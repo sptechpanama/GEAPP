@@ -1,0 +1,7 @@
+streamlit>=1.36.0            # Framework de UI web en Python
+pandas>=2.1.0                # Manejo de DataFrames y fechas
+altair>=5.0.0                # Graficación declarativa
+gspread>=6.0.0               # Cliente de Google Sheets
+google-auth>=2.22.0          # Autenticación con Google (Service Account)
+google-auth-oauthlib>=1.0.0  # OAuth (no imprescindible aquí pero útil si migras flujos)
+google-api-python-client>=2.108.0  # Cliente genérico de APIs de Google

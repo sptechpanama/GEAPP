@@ -1,0 +1,35 @@
+finapp/
+├─ app.py                               # Landing: portada/menú principal (resumen global)
+├─ charts.py                            # (como lo tienes) Todos los gráficos reutilizables
+├─ sheets.py                            # (como lo tienes) Conexión + I/O con Google Sheets
+├─ core/                                # Lógica de negocio (pura, sin Streamlit)
+│  ├─ __init__.py
+│  ├─ filters.py                        # filtrar_por_fecha(df, desde, hasta) -> df
+│  ├─ normalize.py                      # normalizar_esquema(df) -> df con ["Fecha","Concepto","Monto","Categoria"]
+│  ├─ cashflow.py                       # preparar_cashflow(df_ing, df_gas) -> df["Fecha","Flujo","Saldo"]
+│  └─ sync.py                           # sync_cambios(...) -> proyecta editor -> base + guarda en Sheets
+├─ ui/                                  # Componentes de interfaz reutilizables
+│  ├─ __init__.py
+│  ├─ kpis.py                           # render_kpis(total_ing, total_gas, utilidad, margen)
+│  ├─ forms.py                          # (opcional) formularios comunes (cliente, proyecto, fechas)
+│  └─ tables.py                         # (opcional) tablas/editores comunes (con columnas estándar)
+├─ services/                            # (opcional) integraciones/servicios externos
+│  ├─ __init__.py
+│  ├─ panamacompra.py                   # disparadores, URLs, helpers de scraping/links
+│  ├─ pdf.py                            # (opcional) exportadores a PDF
+│  └─ drive.py                          # (opcional) subida de archivos (recibido conforme, PDFs) a Drive
+├─ models/                              # (opcional) “contratos” de datos (schemas)
+│  ├─ __init__.py
+│  ├─ finance.py                        # clases/schemas para ingresos/gastos/cashflow
+│  ├─ quotation.py                      # schemas de cotizaciones (pública/privada)
+│  ├─ project.py                        # schemas de ejecución de OC y postventa
+│  └─ tasks.py                          # schemas de recordatorios/pendientes
+└─ pages/                               # Páginas multipage de Streamlit (se cargan automáticamente)
+   ├─ 1_🏠_Panel_Principal.py            # Dashboard general: proyectos activos, metas, patrimonio
+   ├─ 2_📈_Captacion_y_Seguimiento_Privado.py
+   ├─ 3_🧾_Generador_de_Cotizaciones.py  # Privadas y públicas (PanamáCompra)
+   ├─ 4_📨_Seguimiento_de_Cotizaciones.py # KPIs + recordatorios 4/10/15 días post-cotización
+   ├─ 5_🛠️_Ejecucion_OC.py               # Fechas clave, RC, presentación de cuentas, pagos (5/10/20/40)
+   ├─ 6_🔁_Postventa.py                   # Visitas postventa, llamadas, re-cotizaciones
+   ├─ 7_✅_Pendientes.py                  # Lista global de tareas con días de retraso/checkbox
+   └─ 8_💰_Finanzas_y_Proyecciones.py     # Tu módulo de finanzas actual + proyecciones
