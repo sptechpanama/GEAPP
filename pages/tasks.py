@@ -324,4 +324,9 @@ if not st.session_state.get("tasks_saving", False):
     finally:
         st.session_state["tasks_saving"] = False
 
-st.page_link("inicio.py", label="⬅️ Volver al Panel Principal", icon="🏠")
+try:
+    st.page_link("Inicio.py", label="⬅️ Volver al Home", icon="🏠")
+except Exception:
+    try: st.page_link("inicio.py", label="⬅️ Volver al Home", icon="🏠")
+    except Exception: st.write("Abre la página principal desde el menú lateral.")
+
