@@ -2,7 +2,7 @@
 # finance.py
 # Finanzas operativas (Ingresos / Gastos)
 # - Borrado real en Sheets
-# - Backup automático en archivo aparte (Drive/Respaldo)
+# - Comisiones 8% automáticas al cobrarse ingresos
 # - Gastos con Cliente/Proyecto (cuando Categoría=Proyectos)
 # - Ingresos: ocultar "Concepto" en la tabla (queda solo "Descripcion")
 # - Catálogo: Un único expander para crear Clientes y Proyectos (ID auto)
@@ -28,11 +28,6 @@ except Exception:
     from sync import sync_cambios
 
 from entities import client_selector, project_selector, WS_PROYECTOS, WS_CLIENTES
-
-# === Drive API para backup (archivo aparte) ===
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-
 
 # -------------------- Constantes --------------------
 COL_FECHA   = "Fecha"
@@ -182,7 +177,7 @@ def load_norm(_client, sid: str, ws: str, is_ingresos: bool) -> pd.DataFrame:
 st.session_state.df_ing = load_norm(client, SHEET_ID, WS_ING, True)
 st.session_state.df_gas = load_norm(client, SHEET_ID, WS_GAS, False)
 
-# === Firmas para detectar cambios (para backup) ===
+# === Firmas para detectar cambios (hoy solo para lógica interna) ===
 _sig_ing_before = st.session_state.df_ing.to_csv(index=False) if not st.session_state.df_ing.empty else ""
 _sig_gas_before = st.session_state.df_gas.to_csv(index=False) if not st.session_state.df_gas.empty else ""
 
@@ -227,8 +222,8 @@ if search_q.strip():
     df_gas_f = _match_df(df_gas_f)
 
 # Reales (excluyen por cobrar / por pagar)
-df_ing_reales = df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "No"].copy()
-df_gas_reales = df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "No"].copy()
+df_ing_reales  = df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "No"].copy()
+df_gas_reales  = df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "No"].copy()
 
 # -------------------- KPIs principales --------------------
 ing_total = float(df_ing_reales[COL_MONTO].sum()) if COL_MONTO in df_ing_reales.columns else 0.0
@@ -303,7 +298,7 @@ with st.expander("➕ Clientes y Proyectos"):
                 dfc = pd.DataFrame()
             dfc = ensure_clientes_columns(dfc)
 
-            new_id = f"C-{uuid.uuid4().hex[:8].upper()}"  # <-- ID generado siempre
+            new_id = f"C-{uuid.uuid4().hex[:8].upper()}"  # ID generado siempre
             # Evitar duplicados por Nombre+Empresa
             dup = False
             if not dfc.empty:
@@ -329,7 +324,6 @@ with st.expander("➕ Clientes y Proyectos"):
     st.subheader("Crear nuevo proyecto")
     colp1, colp2 = st.columns([2, 1])
     with colp1:
-        # Seleccionar cliente existente (reusa tu selector)
         cli_sel_id, cli_sel_nom = client_selector(client, SHEET_ID, key="cat_proj")
     with colp2:
         emp_proy = st.selectbox(
@@ -406,6 +400,8 @@ if st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick"):
     st.session_state.df_ing = pd.concat([st.session_state.df_ing, pd.DataFrame([nueva])], ignore_index=True)
     st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
     write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing)
+    # ↓↓↓ Generar comisión si corresponde (ver función más abajo)
+    # se aplicará también tras el sync general
     st.cache_data.clear(); st.rerun()
 
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
@@ -472,7 +468,7 @@ st.markdown("### Añadir gasto (rápido)")
 g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
 with g1: empresa_g = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="gas_empresa_quick")
 with g2: fecha_g = st.date_input("Fecha", value=_today(), key="gas_fecha_quick")
-with g3: categoria_g = st.selectbox("Categoría", ["Proyectos", "Gastos fijos"], index=0, key="gas_categoria_quick")
+with g3: categoria_g = st.selectbox("Categoría", ["Proyectos", "Gastos fijos", "Oficina"], index=0, key="gas_categoria_quick")
 with g4: monto_g = st.number_input("Monto", min_value=0.0, step=1.0, key="gas_monto_quick")
 with g5: por_pagar_nuevo = st.selectbox("Por_pagar", ["No","Sí"], index=0, key="gas_porpag_quick")
 
@@ -508,8 +504,8 @@ st.markdown("### Gastos (tabla)")
 gas_cols_view = [c for c in df_gas_f.columns if c not in (COL_ROWID, COL_ESC)] + [COL_ROWID]
 gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
-    COL_CAT:     st.column_config.TextColumn(COL_CAT),
-    COL_CONC:    st.column_config.TextColumn("Descripción"),  # ← solo etiqueta visible
+    COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=["Proyectos", "Gastos fijos", "Oficina", "Comisiones"]),
+    COL_CONC:    st.column_config.TextColumn("Descripción"),
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
     COL_REF_RID: st.column_config.TextColumn(COL_REF_RID, disabled=True),
     COL_ROWID:   st.column_config.TextColumn(COL_ROWID, disabled=True),
@@ -559,110 +555,76 @@ sync_cambios(
 
 
 # ============================================================
-# BACKUP AUTOMÁTICO A ARCHIVO APARTE (Drive/Respaldo)
-# - solo si hubo cambios reales (firmas before/after)
-# - solo si pasaron >= 3 días desde el último backup
-# - limpia >30 días y máx. 10 archivos
+# COMISIONES 8% AUTOMÁTICAS (tras sincronizar cambios)
+# - Para cada ingreso con Por_cobrar == "No", si no existe un gasto
+#   con Ref RowID Ingreso = RowID del ingreso, se crea:
+#   Monto = 8% del ingreso, Categoria = "Comisiones", Por_pagar = "No".
 # ============================================================
-def _drive_service(creds):
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+def _generar_comisiones_8(client, sheet_id):
+    base_ing = st.session_state.df_ing.copy()
+    base_gas = st.session_state.df_gas.copy()
 
-def _get_parent_id(drive, file_id: str) -> str:
-    meta = drive.files().get(fileId=file_id, fields="parents").execute()
-    parents = meta.get("parents", [])
-    if parents:
-        return parents[0]
-    root = drive.files().get(fileId="root", fields="id").execute()
-    return root["id"]
+    if base_ing.empty:
+        return
 
-def _get_or_create_folder(drive, parent_id: str, name: str) -> str:
-    q = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and '{parent_id}' in parents and trashed=false"
-    res = drive.files().list(q=q, fields="files(id,name)", pageSize=50).execute()
-    arr = res.get("files", [])
-    if arr:
-        return arr[0]["id"]
-    body = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
-    f = drive.files().create(body=body, fields="id").execute()
-    return f["id"]
+    # refs de comisiones ya creadas
+    existing_refs = set()
+    if (not base_gas.empty) and (COL_REF_RID in base_gas.columns):
+        existing_refs = set(base_gas[COL_REF_RID].fillna("").astype(str))
 
-def _list_backups(drive, folder_id: str) -> list:
-    q = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
-    res = drive.files().list(q=q, fields="files(id,name,createdTime)", orderBy="createdTime", pageSize=1000).execute()
-    return res.get("files", [])
+    cobrados = base_ing[base_ing[COL_POR_COB].map(_si_no_norm) == "No"].copy()
+    if cobrados.empty:
+        return
 
-def _copy_spreadsheet(drive, source_sheet_id: str, dst_name: str, folder_id: str) -> str:
-    body = {"name": dst_name, "parents": [folder_id], "mimeType": "application/vnd.google-apps.spreadsheet"}
-    out = drive.files().copy(fileId=source_sheet_id, fields="id,name,createdTime", body=body).execute()
-    return out["id"]
+    nuevos = []
+    for _, r in cobrados.iterrows():
+        rid_ing = str(r.get(COL_ROWID, "")).strip()
+        if not rid_ing or rid_ing in existing_refs:
+            continue  # ya existe comisión o sin id
 
-def _delete_file(drive, file_id: str):
-    drive.files().delete(fileId=file_id).execute()
-
-def _latest_backup_info(backups: list):
-    if not backups:
-        return None, "—"
-    last = backups[-1]
-    dt = pd.to_datetime(last["createdTime"], errors="coerce")
-    if pd.isna(dt):
-        return None, "—"
-    try:
-        human = dt.tz_convert("America/Panama").strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        human = dt.strftime("%Y-%m-%d %H:%M")
-    return dt.timestamp(), human
-
-def _should_backup(last_epoch: float|None, min_days=3) -> bool:
-    if last_epoch is None:
-        return True
-    return (time.time() - last_epoch) >= (min_days * 86400)
-
-def _cleanup_backups(drive, folder_id: str, keep_days=30, max_files=10):
-    files = _list_backups(drive, folder_id)
-    now = time.time()
-    # antigüedad
-    for f in files:
-        dt = pd.to_datetime(f["createdTime"], errors="coerce")
-        if pd.isna(dt):
+        # 🔴 NUEVO: filtrar por empresa (solo RS-SP genera comisión)
+        if str(r.get(COL_EMP, "")).strip().upper() != "RS-SP":
             continue
-        if (now - dt.timestamp()) > keep_days * 86400:
-            _delete_file(drive, f["id"])
-    # limitar a máx. N
-    files2 = _list_backups(drive, folder_id)
-    if len(files2) > max_files:
-        to_del = files2[: len(files2) - max_files]
-        for f in to_del:
-            _delete_file(drive, f["id"])
 
-# Comparar firmas
-_sig_ing_after = st.session_state.df_ing.to_csv(index=False) if not st.session_state.df_ing.empty else ""
-_sig_gas_after = st.session_state.df_gas.to_csv(index=False) if not st.session_state.df_gas.empty else ""
-hubo_cambios = (_sig_ing_after != _sig_ing_before) or (_sig_gas_after != _sig_gas_before)
+        monto = float(r.get(COL_MONTO, 0.0))
+        if monto <= 0:
+            continue
 
-# Ejecutar backup si corresponde
-try:
-    drive = _drive_service(creds)
-    parent_id = _get_parent_id(drive, SHEET_ID)
-    respaldo_folder_id = _get_or_create_folder(drive, parent_id, "Respaldo")
+        fecha = r.get(COL_FCOBRO) if pd.notna(r.get(COL_FCOBRO)) else r.get(COL_FECHA)
+        nuevos.append({
+            COL_ROWID: uuid.uuid4().hex,
+            COL_FECHA: _ts(fecha),
+            COL_MONTO: round(monto * 0.08, 2),
+            COL_DESC: f"Comisión 8% de ingreso: {r.get(COL_DESC, '')}",
+            COL_CONC: f"Comisión 8% de {str(r.get(COL_DESC, '')).strip()}",
+            COL_CAT:  "Comisiones",
+            COL_EMP:  r.get(COL_EMP, EMPRESA_DEFAULT),
+            COL_POR_PAG: "No",  # gasto real al cobrarse
+            COL_PROY: r.get(COL_PROY, ""),
+            COL_CLI_ID: r.get(COL_CLI_ID, ""),
+            COL_CLI_NOM: r.get(COL_CLI_NOM, ""),
+            COL_REF_RID: rid_ing,
+        })
 
-    backups = _list_backups(drive, respaldo_folder_id)
-    last_epoch, last_human = _latest_backup_info(backups)
+    if nuevos:
+        base_gas = pd.concat([base_gas, pd.DataFrame(nuevos)], ignore_index=True)
+        base_gas = ensure_gastos_columns(base_gas)
+        write_worksheet(client, sheet_id, WS_GAS, base_gas)
+        st.session_state.df_gas = base_gas
 
-    if hubo_cambios and _should_backup(last_epoch, min_days=3):
-        ts = pd.Timestamp.now(tz="UTC").tz_convert("America/Panama").strftime("%Y-%m-%d_%H-%M")
-        _copy_spreadsheet(drive, SHEET_ID, f"GEAPP_backup_{ts}", respaldo_folder_id)
-        _cleanup_backups(drive, respaldo_folder_id, keep_days=30, max_files=10)
-        backups = _list_backups(drive, respaldo_folder_id)
-        last_epoch, last_human = _latest_backup_info(backups)
+        # 👇 refrescar inmediatamente
+        st.cache_data.clear()
+        st.toast(f"Se generaron {len(nuevos)} comisiones (8%).")
+        st.rerun()
 
-    st.markdown("---")
-    st.caption(f"🗂 Último respaldo: {last_human if last_human else '—'}")
 
-except HttpError as e:
-    st.markdown("---")
-    st.warning(f"No se pudo crear/consultar respaldo en Drive: {e}")
-except Exception as e:
-    st.markdown("---")
-    st.warning(f"No se pudo ejecutar el backup: {e}")
+# Ejecutar creación de comisiones (si aplica)
+_generar_comisiones_8(client, SHEET_ID)
+
+
+# ============================================================
+# (No hay backup: sección eliminada a petición)
+# ============================================================
 
 # Footer
 try:
