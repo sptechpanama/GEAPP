@@ -249,4 +249,4 @@ if not st.session_state.get("tasks_saving", False):
     finally:
         st.session_state["tasks_saving"] = False
 
-st.page_link("inicio.py", label="⬅️ Volver al Panel Principal", icon="🏠")
+st.page_link("Inicio.py", label="⬅️ Volver al Panel Principal", icon="🏠")
