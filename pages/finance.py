@@ -484,6 +484,7 @@ if categoria_g == "Proyectos":
         cliente_id_g = cli_id_from_proj_g; cliente_nombre_g = cli_nom_from_proj_g or cliente_nombre_g
 
 desc_g = st.text_input("Descripción", key="gas_desc_quick")
+prov_g = st.text_input("Proveedor", key="gas_proveedor_quick")
 
 if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
     nueva_g = {
