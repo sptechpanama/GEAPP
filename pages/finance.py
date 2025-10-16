@@ -46,6 +46,7 @@ COL_ROWID   = "RowID"
 COL_REF_RID = "Ref RowID Ingreso"
 COL_POR_COB = "Por_cobrar"        # Ingresos: "No"/"Sí"
 COL_POR_PAG = "Por_pagar"         # Gastos:   "No"/"Sí"
+COL_PROV    = "Proveedor"         # Gastos: proveedor del gasto
 
 EMPRESAS_OPCIONES = ["RS-SP", "RIR"]
 EMPRESA_DEFAULT   = "RS-SP"
@@ -117,7 +118,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
 def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = _canon_cols(df.copy())
     for col in [COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_ESC, COL_REF_RID,
-                COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_ROWID]:
+                COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_ROWID]:
         if col not in out.columns:
             if col == COL_MONTO: out[col] = 0.0
             elif col == COL_FECHA: out[col] = pd.NaT
@@ -131,7 +132,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
         other=EMPRESA_DEFAULT
     )
     out[COL_POR_PAG] = out[COL_POR_PAG].map(_si_no_norm)
-    out = _ensure_text(out, [COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_ROWID])
+    out = _ensure_text(out, [COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_ROWID])
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -493,6 +494,7 @@ if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
         COL_PROY: (proyecto_id_g or "").strip(),
         COL_CLI_ID: (cliente_id_g or "").strip(),
         COL_CLI_NOM: (cliente_nombre_g or "").strip(),
+        COL_PROV: (prov_g or "").strip(),  # ← NUEVO: guardar proveedor
     }
     st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
     st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
@@ -506,15 +508,22 @@ gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
     COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=["Proyectos", "Gastos fijos", "Oficina", "Comisiones"]),
     COL_CONC:    st.column_config.TextColumn("Descripción"),
+    COL_PROV:    st.column_config.TextColumn("Proveedor"),  # ← NUEVO
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
     COL_REF_RID: st.column_config.TextColumn(COL_REF_RID, disabled=True),
     COL_ROWID:   st.column_config.TextColumn(COL_ROWID, disabled=True),
 }
+# Fuerza un orden amigable: ... Descripción, Proveedor, ...
+gas_order = [x for x in [
+    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_POR_PAG,
+    COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_REF_RID, COL_ROWID
+] if x in gas_cols_view]
+
 edited_gas = st.data_editor(
     df_gas_f[gas_cols_view], num_rows="dynamic", hide_index=True, use_container_width=True,
-    column_config=gas_colcfg, key="tabla_gastos"
+    column_config=gas_colcfg, key="tabla_gastos",
+    column_order=gas_order  # ← NUEVO: asegura que Proveedor quede debajo de Descripción
 )
-
 # === BORRADO REAL PRIMERO (GASTOS) ===
 if COL_ROWID not in edited_gas.columns:
     st.warning("No se encontró columna RowID en la tabla de Gastos; no se pueden borrar filas en Sheets.")
@@ -534,7 +543,7 @@ else:
         if search_q.strip():
             q = search_q.strip().lower()
             def _match_df(df):
-                cols = [COL_CLI_NOM, COL_CLI_ID, COL_PROY, COL_DESC, COL_CONC, COL_CAT, COL_EMP]
+                cols = [COL_CLI_NOM, COL_CLI_ID, COL_PROY, COL_DESC, COL_CONC, COL_PROV, COL_CAT, COL_EMP]
                 tmp = df.copy()
                 for c in cols:
                     if c not in tmp.columns: tmp[c] = ""
