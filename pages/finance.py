@@ -32,6 +32,17 @@ from services.backups import (
 )
 from entities import client_selector, project_selector, WS_PROYECTOS, WS_CLIENTES
 
+
+# ---------- Guard: require inicio de sesión ------------
+if not st.session_state.get("auth_ok", False):
+    st.warning("Debes iniciar sesión para entrar.")
+    try:
+        # Streamlit >= 1.31
+        st.switch_page("Inicio.py")
+    except Exception:
+        st.write("Ir al Inicio desde el menú lateral.")
+    st.stop()
+
 # -------------------- Constantes --------------------
 COL_FECHA   = "Fecha"
 COL_DESC    = "Descripcion"       # tu app usa "Descripcion" (sin tilde)
@@ -50,6 +61,8 @@ COL_REF_RID = "Ref RowID Ingreso"
 COL_POR_COB = "Por_cobrar"        # Ingresos: "No"/"Sí"
 COL_POR_PAG = "Por_pagar"         # Gastos:   "No"/"Sí"
 COL_PROV    = "Proveedor"         # Gastos: proveedor del gasto
+COL_USER  = "Usuario"
+
 
 EMPRESAS_OPCIONES = ["RS-SP", "RIR"]
 EMPRESA_DEFAULT   = "RS-SP"
@@ -65,6 +78,18 @@ def _ts(x):
 def _si_no_norm(x) -> str:
     s = str(x).strip().lower()
     return "Sí" if s in {"si","sí","sí","yes","y","true","1"} else "No"
+
+def _current_user() -> str:
+    """
+    Devuelve el nombre de usuario desde session_state.
+    Ajusta las claves si tu app guarda el usuario con otro nombre.
+    """
+    for k in ("auth_user_name", "auth_username", "user_name", "user", "usuario", "auth_user"):
+        v = st.session_state.get(k)
+        if v:
+            return str(v).strip()
+    return ""
+
 
 def _ensure_text(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     out = df.copy()
@@ -121,7 +146,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
 def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = _canon_cols(df.copy())
     for col in [COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_ESC, COL_REF_RID,
-                COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_ROWID]:
+                COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_ROWID, COL_USER]:
         if col not in out.columns:
             if col == COL_MONTO: out[col] = 0.0
             elif col == COL_FECHA: out[col] = pd.NaT
@@ -135,7 +160,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
         other=EMPRESA_DEFAULT
     )
     out[COL_POR_PAG] = out[COL_POR_PAG].map(_si_no_norm)
-    out = _ensure_text(out, [COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_ROWID])
+    out = _ensure_text(out, [COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_ROWID, COL_USER])
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -502,6 +527,8 @@ if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
         COL_CLI_ID: (cliente_id_g or "").strip(),
         COL_CLI_NOM: (cliente_nombre_g or "").strip(),
         COL_PROV: (prov_g or "").strip(),  # ← NUEVO: guardar proveedor
+        COL_USER: _current_user(),  # ← NUEVO
+
     }
     st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
     st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
@@ -517,12 +544,13 @@ gas_colcfg = {
     COL_CONC:    st.column_config.TextColumn("Descripción"),
     COL_PROV:    st.column_config.TextColumn("Proveedor"),  # ← NUEVO
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
+    COL_USER:   st.column_config.TextColumn(COL_USER),
     COL_REF_RID: st.column_config.TextColumn(COL_REF_RID, disabled=True),
     COL_ROWID:   st.column_config.TextColumn(COL_ROWID, disabled=True),
 }
 # Fuerza un orden amigable: ... Descripción, Proveedor, ...
 gas_order = [x for x in [
-    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_POR_PAG,
+    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_USER, COL_POR_PAG,
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]
 

@@ -8,6 +8,16 @@ import uuid
 from datetime import datetime
 from sheets import get_client, read_worksheet, write_worksheet
 
+# --------- Guard: require inicio de sesión -----------
+if not st.session_state.get("auth_ok", False):
+    st.warning("Debes iniciar sesión para entrar.")
+    try:
+        # Streamlit >= 1.31
+        st.switch_page("Inicio.py")
+    except Exception:
+        st.write("Ir al Inicio desde el menú lateral.")
+    st.stop()
+# ------
 st.set_page_config(page_title="✅ Tasks", page_icon="✅", layout="wide")
 WS_TASKS = st.secrets.get("app", {}).get("WS_TASKS", "pendientes")
 ESTADOS_VALIDOS = ["Pendiente", "Completada", "Descartar"]
