@@ -26,7 +26,10 @@ try:
     from core.sync import sync_cambios
 except Exception:
     from sync import sync_cambios
-
+from services.backups import (
+    start_backup_scheduler_once,
+    get_last_backup_info,
+)
 from entities import client_selector, project_selector, WS_PROYECTOS, WS_CLIENTES
 
 # -------------------- Constantes --------------------
@@ -168,6 +171,9 @@ client, creds = get_client()  # tu get_client debe devolver (gspread_client, cre
 SHEET_ID = st.secrets["app"]["SHEET_ID"]
 WS_ING   = st.secrets["app"]["WS_ING"]
 WS_GAS   = st.secrets["app"]["WS_GAS"]
+
+# Backups automáticos (cada 3 días a 02:15; ver constants en services/backups.py)
+start_backup_scheduler_once(creds, SHEET_ID)
 
 @st.cache_data(ttl=30)
 def load_norm(_client, sid: str, ws: str, is_ingresos: bool) -> pd.DataFrame:
@@ -635,6 +641,14 @@ _generar_comisiones_8(client, SHEET_ID)
 # ============================================================
 # (No hay backup: sección eliminada a petición)
 # ============================================================
+
+st.divider()
+name, ts_local = get_last_backup_info(creds)
+if name and ts_local is not None:
+    st.caption(f"📦 Último respaldo: **{ts_local.strftime('%Y-%m-%d %H:%M')}** — *{name}*")
+else:
+    st.caption("📦 Aún no hay respaldos en la carpeta configurada.")
+
 
 # Footer
 try:
