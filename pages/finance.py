@@ -428,6 +428,7 @@ if st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick"):
         COL_CLI_NOM: (cliente_nombre or "").strip(), COL_EMP: (empresa_ing or EMPRESA_DEFAULT).strip(),
         COL_DESC: (desc_nueva or "").strip(), COL_CONC: (desc_nueva or "").strip(),
         COL_POR_COB: por_cobrar_nuevo, COL_COB: "Sí", COL_FCOBRO: hoy_ts, COL_CAT: "", COL_ESC: "Real",
+        COL_USER: _current_user(),  # ← NUEVO
     }
     st.session_state.df_ing = pd.concat([st.session_state.df_ing, pd.DataFrame([nueva])], ignore_index=True)
     st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
@@ -494,6 +495,13 @@ sync_cambios(
 # ============================================================
 # GASTOS — Añadir gasto (rápido)
 # ============================================================
+
+# ------------------------------------------------------------
+# FLAG para limpiar los campos del formulario de GASTOS
+# ------------------------------------------------------------
+if "reset_gastos" not in st.session_state:
+    st.session_state.reset_gastos = False
+
 st.markdown("## Gastos")
 st.markdown("### Añadir gasto (rápido)")
 
@@ -514,8 +522,20 @@ if categoria_g == "Proyectos":
     if cli_id_from_proj_g:
         cliente_id_g = cli_id_from_proj_g; cliente_nombre_g = cli_nom_from_proj_g or cliente_nombre_g
 
-desc_g = st.text_input("Descripción", key="gas_desc_quick")
-prov_g = st.text_input("Proveedor", key="gas_proveedor_quick")
+desc_g = st.text_input(
+    "Descripción",
+    key="gas_desc_quick",
+    value="" if st.session_state.reset_gastos else st.session_state.get("gas_desc_quick", "")
+)
+prov_g = st.text_input(
+    "Proveedor",
+    key="gas_proveedor_quick",
+    value="" if st.session_state.reset_gastos else st.session_state.get("gas_proveedor_quick", "")
+)
+
+# Una vez renderizados los inputs, desactiva el flag
+if st.session_state.reset_gastos:
+    st.session_state.reset_gastos = False
 
 if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
     nueva_g = {
@@ -550,8 +570,8 @@ gas_colcfg = {
 }
 # Fuerza un orden amigable: ... Descripción, Proveedor, ...
 gas_order = [x for x in [
-    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_USER, COL_POR_PAG,
-    COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_REF_RID, COL_ROWID
+    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_POR_PAG,
+    COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_USER, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]
 
 edited_gas = st.data_editor(
@@ -648,6 +668,8 @@ def _generar_comisiones_8(client, sheet_id):
             COL_CLI_ID: r.get(COL_CLI_ID, ""),
             COL_CLI_NOM: r.get(COL_CLI_NOM, ""),
             COL_REF_RID: rid_ing,
+            COL_USER: r.get(COL_USER, _current_user()),  # ← NUEVO
+
         })
 
     if nuevos:
