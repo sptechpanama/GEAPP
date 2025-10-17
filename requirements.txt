@@ -8,4 +8,6 @@ google-auth-oauthlib==1.2.1
 gspread==6.1.2
 schedule==1.2.1
 google-api-python-client>=2.140.0
+streamlit-authenticator==0.3.2
+PyYAML>=6.0
 
