@@ -235,17 +235,21 @@ def ensure_proyectos_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # -------------------- Página --------------------
-st.markdown("<h1>Finanzas operativas y proyecciones</h1>", unsafe_allow_html=True)
+st.markdown("<h1>📊 Finanzas</h1>", unsafe_allow_html=True)
 
 # --- logos pequeños arriba (RS, SP, RIR) ---
-cols = st.columns(3)
-for i, path in enumerate(["assets/rs.png", "assets/sp.png", "assets/rir.png"]):
-    try:
-        cols[i].image(path, width=42)
-    except Exception:
-        # si falta el archivo, muestra un texto corto en su lugar
-        cols[i].caption(path.split("/")[-1].split(".")[0].upper())
-st.write("")  # espacio
+logo_cols = st.columns([1,1,1])
+logos_paths = ["assets/rs.png", "assets/sp.png", "assets/rir.png"]
+
+for col, path in zip(logo_cols, logos_paths):
+    with col:
+        try:
+            col.image(path, width=48)  # todos del mismo tamaño visual
+        except Exception:
+            col.caption(path.split("/")[-1].split(".")[0].upper())
+
+st.write("")  # pequeño espacio
+
 
 
 
@@ -672,22 +676,12 @@ if categoria_g == "Proyectos":
     if cli_id_from_proj_g:
         cliente_id_g = cli_id_from_proj_g; cliente_nombre_g = cli_nom_from_proj_g or cliente_nombre_g
 
-desc_g = st.text_input(
-    "Descripción",
-    key="gas_desc_quick",
-    value="" if st.session_state.reset_gastos else st.session_state.get("gas_desc_quick", "")
-)
-prov_g = st.text_input(
-    "Proveedor",
-    key="gas_proveedor_quick",
-    value="" if st.session_state.reset_gastos else st.session_state.get("gas_proveedor_quick", "")
-)
+with st.form("gasto_quick_form", clear_on_submit=False):
+    desc_g = st.text_input("Descripción", key="gas_desc_quick")
+    prov_g = st.text_input("Proveedor", key="gas_proveedor_quick")
+    guardar_gasto = st.form_submit_button("Guardar gasto", type="primary")
 
-# Una vez renderizados los inputs, desactiva el flag
-if st.session_state.reset_gastos:
-    st.session_state.reset_gastos = False
-
-if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
+if guardar_gasto:
     nueva_g = {
         COL_ROWID: uuid.uuid4().hex, COL_FECHA: _ts(fecha_g), COL_MONTO: float(monto_g),
         COL_DESC: (desc_g or "").strip(), COL_CONC: (desc_g or "").strip(),
@@ -696,15 +690,18 @@ if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
         COL_PROY: (proyecto_id_g or "").strip(),
         COL_CLI_ID: (cliente_id_g or "").strip(),
         COL_CLI_NOM: (cliente_nombre_g or "").strip(),
-        COL_PROV: (prov_g or "").strip(),  # ← NUEVO: guardar proveedor
-        COL_USER: _current_user(),  # ← NUEVO
-
+        COL_PROV: (prov_g or "").strip(),
+        COL_USER: _current_user(),
     }
     st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
     st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
     wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
     if wrote:
         st.cache_data.clear()
+
+    # limpiar SOLO descripción y categoría; mantener cliente/proveedor
+    st.session_state["gas_desc_quick"] = ""
+    st.session_state["gas_categoria_quick"] = "Proyectos"
     st.rerun()
 
 
