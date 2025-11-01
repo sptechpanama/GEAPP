@@ -106,6 +106,15 @@ EMPRESA_DEFAULT   = "RS-SP"
 
 
 # -------------------- Helpers generales --------------------
+
+if st.button("Probar conexión con Google Sheets"):
+    try:
+        gclient, gcreds = get_client()
+        sh = gclient.open_by_key(st.secrets["app"]["SHEET_ID"])
+        st.success(f"✅ Conexión OK. Hoja: {sh.title}")
+    except Exception as e:
+        st.error(f"❌ {e}")
+
 def _today() -> date: return date.today()
 
 def _ts(x):
@@ -227,6 +236,18 @@ def ensure_proyectos_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 # -------------------- Página --------------------
 st.markdown("<h1>Finanzas operativas y proyecciones</h1>", unsafe_allow_html=True)
+
+# --- logos pequeños arriba (RS, SP, RIR) ---
+cols = st.columns(3)
+for i, path in enumerate(["assets/rs.png", "assets/sp.png", "assets/rir.png"]):
+    try:
+        cols[i].image(path, width=42)
+    except Exception:
+        # si falta el archivo, muestra un texto corto en su lugar
+        cols[i].caption(path.split("/")[-1].split(".")[0].upper())
+st.write("")  # espacio
+
+
 
 # ======================
 # 🔧 CONEXIÓN GOOGLE SHEETS (OPTIMIZADA)
@@ -684,7 +705,14 @@ if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
     wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
     if wrote:
         st.cache_data.clear()
+        
+    #  Limpia SOLO estos campos, conserva cliente/proyecto y proveedor
+    st.session_state["gas_desc_quick"] = ""
+    st.session_state["gas_proveedor_quick"] = ""
+    st.session_state["gas_categoria_quick"] = "Proyectos"  # o la opción por defecto que prefieras
+
     st.rerun()
+
 
 
 
