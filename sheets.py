@@ -15,21 +15,48 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import os  # 👈 necesario para detectar si el archivo existe
-SERVICE_ACCOUNT_PATH = r"C:\Users\rodri\ge\finapp\pure-beach-474203-p1-fdc9557f33d0.json"
 
+# Ruta local (fallback) a tu JSON. Se usará solo si NO hay secretos en st.secrets.
+SERVICE_ACCOUNT_PATH = os.environ.get(
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    r"C:\Users\rodri\ge\finapp\pure-beach-474203-p1-fdc9557f33d0.json"
+)
 
 # Scopes (permisos) que usará la cuenta de servicio
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive", 
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.metadata.readonly",
 ]
 
-
-
 def get_client():
-    """Usa directamente el archivo físico de credenciales (ignora .streamlit/secrets.toml)."""
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH, scopes=SCOPES)
+    """
+    Prioriza credenciales desde st.secrets['google_service_account'] (Streamlit Cloud).
+    Si no existen, usa el archivo local SERVICE_ACCOUNT_PATH (entorno local).
+    """
+    creds = None
+
+    # 1) Cloud / .streamlit/secrets.toml
+    try:
+        if "google_service_account" in st.secrets:
+            info = dict(st.secrets["google_service_account"])
+            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    except Exception:
+        # si falla secrets, probamos el archivo
+        creds = None
+
+    # 2) Local file (fallback)
+    if creds is None:
+        try:
+            path = SERVICE_ACCOUNT_PATH
+            if not os.path.isfile(path):
+                # último intento: variable de entorno
+                path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", SERVICE_ACCOUNT_PATH)
+            creds = Credentials.from_service_account_file(path, scopes=SCOPES)
+        except Exception as e:
+            # re-lanzar con mensaje claro (Streamlit lo ocultará en Cloud, pero sirve localmente)
+            raise FileNotFoundError(f"No se pudieron cargar credenciales: {e}")
+
     client = gspread.authorize(creds)
     return client, creds
 
@@ -78,9 +105,8 @@ def write_worksheet(client: gspread.Client, sheet_id: str, worksheet_name: str, 
     # 👇 también con retry por si hay cortes al escribir
     _retry(lambda: ws.clear())
     _retry(lambda: ws.update("A1", rows))
-    
-# añadir filas sin sobreescribir toda la hoja
 
+# añadir filas sin sobreescribir toda la hoja
 def append_rows(client, sheet_id: str, ws_name: str, rows: list[dict]) -> None:
     """
     Lee la pestaña, agrega 'rows' (lista de dicts) y escribe de vuelta.
@@ -89,4 +115,3 @@ def append_rows(client, sheet_id: str, ws_name: str, rows: list[dict]) -> None:
     df = read_worksheet(client, sheet_id, ws_name)  # ya convierte tipos básicos
     df_new = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
     write_worksheet(client, sheet_id, ws_name, df_new)
-
