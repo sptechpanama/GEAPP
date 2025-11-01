@@ -107,13 +107,6 @@ EMPRESA_DEFAULT   = "RS-SP"
 
 # -------------------- Helpers generales --------------------
 
-if st.button("Probar conexión con Google Sheets"):
-    try:
-        gclient, gcreds = get_client()
-        sh = gclient.open_by_key(st.secrets["app"]["SHEET_ID"])
-        st.success(f"✅ Conexión OK. Hoja: {sh.title}")
-    except Exception as e:
-        st.error(f"❌ {e}")
 
 def _today() -> date: return date.today()
 
