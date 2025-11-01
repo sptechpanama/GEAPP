@@ -11,6 +11,7 @@
 from __future__ import annotations
 import uuid, time
 import streamlit as st
+st.set_page_config(page_title="Finanzas Operativas", page_icon="📊", layout="wide")
 import pandas as pd
 from datetime import date
 
@@ -20,28 +21,64 @@ from charts import (
     chart_line_ing_gas_util_mensual,
     chart_bar_top_gastos,
 )
+from services.backups import debug_sa_quota
 from core.metrics import kpis_finanzas, monthly_pnl, top_gastos_por_categoria
 from core.cashflow import preparar_cashflow
 try:
     from core.sync import sync_cambios
 except Exception:
     from sync import sync_cambios
+
 from services.backups import (
     start_backup_scheduler_once,
     get_last_backup_info,
+    create_backup_now,  
 )
+
 from entities import client_selector, project_selector, WS_PROYECTOS, WS_CLIENTES
 
 
 # ---------- Guard: require inicio de sesión ------------
-if not st.session_state.get("auth_ok", False):
-    st.warning("Debes iniciar sesión para entrar.")
-    try:
-        # Streamlit >= 1.31
-        st.switch_page("Inicio.py")
-    except Exception:
-        st.write("Ir al Inicio desde el menú lateral.")
-    st.stop()
+import bcrypt, streamlit_authenticator as stauth
+
+USERS = {
+    "rsanchez": ("Rodrigo Sánchez", "Sptech-71"),
+    "isanchez": ("Irvin Sánchez",   "Sptech-71"),
+    "igsanchez": ("Iris Grisel Sánchez", "Sptech-71"),
+}
+def _hash(pw: str) -> str:
+    import bcrypt
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+credentials = {"usernames": {u: {"name": n, "password": _hash(p)} for u,(n,p) in USERS.items()}}
+
+COOKIE_NAME = "finapp_auth"
+COOKIE_KEY  = "finapp_key_123"
+authenticator = stauth.Authenticate(credentials, COOKIE_NAME, COOKIE_KEY, 30)
+
+# 🔁 Rehidrata autenticación desde cookie (no mostramos formulario aquí)
+# Nota: en versiones actuales, llamar login() rellena session_state si la cookie es válida
+try:
+    authenticator.login(" ", location="sidebar", key="auth_finanzas_silent")
+    # inmediatamente limpiamos el contenedor del sidebar (evita parpadeo si no hay cookie)
+    st.sidebar.empty()
+except Exception:
+    pass
+
+# ✅ Si NO está autenticado, redirige a Inicio en vez de mostrar error
+if st.session_state.get("authentication_status") is not True:
+    st.switch_page("Inicio.py")
+
+# 🔧 Normaliza claves para _current_user()
+st.session_state.setdefault("auth_user_name", st.session_state.get("name", ""))
+st.session_state.setdefault("auth_username",  st.session_state.get("username", ""))
+
+# Botón de logout visible en esta página
+authenticator.logout("Cerrar sesión", location="sidebar")
+
+
+
+# … contenido real de la página …
 
 # -------------------- Constantes --------------------
 COL_FECHA   = "Fecha"
@@ -123,7 +160,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in [
         COL_FECHA, COL_DESC, COL_CONC, COL_MONTO, COL_CAT, COL_ESC,
         COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB,
-        COL_COB, COL_FCOBRO, COL_ROWID
+        COL_COB, COL_FCOBRO, COL_ROWID, COL_USER
     ]:
         if col not in out.columns:
             if col in {COL_MONTO}: out[col] = 0.0
@@ -139,7 +176,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     out[COL_POR_COB] = out[COL_POR_COB].map(_si_no_norm)
     out[COL_COB]     = out[COL_COB].map(_si_no_norm)
-    out = _ensure_text(out, [COL_DESC, COL_CONC, COL_CAT, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB, COL_COB, COL_ROWID])
+    out = _ensure_text(out, [COL_DESC, COL_CONC, COL_CAT, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB, COL_COB, COL_ROWID, COL_USER])
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -189,29 +226,104 @@ def ensure_proyectos_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # -------------------- Página --------------------
-st.set_page_config(page_title="Finanzas Operativas", page_icon="📊", layout="wide")
 st.markdown("<h1>Finanzas operativas y proyecciones</h1>", unsafe_allow_html=True)
 
-client, creds = get_client()  # tu get_client debe devolver (gspread_client, creds)
+# ======================
+# 🔧 CONEXIÓN GOOGLE SHEETS (OPTIMIZADA)
+# ======================
+
+if "google_client" not in st.session_state or "google_creds" not in st.session_state:
+    with st.spinner("Conectando con Google Sheets..."):
+        gclient, gcreds = get_client()
+        st.session_state.google_client = gclient
+        st.session_state.google_creds = gcreds
+        st.success("✅ Conexión establecida")
+
+client = st.session_state.google_client
+creds = st.session_state.google_creds
+
 SHEET_ID = st.secrets["app"]["SHEET_ID"]
 WS_ING   = st.secrets["app"]["WS_ING"]
 WS_GAS   = st.secrets["app"]["WS_GAS"]
 
-# Backups automáticos (cada 3 días a 02:15; ver constants en services/backups.py)
-start_backup_scheduler_once(creds, SHEET_ID)
+# Guardar las credenciales en session_state
+st.session_state.google_creds = creds
+st.session_state.google_client = client
 
-@st.cache_data(ttl=30)
-def load_norm(_client, sid: str, ws: str, is_ingresos: bool) -> pd.DataFrame:
-    df = read_worksheet(_client, sid, ws)
+
+# ---- Scheduler de backups: iniciar una sola vez
+if not st.session_state.get("backup_started"):
+    try:
+        start_backup_scheduler_once(creds, st.secrets["app"]["SHEET_ID"])
+        st.session_state["backup_started"] = True
+        print("[INIT] Backup scheduler iniciado.")
+    except Exception as e:
+        print(f"[WARN] No se pudo iniciar backup: {e}")
+
+# ======================
+# 📦 CACHÉ DE LECTURA
+# ======================
+
+@st.cache_data(ttl=120)
+def get_sheet_df_cached(sid: str, ws: str):
+    # usa el client guardado en session_state para evitar pasarlo como arg
+    return read_worksheet(st.session_state.google_client, sid, ws)
+
+
+@st.cache_data(ttl=300)
+def load_norm_cached(sid: str, ws: str, is_ingresos: bool):
+    df = get_sheet_df_cached(sid, ws)
     return ensure_ingresos_columns(df) if is_ingresos else ensure_gastos_columns(df)
 
-# Carga base
-st.session_state.df_ing = load_norm(client, SHEET_ID, WS_ING, True)
-st.session_state.df_gas = load_norm(client, SHEET_ID, WS_GAS, False)
 
-# === Firmas para detectar cambios (hoy solo para lógica interna) ===
-_sig_ing_before = st.session_state.df_ing.to_csv(index=False) if not st.session_state.df_ing.empty else ""
-_sig_gas_before = st.session_state.df_gas.to_csv(index=False) if not st.session_state.df_gas.empty else ""
+def _norm_for_compare(df: pd.DataFrame, id_col: str | None = None) -> pd.DataFrame:
+    out = df.copy()
+
+    # Orden estable por id si existe
+    if id_col and id_col in out.columns:
+        out = out.sort_values(id_col).reset_index(drop=True)
+
+    # Normalizar datetimes a YYYY-MM-DD (o vacío si NaT)
+    for c in out.columns:
+        if pd.api.types.is_datetime64_any_dtype(out[c]):
+            out[c] = pd.to_datetime(out[c], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+
+    # Redondear floats a 2 decimales para comparación estable
+    for c in out.select_dtypes(include=["float", "float64", "float32"]).columns:
+        out[c] = out[c].round(2)
+
+    # Texto: sin NaN
+    out = out.fillna("")
+    # Columnas en orden determinista
+    out = out.reindex(sorted(out.columns), axis=1)
+    return out
+
+
+def safe_write_worksheet(client, sheet_id, worksheet, new_df, old_df=None, id_col: str | None = "RowID") -> bool:
+    """
+    Escribe solo si cambió. Devuelve True si escribió.
+    """
+    try:
+        nd = _norm_for_compare(new_df, id_col)
+        if old_df is not None:
+            od = _norm_for_compare(old_df, id_col)
+            if nd.equals(od):
+                return False
+        write_worksheet(client, sheet_id, worksheet, new_df)
+        return True
+    except Exception as e:
+        print(f"[WARN] Error al escribir en {worksheet}: {e}")
+        return False
+
+# Carga base
+st.session_state.df_ing = load_norm_cached(SHEET_ID, WS_ING, True)
+st.session_state.df_gas = load_norm_cached(SHEET_ID, WS_GAS, False)
+
+
+# === Copias "antes" para comparar cambios ===
+df_ing_before = st.session_state.df_ing.copy()
+df_gas_before = st.session_state.df_gas.copy()
+
 
 
 # -------------------- Filtros + Buscador + Empresa --------------------
@@ -245,13 +357,16 @@ if search_q.strip():
         cols = [COL_CLI_NOM, COL_CLI_ID, COL_PROY, COL_DESC, COL_CONC, COL_CAT, COL_EMP]
         tmp = df.copy()
         for c in cols:
-            if c not in tmp.columns: tmp[c] = ""
+            if c not in tmp.columns:
+                tmp[c] = ""
             tmp[c] = tmp[c].astype(str).str.lower()
-        mask = False
-        for c in cols: mask = mask | tmp[c].str.contains(q, na=False)
+        mask = pd.Series(False, index=tmp.index)
+        for c in cols:
+            mask = mask | tmp[c].str.contains(q, na=False)
         return df[mask]
     df_ing_f = _match_df(df_ing_f)
     df_gas_f = _match_df(df_gas_f)
+
 
 # Reales (excluyen por cobrar / por pagar)
 df_ing_reales  = df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "No"].copy()
@@ -422,20 +537,32 @@ desc_nueva = st.text_input("Descripción", key="ing_desc_quick")
 
 if st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick"):
     hoy_ts = pd.Timestamp(_today()); rid = uuid.uuid4().hex
+    cobrado = "No" if por_cobrar_nuevo == "Sí" else "Sí"
+    fecha_cobro = hoy_ts if cobrado == "Sí" else pd.NaT
     nueva = {
-        COL_ROWID: rid, COL_FECHA: _ts(fecha_nueva), COL_MONTO: float(monto_nuevo),
-        COL_PROY: (proyecto_id or "").strip(), COL_CLI_ID: (cliente_id or "").strip(),
-        COL_CLI_NOM: (cliente_nombre or "").strip(), COL_EMP: (empresa_ing or EMPRESA_DEFAULT).strip(),
-        COL_DESC: (desc_nueva or "").strip(), COL_CONC: (desc_nueva or "").strip(),
-        COL_POR_COB: por_cobrar_nuevo, COL_COB: "Sí", COL_FCOBRO: hoy_ts, COL_CAT: "", COL_ESC: "Real",
-        COL_USER: _current_user(),  # ← NUEVO
+        COL_ROWID: rid,
+        COL_FECHA: _ts(fecha_nueva),
+        COL_MONTO: float(monto_nuevo),
+        COL_PROY: (proyecto_id or "").strip(),
+        COL_CLI_ID: (cliente_id or "").strip(),
+        COL_CLI_NOM: (cliente_nombre or "").strip(),
+        COL_EMP: (empresa_ing or EMPRESA_DEFAULT).strip(),
+        COL_DESC: (desc_nueva or "").strip(),
+        COL_CONC: (desc_nueva or "").strip(),
+        COL_POR_COB: por_cobrar_nuevo,
+        COL_COB: cobrado,
+        COL_FCOBRO: fecha_cobro,
+        COL_CAT: "",
+        COL_ESC: "Real",
+        COL_USER: _current_user(),
     }
     st.session_state.df_ing = pd.concat([st.session_state.df_ing, pd.DataFrame([nueva])], ignore_index=True)
     st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
-    write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing)
-    # ↓↓↓ Generar comisión si corresponde (ver función más abajo)
-    # se aplicará también tras el sync general
-    st.cache_data.clear(); st.rerun()
+    wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
+    if wrote:
+        st.cache_data.clear()
+    st.rerun()
+
 
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
 st.markdown("### Ingresos (tabla)")
@@ -447,6 +574,7 @@ ing_colcfg = {
     COL_DESC:    st.column_config.TextColumn(COL_DESC),
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
     COL_ROWID:   st.column_config.TextColumn(COL_ROWID, disabled=True),
+    COL_USER:   st.column_config.TextColumn(COL_USER, disabled=True),
 }
 edited_ing = st.data_editor(
     df_ing_f[ing_cols_view], num_rows="dynamic", hide_index=True, use_container_width=True,
@@ -465,6 +593,7 @@ else:
         base_ing = base_ing[~base_ing[COL_ROWID].astype(str).isin(ids_a_borrar)].reset_index(drop=True)
         write_worksheet(client, SHEET_ID, WS_ING, ensure_ingresos_columns(base_ing))
         st.session_state.df_ing = base_ing.copy()
+        st.cache_data.clear()
         # refrescar vista filtrada para que sync no "reviva" las filas borradas
         df_ing_f = _filtrar_periodo(st.session_state.df_ing, f_desde, f_hasta)
         if filtro_empresa != "Todas":
@@ -552,8 +681,12 @@ if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
     }
     st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
     st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
-    write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas)
-    st.cache_data.clear(); st.rerun()
+    wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
+    if wrote:
+        st.cache_data.clear()
+    st.rerun()
+
+
 
 # Tabla Gastos (etiqueta "Descripción" para Concepto)
 st.markdown("### Gastos (tabla)")
@@ -564,9 +697,9 @@ gas_colcfg = {
     COL_CONC:    st.column_config.TextColumn("Descripción"),
     COL_PROV:    st.column_config.TextColumn("Proveedor"),  # ← NUEVO
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
-    COL_USER:   st.column_config.TextColumn(COL_USER),
     COL_REF_RID: st.column_config.TextColumn(COL_REF_RID, disabled=True),
     COL_ROWID:   st.column_config.TextColumn(COL_ROWID, disabled=True),
+    COL_USER:   st.column_config.TextColumn(COL_USER, disabled=True),
 }
 # Fuerza un orden amigable: ... Descripción, Proveedor, ...
 gas_order = [x for x in [
@@ -591,6 +724,7 @@ else:
         base_g = base_g[~base_g[COL_ROWID].astype(str).isin(ids_a_borrar_g)].reset_index(drop=True)
         write_worksheet(client, SHEET_ID, WS_GAS, ensure_gastos_columns(base_g))
         st.session_state.df_gas = base_g.copy()
+        st.cache_data.clear() 
         # refrescar la vista filtrada después del borrado
         df_gas_f = _filtrar_periodo(st.session_state.df_gas, f_desde, f_hasta)
         if filtro_empresa != "Todas":
@@ -693,11 +827,41 @@ _generar_comisiones_8(client, SHEET_ID)
 # ============================================================
 
 st.divider()
-name, ts_local = get_last_backup_info(creds)
-if name and ts_local is not None:
-    st.caption(f"📦 Último respaldo: **{ts_local.strftime('%Y-%m-%d %H:%M')}** — *{name}*")
-else:
-    st.caption("📦 Aún no hay respaldos en la carpeta configurada.")
+col_bk1, col_bk2 = st.columns([1, 3])
+
+with col_bk1:
+    if st.button("📦 Respaldar ahora", use_container_width=True):
+        try:
+            bk = create_backup_now(creds, SHEET_ID)
+            if bk:
+                st.success(f"Respaldo creado: {bk.name}")
+                # refresca cache y vuelve a renderizar para mostrar el último respaldo actualizado
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.warning("No se pudo crear respaldo (revisa DRIVE_BACKUP_FOLDER_ID en secrets).")
+        except Exception as e:
+            st.error(f"No se pudo crear el respaldo: {e}")
+
+with col_bk2:
+    name, ts_local = get_last_backup_info(creds)
+    if name and ts_local is not None:
+        st.caption(f"📦 Último respaldo: **{ts_local.strftime('%Y-%m-%d %H:%M')}** — *{name}*")
+    else:
+        st.caption("📦 Aún no hay respaldos en la carpeta configurada.")
+
+
+##import os
+##if st.sidebar.checkbox("🔍 Diagnóstico de recursos"):
+##    try:
+##        import psutil
+##        p = psutil.Process(os.getpid())
+##        st.sidebar.write("Archivos abiertos:", len(p.open_files()))
+##        st.sidebar.write("Conexiones de red:", len(p.connections()))
+##        st.sidebar.write("Threads activos:", p.num_threads())
+##    except Exception as e:
+##        st.sidebar.warning(f"No se pudo leer recursos del sistema ({e})")
+
 
 
 # Footer

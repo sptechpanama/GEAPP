@@ -1,35 +1,76 @@
 finapp/
-├─ app.py                               # Landing: portada/menú principal (resumen global)
-├─ charts.py                            # (como lo tienes) Todos los gráficos reutilizables
-├─ sheets.py                            # (como lo tienes) Conexión + I/O con Google Sheets
-├─ core/                                # Lógica de negocio (pura, sin Streamlit)
+├─ inicio.py                         # (ENTRYPOINT) Portada/menú principal: botones a módulos
+│                                    #   - Muestra “Proyectos activos”, metas/patrimonio (% progreso)
+│                                    #   - Enlaces a cada módulo (page_link)               :contentReference[oaicite:1]{index=1}
+│
+├─ sheets.py                         # I/O Google Sheets: get_client(), read_worksheet(), write_worksheet()
+├─ charts.py                         # Gráficas reutilizables (Altair): barras mensuales, líneas, KPIs
+│
+├─ core/                             # Lógica de negocio (pura, sin Streamlit)
 │  ├─ __init__.py
-│  ├─ filters.py                        # filtrar_por_fecha(df, desde, hasta) -> df
-│  ├─ normalize.py                      # normalizar_esquema(df) -> df con ["Fecha","Concepto","Monto","Categoria"]
-│  ├─ cashflow.py                       # preparar_cashflow(df_ing, df_gas) -> df["Fecha","Flujo","Saldo"]
-│  └─ sync.py                           # sync_cambios(...) -> proyecta editor -> base + guarda en Sheets
-├─ ui/                                  # Componentes de interfaz reutilizables
+│  ├─ filters.py                     # filtrar_por_fecha(df, desde, hasta)
+│  ├─ normalize.py                   # normalizar_esquema(), normalizar_tasks(), normalizar_* (schemas)
+│  ├─ cashflow.py                    # preparar_cashflow(df_ing, df_gas)
+│  ├─ sync.py                        # sync_cambios() (editor→base→Sheets), sync_tasks(), sync_* por módulo
+│  ├─ metrics.py                     # KPIs: conversión, tiempos medios, % OC, % adjudicadas, etc.
+│  ├─ reminders.py                   # Generación de “autotareas”/recordatorios en fechas relativas
+│  └─ ids.py                         # helpers de UUID / claves compuestas (cliente+proyecto, etc.)
+│
+├─ ui/                               # Componentes UI reutilizables (sin lógica de negocio)
 │  ├─ __init__.py
-│  ├─ kpis.py                           # render_kpis(total_ing, total_gas, utilidad, margen)
-│  ├─ forms.py                          # (opcional) formularios comunes (cliente, proyecto, fechas)
-│  └─ tables.py                         # (opcional) tablas/editores comunes (con columnas estándar)
-├─ services/                            # (opcional) integraciones/servicios externos
+│  ├─ kpis.py                        # render_kpis_finanzas(...), render_kpis_cotizaciones(...), etc.
+│  ├─ widgets.py                     # radios/selects estandar, date-range, chips de estado
+│  ├─ tables.py                      # data_editor configurados por módulo (column_config)
+│  └─ styles.py                      # inyectores CSS (colores por estado, badges, highlights)
+│
+├─ services/                         # Integraciones opcionales
 │  ├─ __init__.py
-│  ├─ panamacompra.py                   # disparadores, URLs, helpers de scraping/links
-│  ├─ pdf.py                            # (opcional) exportadores a PDF
-│  └─ drive.py                          # (opcional) subida de archivos (recibido conforme, PDFs) a Drive
-├─ models/                              # (opcional) “contratos” de datos (schemas)
+│  ├─ drive.py                       # subir/listar archivos (PDFs, RC escaneados) a Drive
+│  ├─ pdf.py                         # exportar cotizaciones/formatos a PDF
+│  └─ panamacompra.py                # enlaces / helpers de scraping / disparadores simples
+│
+├─ models/                           # Esquemas/contratos de datos (para consistencia y validación ligera)
 │  ├─ __init__.py
-│  ├─ finance.py                        # clases/schemas para ingresos/gastos/cashflow
-│  ├─ quotation.py                      # schemas de cotizaciones (pública/privada)
-│  ├─ project.py                        # schemas de ejecución de OC y postventa
-│  └─ tasks.py                          # schemas de recordatorios/pendientes
-└─ pages/                               # Páginas multipage de Streamlit (se cargan automáticamente)
-   ├─ 1_🏠_Panel_Principal.py            # Dashboard general: proyectos activos, metas, patrimonio
-   ├─ 2_📈_Captacion_y_Seguimiento_Privado.py
-   ├─ 3_🧾_Generador_de_Cotizaciones.py  # Privadas y públicas (PanamáCompra)
-   ├─ 4_📨_Seguimiento_de_Cotizaciones.py # KPIs + recordatorios 4/10/15 días post-cotización
-   ├─ 5_🛠️_Ejecucion_OC.py               # Fechas clave, RC, presentación de cuentas, pagos (5/10/20/40)
-   ├─ 6_🔁_Postventa.py                   # Visitas postventa, llamadas, re-cotizaciones
-   ├─ 7_✅_Pendientes.py                  # Lista global de tareas con días de retraso/checkbox
-   └─ 8_💰_Finanzas_y_Proyecciones.py     # Tu módulo de finanzas actual + proyecciones
+│  ├─ quotation.py                   # Cotización: privada/pública (campos comunes y específicos)
+│  ├─ project.py                     # Ejecución OC / Postventa: fechas, estados, checklists
+│  ├─ tasks.py                       # Pendientes: ID, Tarea, Estado, fechas, delta días
+│  └─ finance.py                     # Ingresos/Gastos/Cashflow
+│
+└─ pages/                            # Páginas multipage (navegables desde “inicio.py”)
+   ├─ panel_principal.py             # Dashboard: Proyectos activos, metas/patrimonio, accesos rápidos  :contentReference[oaicite:2]{index=2}
+   ├─ captacion_seguimiento_privado.py
+   │                                  # Listado de visitas/prospectos, clientes convertidos, KPIs y rangos
+   │                                  # Campos clave: empresa, fechas (ingreso/lista/programación/visitas/llamadas/1ra cotización),
+   │                                  #   costo, monto ofertado, #cotización, estado, conversión y tiempos.  :contentReference[oaicite:3]{index=3}
+   │
+   ├─ generador_cotizacion_privada.py
+   │                                  # Selector encabezado/firma (RS/RIR/SP), ítems (UM, qty, PU, ITBMS),
+   │                                  # calc. totales, presupuesto, ganancia/% est., #cot, cliente/entidad,
+   │                                  # exportar PDF a Drive + registrar en Sheets.                   :contentReference[oaicite:4]{index=4}
+   ├─ generador_cotizacion_publica.py
+   │                                  # Igual a privada + “Enlace de PanamáCompra”.                   :contentReference[oaicite:5]{index=5}
+   │
+   ├─ seguimiento_cotizaciones.py     # Pipeline de cotizaciones (priv/púb):
+   │                                  #   fechas cot/llamadas(1–2–3), adjudicación, OC refrendada,
+   │                                  #   recordatorios auto: 4/10/15 (post-cot) y 10/20/35 (post-adj),
+   │                                  #   KPIs: # totales, % adj, % con OC, conversión de montos/ganancia,
+   │                                  #   tiempos: cot→adj / cot→OC / adj→OC; botón “Ir a Ejecución OC”. :contentReference[oaicite:6]{index=6}
+   │
+   ├─ ejecucion_oc.py                 # Seguimiento de proyectos en ejecución (OC):
+   │                                  #   OC, compras, recepción, inicio, fin; recibido conforme (RC):
+   │                                  #   solicitud/notificación/retiro; presentación de cuentas; pago/depósito;
+   │                                  #   recordatorios auto 5/10/20/40 días tras solicitud RC;
+   │                                  #   adjuntar RC escaneado; KPIs de tramos (OC→compras, ejec, fin→RC, RC→pago…). :contentReference[oaicite:7]{index=7}
+   │
+   ├─ postventa.py                    # Visitas postventa → reactivación: programación, visitas/llamadas, post-cotización,
+   │                                  # derivación a Seguimiento de cotizaciones; KPIs postventa.      :contentReference[oaicite:8]{index=8}
+   │
+   ├─ tasks.py                        # Pendientes (lista global + “días de retraso”):
+   │                                  #   editor: Tarea, Estado (Pendiente/Completada/Descartar),
+   │                                  #   Fecha ingreso, Fecha completado, Tiempo sin completar (días),
+   │                                  #   sync bidireccional con hoja “pendientes”.                    :contentReference[oaicite:9]{index=9}
+   │
+   ├─ finanzas_proyecciones.py        # Finanzas operativas (tu módulo): ingresos/gastos, flujo caja, KPIs y proyecciones.
+   │
+   └─ captacion_panamacompra.py       # “Botones” que abren scripts/enlaces: CL vigentes (cada hora 8–14),
+                                      # CL programadas (1/día), actualización nocturna, análisis semanal y envío 

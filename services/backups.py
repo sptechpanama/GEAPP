@@ -1,118 +1,191 @@
 # services/backups.py
-import time
-import threading
-import schedule
-import pandas as pd
-from datetime import datetime, timezone
+from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple, List
+from zoneinfo import ZoneInfo
+
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+import streamlit as st
 
-# ---- Config por defecto (puedes sobreescribir desde finance.py si quieres) ----
-BACKUP_PREFIX    = "Finanzas_Backup_"
-KEEP_LATEST      = 10
-FRECUENCIA_DIAS  = 1
-BACKUP_TIME_HHMM = "02:15"
-BACKUP_FOLDER_ID = "1eVwyEehX6oakMTrW95MLyoMdV5QSdg37"  # tu carpeta de Drive
+# ================= Config desde secrets =================
+_APP = st.secrets.get("app", {})
+_TZ = ZoneInfo("America/Panama")
 
-def _get_drive_service(creds):
+_BACKUP_PREFIX = _APP.get("BACKUP_PREFIX", "Finanzas Backup")
+_FOLDER_ID     = _APP.get("DRIVE_BACKUP_FOLDER_ID", "")  # ID de carpeta en UNIDAD COMPARTIDA
+_KEEP_LAST     = int(_APP.get("BACKUP_KEEP_LAST", 15))
+
+# Preferible usar días (BACKUP_EVERY_DAYS). Si no, compat con 'daily/weekly/monthly'
+_EVERY_DAYS = _APP.get("BACKUP_EVERY_DAYS", None)
+_FREQ       = (_APP.get("BACKUP_FREQUENCY") or "").lower()
+
+_STARTED = False  # evita doble ejecución por proceso
+
+@dataclass
+class BackupInfo:
+    id: str
+    name: str
+    created_utc: datetime
+
+def _drive(creds):
+    # IMPORTANTÍSIMO: supportsAllDrives en todas las llamadas
     return build("drive", "v3", credentials=creds)
 
-def make_backup(creds, source_file_id: str, folder_id: str = BACKUP_FOLDER_ID):
-    """
-    Crea una copia del Google Sheet en la carpeta de backups y rota para mantener solo KEEP_LATEST.
-    """
-    drive = _get_drive_service(creds)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_name = f"{BACKUP_PREFIX}{ts}"
+def _as_int_days(value) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    s = str(value).strip().lower()
+    if s.endswith("d"):
+        s = s[:-1]
+    try:
+        n = int(s)
+        return n if n > 0 else None
+    except Exception:
+        return None
 
-    # 1) Copiar archivo
-    body = {"name": backup_name, "parents": [folder_id]}
-    new_file = drive.files().copy(fileId=source_file_id, body=body).execute()
-    new_id = new_file.get("id")
-    print(f"[BACKUP] Copia creada: {backup_name} ({new_id})")
+def _freq_delta() -> timedelta:
+    n = _as_int_days(_EVERY_DAYS)
+    if n:
+        return timedelta(days=n)
+    if _FREQ == "weekly":
+        return timedelta(days=7)
+    if _FREQ == "monthly":
+        return timedelta(days=30)
+    return timedelta(days=1)
 
-    # 2) Rotación
-    _rotate_backups(drive, folder_id)
-
-def _rotate_backups(drive_svc, folder_id: str):
-    query = (
-        f"'{folder_id}' in parents and "
-        f"name contains '{BACKUP_PREFIX}' and "
-        f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
-        f"trashed = false"
+def _list_backups(drive, folder_id: str) -> List[BackupInfo]:
+    if not folder_id:
+        return []
+    q = (
+        f"'{folder_id}' in parents and trashed=false "
+        f"and name contains '{_BACKUP_PREFIX}'"
     )
-    resp = drive_svc.files().list(
-        q=query,
-        fields="files(id, name, createdTime)",
-        orderBy="createdTime asc",  # antiguas primero
-        pageSize=1000
+    out: List[BackupInfo] = []
+    token = None
+    while True:
+        resp = drive.files().list(
+            q=q,
+            orderBy="createdTime desc",
+            fields="nextPageToken, files(id,name,createdTime)",
+            pageToken=token,
+            pageSize=100,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        for f in resp.get("files", []):
+            ct = datetime.fromisoformat(f["createdTime"].replace("Z", "+00:00"))
+            out.append(BackupInfo(id=f["id"], name=f["name"], created_utc=ct))
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    return out
+
+def _delete_excess(drive, backups: List[BackupInfo], keep_last: int) -> int:
+    removed = 0
+    for b in backups[keep_last:]:
+        try:
+            drive.files().delete(
+                fileId=b.id,
+                supportsAllDrives=True,
+            ).execute()
+            removed += 1
+        except HttpError:
+            pass
+    return removed
+
+def _copy_sheet(drive, source_sheet_id: str, folder_id: str) -> BackupInfo:
+    """
+    Crea una copia del Google Sheet dentro de la UNIDAD COMPARTIDA.
+    En Shared Drives NO se transfiere propiedad: la "propiedad" la tiene la unidad.
+    """
+    now_local = datetime.now(tz=_TZ)
+    name = f"{_BACKUP_PREFIX} — {now_local.strftime('%Y-%m-%d %H%M')}"
+
+    body = {"name": name, "parents": [folder_id]}
+    resp = drive.files().copy(
+        fileId=source_sheet_id,
+        body=body,
+        fields="id,name,createdTime",
+        supportsAllDrives=True,
     ).execute()
-    files = resp.get("files", [])
-    total = len(files)
 
-    if total <= KEEP_LATEST:
-        print(f"[ROTATE] {total} copias. No hay que borrar.")
+    ct = datetime.fromisoformat(resp["createdTime"].replace("Z", "+00:00"))
+    return BackupInfo(id=resp["id"], name=resp["name"], created_utc=ct)
+
+def auto_backup_if_due(creds, sheet_id: str) -> Optional[BackupInfo]:
+    """
+    Crea respaldo solo si NO existe uno dentro de la ventana (N días).
+    """
+    if not _FOLDER_ID:
+        print("[BACKUP] Falta DRIVE_BACKUP_FOLDER_ID en secrets.app")
+        return None
+    drive = _drive(creds)
+    backups = _list_backups(drive, _FOLDER_ID)
+    delta = _freq_delta()
+
+    now_utc = datetime.now(timezone.utc)
+    if backups:
+        last = backups[0]
+        if (now_utc - last.created_utc) < delta:
+            _delete_excess(drive, backups, _KEEP_LAST)
+            return None
+
+    new_bk = _copy_sheet(drive, sheet_id, _FOLDER_ID)
+    backups = _list_backups(drive, _FOLDER_ID)
+    _delete_excess(drive, backups, _KEEP_LAST)
+    return new_bk
+
+def start_backup_scheduler_once(creds, sheet_id: str):
+    """
+    Idempotente: chequea y respalda si 'toca', una sola vez por proceso.
+    """
+    global _STARTED
+    if _STARTED:
         return
+    _STARTED = True
+    try:
+        created = auto_backup_if_due(creds, sheet_id)
+        if created:
+            print(f"[BACKUP] Copia creada: {created.name}")
+    except Exception as e:
+        print(f"[BACKUP] Error en respaldo: {e}")
 
-    to_delete = total - KEEP_LATEST
-    print(f"[ROTATE] {total} copias. Se eliminarán {to_delete} antiguas...")
-    for i in range(to_delete):
-        fid = files[i]["id"]
-        fname = files[i]["name"]
-        drive_svc.files().delete(fileId=fid).execute()
-        print(f"[ROTATE] Eliminada: {fname} ({fid})")
-
-def start_backup_scheduler_once(creds, source_file_id: str):
-    """
-    Lanza un hilo en segundo plano con schedule. Idempotente para Streamlit.
-    """
-    import streamlit as st
-
-    if "backup_scheduler_started" in st.session_state:
-        return
-
-    schedule.clear("backups")
-
-    schedule.every(FRECUENCIA_DIAS).days.at(BACKUP_TIME_HHMM).do(
-        make_backup, creds=creds, source_file_id=source_file_id, folder_id=BACKUP_FOLDER_ID
-    ).tag("backups")
-
-    def _runner():
-        while True:
-            schedule.run_pending()
-            time.sleep(30)
-
-    t = threading.Thread(target=_runner, daemon=True)
-    t.start()
-    st.session_state["backup_scheduler_started"] = True
-    print(f"[SCHEDULER] Backups cada {FRECUENCIA_DIAS} día(s) a las {BACKUP_TIME_HHMM}.")
-
-# -------- Mostrar "Último respaldo" --------
-def get_last_backup_info(creds, folder_id: str = BACKUP_FOLDER_ID):
-    """
-    Devuelve (name, ts_local) del backup más reciente; o (None, None) si no hay.
-    """
-    drive = _get_drive_service(creds)
-    query = (
-        f"'{folder_id}' in parents and "
-        f"name contains '{BACKUP_PREFIX}' and "
-        f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
-        f"trashed = false"
-    )
-    resp = drive.files().list(
-        q=query,
-        fields="files(id, name, createdTime)",
-        orderBy="createdTime desc",
-        pageSize=1
-    ).execute()
-    files = resp.get("files", [])
-    if not files:
+def get_last_backup_info(creds) -> Tuple[Optional[str], Optional[datetime]]:
+    if not _FOLDER_ID:
+        return None, None
+    try:
+        drive = _drive(creds)
+        backups = _list_backups(drive, _FOLDER_ID)
+        if not backups:
+            return None, None
+        last = backups[0]
+        return last.name, last.created_utc.astimezone(_TZ)
+    except Exception:
         return None, None
 
-    f = files[0]
-    name = f.get("name")
-    created = f.get("createdTime")  # RFC3339
-    try:
-        ts_local = pd.to_datetime(created, utc=True).tz_convert(None)
-    except Exception:
-        ts_local = pd.to_datetime(created)
-    return name, ts_local
+def create_backup_now(creds, sheet_id: str) -> Optional[BackupInfo]:
+    """Botón manual."""
+    if not _FOLDER_ID:
+        return None
+    drive = _drive(creds)
+    return _copy_sheet(drive, sheet_id, _FOLDER_ID)
+
+def debug_sa_quota(creds):
+    """
+    Devuelve información de la cuenta autenticada (service account) y su 'storageQuota'
+    tal como la espera finance.py:
+      - 'sa_email' (email de la cuenta)
+      - 'storageQuota' (dict con limit, usage, usageInDrive, usageInDriveTrash)
+    Nota: En service accounts el 'limit' suele ser None porque no tienen cuota propia.
+    """
+    drive = build("drive", "v3", credentials=creds)
+    about = drive.about().get(fields="user(emailAddress), storageQuota").execute() or {}
+    return {
+        "sa_email": about.get("user", {}).get("emailAddress"),
+        "storageQuota": about.get("storageQuota", {}) or {},
+    }
+
