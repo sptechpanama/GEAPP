@@ -107,13 +107,13 @@ EMPRESA_DEFAULT   = "RS-SP"
 
 # -------------------- Helpers generales --------------------
 
-if st.button("Probar conexión con Google Sheets"):
-    try:
-        gclient, gcreds = get_client()
-        sh = gclient.open_by_key(st.secrets["app"]["SHEET_ID"])
-        st.success(f"✅ Conexión OK. Hoja: {sh.title}")
-    except Exception as e:
-        st.error(f"❌ {e}")
+##if st.button("Probar conexión con Google Sheets"):
+##    try:
+##        gclient, gcreds = get_client()
+##        sh = gclient.open_by_key(st.secrets["app"]["SHEET_ID"])
+##        st.success(f"✅ Conexión OK. Hoja: {sh.title}")
+##    except Exception as e:
+##        st.error(f"❌ {e}")
 
 def _today() -> date: return date.today()
 
@@ -705,12 +705,6 @@ if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
     wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
     if wrote:
         st.cache_data.clear()
-        
-    #  Limpia SOLO estos campos, conserva cliente/proyecto y proveedor
-    st.session_state["gas_desc_quick"] = ""
-    st.session_state["gas_proveedor_quick"] = ""
-    st.session_state["gas_categoria_quick"] = "Proyectos"  # o la opción por defecto que prefieras
-
     st.rerun()
 
 
