@@ -1,16 +1,16 @@
-streamlit>=1.36.0            # Framework de UI web en Python
-pandas>=2.1.0                # Manejo de DataFrames y fechas
+streamlit>=1.38.0            # Framework de UI web en Python
+pandas>=2.2.2               # Manejo de DataFrames y fechas
 altair>=5.0.0                # Graficación declarativa
 google-api-python-client==2.149.0
-google-auth==2.35.0
+google-auth==2.33.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 gspread==6.1.2
 schedule==1.2.1
-google-api-python-client>=2.140.0
+google-api-python-client>=2.146.0
 streamlit-authenticator==0.3.2
 PyYAML>=6.0
 streamlit-authenticator==0.3.2
-bcrypt>=4.0.1
+bcrypt>=4.1.2
 PyYAML>=6.0
 

@@ -26,10 +26,10 @@ COOKIE_NAME = "finapp_auth"
 COOKIE_KEY  = "finapp_key_123"
 
 authenticator = stauth.Authenticate(
-    credentials=credentials,
-    cookie_name=COOKIE_NAME,
-    key=COOKIE_KEY,
-    cookie_expiry_days=30,
+    credentials,           # en vez de credentials=credentials
+    COOKIE_NAME,           # en vez de cookie_name=...
+    COOKIE_KEY,            # en vez de key=...
+    30                     # en vez de cookie_expiry_days=30
 )
 
 # ======= PINTA EL FORMULARIO (0.4.2) =======
