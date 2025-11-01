@@ -29,36 +29,30 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.metadata.readonly",
 ]
 
+
 def get_client():
-    """
-    Prioriza credenciales desde st.secrets['google_service_account'] (Streamlit Cloud).
-    Si no existen, usa el archivo local SERVICE_ACCOUNT_PATH (entorno local).
-    """
-    creds = None
-
-    # 1) Cloud / .streamlit/secrets.toml
+    # 1) Tomar SIEMPRE desde st.secrets
     try:
-        if "google_service_account" in st.secrets:
-            info = dict(st.secrets["google_service_account"])
-            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+        info = dict(st.secrets["google_service_account"])
     except Exception:
-        # si falla secrets, probamos el archivo
-        creds = None
+        # Mostrar claves disponibles para depurar (no muestra valores)
+        keys = ", ".join(list(st.secrets.keys()))
+        raise RuntimeError(
+            "No se encontró el bloque [google_service_account] en los Secrets "
+            f"de ESTE app. Claves disponibles: {keys}. Abre Manage app → Secrets "
+            "y pega el JSON bajo ese encabezado exactamente."
+        )
 
-    # 2) Local file (fallback)
-    if creds is None:
-        try:
-            path = SERVICE_ACCOUNT_PATH
-            if not os.path.isfile(path):
-                # último intento: variable de entorno
-                path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", SERVICE_ACCOUNT_PATH)
-            creds = Credentials.from_service_account_file(path, scopes=SCOPES)
-        except Exception as e:
-            # re-lanzar con mensaje claro (Streamlit lo ocultará en Cloud, pero sirve localmente)
-            raise FileNotFoundError(f"No se pudieron cargar credenciales: {e}")
+    # 2) Arreglar saltos de línea del private_key si vienen escapados
+    pk = info.get("private_key", "")
+    if "\\n" in pk and "\n" not in pk:
+        info["private_key"] = pk.replace("\\n", "\n")
 
+    # 3) Crear credenciales y autorizar gspread
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     client = gspread.authorize(creds)
     return client, creds
+
 
 
 def _retry(fn, tries=5, base_sleep=0.5):
