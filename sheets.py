@@ -77,17 +77,38 @@ def _retry(fn, tries=5, base_sleep=0.5):
     # último intento fuera del bucle
     return fn()
 
+def _make_unique_headers(raw_headers: list[str]) -> list[str]:
+    unique, seen = [], {}
+    for idx, header in enumerate(raw_headers):
+        name = (header or "").strip() or f"col_{idx+1}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 0
+        unique.append(name)
+    return unique
+
+
 def read_worksheet(client: gspread.Client, sheet_id: str, worksheet_name: str) -> pd.DataFrame:
     sh = client.open_by_key(sheet_id)
     ws = sh.worksheet(worksheet_name)
 
-    # 👇 Usa wrapper con backoff para lecturas
-    def _get_all_records():
-        return ws.get_all_records()  # datos desde fila 2
+    raw_headers = ws.row_values(1)
+    expected_headers = _make_unique_headers(raw_headers)
 
-    data = _retry(_get_all_records)
+    def _get_all_values():
+        return ws.get_all_values()
 
-    df = pd.DataFrame(data)
+    values = _retry(_get_all_values)
+
+    if not values:
+        df = pd.DataFrame(columns=expected_headers)
+    else:
+        data_rows = values[1:] if len(values) > 1 else []
+        width = len(expected_headers)
+        padded_rows = [row[:width] + [""] * (width - len(row)) for row in data_rows]
+        df = pd.DataFrame(padded_rows, columns=expected_headers)
     if "Fecha" in df.columns:
         df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
     if "Monto" in df.columns:

@@ -240,10 +240,13 @@ if "google_client" not in st.session_state or "google_creds" not in st.session_s
         gclient, gcreds = get_client()
         st.session_state.google_client = gclient
         st.session_state.google_creds = gcreds
+        st.session_state.google_cache_token = uuid.uuid4().hex
         st.success("✅ Conexión establecida")
 
 client = st.session_state.google_client
 creds = st.session_state.google_creds
+if "google_cache_token" not in st.session_state:
+    st.session_state.google_cache_token = uuid.uuid4().hex
 
 SHEET_ID = st.secrets["app"]["SHEET_ID"]
 WS_ING   = st.secrets["app"]["WS_ING"]
@@ -268,14 +271,22 @@ if not st.session_state.get("backup_started"):
 # ======================
 
 @st.cache_data(ttl=120)
-def get_sheet_df_cached(sid: str, ws: str):
+def get_sheet_df_cached(sid: str, ws: str, cache_token: str):
     # usa el client guardado en session_state para evitar pasarlo como arg
-    return read_worksheet(st.session_state.google_client, sid, ws)
+    # cache_token asegura invalidación si el client/credencial cambia
+    client_obj = st.session_state.get("google_client")
+    if client_obj is None:
+        client_obj, client_creds = get_client()
+        st.session_state.google_client = client_obj
+        st.session_state.google_creds = client_creds
+        st.session_state.google_cache_token = uuid.uuid4().hex
+    _ = cache_token  # solo para clave de caché
+    return read_worksheet(client_obj, sid, ws)
 
 
 @st.cache_data(ttl=300)
-def load_norm_cached(sid: str, ws: str, is_ingresos: bool):
-    df = get_sheet_df_cached(sid, ws)
+def load_norm_cached(sid: str, ws: str, is_ingresos: bool, cache_token: str):
+    df = get_sheet_df_cached(sid, ws, cache_token)
     return ensure_ingresos_columns(df) if is_ingresos else ensure_gastos_columns(df)
 
 
@@ -319,8 +330,9 @@ def safe_write_worksheet(client, sheet_id, worksheet, new_df, old_df=None, id_co
         return False
 
 # Carga base
-st.session_state.df_ing = load_norm_cached(SHEET_ID, WS_ING, True)
-st.session_state.df_gas = load_norm_cached(SHEET_ID, WS_GAS, False)
+cache_token = st.session_state.google_cache_token
+st.session_state.df_ing = load_norm_cached(SHEET_ID, WS_ING, True, cache_token)
+st.session_state.df_gas = load_norm_cached(SHEET_ID, WS_GAS, False, cache_token)
 
 
 # === Copias "antes" para comparar cambios ===
@@ -330,14 +342,36 @@ df_gas_before = st.session_state.df_gas.copy()
 
 
 # -------------------- Filtros + Buscador + Empresa --------------------
-st.markdown("### Filtros")
-fc1, fc2, fc3 = st.columns([1, 1, 1.4])
-with fc1: f_desde = st.date_input("Desde", value=date(date.today().year, 1, 1))
-with fc2: f_hasta = st.date_input("Hasta", value=_today())
-with fc3:
-    filtro_empresa = st.selectbox("Empresa", options=["Todas"] + EMPRESAS_OPCIONES, index=0)
+default_desde = date(date.today().year, 1, 1)
+default_hasta = _today()
 
-search_q = st.text_input("🔎 Buscar (cliente, proyecto, descripción, concepto, categoría, empresa)", key="global_search")
+with st.sidebar:
+    st.markdown("### 🎛️ Filtros")
+    with st.expander("Rango y criterios", expanded=True):
+        f_desde = st.date_input("Desde", value=default_desde, key="filtro_desde")
+        f_hasta = st.date_input("Hasta", value=default_hasta, key="filtro_hasta")
+        filtro_empresa = st.selectbox("Empresa", options=["Todas"] + EMPRESAS_OPCIONES, index=0, key="filtro_empresa")
+        search_q = st.text_input(
+            "🔎 Buscar (cliente, proyecto, descripción, concepto, categoría, empresa)",
+            key="global_search",
+        )
+
+    active_tags = []
+    if isinstance(f_desde, date) and f_desde != default_desde:
+        active_tags.append(f"Desde {f_desde.strftime('%Y-%m-%d')}")
+    if isinstance(f_hasta, date) and f_hasta != default_hasta:
+        active_tags.append(f"Hasta {f_hasta.strftime('%Y-%m-%d')}")
+    if filtro_empresa != "Todas":
+        active_tags.append(f"Empresa: {filtro_empresa}")
+    if search_q.strip():
+        active_tags.append(f"Busca: {search_q.strip()[:30]}" + ("…" if len(search_q.strip()) > 30 else ""))
+
+    if active_tags:
+        chips = " ".join(
+            f"<span style='background-color:#1f2630;padding:4px 8px;border-radius:12px;font-size:12px;display:inline-block;margin-right:4px;margin-bottom:4px;'>{tag}</span>"
+            for tag in active_tags
+        )
+        st.sidebar.markdown("**Filtros activos:**<br>" + chips, unsafe_allow_html=True)
 
 def _filtrar_periodo(df: pd.DataFrame, d1: date, d2: date) -> pd.DataFrame:
     if COL_FECHA not in df.columns: return df.copy()
@@ -400,24 +434,27 @@ with k2: st.metric("Capital actual", f"${saldo_actual:,.2f}")
 with k3: st.metric("Cuentas por cobrar (futuras)", f"${cxc_futuras:,.2f}")
 
 # -------------------- Gráficas y análisis --------------------
-st.markdown("### Tendencia mensual (Ingresos vs Gastos vs Utilidad)")
-pnl_m = monthly_pnl(df_ing_reales, df_gas_reales)
-st.altair_chart(chart_line_ing_gas_util_mensual(pnl_m), width="stretch")
+with st.expander("📈 Ver análisis y gráficas", expanded=False):
+    st.markdown("### Tendencia mensual (Ingresos vs Gastos vs Utilidad)")
+    pnl_m = monthly_pnl(df_ing_reales, df_gas_reales)
+    st.altair_chart(chart_line_ing_gas_util_mensual(pnl_m), width="stretch")
 
-st.markdown("### Top categorías de gasto")
-try:
-    df_top = top_gastos_por_categoria(df_gas_reales, top_n=5)
-    st.altair_chart(chart_bar_top_gastos(df_top), width="stretch")
-except Exception:
-    st.caption("Sin categorías de gasto disponibles.")
+    st.markdown("### Top categorías de gasto")
+    try:
+        df_top = top_gastos_por_categoria(df_gas_reales, top_n=5)
+        st.altair_chart(chart_bar_top_gastos(df_top), width="stretch")
+    except Exception:
+        st.caption("Sin categorías de gasto disponibles.")
 
-st.markdown("### Flujo de caja acumulado (filtrado)")
-if cash.empty:
-    st.info("No hay datos en el período seleccionado.")
-else:
-    gc1, gc2 = st.columns([2, 1])
-    with gc1: st.line_chart(cash.set_index(COL_FECHA)[["Saldo"]], height=280, width="stretch")
-    with gc2: st.altair_chart(chart_bars_saldo_mensual(cash), width="stretch")
+    st.markdown("### Flujo de caja acumulado (filtrado)")
+    if cash.empty:
+        st.info("No hay datos en el período seleccionado.")
+    else:
+        gc1, gc2 = st.columns([2, 1])
+        with gc1:
+            st.line_chart(cash.set_index(COL_FECHA)[["Saldo"]], height=280, width="stretch")
+        with gc2:
+            st.altair_chart(chart_bars_saldo_mensual(cash), width="stretch")
 
 
 # ============================================================
