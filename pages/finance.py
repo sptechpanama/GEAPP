@@ -402,12 +402,12 @@ with k3: st.metric("Cuentas por cobrar (futuras)", f"${cxc_futuras:,.2f}")
 # -------------------- Gráficas y análisis --------------------
 st.markdown("### Tendencia mensual (Ingresos vs Gastos vs Utilidad)")
 pnl_m = monthly_pnl(df_ing_reales, df_gas_reales)
-st.altair_chart(chart_line_ing_gas_util_mensual(pnl_m), use_container_width=True)
+st.altair_chart(chart_line_ing_gas_util_mensual(pnl_m), width="stretch")
 
 st.markdown("### Top categorías de gasto")
 try:
     df_top = top_gastos_por_categoria(df_gas_reales, top_n=5)
-    st.altair_chart(chart_bar_top_gastos(df_top), use_container_width=True)
+    st.altair_chart(chart_bar_top_gastos(df_top), width="stretch")
 except Exception:
     st.caption("Sin categorías de gasto disponibles.")
 
@@ -416,8 +416,8 @@ if cash.empty:
     st.info("No hay datos en el período seleccionado.")
 else:
     gc1, gc2 = st.columns([2, 1])
-    with gc1: st.line_chart(cash.set_index(COL_FECHA)[["Saldo"]], height=280, use_container_width=True)
-    with gc2: st.altair_chart(chart_bars_saldo_mensual(cash), use_container_width=True)
+    with gc1: st.line_chart(cash.set_index(COL_FECHA)[["Saldo"]], height=280, width="stretch")
+    with gc2: st.altair_chart(chart_bars_saldo_mensual(cash), width="stretch")
 
 
 # ============================================================
@@ -580,7 +580,7 @@ ing_colcfg = {
     COL_USER:   st.column_config.TextColumn(COL_USER, disabled=True),
 }
 edited_ing = st.data_editor(
-    df_ing_f[ing_cols_view], num_rows="dynamic", hide_index=True, use_container_width=True,
+    df_ing_f[ing_cols_view], num_rows="dynamic", hide_index=True, width="stretch",
     column_config=ing_colcfg, key="tabla_ingresos"
 )
 
@@ -711,7 +711,7 @@ gas_order = [x for x in [
 ] if x in gas_cols_view]
 
 edited_gas = st.data_editor(
-    df_gas_f[gas_cols_view], num_rows="dynamic", hide_index=True, use_container_width=True,
+    df_gas_f[gas_cols_view], num_rows="dynamic", hide_index=True, width="stretch",
     column_config=gas_colcfg, key="tabla_gastos",
     column_order=gas_order  # ← NUEVO: asegura que Proveedor quede debajo de Descripción
 )
@@ -833,7 +833,7 @@ st.divider()
 col_bk1, col_bk2 = st.columns([1, 3])
 
 with col_bk1:
-    if st.button("📦 Respaldar ahora", use_container_width=True):
+    if st.button("📦 Respaldar ahora", width="stretch"):
         try:
             bk = create_backup_now(creds, SHEET_ID)
             if bk:

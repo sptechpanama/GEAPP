@@ -193,7 +193,7 @@ with st.form("new_task_form", clear_on_submit=True):
     with c2:
         # SIN título arriba y placeholder "Categoría"
         nueva_categoria = st.text_input("Categoría", placeholder="Categoría", label_visibility="collapsed")
-    submitted = st.form_submit_button("Agregar", use_container_width=True)
+    submitted = st.form_submit_button("Agregar", width="stretch")
     if submitted:
         if nueva_tarea.strip() == "":
             st.warning("Escribe una descripción para la tarea.")

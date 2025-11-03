@@ -140,7 +140,7 @@ def render_df(df: pd.DataFrame, sheet_name: str):
     st.dataframe(
         df[cols] if cols else df,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=620,
         column_config=col_cfg,
     )
