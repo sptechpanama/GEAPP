@@ -280,7 +280,7 @@ def render_df(df: pd.DataFrame, sheet_name: str):
         })
 
     if public_col:
-    public_series = pd.to_datetime(df_base[public_col], errors="coerce", dayfirst=True)
+        public_series = pd.to_datetime(df_base[public_col], errors="coerce", dayfirst=True)
         if public_series.notna().any():
             count_public_today = int((public_series.dt.date == today).sum())
             metrics_defs.append({
