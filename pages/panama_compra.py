@@ -173,7 +173,8 @@ def render_df(df: pd.DataFrame, sheet_name: str):
             if sel: df = df[df["Estado"].isin(sel)]
 
         if date_col and df[date_col].notna().any():
-            mind, maxd = df[date_col].min(), df[date_col].max()
+            normalized_dates = df[date_col].dt.normalize()
+            mind, maxd = normalized_dates.min(), normalized_dates.max()
             default_fin = today
             default_ini = today - timedelta(days=29)
             if pd.notna(mind) and mind.date() > default_fin:
@@ -187,8 +188,10 @@ def render_df(df: pd.DataFrame, sheet_name: str):
                 key=keyp+"fecha",
             )
             if isinstance(r, tuple) and len(r) == 2:
-                ini, fin = pd.Timestamp(r[0]), pd.Timestamp(r[1])
-                df = df[(df[date_col] >= ini) & (df[date_col] <= fin)]
+                ini = pd.Timestamp(r[0]).normalize()
+                fin = pd.Timestamp(r[1]).normalize()
+                mask = df[date_col].dt.normalize().between(ini, fin)
+                df = df[mask]
 
         if money_cols:
             colm = money_cols[0]
@@ -271,7 +274,7 @@ def render_df(df: pd.DataFrame, sheet_name: str):
     public_series = None
 
     if date_col and df_base[date_col].notna().any():
-        count_date_today = int((df_base[date_col].dt.date == today).sum())
+        count_date_today = int((df_base[date_col].dt.normalize() == pd.Timestamp(today)).sum())
         metrics_defs.append({
             "key": "fecha_hoy",
             "label": "Actos a celebrarse hoy",
@@ -282,7 +285,7 @@ def render_df(df: pd.DataFrame, sheet_name: str):
     if public_col:
         public_series = pd.to_datetime(df_base[public_col], errors="coerce", dayfirst=True)
         if public_series.notna().any():
-            count_public_today = int((public_series.dt.date == today).sum())
+            count_public_today = int((public_series.dt.normalize() == pd.Timestamp(today)).sum())
             metrics_defs.append({
                 "key": "publicados_hoy",
                 "label": "Actos publicados hoy",
@@ -328,10 +331,10 @@ def render_df(df: pd.DataFrame, sheet_name: str):
 
     df = df_base
     if active_metric == "fecha_hoy" and date_col:
-        mask = df_base[date_col].dt.date == today
+        mask = df_base[date_col].dt.normalize() == pd.Timestamp(today)
         df = df_base[mask]
     elif active_metric == "publicados_hoy" and public_series is not None:
-        mask = public_series.dt.date == today
+        mask = public_series.dt.normalize() == pd.Timestamp(today)
         df = df_base.loc[mask.fillna(False)]
 
     if st.session_state.get(top_modal_key):
