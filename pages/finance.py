@@ -227,6 +227,164 @@ def ensure_proyectos_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# -------------------- Catálogo en memoria --------------------
+CATALOG_TTL_SECONDS = 180  # recarga cada 3 minutos si no se fuerza
+
+
+def _format_catalog_label(name: str, identifier: str) -> str:
+    name = (name or "").strip()
+    identifier = (identifier or "").strip()
+    if identifier and name:
+        return f"{name} ▸ {identifier}"
+    return identifier or name or ""
+
+
+def _ensure_catalog_data(client, sheet_id: str, *, force: bool = False) -> None:
+    now_ts = time.time()
+    last_loaded = st.session_state.get("catalog_loaded_at", 0.0)
+    should_refresh = force or (now_ts - last_loaded > CATALOG_TTL_SECONDS) or (
+        "catalog_clients_df" not in st.session_state or "catalog_projects_df" not in st.session_state
+    )
+    if not should_refresh:
+        return
+
+    df_cli = ensure_clientes_columns(read_worksheet(client, sheet_id, WS_CLIENTES))
+    df_cli[COL_CLI_ID] = df_cli[COL_CLI_ID].astype(str).str.strip()
+    df_cli[COL_CLI_NOM] = df_cli[COL_CLI_NOM].astype(str).str.strip()
+    df_cli = df_cli[df_cli[COL_CLI_ID] != ""].drop_duplicates(subset=[COL_CLI_ID]).reset_index(drop=True)
+    cli_labels = []
+    cli_label_map = {}
+    cli_id_to_label = {}
+    for _, row in df_cli.iterrows():
+        label = _format_catalog_label(row[COL_CLI_NOM], row[COL_CLI_ID]) or row[COL_CLI_ID]
+        cli_labels.append(label)
+        cli_label_map[label] = {"ClienteID": row[COL_CLI_ID], "ClienteNombre": row[COL_CLI_NOM]}
+        cli_id_to_label[row[COL_CLI_ID]] = label
+    st.session_state["catalog_clients_df"] = df_cli
+    st.session_state["catalog_clients_opts"] = [""] + cli_labels
+    st.session_state["catalog_clients_label_map"] = cli_label_map
+    st.session_state["catalog_clients_id_to_label"] = cli_id_to_label
+
+    df_proj = ensure_proyectos_columns(read_worksheet(client, sheet_id, WS_PROYECTOS))
+    df_proj[COL_PROY] = df_proj[COL_PROY].astype(str).str.strip()
+    df_proj[COL_CLI_ID] = df_proj[COL_CLI_ID].astype(str).str.strip()
+    df_proj[COL_CLI_NOM] = df_proj[COL_CLI_NOM].astype(str).str.strip()
+    df_proj = df_proj[df_proj[COL_PROY] != ""].drop_duplicates(subset=[COL_PROY]).reset_index(drop=True)
+    proj_labels = []
+    proj_label_map = {}
+    for _, row in df_proj.iterrows():
+        proj_id = str(row.get("ProyectoID", row[COL_PROY])).strip()
+        proj_name = str(row.get("ProyectoNombre", row[COL_PROY])).strip()
+        label = _format_catalog_label(proj_name or proj_id, proj_id) or proj_id
+        proj_labels.append(label)
+        proj_label_map[label] = {
+            "ProyectoID": proj_id,
+            "ProyectoNombre": proj_name or proj_id,
+            "ClienteID": row[COL_CLI_ID],
+            "ClienteNombre": row[COL_CLI_NOM],
+        }
+    df_proj["__label__"] = proj_labels
+    st.session_state["catalog_projects_df"] = df_proj
+    st.session_state["catalog_projects_label_map"] = proj_label_map
+    st.session_state["catalog_loaded_at"] = now_ts
+
+
+def _on_client_change(prefix: str) -> None:
+    label = st.session_state.get(f"{prefix}_cliente_raw", "")
+    info = st.session_state.get("catalog_clients_label_map", {}).get(label)
+    if info:
+        st.session_state[f"{prefix}_cliente_id"] = info["ClienteID"]
+        st.session_state[f"{prefix}_cliente_nombre"] = info["ClienteNombre"]
+    else:
+        st.session_state[f"{prefix}_cliente_id"] = ""
+        st.session_state[f"{prefix}_cliente_nombre"] = ""
+    if not st.session_state.pop(f"{prefix}_skip_project_sync", False):
+        _sync_project_selection(prefix)
+
+
+def _on_project_change(prefix: str) -> None:
+    label = st.session_state.get(f"{prefix}_proyecto_raw", "")
+    info = st.session_state.get("catalog_projects_label_map", {}).get(label)
+    if info:
+        st.session_state[f"{prefix}_proyecto_id"] = info["ProyectoID"]
+        st.session_state[f"{prefix}_proyecto_nombre"] = info["ProyectoNombre"]
+        st.session_state[f"{prefix}_proyecto_cliente_id"] = info.get("ClienteID", "")
+        st.session_state[f"{prefix}_proyecto_cliente_nombre"] = info.get("ClienteNombre", "")
+        client_label = st.session_state.get("catalog_clients_id_to_label", {}).get(info.get("ClienteID"), "")
+        if client_label:
+            current_label = st.session_state.get(f"{prefix}_cliente_raw")
+            if current_label != client_label:
+                st.session_state[f"{prefix}_skip_project_sync"] = True
+                st.session_state[f"{prefix}_cliente_raw"] = client_label
+                _on_client_change(prefix)
+    else:
+        st.session_state[f"{prefix}_proyecto_id"] = ""
+        st.session_state[f"{prefix}_proyecto_nombre"] = ""
+        st.session_state[f"{prefix}_proyecto_cliente_id"] = ""
+        st.session_state[f"{prefix}_proyecto_cliente_nombre"] = ""
+
+
+def _build_project_options(prefix: str, client_id: str | None = None) -> list[str]:
+    df_proj = st.session_state.get("catalog_projects_df")
+    if df_proj is None or df_proj.empty:
+        return [""]
+    if client_id is None:
+        client_id = st.session_state.get(f"{prefix}_cliente_id", "")
+    if client_id:
+        df_view = df_proj[df_proj[COL_CLI_ID].astype(str) == str(client_id)].copy()
+    else:
+        df_view = df_proj.copy()
+    labels = df_view["__label__"].tolist()
+    return [""] + labels if labels else [""]
+
+
+def _sync_project_selection(prefix: str) -> None:
+    options = _build_project_options(prefix)
+    key = f"{prefix}_proyecto_raw"
+    if key not in st.session_state or st.session_state[key] not in options:
+        st.session_state[key] = options[0] if options else ""
+    if st.session_state.get(key):
+        _on_project_change(prefix)
+
+
+def _prepare_entry_defaults(prefix: str) -> list[str]:
+    client_opts = st.session_state.get("catalog_clients_opts", [""])
+    client_key = f"{prefix}_cliente_raw"
+    if client_key not in st.session_state or st.session_state[client_key] not in client_opts:
+        st.session_state[client_key] = client_opts[0] if client_opts else ""
+    _on_client_change(prefix)
+    options = _build_project_options(prefix)
+    proj_key = f"{prefix}_proyecto_raw"
+    if proj_key not in st.session_state or st.session_state[proj_key] not in options:
+        st.session_state[proj_key] = options[0] if options else ""
+    if st.session_state.get(proj_key):
+        _on_project_change(prefix)
+    return options
+
+
+def _reset_entry_state(prefix: str) -> None:
+    for suffix in [
+        "cliente_raw",
+        "cliente_id",
+        "cliente_nombre",
+        "proyecto_raw",
+        "proyecto_id",
+        "proyecto_nombre",
+        "proyecto_cliente_id",
+        "proyecto_cliente_nombre",
+        "empresa_quick",
+        "fecha_quick",
+        "monto_quick",
+        "porcob_quick",
+        "porpag_quick",
+        "categoria_quick",
+        "desc_quick",
+        "proveedor_quick",
+        "skip_project_sync",
+    ]:
+        st.session_state.pop(f"{prefix}_{suffix}", None)
+
+
 # -------------------- Página --------------------
 st.markdown("<h1>📊 Finanzas</h1>", unsafe_allow_html=True)
 
@@ -255,6 +413,9 @@ WS_GAS   = st.secrets["app"]["WS_GAS"]
 # Guardar las credenciales en session_state
 st.session_state.google_creds = creds
 st.session_state.google_client = client
+
+force_catalog_reload = st.session_state.pop("catalog_force_reload", False)
+_ensure_catalog_data(client, SHEET_ID, force=force_catalog_reload)
 
 
 # ---- Scheduler de backups: iniciar una sola vez
@@ -479,31 +640,49 @@ with st.expander("➕ Clientes y Proyectos"):
         if not cli_nom_in.strip():
             st.warning("Debes indicar el nombre del cliente.")
         else:
-            try:
-                dfc = read_worksheet(client, SHEET_ID, WS_CLIENTES)
-            except Exception:
-                dfc = pd.DataFrame()
-            dfc = ensure_clientes_columns(dfc)
+            with st.spinner("Creando cliente..."):
+                try:
+                    dfc = read_worksheet(client, SHEET_ID, WS_CLIENTES)
+                except Exception:
+                    dfc = pd.DataFrame()
+                dfc = ensure_clientes_columns(dfc)
 
-            new_id = f"C-{uuid.uuid4().hex[:8].upper()}"  # ID generado siempre
-            # Evitar duplicados por Nombre+Empresa
-            dup = False
-            if not dfc.empty:
-                dup = ((dfc[COL_CLI_NOM].astype(str).str.lower()==cli_nom_in.strip().lower()) &
-                       (dfc[COL_EMP].astype(str).str.upper()==emp_cliente.upper())).any()
-            if dup:
-                st.warning("Ya existe un cliente con ese nombre en la misma empresa.")
-            else:
-                new_row = {
-                    COL_ROWID: uuid.uuid4().hex,
-                    COL_CLI_ID: new_id,
-                    COL_CLI_NOM: cli_nom_in.strip(),
-                    COL_EMP: emp_cliente
-                }
-                dfc = pd.concat([dfc, pd.DataFrame([new_row])], ignore_index=True)
-                write_worksheet(client, SHEET_ID, WS_CLIENTES, dfc)
-                st.toast(f"Cliente creado: {new_id} — {cli_nom_in.strip()}")
-                st.rerun()  # refrescar inmediatamente los selectores
+                new_id = f"C-{uuid.uuid4().hex[:8].upper()}"  # ID generado siempre
+                dup = False
+                if not dfc.empty:
+                    dup = ((dfc[COL_CLI_NOM].astype(str).str.lower()==cli_nom_in.strip().lower()) &
+                           (dfc[COL_EMP].astype(str).str.upper()==emp_cliente.upper())).any()
+                if dup:
+                    st.warning("Ya existe un cliente con ese nombre en la misma empresa.")
+                else:
+                    new_row = {
+                        COL_ROWID: uuid.uuid4().hex,
+                        COL_CLI_ID: new_id,
+                        COL_CLI_NOM: cli_nom_in.strip(),
+                        COL_EMP: emp_cliente
+                    }
+                    dfc = pd.concat([dfc, pd.DataFrame([new_row])], ignore_index=True)
+                    write_worksheet(client, SHEET_ID, WS_CLIENTES, dfc)
+                    st.cache_data.clear()
+                    st.session_state["catalog_force_reload"] = True
+                    if "catalog_clients_df" in st.session_state:
+                        cached_cli = st.session_state["catalog_clients_df"].copy()
+                        if COL_ROWID not in cached_cli.columns:
+                            cached_cli[COL_ROWID] = ""
+                        st.session_state["catalog_clients_df"] = pd.concat(
+                            [cached_cli, pd.DataFrame([new_row])],
+                            ignore_index=True,
+                        ).reset_index(drop=True)
+                    label = _format_catalog_label(new_row[COL_CLI_NOM], new_row[COL_CLI_ID])
+                    opts = st.session_state.get("catalog_clients_opts")
+                    if opts is not None and label and label not in opts:
+                        st.session_state["catalog_clients_opts"] = opts + [label]
+                    label_map = st.session_state.setdefault("catalog_clients_label_map", {})
+                    if label:
+                        label_map[label] = {"ClienteID": new_row[COL_CLI_ID], "ClienteNombre": new_row[COL_CLI_NOM]}
+                        st.session_state.setdefault("catalog_clients_id_to_label", {})[new_row[COL_CLI_ID]] = label
+                    st.toast(f"Cliente creado: {new_id} — {cli_nom_in.strip()}")
+                    st.rerun()  # refrescar inmediatamente los selectores
 
     st.divider()
 
@@ -527,32 +706,57 @@ with st.expander("➕ Clientes y Proyectos"):
         elif not cli_sel_id.strip():
             st.warning("Debes seleccionar un cliente.")
         else:
-            try:
-                dfp = read_worksheet(client, SHEET_ID, WS_PROYECTOS)
-            except Exception:
-                dfp = pd.DataFrame()
-            dfp = ensure_proyectos_columns(dfp)
+            with st.spinner("Creando proyecto..."):
+                try:
+                    dfp = read_worksheet(client, SHEET_ID, WS_PROYECTOS)
+                except Exception:
+                    dfp = pd.DataFrame()
+                dfp = ensure_proyectos_columns(dfp)
 
-            # Evitar duplicados por (Proyecto + Cliente + Empresa)
-            dup = False
-            if not dfp.empty:
-                dup = ((dfp[COL_PROY].astype(str).str.lower()==proy_nom_in.strip().lower()) &
-                       (dfp[COL_CLI_ID].astype(str)==cli_sel_id) &
-                       (dfp[COL_EMP].astype(str).str.upper()==emp_proy.upper())).any()
-            if dup:
-                st.warning("Ya existe un proyecto con ese nombre para ese cliente y empresa.")
-            else:
-                new_row = {
-                    COL_ROWID: uuid.uuid4().hex,
-                    COL_PROY: proy_nom_in.strip(),
-                    COL_CLI_ID: cli_sel_id.strip(),
-                    COL_CLI_NOM: cli_sel_nom.strip(),
-                    COL_EMP: emp_proy
-                }
-                dfp = pd.concat([dfp, pd.DataFrame([new_row])], ignore_index=True)
-                write_worksheet(client, SHEET_ID, WS_PROYECTOS, dfp)
-                st.toast(f"Proyecto creado: {proy_nom_in.strip()} (Cliente: {cli_sel_nom})")
-                st.rerun()  # refrescar inmediatamente los selectores
+                dup = False
+                if not dfp.empty:
+                    dup = ((dfp[COL_PROY].astype(str).str.lower()==proy_nom_in.strip().lower()) &
+                           (dfp[COL_CLI_ID].astype(str)==cli_sel_id) &
+                           (dfp[COL_EMP].astype(str).str.upper()==emp_proy.upper())).any()
+                if dup:
+                    st.warning("Ya existe un proyecto con ese nombre para ese cliente y empresa.")
+                else:
+                    new_row = {
+                        COL_ROWID: uuid.uuid4().hex,
+                        COL_PROY: proy_nom_in.strip(),
+                        COL_CLI_ID: cli_sel_id.strip(),
+                        COL_CLI_NOM: cli_sel_nom.strip(),
+                        COL_EMP: emp_proy
+                    }
+                    dfp = pd.concat([dfp, pd.DataFrame([new_row])], ignore_index=True)
+                    write_worksheet(client, SHEET_ID, WS_PROYECTOS, dfp)
+                    st.cache_data.clear()
+                    st.session_state["catalog_force_reload"] = True
+                    proj_label = _format_catalog_label(new_row[COL_PROY], new_row[COL_PROY])
+                    augment_row = new_row.copy()
+                    augment_row["__label__"] = proj_label
+                    if "catalog_projects_df" in st.session_state:
+                        cached_proj = st.session_state["catalog_projects_df"].copy()
+                        if "ProyectoID" in cached_proj.columns:
+                            augment_row.setdefault("ProyectoID", new_row.get("ProyectoID", new_row[COL_PROY]))
+                        if "ProyectoNombre" in cached_proj.columns:
+                            augment_row.setdefault("ProyectoNombre", new_row.get("ProyectoNombre", new_row[COL_PROY]))
+                        st.session_state["catalog_projects_df"] = pd.concat(
+                            [cached_proj, pd.DataFrame([augment_row])],
+                            ignore_index=True,
+                        ).reset_index(drop=True)
+                    if proj_label:
+                        proj_map = st.session_state.setdefault("catalog_projects_label_map", {})
+                        proj_id_val = augment_row.get("ProyectoID", new_row[COL_PROY])
+                        proj_name_val = augment_row.get("ProyectoNombre", new_row[COL_PROY])
+                        proj_map[proj_label] = {
+                            "ProyectoID": proj_id_val,
+                            "ProyectoNombre": proj_name_val,
+                            "ClienteID": new_row[COL_CLI_ID],
+                            "ClienteNombre": new_row[COL_CLI_NOM],
+                        }
+                    st.toast(f"Proyecto creado: {proy_nom_in.strip()} (Cliente: {cli_sel_nom})")
+                    st.rerun()  # refrescar inmediatamente los selectores
 
 
 # ============================================================
@@ -561,22 +765,50 @@ with st.expander("➕ Clientes y Proyectos"):
 st.markdown("## Ingresos")
 st.markdown("### Añadir ingreso (rápido)")
 
-cliente_id, cliente_nombre = client_selector(client, SHEET_ID, key="ing")
-proyecto_id, proyecto_nom, cli_id_from_proj, cli_nom_from_proj = project_selector(
-    client, SHEET_ID, key="ing", allow_client_link=True, selected_client_id=cliente_id or None
-)
-if cli_id_from_proj:
-    cliente_id = cli_id_from_proj; cliente_nombre = cli_nom_from_proj or cliente_nombre
+_prepare_entry_defaults("ing")
+client_options = st.session_state.get("catalog_clients_opts", [""])
 
 c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
-with c1: empresa_ing = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="ing_empresa_quick")
-with c2: fecha_nueva = st.date_input("Fecha", value=_today(), key="ing_fecha_quick")
-with c3: monto_nuevo = st.number_input("Monto", min_value=0.0, step=1.0, key="ing_monto_quick")
-with c4: por_cobrar_nuevo = st.selectbox("Por_cobrar", ["No","Sí"], index=0, key="ing_porcob_quick")
+with c1:
+    empresa_ing = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="ing_empresa_quick")
+with c2:
+    fecha_nueva = st.date_input("Fecha", value=_today(), key="ing_fecha_quick")
+with c3:
+    monto_nuevo = st.number_input("Monto", min_value=0.0, step=1.0, key="ing_monto_quick")
+with c4:
+    por_cobrar_nuevo = st.selectbox("Por_cobrar", ["No", "Sí"], index=0, key="ing_porcob_quick")
+
+st.selectbox(
+    "Cliente",
+    client_options,
+    key="ing_cliente_raw",
+    on_change=lambda prefix="ing": _on_client_change(prefix),
+)
+project_options = _build_project_options("ing")
+if st.session_state.get("ing_proyecto_raw") not in project_options:
+    st.session_state["ing_proyecto_raw"] = project_options[0] if project_options else ""
+st.selectbox(
+    "Proyecto",
+    project_options,
+    key="ing_proyecto_raw",
+    on_change=lambda prefix="ing": _on_project_change(prefix),
+)
 desc_nueva = st.text_input("Descripción", key="ing_desc_quick")
 
-if st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick"):
-    hoy_ts = pd.Timestamp(_today()); rid = uuid.uuid4().hex
+submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
+
+if submitted_ing:
+    cliente_id = st.session_state.get("ing_cliente_id", "")
+    cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
+    proyecto_id = st.session_state.get("ing_proyecto_id", "")
+    linked_client_id = st.session_state.get("ing_proyecto_cliente_id")
+    linked_client_name = st.session_state.get("ing_proyecto_cliente_nombre")
+    if linked_client_id:
+        cliente_id = linked_client_id
+        cliente_nombre = linked_client_name or cliente_nombre
+
+    hoy_ts = pd.Timestamp(_today())
+    rid = uuid.uuid4().hex
     cobrado = "No" if por_cobrar_nuevo == "Sí" else "Sí"
     fecha_cobro = hoy_ts if cobrado == "Sí" else pd.NaT
     nueva = {
@@ -601,6 +833,7 @@ if st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick"):
     wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
     if wrote:
         st.cache_data.clear()
+    _reset_entry_state("ing")
     st.rerun()
 
 
@@ -665,65 +898,83 @@ sync_cambios(
 # GASTOS — Añadir gasto (rápido)
 # ============================================================
 
-# ------------------------------------------------------------
-# FLAG para limpiar los campos del formulario de GASTOS
-# ------------------------------------------------------------
-if "reset_gastos" not in st.session_state:
-    st.session_state.reset_gastos = False
-
 st.markdown("## Gastos")
 st.markdown("### Añadir gasto (rápido)")
 
+_prepare_entry_defaults("gas")
+client_options = st.session_state.get("catalog_clients_opts", [""])
+
 g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
-with g1: empresa_g = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="gas_empresa_quick")
-with g2: fecha_g = st.date_input("Fecha", value=_today(), key="gas_fecha_quick")
-with g3: categoria_g = st.selectbox("Categoría", ["Proyectos", "Gastos fijos", "Oficina"], index=0, key="gas_categoria_quick")
-with g4: monto_g = st.number_input("Monto", min_value=0.0, step=1.0, key="gas_monto_quick")
-with g5: por_pagar_nuevo = st.selectbox("Por_pagar", ["No","Sí"], index=0, key="gas_porpag_quick")
+with g1:
+    empresa_g = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="gas_empresa_quick")
+with g2:
+    fecha_g = st.date_input("Fecha", value=_today(), key="gas_fecha_quick")
+with g3:
+    categoria_g = st.selectbox("Categoría", ["Proyectos", "Gastos fijos", "Oficina"], index=0, key="gas_categoria_quick")
+with g4:
+    monto_g = st.number_input("Monto", min_value=0.0, step=1.0, key="gas_monto_quick")
+with g5:
+    por_pagar_nuevo = st.selectbox("Por_pagar", ["No", "Sí"], index=0, key="gas_porpag_quick")
 
-# Cliente/Proyecto SOLO si es categoría Proyectos
-cliente_id_g = ""; cliente_nombre_g = ""; proyecto_id_g = ""; proyecto_nom_g = ""
+cliente_id_g = ""
+cliente_nombre_g = ""
+proyecto_id_g = ""
 if categoria_g == "Proyectos":
-    cliente_id_g, cliente_nombre_g = client_selector(client, SHEET_ID, key="gas")
-    proyecto_id_g, proyecto_nom_g, cli_id_from_proj_g, cli_nom_from_proj_g = project_selector(
-        client, SHEET_ID, key="gas", allow_client_link=True, selected_client_id=cliente_id_g or None
+    st.selectbox(
+        "Cliente",
+        client_options,
+        key="gas_cliente_raw",
+        on_change=lambda prefix="gas": _on_client_change(prefix),
     )
-    if cli_id_from_proj_g:
-        cliente_id_g = cli_id_from_proj_g; cliente_nombre_g = cli_nom_from_proj_g or cliente_nombre_g
+    project_options_g = _build_project_options("gas")
+    if st.session_state.get("gas_proyecto_raw") not in project_options_g:
+        st.session_state["gas_proyecto_raw"] = project_options_g[0] if project_options_g else ""
+    st.selectbox(
+        "Proyecto",
+        project_options_g,
+        key="gas_proyecto_raw",
+        on_change=lambda prefix="gas": _on_project_change(prefix),
+    )
+    cliente_id_g = st.session_state.get("gas_cliente_id", "")
+    cliente_nombre_g = st.session_state.get("gas_cliente_nombre", "")
+    proyecto_id_g = st.session_state.get("gas_proyecto_id", "")
+    linked_client_id_g = st.session_state.get("gas_proyecto_cliente_id")
+    linked_client_name_g = st.session_state.get("gas_proyecto_cliente_nombre")
+    if linked_client_id_g:
+        cliente_id_g = linked_client_id_g
+        cliente_nombre_g = linked_client_name_g or cliente_nombre_g
 
-desc_g = st.text_input(
-    "Descripción",
-    key="gas_desc_quick",
-    value="" if st.session_state.reset_gastos else st.session_state.get("gas_desc_quick", "")
-)
-prov_g = st.text_input(
-    "Proveedor",
-    key="gas_proveedor_quick",
-    value="" if st.session_state.reset_gastos else st.session_state.get("gas_proveedor_quick", "")
-)
+desc_g = st.text_input("Descripción", key="gas_desc_quick")
+prov_g = st.text_input("Proveedor", key="gas_proveedor_quick")
 
-# Una vez renderizados los inputs, desactiva el flag
-if st.session_state.reset_gastos:
-    st.session_state.reset_gastos = False
+submitted_gas = st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick")
 
-if st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick"):
+if submitted_gas:
+    if categoria_g != "Proyectos":
+        cliente_id_g = ""
+        cliente_nombre_g = ""
+        proyecto_id_g = ""
     nueva_g = {
-        COL_ROWID: uuid.uuid4().hex, COL_FECHA: _ts(fecha_g), COL_MONTO: float(monto_g),
-        COL_DESC: (desc_g or "").strip(), COL_CONC: (desc_g or "").strip(),
-        COL_CAT: categoria_g, COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
+        COL_ROWID: uuid.uuid4().hex,
+        COL_FECHA: _ts(fecha_g),
+        COL_MONTO: float(monto_g),
+        COL_DESC: (desc_g or "").strip(),
+        COL_CONC: (desc_g or "").strip(),
+        COL_CAT: categoria_g,
+        COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
         COL_POR_PAG: por_pagar_nuevo,
         COL_PROY: (proyecto_id_g or "").strip(),
         COL_CLI_ID: (cliente_id_g or "").strip(),
         COL_CLI_NOM: (cliente_nombre_g or "").strip(),
-        COL_PROV: (prov_g or "").strip(),  # ← NUEVO: guardar proveedor
-        COL_USER: _current_user(),  # ← NUEVO
-
+        COL_PROV: (prov_g or "").strip(),
+        COL_USER: _current_user(),
     }
     st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
     st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
     wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
     if wrote:
         st.cache_data.clear()
+    _reset_entry_state("gas")
     st.rerun()
 
 
