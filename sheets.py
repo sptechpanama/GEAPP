@@ -14,12 +14,18 @@ import time, requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-import os  # 👈 necesario para detectar si el archivo existe
+import json
+import os
+from pathlib import Path
 
 # Ruta local (fallback) a tu JSON. Se usará solo si NO hay secretos en st.secrets.
-SERVICE_ACCOUNT_PATH = os.environ.get(
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    r"C:\Users\rodri\ge\finapp\pure-beach-474203-p1-fdc9557f33d0.json"
+APP_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_SA_FILE = APP_ROOT / "pure-beach-474203-p1-fdc9557f33d0.json"
+
+SERVICE_ACCOUNT_PATH = (
+    os.environ.get("FINAPP_SERVICE_ACCOUNT_FILE")
+    or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    or (str(_DEFAULT_SA_FILE) if _DEFAULT_SA_FILE.exists() else None)
 )
 
 # Scopes (permisos) que usará la cuenta de servicio
@@ -35,13 +41,17 @@ def get_client():
     try:
         info = dict(st.secrets["google_service_account"])
     except Exception:
-        # Mostrar claves disponibles para depurar (no muestra valores)
-        keys = ", ".join(list(st.secrets.keys()))
-        raise RuntimeError(
-            "No se encontró el bloque [google_service_account] en los Secrets "
-            f"de ESTE app. Claves disponibles: {keys}. Abre Manage app → Secrets "
-            "y pega el JSON bajo ese encabezado exactamente."
-        )
+        if SERVICE_ACCOUNT_PATH and Path(SERVICE_ACCOUNT_PATH).exists():
+            with open(SERVICE_ACCOUNT_PATH, "r", encoding="utf-8") as fh:
+                info = json.load(fh)
+        else:
+            keys = ", ".join(list(st.secrets.keys()))
+            raise RuntimeError(
+                "No se encontró el bloque [google_service_account] en los Secrets "
+                f"de ESTE app. Claves disponibles: {keys}. "
+                "Sube el JSON en Streamlit Secrets o define FINAPP_SERVICE_ACCOUNT_FILE/" 
+                "GOOGLE_APPLICATION_CREDENTIALS apuntando al archivo."
+            )
 
     # 2) Arreglar saltos de línea del private_key si vienen escapados
     pk = info.get("private_key", "")

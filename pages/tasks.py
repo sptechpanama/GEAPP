@@ -6,10 +6,16 @@ import streamlit as st
 import pandas as pd
 import uuid
 from datetime import datetime
+from gspread.exceptions import WorksheetNotFound, APIError
 from sheets import get_client, read_worksheet, write_worksheet
 
 # --------- Guard: require inicio de sesión -----------
-if not st.session_state.get("auth_ok", False):
+# Usar la misma clave que `Inicio.py` (streamlit-authenticator pone
+# `authentication_status` en `st.session_state`). Antes se revisaba
+# `auth_ok`, que no existe y causaba redirección a Inicio incluso si
+# el usuario estaba autenticado.
+status = st.session_state.get("authentication_status", None)
+if status is not True:
     st.warning("Debes iniciar sesión para entrar.")
     try:
         # Streamlit >= 1.31
@@ -21,6 +27,15 @@ if not st.session_state.get("auth_ok", False):
 st.set_page_config(page_title="✅ Tasks", page_icon="✅", layout="wide")
 WS_TASKS = st.secrets.get("app", {}).get("WS_TASKS", "pendientes")
 ESTADOS_VALIDOS = ["Pendiente", "Completada", "Descartar"]
+DEFAULT_TASK_COLUMNS = [
+    "ID",
+    "Tarea",
+    "Categoria",
+    "Estado",
+    "Fecha de ingreso",
+    "Fecha de completado",
+    "Tiempo sin completar (días)",
+]
 
 MAPA_ESTADO_VISUAL = {
     "Pendiente": "🟥 Pendiente",
@@ -54,7 +69,7 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    for col in ["ID", "Tarea", "Estado", "Categoria", "Fecha de ingreso", "Fecha de completado", "Tiempo sin completar (días)"]:
+    for col in DEFAULT_TASK_COLUMNS:
         if col not in out.columns:
             if col in ["Fecha de ingreso", "Fecha de completado"]:
                 out[col] = pd.NaT
@@ -94,9 +109,34 @@ def compute_days(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_tasks() -> pd.DataFrame:
     client, _ = get_client()
-    df = read_worksheet(client, st.secrets["app"]["SHEET_ID"], WS_TASKS)
+    sheet_id = st.secrets["app"]["SHEET_ID"]
+    ws_title = WS_TASKS
+    try:
+        df = read_worksheet(client, sheet_id, ws_title)
+    except WorksheetNotFound:
+        sh = client.open_by_key(sheet_id)
+        normalized_target = ws_title.strip().lower()
+        alt_title = None
+        for ws in sh.worksheets():
+            if ws.title.strip().lower() == normalized_target:
+                alt_title = ws.title
+                break
+        if alt_title:
+            ws_title = alt_title
+            df = read_worksheet(client, sheet_id, ws_title)
+        else:
+            try:
+                ws = sh.add_worksheet(title=ws_title, rows=200, cols=len(DEFAULT_TASK_COLUMNS))
+                ws.update("A1", [DEFAULT_TASK_COLUMNS])
+            except APIError as api_err:
+                if "already exists" not in str(api_err):
+                    raise
+                df = read_worksheet(client, sheet_id, ws_title)
+            else:
+                df = pd.DataFrame(columns=DEFAULT_TASK_COLUMNS)
+    st.session_state["tasks_ws_title"] = ws_title
     if df is None or df.empty:
-        df = pd.DataFrame(columns=["ID", "Tarea", "Categoria", "Estado", "Fecha de ingreso", "Fecha de completado", "Tiempo sin completar (días)"])
+        df = pd.DataFrame(columns=DEFAULT_TASK_COLUMNS)
     df = standardize_columns(df)
     df = ensure_schema(df)
     df = compute_days(df)
@@ -117,7 +157,8 @@ def write_all(df_final: pd.DataFrame):
     cols_order = ["ID", "Tarea", "Categoria", "Estado", "Fecha de ingreso", "Fecha de completado", "Tiempo sin completar (días)"]
     cols_present = [c for c in cols_order if c in df_final.columns]
     df_to_write = df_final[cols_present].copy()
-    write_worksheet(get_client()[0], st.secrets["app"]["SHEET_ID"], WS_TASKS, df_to_write)
+    ws_name = st.session_state.get("tasks_ws_title", WS_TASKS)
+    write_worksheet(get_client()[0], st.secrets["app"]["SHEET_ID"], ws_name, df_to_write)
     st.session_state["tasks_last_sig"] = simple_signature(df_to_write)
     st.session_state["df_tasks"] = df_to_write.copy()
 
@@ -138,10 +179,9 @@ col_c.metric("Completadas", comp)
 
 # Selector SIN título (etiqueta colapsada)
 filtro_estado = st.segmented_control(
-    "",  # <- sin palabra "Filtro"
+    "Estado",
     options=["Todos", "Pendientes", "Completadas"],
     default="Todos",
-    # algunos builds de Streamlit soportan esto; si no, se ignora
     label_visibility="collapsed",
 )
 

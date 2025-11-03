@@ -1,7 +1,22 @@
-﻿__pycache__/
+# Python
+__pycache__/
 *.py[cod]
 *.pyo
-*.pyd
-*.log
-.streamlit/secrets.toml
-*.json
+
+# Streamlit (secrets locales)
+.streamlit/
+!.streamlit/config.toml      # permite config, pero no secrets
+.streamlit/secrets.toml      # NO subir
+
+# Claves/credenciales (variantes comunes)
+*service*account*.json
+*credentials*.json
+*.secrets*.json
+*.p12
+*.pem
+pure-beach-*.json
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
