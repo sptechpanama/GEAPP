@@ -1,4 +1,5 @@
 # pages/visualizador.py
+import re
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -44,6 +45,56 @@ def _coerce_to_bool(value):
 
 def _is_checkbox_target(col_name: str) -> bool:
     return col_name.strip().lower() in CHECKBOX_FLAG_NAMES
+
+
+def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return pd.Series([], index=series.index, dtype="datetime64[ns]", name=series.name)
+
+    if pd.api.types.is_datetime64_any_dtype(series):
+        tz_info = getattr(series.dt, "tz", None)
+        return series.dt.tz_convert(None) if tz_info is not None else series
+
+    cleaned = series.astype("string").str.strip()
+    cleaned = cleaned.replace({
+        "": pd.NA,
+        "none": pd.NA,
+        "null": pd.NA,
+        "nan": pd.NA,
+        "nat": pd.NA,
+        "n/a": pd.NA,
+    }, regex=False)
+
+    parsed = pd.to_datetime(cleaned, errors="coerce", dayfirst=True)
+
+    mask_serial = parsed.isna() & cleaned.str.fullmatch(r"\d+(\.0+)?", na=False)
+    if mask_serial.any():
+        serial = cleaned[mask_serial].astype(float)
+        parsed.loc[mask_serial] = pd.to_datetime(
+            serial,
+            errors="coerce",
+            origin="1899-12-30",
+            unit="D",
+        )
+
+    mask_pattern = parsed.isna() & cleaned.notna()
+    if mask_pattern.any():
+        date_pattern = re.compile(r"(\d{1,2}[\-/]\d{1,2}[\-/]\d{2,4})")
+
+        def _last_match(text: str):
+            matches = date_pattern.findall(text)
+            if matches:
+                return matches[-1]
+            return text
+
+        extracted = cleaned[mask_pattern].map(_last_match)
+        parsed.loc[mask_pattern] = pd.to_datetime(extracted, errors="coerce", dayfirst=True)
+
+    tz_info = getattr(parsed.dt, "tz", None)
+    if tz_info is not None:
+        parsed = parsed.dt.tz_convert(None)
+
+    return parsed
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 st.title("📋 Visualizador cómodo de Actos (CL / RIR)")
@@ -151,53 +202,136 @@ def render_df(df: pd.DataFrame, sheet_name: str):
     df = df.copy()
     displayable_columns = [c for c in df.columns if c != ROW_ID_COL]
 
-    # Detectar columna de fecha (cualquiera que empiece por "Fecha")
-    date_col = next((c for c in df.columns if c.lower().startswith("fecha")), None)
-    if date_col:
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    def _normalize_label(value: str) -> str:
+        value = (value or "").strip().lower()
+        for src, tgt in (
+            ("á", "a"),
+            ("é", "e"),
+            ("í", "i"),
+            ("ó", "o"),
+            ("ú", "u"),
+            ("ü", "u"),
+        ):
+            value = value.replace(src, tgt)
+        value = re.sub(r"\s+", " ", value)
+        return value
+
+    def _is_date_header(name: str) -> bool:
+        normalized = _normalize_label(name)
+        if not normalized:
+            return False
+        if normalized.startswith("fecha"):
+            return True
+        if "publicacion" in normalized:
+            return True
+        return False
+
+    date_columns = [c for c in df.columns if _is_date_header(c)]
+
+    filter_date_col = None
+    for col in date_columns:
+        norm = _normalize_label(col)
+        if "publicacion" in norm:
+            filter_date_col = col
+            break
+
+    if filter_date_col is None:
+        for col in date_columns:
+            if _normalize_label(col) == "fecha sola":
+                filter_date_col = col
+                break
+
+    if filter_date_col is None:
+        for col in date_columns:
+            if _normalize_label(col) == "fecha":
+                filter_date_col = col
+                break
+
+    if filter_date_col is None and date_columns:
+        filter_date_col = date_columns[0]
+
+    event_date_col = None
+    for col in date_columns:
+        if _normalize_label(col) == "fecha sola":
+            event_date_col = col
+            break
+
+    if event_date_col is None:
+        for col in date_columns:
+            norm = _normalize_label(col)
+            if any(token in norm for token in ("acto", "celebr")):
+                event_date_col = col
+                break
+
+    if event_date_col is None:
+        for col in date_columns:
+            if _normalize_label(col) == "fecha":
+                event_date_col = col
+                break
+
+    parsed_date_series = {}
+    for col in date_columns:
+        parsed = _parse_sheet_date_column(df[col])
+        parsed_date_series[col] = parsed
+        normalized_name = _normalize_label(col)
+        keep_original = (col == filter_date_col) or (normalized_name == "fecha")
+        if not keep_original:
+            df[col] = parsed
 
     # Detectar columnas de monto/precio
     money_cols = [c for c in df.columns if any(x in c.lower() for x in ["precio", "monto", "estimado", "referencia"])]
 
     today = date.today()
+    today_ts = pd.Timestamp(today)
 
     with st.expander("🔎 Filtros", expanded=True):
         if "Entidad" in df.columns:
             opciones = sorted([e for e in df["Entidad"].dropna().unique()])
             sel = st.multiselect("Entidad", opciones, key=keyp+"ent")
-            if sel: df = df[df["Entidad"].isin(sel)]
+            if sel:
+                df = df[df["Entidad"].isin(sel)]
 
         if "Estado" in df.columns:
             opciones = sorted([e for e in df["Estado"].dropna().unique()])
             sel = st.multiselect("Estado", opciones, key=keyp+"estado")
-            if sel: df = df[df["Estado"].isin(sel)]
+            if sel:
+                df = df[df["Estado"].isin(sel)]
 
-        if date_col and df[date_col].notna().any():
-            normalized_dates = df[date_col].dt.normalize()
-            mind, maxd = normalized_dates.min(), normalized_dates.max()
-            default_fin = today
-            default_ini = today - timedelta(days=29)
-            if pd.notna(mind) and mind.date() > default_fin:
-                default_ini = mind.date()
-                default_fin = mind.date()
-            if default_ini > default_fin:
-                default_ini = default_fin
-            r = st.date_input(
-                "Rango de fechas",
-                value=(default_ini, default_fin),
-                key=keyp+"fecha",
-            )
-            if isinstance(r, tuple) and len(r) == 2:
-                ini = pd.Timestamp(r[0]).normalize()
-                fin = pd.Timestamp(r[1]).normalize()
-                mask = df[date_col].dt.normalize().between(ini, fin)
-                df = df[mask]
+        date_filter_series = None
+        if filter_date_col:
+            date_filter_series = parsed_date_series.get(filter_date_col)
+            if date_filter_series is not None and date_filter_series.notna().any():
+                normalized_dates = date_filter_series.dt.normalize()
+                valid_dates = normalized_dates.dropna()
+                mind = valid_dates.min() if not valid_dates.empty else pd.Timestamp(today)
+                maxd = valid_dates.max() if not valid_dates.empty else pd.Timestamp(today)
+                default_fin = today
+                default_ini = today - timedelta(days=30)
+                if pd.notna(mind) and mind.date() > default_fin:
+                    default_ini = mind.date()
+                    default_fin = mind.date()
+                if default_ini > default_fin:
+                    default_ini = default_fin
+                r = st.date_input(
+                    "Rango de fechas",
+                    value=(default_ini, default_fin),
+                    key=keyp+"fecha",
+                )
+                if isinstance(r, tuple) and len(r) == 2:
+                    ini = pd.Timestamp(r[0]).normalize()
+                    fin = pd.Timestamp(r[1]).normalize()
+                    normalized = date_filter_series.dt.normalize()
+                    mask_valid = (normalized >= ini) & (normalized <= fin)
+                    mask = normalized.isna() | mask_valid
+                    df = df[mask]
+            else:
+                st.info("No encontramos fechas válidas en esa columna todavía.")
 
         if money_cols:
             colm = money_cols[0]
             v = pd.to_numeric(df[colm], errors="coerce")
             if v.notna().any():
-                price_min, price_max = 0.0, 2000000.0
+                price_min, price_max = 1000.0, 2000000.0
                 if price_min < price_max:
                     r = st.slider(
                         f"Rango de {colm}",
@@ -215,7 +349,6 @@ def render_df(df: pd.DataFrame, sheet_name: str):
         if q:
             mask = df.astype(str).apply(lambda s: s.str.contains(q, case=False, na=False)).any(axis=1)
             df = df[mask]
-
         def _is_item_column(col_name: str) -> bool:
             normalized = col_name.strip().lower().replace("í", "i")
             return normalized.startswith("item")
@@ -256,6 +389,8 @@ def render_df(df: pd.DataFrame, sheet_name: str):
         else:
             cols = displayable_columns
 
+    parsed_filtered = {col: series.loc[df.index] for col, series in parsed_date_series.items()}
+
     df_base = df.copy()
 
     metric_state_key = keyp + "metric_filter"
@@ -272,26 +407,39 @@ def render_df(df: pd.DataFrame, sheet_name: str):
 
     public_col = next((c for c in df_base.columns if "public" in c.lower()), None)
     public_series = None
+    public_series_normalized = None
 
-    if date_col and df_base[date_col].notna().any():
-        count_date_today = int((df_base[date_col].dt.normalize() == pd.Timestamp(today)).sum())
+    if public_col:
+        public_series = _parse_sheet_date_column(df_base[public_col])
+        count_public_today = 0
+        if public_series.notna().any():
+            public_series_normalized = public_series.dt.normalize()
+            count_public_today = int((public_series_normalized == today_ts).sum())
+        metrics_defs.append({
+            "key": "publicados_hoy",
+            "label": "Actos publicados hoy",
+            "count": count_public_today,
+            "filter": "publicados_hoy",
+        })
+
+    event_series = None
+    event_series_normalized = None
+    count_date_today = 0
+
+    if event_date_col:
+        event_series = parsed_filtered.get(event_date_col)
+        if event_series is not None:
+            event_series_normalized = event_series.dt.normalize()
+            if event_series_normalized.notna().any():
+                count_date_today = int((event_series_normalized == today_ts).sum())
+
+    if event_date_col:
         metrics_defs.append({
             "key": "fecha_hoy",
             "label": "Actos a celebrarse hoy",
             "count": count_date_today,
             "filter": "fecha_hoy",
         })
-
-    if public_col:
-        public_series = pd.to_datetime(df_base[public_col], errors="coerce", dayfirst=True)
-        if public_series.notna().any():
-            count_public_today = int((public_series.dt.normalize() == pd.Timestamp(today)).sum())
-            metrics_defs.append({
-                "key": "publicados_hoy",
-                "label": "Actos publicados hoy",
-                "count": count_public_today,
-                "filter": "publicados_hoy",
-            })
 
     metrics_defs.append({
         "key": "top_unidades",
@@ -330,11 +478,11 @@ def render_df(df: pd.DataFrame, sheet_name: str):
     active_metric = st.session_state.get(metric_state_key)
 
     df = df_base
-    if active_metric == "fecha_hoy" and date_col:
-        mask = df_base[date_col].dt.normalize() == pd.Timestamp(today)
-        df = df_base[mask]
-    elif active_metric == "publicados_hoy" and public_series is not None:
-        mask = public_series.dt.normalize() == pd.Timestamp(today)
+    if active_metric == "fecha_hoy" and event_series_normalized is not None:
+        mask = event_series_normalized == today_ts
+        df = df_base.loc[mask.fillna(False)]
+    elif active_metric == "publicados_hoy" and public_series_normalized is not None:
+        mask = public_series_normalized == today_ts
         df = df_base.loc[mask.fillna(False)]
 
     if st.session_state.get(top_modal_key):
@@ -350,8 +498,9 @@ def render_df(df: pd.DataFrame, sheet_name: str):
         display_df[col] = display_df[col].map(_coerce_to_bool)
 
     col_cfg = {}
-    if date_col and date_col in display_df.columns:
-        col_cfg[date_col] = st.column_config.DateColumn(date_col, help="Fecha")
+    for date_field in date_columns:
+        if date_field in display_df.columns and pd.api.types.is_datetime64_any_dtype(display_df[date_field]):
+            col_cfg[date_field] = st.column_config.DateColumn(date_field, help="Fecha")
 
     for c in money_cols:
         if c in display_df.columns:
