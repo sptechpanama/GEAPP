@@ -13,6 +13,7 @@ import streamlit as st  # st.secrets
 import time, requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from gspread.exceptions import APIError
 
 import json
 import os
@@ -65,17 +66,35 @@ def get_client():
 
 
 
-def _retry(fn, tries=5, base_sleep=0.5):
-    """Ejecuta fn() con reintentos exponenciales."""
+def _retry(fn, tries=5, base_sleep=0.5, max_sleep=8.0):
+    """Ejecuta fn() con reintentos exponenciales y manejo básico de cuotas."""
     last = None
-    for i in range(tries):
+    for attempt in range(tries):
         try:
             return fn()
-        except (requests.exceptions.RequestException, requests.exceptions.ConnectionError) as e:
-            last = e
-            time.sleep(base_sleep * (2 ** i))
-    # último intento fuera del bucle
-    return fn()
+        except APIError as api_err:
+            response = getattr(api_err, "response", None)
+            status = getattr(response, "status_code", None)
+            if status in (429, 500, 503):
+                retry_after = None
+                if response is not None:
+                    try:
+                        retry_after = float(response.headers.get("Retry-After", ""))
+                    except (TypeError, ValueError):
+                        retry_after = None
+                delay = retry_after if retry_after else min(max_sleep, base_sleep * (2 ** attempt))
+                time.sleep(delay)
+                last = api_err
+                continue
+            last = api_err
+            break
+        except (requests.exceptions.RequestException, requests.exceptions.ConnectionError) as exc:
+            last = exc
+            delay = min(max_sleep, base_sleep * (2 ** attempt))
+            time.sleep(delay)
+    if last:
+        raise last
+    raise RuntimeError("Retry loop exited without calling function")
 
 def _make_unique_headers(raw_headers: list[str]) -> list[str]:
     unique, seen = [], {}

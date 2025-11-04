@@ -35,7 +35,16 @@ from services.backups import (
     create_backup_now,  
 )
 
-from entities import client_selector, project_selector, WS_PROYECTOS, WS_CLIENTES
+from gspread.exceptions import APIError
+
+from entities import (
+    client_selector,
+    project_selector,
+    WS_PROYECTOS,
+    WS_CLIENTES,
+    _load_clients,
+    _load_projects,
+)
 
 
 # ---------- Guard: require inicio de sesión ------------
@@ -165,11 +174,16 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         COL_COB, COL_FCOBRO, COL_ROWID, COL_USER
     ]:
         if col not in out.columns:
-            if col in {COL_MONTO}: out[col] = 0.0
-            elif col in {COL_FECHA, COL_FCOBRO}: out[col] = pd.NaT
-            elif col in {COL_EMP}: out[col] = EMPRESA_DEFAULT
-            elif col in {COL_POR_COB, COL_COB}: out[col] = "No"
-            else: out[col] = ""
+            if col in {COL_MONTO}:
+                out[col] = 0.0
+            elif col in {COL_FECHA, COL_FCOBRO}:
+                out[col] = pd.NaT
+            elif col in {COL_EMP}:
+                out[col] = EMPRESA_DEFAULT
+            elif col in {COL_POR_COB, COL_COB}:
+                out[col] = "No"
+            else:
+                out[col] = ""
     out[COL_FECHA] = _ts(out[COL_FECHA]); out[COL_FCOBRO] = _ts(out[COL_FCOBRO])
     out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
     out[COL_EMP]   = out[COL_EMP].astype("string").str.upper().str.strip().where(
@@ -239,7 +253,14 @@ def _format_catalog_label(name: str, identifier: str) -> str:
     return identifier or name or ""
 
 
-def _ensure_catalog_data(client, sheet_id: str, *, force: bool = False) -> None:
+def _ensure_catalog_data(
+    client,
+    sheet_id: str,
+    *,
+    force: bool = False,
+    clients_df: pd.DataFrame | None = None,
+    projects_df: pd.DataFrame | None = None,
+) -> None:
     now_ts = time.time()
     last_loaded = st.session_state.get("catalog_loaded_at", 0.0)
     should_refresh = force or (now_ts - last_loaded > CATALOG_TTL_SECONDS) or (
@@ -248,7 +269,19 @@ def _ensure_catalog_data(client, sheet_id: str, *, force: bool = False) -> None:
     if not should_refresh:
         return
 
-    df_cli = ensure_clientes_columns(read_worksheet(client, sheet_id, WS_CLIENTES))
+    if clients_df is not None:
+        raw_cli = clients_df.copy()
+    else:
+        try:
+            raw_cli = read_worksheet(client, sheet_id, WS_CLIENTES)
+        except APIError as api_err:
+            _handle_gspread_error(api_err, "cargar el catálogo de clientes")
+            return
+        except Exception as exc:
+            st.error(f"No se pudo cargar el catálogo de clientes. {exc}")
+            return
+
+    df_cli = ensure_clientes_columns(raw_cli)
     df_cli[COL_CLI_ID] = df_cli[COL_CLI_ID].astype(str).str.strip()
     df_cli[COL_CLI_NOM] = df_cli[COL_CLI_NOM].astype(str).str.strip()
     df_cli = df_cli[df_cli[COL_CLI_ID] != ""].drop_duplicates(subset=[COL_CLI_ID]).reset_index(drop=True)
@@ -265,7 +298,19 @@ def _ensure_catalog_data(client, sheet_id: str, *, force: bool = False) -> None:
     st.session_state["catalog_clients_label_map"] = cli_label_map
     st.session_state["catalog_clients_id_to_label"] = cli_id_to_label
 
-    df_proj = ensure_proyectos_columns(read_worksheet(client, sheet_id, WS_PROYECTOS))
+    if projects_df is not None:
+        raw_proj = projects_df.copy()
+    else:
+        try:
+            raw_proj = read_worksheet(client, sheet_id, WS_PROYECTOS)
+        except APIError as api_err:
+            _handle_gspread_error(api_err, "cargar el catálogo de proyectos")
+            return
+        except Exception as exc:
+            st.error(f"No se pudo cargar el catálogo de proyectos. {exc}")
+            return
+
+    df_proj = ensure_proyectos_columns(raw_proj)
     df_proj[COL_PROY] = df_proj[COL_PROY].astype(str).str.strip()
     df_proj[COL_CLI_ID] = df_proj[COL_CLI_ID].astype(str).str.strip()
     df_proj[COL_CLI_NOM] = df_proj[COL_CLI_NOM].astype(str).str.strip()
@@ -287,6 +332,26 @@ def _ensure_catalog_data(client, sheet_id: str, *, force: bool = False) -> None:
     st.session_state["catalog_projects_df"] = df_proj
     st.session_state["catalog_projects_label_map"] = proj_label_map
     st.session_state["catalog_loaded_at"] = now_ts
+
+
+def _handle_gspread_error(exc: Exception, action: str) -> None:
+    """Show a friendly error message after a Sheets API failure."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    detail = ""
+    try:
+        payload = getattr(exc, "response", None)
+        if payload is not None:
+            data = payload.json()
+            detail = data.get("error", {}).get("message", "")
+    except Exception:
+        detail = ""
+
+    if status == 429:
+        detail = detail or "Google limitó temporalmente las lecturas/escrituras. Espera unos segundos e inténtalo nuevamente."
+    elif status == 403:
+        detail = detail or "La cuenta actual no tiene permisos suficientes para modificar la hoja."
+    message = detail or str(exc)
+    st.error(f"No se pudo {action}. {message}")
 
 
 def _on_client_change(prefix: str) -> None:
@@ -415,7 +480,17 @@ st.session_state.google_creds = creds
 st.session_state.google_client = client
 
 force_catalog_reload = st.session_state.pop("catalog_force_reload", False)
-_ensure_catalog_data(client, SHEET_ID, force=force_catalog_reload)
+st.session_state.setdefault("catalog_clients_opts", [""])
+st.session_state.setdefault("catalog_clients_label_map", {})
+st.session_state.setdefault("catalog_clients_id_to_label", {})
+st.session_state.setdefault("catalog_projects_df", pd.DataFrame())
+st.session_state.setdefault("catalog_projects_label_map", {})
+try:
+    _ensure_catalog_data(client, SHEET_ID, force=force_catalog_reload)
+except APIError as api_err:
+    _handle_gspread_error(api_err, "cargar el catálogo")
+except Exception as exc:
+    st.error(f"No se pudo cargar el catálogo. {exc}")
 
 
 # ---- Scheduler de backups: iniciar una sola vez
@@ -621,8 +696,47 @@ with st.expander("📈 Ver análisis y gráficas", expanded=False):
 # ============================================================
 # CATÁLOGO — Un único expander: crear Clientes y Proyectos
 # ============================================================
+if st.session_state.get("btn_crear_cliente") or st.session_state.get("btn_crear_proyecto"):
+    st.session_state["catalog_force_open"] = True
+    st.session_state.setdefault("catalog_scroll_to", True)
+
+current_proj_client = st.session_state.get("cat_proj_cliente")
+prev_proj_client = st.session_state.get("catalog_prev_proj_cliente", None)
+if current_proj_client != prev_proj_client:
+    st.session_state["catalog_prev_proj_cliente"] = current_proj_client
+    if current_proj_client:
+        st.session_state["catalog_force_open"] = True
+        st.session_state.setdefault("catalog_scroll_to", True)
+
+current_proj_emp = st.session_state.get("cat_emp_proj")
+if current_proj_emp:
+    st.session_state.setdefault("catalog_force_open", True)
+    st.session_state.setdefault("catalog_scroll_to", True)
+
+catalog_should_expand = st.session_state.pop("catalog_force_open", False)
+scroll_to_catalog = st.session_state.pop("catalog_scroll_to", False)
+if st.session_state.pop("catalog_reset_cliente_inputs", False):
+    st.session_state.pop("cat_cli_nom", None)
+    st.session_state.pop("cat_emp_cliente", None)
+if st.session_state.pop("catalog_reset_proyecto_inputs", False):
+    st.session_state.pop("cat_proj_nom", None)
+    st.session_state.pop("cat_emp_proj", None)
+st.markdown('<div id="catalog-anchor"></div>', unsafe_allow_html=True)
+if scroll_to_catalog:
+    st.markdown(
+        """
+        <script>
+        const anchor = document.getElementById('catalog-anchor');
+        if (anchor) {
+            anchor.scrollIntoView({behavior: 'smooth', block: 'start'});
+        }
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
 st.markdown("### Catálogo")
-with st.expander("➕ Clientes y Proyectos"):
+with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
     # --- Crear Cliente (ID automático) ---
     st.subheader("Crear nuevo cliente")
     colc1, colc2 = st.columns([1, 2])
@@ -637,21 +751,33 @@ with st.expander("➕ Clientes y Proyectos"):
         cli_nom_in = st.text_input("Nombre del cliente", key="cat_cli_nom")
 
     if st.button("Crear cliente", key="btn_crear_cliente"):
+        st.session_state["catalog_force_open"] = True
+        st.session_state["catalog_scroll_to"] = True
         if not cli_nom_in.strip():
             st.warning("Debes indicar el nombre del cliente.")
         else:
             with st.spinner("Creando cliente..."):
-                try:
-                    dfc = read_worksheet(client, SHEET_ID, WS_CLIENTES)
-                except Exception:
-                    dfc = pd.DataFrame()
+                dfc_state = st.session_state.get("catalog_clients_df")
+                if dfc_state is not None and isinstance(dfc_state, pd.DataFrame) and not dfc_state.empty:
+                    dfc = dfc_state.copy()
+                else:
+                    try:
+                        dfc = read_worksheet(client, SHEET_ID, WS_CLIENTES)
+                    except APIError as api_err:
+                        _handle_gspread_error(api_err, "cargar los clientes existentes")
+                        st.stop()
+                    except Exception as exc:
+                        st.error(f"No se pudo leer la hoja de clientes. {exc}")
+                        st.stop()
                 dfc = ensure_clientes_columns(dfc)
 
-                new_id = f"C-{uuid.uuid4().hex[:8].upper()}"  # ID generado siempre
+                new_id = f"C-{uuid.uuid4().hex[:8].upper()}"
                 dup = False
                 if not dfc.empty:
-                    dup = ((dfc[COL_CLI_NOM].astype(str).str.lower()==cli_nom_in.strip().lower()) &
-                           (dfc[COL_EMP].astype(str).str.upper()==emp_cliente.upper())).any()
+                    dup = (
+                        (dfc[COL_CLI_NOM].astype(str).str.lower() == cli_nom_in.strip().lower())
+                        & (dfc[COL_EMP].astype(str).str.upper() == emp_cliente.upper())
+                    ).any()
                 if dup:
                     st.warning("Ya existe un cliente con ese nombre en la misma empresa.")
                 else:
@@ -659,30 +785,30 @@ with st.expander("➕ Clientes y Proyectos"):
                         COL_ROWID: uuid.uuid4().hex,
                         COL_CLI_ID: new_id,
                         COL_CLI_NOM: cli_nom_in.strip(),
-                        COL_EMP: emp_cliente
+                        COL_EMP: emp_cliente,
                     }
                     dfc = pd.concat([dfc, pd.DataFrame([new_row])], ignore_index=True)
-                    write_worksheet(client, SHEET_ID, WS_CLIENTES, dfc)
-                    st.cache_data.clear()
-                    st.session_state["catalog_force_reload"] = True
-                    if "catalog_clients_df" in st.session_state:
-                        cached_cli = st.session_state["catalog_clients_df"].copy()
-                        if COL_ROWID not in cached_cli.columns:
-                            cached_cli[COL_ROWID] = ""
-                        st.session_state["catalog_clients_df"] = pd.concat(
-                            [cached_cli, pd.DataFrame([new_row])],
-                            ignore_index=True,
-                        ).reset_index(drop=True)
-                    label = _format_catalog_label(new_row[COL_CLI_NOM], new_row[COL_CLI_ID])
-                    opts = st.session_state.get("catalog_clients_opts")
-                    if opts is not None and label and label not in opts:
-                        st.session_state["catalog_clients_opts"] = opts + [label]
-                    label_map = st.session_state.setdefault("catalog_clients_label_map", {})
-                    if label:
-                        label_map[label] = {"ClienteID": new_row[COL_CLI_ID], "ClienteNombre": new_row[COL_CLI_NOM]}
-                        st.session_state.setdefault("catalog_clients_id_to_label", {})[new_row[COL_CLI_ID]] = label
-                    st.toast(f"Cliente creado: {new_id} — {cli_nom_in.strip()}")
-                    st.rerun()  # refrescar inmediatamente los selectores
+                    try:
+                        write_worksheet(client, SHEET_ID, WS_CLIENTES, dfc)
+                    except APIError as api_err:
+                        _handle_gspread_error(api_err, "crear el cliente")
+                    except Exception as exc:
+                        st.error(f"No se pudo crear el cliente. {exc}")
+                    else:
+                        _load_clients.clear()
+                        projects_df_state = st.session_state.get("catalog_projects_df")
+                        _ensure_catalog_data(
+                            client,
+                            SHEET_ID,
+                            force=True,
+                            clients_df=dfc,
+                            projects_df=projects_df_state if isinstance(projects_df_state, pd.DataFrame) else None,
+                        )
+                        st.session_state["catalog_reset_cliente_inputs"] = True
+                        st.session_state["catalog_force_open"] = True
+                        st.session_state["catalog_scroll_to"] = True
+                        st.toast(f"Cliente creado: {new_id} — {cli_nom_in.strip()}")
+                        st.rerun()
 
     st.divider()
 
@@ -701,23 +827,35 @@ with st.expander("➕ Clientes y Proyectos"):
     proy_nom_in = st.text_input("Nombre del proyecto", key="cat_proj_nom")
 
     if st.button("Crear proyecto", key="btn_crear_proyecto"):
+        st.session_state["catalog_force_open"] = True
+        st.session_state["catalog_scroll_to"] = True
         if not proy_nom_in.strip():
             st.warning("Debes indicar el nombre del proyecto.")
         elif not cli_sel_id.strip():
             st.warning("Debes seleccionar un cliente.")
         else:
             with st.spinner("Creando proyecto..."):
-                try:
-                    dfp = read_worksheet(client, SHEET_ID, WS_PROYECTOS)
-                except Exception:
-                    dfp = pd.DataFrame()
+                dfp_state = st.session_state.get("catalog_projects_df")
+                if dfp_state is not None and isinstance(dfp_state, pd.DataFrame) and not dfp_state.empty:
+                    dfp = dfp_state.copy()
+                else:
+                    try:
+                        dfp = read_worksheet(client, SHEET_ID, WS_PROYECTOS)
+                    except APIError as api_err:
+                        _handle_gspread_error(api_err, "cargar los proyectos existentes")
+                        st.stop()
+                    except Exception as exc:
+                        st.error(f"No se pudo leer la hoja de proyectos. {exc}")
+                        st.stop()
                 dfp = ensure_proyectos_columns(dfp)
 
                 dup = False
                 if not dfp.empty:
-                    dup = ((dfp[COL_PROY].astype(str).str.lower()==proy_nom_in.strip().lower()) &
-                           (dfp[COL_CLI_ID].astype(str)==cli_sel_id) &
-                           (dfp[COL_EMP].astype(str).str.upper()==emp_proy.upper())).any()
+                    dup = (
+                        (dfp[COL_PROY].astype(str).str.lower() == proy_nom_in.strip().lower())
+                        & (dfp[COL_CLI_ID].astype(str) == cli_sel_id)
+                        & (dfp[COL_EMP].astype(str).str.upper() == emp_proy.upper())
+                    ).any()
                 if dup:
                     st.warning("Ya existe un proyecto con ese nombre para ese cliente y empresa.")
                 else:
@@ -726,37 +864,30 @@ with st.expander("➕ Clientes y Proyectos"):
                         COL_PROY: proy_nom_in.strip(),
                         COL_CLI_ID: cli_sel_id.strip(),
                         COL_CLI_NOM: cli_sel_nom.strip(),
-                        COL_EMP: emp_proy
+                        COL_EMP: emp_proy,
                     }
                     dfp = pd.concat([dfp, pd.DataFrame([new_row])], ignore_index=True)
-                    write_worksheet(client, SHEET_ID, WS_PROYECTOS, dfp)
-                    st.cache_data.clear()
-                    st.session_state["catalog_force_reload"] = True
-                    proj_label = _format_catalog_label(new_row[COL_PROY], new_row[COL_PROY])
-                    augment_row = new_row.copy()
-                    augment_row["__label__"] = proj_label
-                    if "catalog_projects_df" in st.session_state:
-                        cached_proj = st.session_state["catalog_projects_df"].copy()
-                        if "ProyectoID" in cached_proj.columns:
-                            augment_row.setdefault("ProyectoID", new_row.get("ProyectoID", new_row[COL_PROY]))
-                        if "ProyectoNombre" in cached_proj.columns:
-                            augment_row.setdefault("ProyectoNombre", new_row.get("ProyectoNombre", new_row[COL_PROY]))
-                        st.session_state["catalog_projects_df"] = pd.concat(
-                            [cached_proj, pd.DataFrame([augment_row])],
-                            ignore_index=True,
-                        ).reset_index(drop=True)
-                    if proj_label:
-                        proj_map = st.session_state.setdefault("catalog_projects_label_map", {})
-                        proj_id_val = augment_row.get("ProyectoID", new_row[COL_PROY])
-                        proj_name_val = augment_row.get("ProyectoNombre", new_row[COL_PROY])
-                        proj_map[proj_label] = {
-                            "ProyectoID": proj_id_val,
-                            "ProyectoNombre": proj_name_val,
-                            "ClienteID": new_row[COL_CLI_ID],
-                            "ClienteNombre": new_row[COL_CLI_NOM],
-                        }
-                    st.toast(f"Proyecto creado: {proy_nom_in.strip()} (Cliente: {cli_sel_nom})")
-                    st.rerun()  # refrescar inmediatamente los selectores
+                    try:
+                        write_worksheet(client, SHEET_ID, WS_PROYECTOS, dfp)
+                    except APIError as api_err:
+                        _handle_gspread_error(api_err, "crear el proyecto")
+                    except Exception as exc:
+                        st.error(f"No se pudo crear el proyecto. {exc}")
+                    else:
+                        _load_projects.clear()
+                        clients_df_state = st.session_state.get("catalog_clients_df")
+                        _ensure_catalog_data(
+                            client,
+                            SHEET_ID,
+                            force=True,
+                            clients_df=clients_df_state if isinstance(clients_df_state, pd.DataFrame) else None,
+                            projects_df=dfp,
+                        )
+                        st.session_state["catalog_reset_proyecto_inputs"] = True
+                        st.session_state["catalog_force_open"] = True
+                        st.session_state["catalog_scroll_to"] = True
+                        st.toast(f"Proyecto creado: {proy_nom_in.strip()} (Cliente: {cli_sel_nom})")
+                        st.rerun()
 
 
 # ============================================================
