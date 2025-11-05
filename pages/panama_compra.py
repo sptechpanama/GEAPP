@@ -27,7 +27,13 @@ def _require_authentication() -> None:
     if status is False:
         st.error("Credenciales inválidas. Vuelve a la portada para iniciar sesión.")
     else:
-        st.info("Debes iniciar sesión desde la portada para acceder a PanamáCompra.")
+        st.warning("Debes iniciar sesión para entrar.")
+
+    # Redirige al home, igual que otras páginas protegidas del multipage.
+    try:
+        st.switch_page("Inicio.py")
+    except Exception:
+        st.stop()
     st.stop()
 
 PC_STATE_WORKSHEET = "pc_state"
