@@ -1,9 +1,12 @@
+"""Vista PanamáCompra para GE FinApp."""
+
 # pages/visualizador.py
 import re
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
-from sheets import get_client
+import uuid
+from datetime import date, timedelta, datetime, timezone
+from sheets import get_client, read_worksheet
 
 
 ROW_ID_COL = "__row__"
@@ -14,6 +17,362 @@ CHECKBOX_FLAG_NAMES = {
     "descarte",
 }
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
+
+PC_STATE_WORKSHEET = "pc_state"
+PC_CONFIG_WORKSHEET = "pc_config"
+PC_MANUAL_SHEET_ID = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
+PC_MANUAL_WORKSHEET = "pc_manual"
+JOB_NAME_LABELS = {
+    "clrir": "Cotizaciones Programadas",
+    "clv": "Cotizaciones Abiertas",
+    "rir1": "Licitaciones",
+}
+JOB_NAME_ORDER = ["clrir", "clv", "rir1"]
+STATUS_BADGES = {
+    "success": ("🟢", "Éxito"),
+    "running": ("🟡", "En curso"),
+    "failed": ("🔴", "Error"),
+    "error": ("🔴", "Error"),
+}
+
+HEADER_ALIASES = {
+    "request_id": {"request_id", "id", "uuid", "solicitud_id"},
+    "timestamp": {"timestamp", "requested_at", "fecha", "fecha_solicitud", "created_at"},
+    "job_name": {"job_name", "job", "bot", "proceso"},
+    "job_label": {"job_label", "job_desc", "descripcion", "descripción"},
+    "requested_by": {"requested_by", "user", "usuario", "solicitado_por"},
+    "note": {"note", "nota", "comentario", "observacion", "observación"},
+}
+
+
+def _manual_sheet_id() -> str | None:
+    try:
+        app_cfg = st.secrets["app"]
+    except Exception:
+        app_cfg = {}
+
+    manual_id = app_cfg.get("PC_MANUAL_SHEET_ID") if isinstance(app_cfg, dict) else None
+    manual_id = manual_id or PC_MANUAL_SHEET_ID
+    return manual_id or None
+
+
+def _current_user() -> str:
+    for key in ("username", "user", "email", "correo", "name", "nombre"):
+        value = st.session_state.get(key)
+        if value:
+            return str(value)
+    return "desconocido"
+
+
+def append_manual_request(job_name: str, job_label: str, note: str) -> bool:
+    sheet_id = _manual_sheet_id()
+    if not sheet_id:
+        st.error("No hay hoja configurada para registrar ejecuciones manuales.")
+        return False
+
+    client = get_gc()
+    try:
+        sh = client.open_by_key(sheet_id)
+    except Exception as exc:
+        st.error(f"No se pudo abrir la hoja manual: {exc}")
+        return False
+
+    ws = None
+    try:
+        ws = sh.worksheet(PC_MANUAL_WORKSHEET)
+    except Exception:
+        try:
+            ws = sh.sheet1
+        except Exception:
+            st.error("No encontramos la pestaña pc_manual en la hoja configurada.")
+            return False
+
+    headers = ws.row_values(1)
+    cleaned_headers = [h.strip() for h in headers if h.strip()]
+    if not cleaned_headers:
+        cleaned_headers = ["request_id", "timestamp", "job_name", "job_label", "requested_by", "note"]
+        ws.update("A1", [cleaned_headers])
+
+    payload_map = {
+        "request_id": uuid.uuid4().hex,
+        "timestamp": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        "job_name": job_name,
+        "job_label": job_label,
+        "requested_by": _current_user(),
+        "note": note.strip(),
+    }
+
+    def _value_for_header(header: str) -> str:
+        normalized = header.strip().lower()
+        for key, aliases in HEADER_ALIASES.items():
+            if normalized == key or normalized in aliases:
+                return payload_map.get(key, "")
+        return payload_map.get(normalized, "")
+
+    row = [_value_for_header(header) for header in cleaned_headers]
+
+    try:
+        ws.append_row(row, value_input_option="USER_ENTERED")
+    except Exception as exc:
+        st.error(f"No se pudo registrar la ejecución manual: {exc}")
+        return False
+
+    return True
+
+
+@st.cache_data(ttl=180)
+def load_pc_state() -> pd.DataFrame:
+    """Carga el estado de los jobs PanamáCompra desde Finanzas Operativas."""
+    try:
+        sheet_id = st.secrets["app"]["SHEET_ID"]
+    except Exception:
+        return pd.DataFrame()
+
+    if not sheet_id:
+        return pd.DataFrame()
+
+    try:
+        df = read_worksheet(get_gc(), sheet_id, PC_STATE_WORKSHEET)
+    except Exception:
+        return pd.DataFrame()
+
+    keep_cols = [
+        col
+        for col in (
+            "job_name",
+            "status",
+            "started_at",
+            "finished_at",
+            "duration_display",
+            "duration_seconds",
+        )
+        if col in df.columns
+    ]
+
+    if not keep_cols:
+        return pd.DataFrame()
+
+    data = df[keep_cols].copy()
+    if "job_name" not in data.columns:
+        return pd.DataFrame()
+
+    data["job_name"] = data["job_name"].astype(str).str.strip()
+
+    if "status" in data.columns:
+        data["status"] = data["status"].astype(str).str.strip()
+    else:
+        data["status"] = ""
+    if "started_at" in data.columns:
+        data["__started_ts"] = pd.to_datetime(data["started_at"], errors="coerce")
+    else:
+        data["__started_ts"] = pd.NaT
+
+    # Conserva el último registro por job.
+    data = data.sort_values("__started_ts", ascending=False)
+    data = data.drop_duplicates(subset=["job_name"], keep="first")
+
+    order_map = {name: idx for idx, name in enumerate(JOB_NAME_ORDER)}
+    data["__order"] = data["job_name"].str.lower().map(order_map).fillna(len(order_map))
+    data = data.sort_values(["__order", "__started_ts"], ascending=[True, False]).reset_index(drop=True)
+    return data.drop(columns=["__started_ts", "__order"], errors="ignore")
+
+
+@st.cache_data(ttl=180)
+def load_pc_config() -> pd.DataFrame:
+    """Obtiene la configuración de programación (días/horas) desde la hoja pc_config."""
+    try:
+        sheet_id = st.secrets["app"]["SHEET_ID"]
+    except Exception:
+        return pd.DataFrame()
+
+    if not sheet_id:
+        return pd.DataFrame()
+
+    try:
+        df = read_worksheet(get_gc(), sheet_id, PC_CONFIG_WORKSHEET)
+    except Exception:
+        return pd.DataFrame()
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    return df.rename(columns=lambda col: str(col).strip().lower())
+
+
+def _format_pc_datetime(value) -> str:
+    if value is None or value == "":
+        return "—"
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return "—"
+    return ts.strftime("%d/%m %H:%M")
+
+
+def _format_pc_duration(row: pd.Series) -> str:
+    display = str(row.get("duration_display", "")).strip()
+    if display:
+        return display
+    seconds = row.get("duration_seconds")
+    try:
+        return f"{float(seconds):.0f} s"
+    except Exception:
+        return "—"
+
+
+def render_pc_state_cards(
+    pc_state_df: pd.DataFrame | None,
+    pc_config_df: pd.DataFrame | None,
+    suffix: str | None = None,
+) -> None:
+    """Renderiza tarjetas discretas con el estado de los bots de PanamáCompra."""
+    if pc_state_df is None or pc_state_df.empty:
+        return
+
+    st.markdown(
+        """
+<div style="margin-top:14px;margin-bottom:6px;padding:6px 12px;background:rgba(63,142,252,0.16);border-radius:6px;font-size:1.12rem;font-weight:600;color:#ffffff;letter-spacing:0.01em;">
+  🔧 Resumen de últimas actualizaciones y controles
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    rows = pc_state_df.drop(columns=[col for col in pc_state_df.columns if col.startswith("__")]).copy()
+
+    config_map = {}
+    if pc_config_df is not None and not pc_config_df.empty and "name" in pc_config_df.columns:
+        tmp = pc_config_df.copy()
+        tmp["name"] = tmp["name"].astype(str).str.strip().str.lower()
+        for _, cfg_row in tmp.iterrows():
+            config_map[cfg_row["name"]] = cfg_row
+
+    updates = []
+
+    for start in range(0, len(rows), 3):
+        chunk = rows.iloc[start : start + 3]
+        cols = st.columns(len(chunk))
+        for col_widget, (_, row) in zip(cols, chunk.iterrows()):
+            job_raw = str(row.get("job_name", "")).strip()
+            job_label = JOB_NAME_LABELS.get(job_raw.lower(), job_raw or "Job sin nombre")
+            status_key = str(row.get("status", "")).strip().lower()
+            icon, status_label = STATUS_BADGES.get(status_key, ("⚪", status_key.capitalize() or "Sin dato"))
+            started_text = _format_pc_datetime(row.get("started_at"))
+            duration_text = _format_pc_duration(row)
+
+            cfg = config_map.get(job_raw.lower()) if config_map else None
+            key_suffix = f"_{suffix}" if suffix else ""
+            days_key = f"pc_days_{job_raw.lower()}{key_suffix}"
+            times_key = f"pc_times_{job_raw.lower()}{key_suffix}"
+            days_value = str(cfg.get("days", "")).strip() if cfg is not None else ""
+            times_value = str(cfg.get("times", "")).strip() if cfg is not None else ""
+
+            card = f"""
+<div style="border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-top:8px;background-color:rgba(17,20,24,0.35);">
+  <div style="font-weight:600;font-size:0.95rem;">{job_label}</div>
+  <div style="font-size:0.8rem;color:#9aa0a6;margin-top:4px;">{icon} {status_label}</div>
+  <div style="font-size:0.76rem;color:#d6d8dc;margin-top:10px;line-height:1.45;">
+    <div>Fecha: {started_text}</div>
+    <div>Duración: {duration_text}</div>
+  </div>
+</div>
+"""
+            col_widget.markdown(card, unsafe_allow_html=True)
+
+            days_input = col_widget.text_input(
+                f"Días programados ({job_label})",
+                value=days_value,
+                key=days_key,
+                placeholder="Días separados por comas",
+                label_visibility="collapsed",
+                help="Días separados por comas",
+            )
+            times_input = col_widget.text_input(
+                f"Horas programadas ({job_label})",
+                value=times_value,
+                key=times_key,
+                placeholder="Horas separadas por comas",
+                label_visibility="collapsed",
+                help="Horas separadas por comas",
+            )
+
+            if col_widget.button(
+                f"▶ Actualización manual",
+                key=f"pc_manual_btn_{job_raw.lower()}{key_suffix}",
+                use_container_width=True,
+            ):
+                if append_manual_request(job_raw, job_label, ""):
+                    st.session_state["pc_manual_feedback"] = job_label
+
+            if cfg is not None and (
+                days_input.strip() != days_value or times_input.strip() != times_value
+            ):
+                updates.append(
+                    {
+                        "name": cfg.get("name", job_raw),
+                        "days": days_input.strip(),
+                        "times": times_input.strip(),
+                    }
+                )
+
+    if updates:
+        st.session_state.setdefault("pc_config_pending_updates", []).extend(updates)
+
+    feedback_key = "pc_manual_feedback"
+    if feedback_key in st.session_state:
+        job_label = st.session_state.pop(feedback_key)
+        st.success(f"Ejecución manual iniciada, scraping en curso para {job_label} (status: pending).")
+
+
+def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
+    """Escribe en la hoja de configuración cualquier cambio realizado desde la UI."""
+    pending = st.session_state.pop("pc_config_pending_updates", None)
+    if not pending:
+        return
+
+    if pc_config_df is None or pc_config_df.empty:
+        st.warning("No fue posible sincronizar pc_config: datos base vacíos.")
+        return
+
+    try:
+        app_cfg = st.secrets["app"]
+    except Exception:
+        app_cfg = {}
+    sheet_id = app_cfg.get("SHEET_ID")
+    if not sheet_id:
+        st.warning("No hay SHEET_ID configurado para sincronizar pc_config.")
+        return
+
+    client = get_gc()
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(PC_CONFIG_WORKSHEET)
+
+    df = pc_config_df.copy()
+    df.columns = df.columns.astype(str)
+    name_col = None
+    for col in df.columns:
+        if col.lower() == "name":
+            name_col = col
+            break
+    if name_col is None:
+        st.warning("No se encontró columna 'name' en pc_config; no se aplicaron cambios.")
+        return
+
+    df[name_col] = df[name_col].astype(str).str.strip().str.lower()
+    df.set_index(name_col, inplace=True)
+
+    for payload in pending:
+        job_name = str(payload.get("name", "")).strip().lower()
+        if not job_name or job_name not in df.index:
+            continue
+        if "days" in payload:
+            df.at[job_name, "days"] = payload["days"]
+        if "times" in payload:
+            df.at[job_name, "times"] = payload["times"]
+
+    df.reset_index(inplace=True)
+    headers = list(df.columns)
+    values = [headers] + df.astype(str).fillna("").values.tolist()
+    ws.update("A1", values)
+    load_pc_config.clear()
 
 
 def _make_unique(headers):
@@ -103,13 +462,52 @@ st.title("📋 Visualizador cómodo de Actos (CL / RIR)")
 SHEET_ID = "17hOfP-vMdJ4D7xym1cUp7vAcd8XJPErpY3V-9Ui2tCo"
 
 
-DEFAULT_TAB = "cl_abiertas_rir_sin_requisitos"
-_OTHER_TABS = [
-    "ap_con_ct", "ap_sin_ficha", "ap_sin_requisitos",
-    "cl_prog_sin_ficha", "cl_prog_sin_requisitos", "cl_prog_con_ct",
-    "cl_abiertas", "cl_abiertas_rir_con_ct", "cl_prioritarios",
+DEFAULT_SHEET = "cl_abiertas_rir_sin_requisitos"
+
+SHEET_LABELS = {
+    "cl_abiertas_rir_sin_requisitos": "CL abiertas RIR sin requisitos",
+    "cl_abiertas": "CL abiertas",
+    "cl_abiertas_rir_con_ct": "CL abiertas RIR con CT",
+    "cl_prog_sin_ficha": "CL programadas sin ficha",
+    "cl_prog_sin_requisitos": "CL programadas sin requisitos",
+    "cl_prog_con_ct": "CL programadas con CT",
+    "cl_prioritarios": "CL prioritarios",
+    "ap_con_ct": "AP con CT",
+    "ap_sin_ficha": "AP sin ficha",
+    "ap_sin_requisitos": "AP sin requisitos",
+}
+
+SHEET_GROUPS = {
+    "Cotizaciones Abiertas": [
+        "cl_abiertas_rir_sin_requisitos",
+        "cl_abiertas",
+        "cl_abiertas_rir_con_ct",
+    ],
+    "Cotizaciones Programadas": [
+        "cl_prog_sin_ficha",
+        "cl_prog_sin_requisitos",
+        "cl_prog_con_ct",
+    ],
+    "Licitaciones": [
+        "ap_con_ct",
+        "ap_sin_ficha",
+        "ap_sin_requisitos",
+    ],
+    "Prioritarias": [
+        "cl_prioritarios",
+    ],
+}
+
+CATEGORY_ORDER = [
+    "Cotizaciones Abiertas",
+    "Cotizaciones Programadas",
+    "Licitaciones",
+    "Prioritarias",
 ]
-TABS = [DEFAULT_TAB] + [t for t in _OTHER_TABS if t != DEFAULT_TAB]
+
+
+def _sheet_label(name: str) -> str:
+    return SHEET_LABELS.get(name, name.replace("_", " ").title())
 
 def get_gc():
     # Reutiliza las credenciales centralizadas en sheets.get_client()
@@ -190,7 +588,13 @@ def load_df(sheet_name: str) -> pd.DataFrame:
     return df
 
 
-def render_df(df: pd.DataFrame, sheet_name: str):
+def render_df(
+    df: pd.DataFrame,
+    sheet_name: str,
+    pc_state_df: pd.DataFrame | None = None,
+    pc_config_df: pd.DataFrame | None = None,
+    suffix: str | None = None,
+):
     keyp = f"{sheet_name}_"
 
     notice_key = keyp + "update_notice"
@@ -567,21 +971,45 @@ def render_df(df: pd.DataFrame, sheet_name: str):
         )
 
     st.caption(f"Mostrando {len(df)} filas")
-    st.download_button(
-        "⬇️ Descargar CSV",
-        df_view.to_csv(index=False).encode("utf-8"),
-        file_name=f"{sheet_name}.csv",
-        mime="text/csv",
-        key=keyp+"dl",
-    )
 
-# ---- UI en pestañas (más cómodo que selectbox) ----
-tabs = st.tabs(TABS)
-for tab, name in zip(tabs, TABS):
+    render_pc_state_cards(pc_state_df, pc_config_df, suffix=suffix)
+
+# ---- UI: pestañas de categorías + desplegable de hojas ----
+pc_state_df = load_pc_state()
+pc_config_df = load_pc_config()
+ordered_categories = [c for c in CATEGORY_ORDER if c in SHEET_GROUPS]
+category_tabs = st.tabs(ordered_categories)
+
+for tab, category_name in zip(category_tabs, ordered_categories):
     with tab:
-        st.subheader(name)
-        df = load_df(name)
+        st.subheader(category_name)
+        sheets = SHEET_GROUPS.get(category_name, [])
+        if not sheets:
+            st.info("Sin hojas configuradas para esta categoría.")
+            continue
+
+        selector_slug = re.sub(r"[^0-9a-z]+", "_", category_name.lower())
+        selector_key = f"sheet_selector_{selector_slug.strip('_')}"
+        tab_suffix = selector_slug.strip("_") or None
+
+        if len(sheets) == 1:
+            sheet_name = sheets[0]
+            st.caption(_sheet_label(sheet_name))
+        else:
+            default_idx = sheets.index(DEFAULT_SHEET) if DEFAULT_SHEET in sheets else 0
+            sheet_name = st.selectbox(
+                "Seleccione la hoja",
+                sheets,
+                index=default_idx,
+                key=selector_key,
+                format_func=_sheet_label,
+                label_visibility="collapsed",
+            )
+
+        df = load_df(sheet_name)
         if df.empty:
             st.info("Sin datos en esta pestaña.")
         else:
-            render_df(df, name)
+            render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
+
+sync_pc_config_updates(pc_config_df)
