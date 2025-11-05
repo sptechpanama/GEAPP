@@ -297,6 +297,9 @@ def render_pc_state_cards(
             days_value = str(cfg.get("days", "")).strip() if cfg is not None else ""
             times_value = str(cfg.get("times", "")).strip() if cfg is not None else ""
 
+                        anchor_id = f"pc_anchor_{job_raw.lower()}{key_suffix}"
+                        col_widget.markdown(f"<div id='{anchor_id}'></div>", unsafe_allow_html=True)
+
             card = f"""
 <div style="border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-top:8px;background-color:rgba(17,20,24,0.35);">
   <div style="font-weight:600;font-size:0.95rem;">{job_label}</div>
@@ -337,6 +340,10 @@ def render_pc_state_cards(
             if cfg is not None and (
                 days_input.strip() != days_value or times_input.strip() != times_value
             ):
+                if days_input.strip() != days_value:
+                    cfg["days"] = days_input.strip()
+                if times_input.strip() != times_value:
+                    cfg["times"] = times_input.strip()
                 updates.append(
                     {
                         "name": cfg.get("name", job_raw),
@@ -344,6 +351,7 @@ def render_pc_state_cards(
                         "times": times_input.strip(),
                     }
                 )
+                st.session_state["pc_focus_anchor"] = anchor_id
 
     if updates:
         st.session_state.setdefault("pc_config_pending_updates", []).extend(updates)
@@ -352,6 +360,22 @@ def render_pc_state_cards(
     if feedback_key in st.session_state:
         job_label = st.session_state.pop(feedback_key)
         st.success(f"Ejecución manual iniciada, scraping en curso para {job_label} (status: pending).")
+
+        anchor_target = st.session_state.pop("pc_focus_anchor", None)
+        if anchor_target:
+                st.markdown(
+                        f"""
+<script>
+setTimeout(function() {{
+    const el = document.getElementById('{anchor_target}');
+    if (el) {{
+        el.scrollIntoView({{behavior: 'instant', block: 'center'}});
+    }}
+}}, 0);
+</script>
+""",
+                        unsafe_allow_html=True,
+                )
 
 
 def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
