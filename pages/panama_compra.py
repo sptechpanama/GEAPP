@@ -260,14 +260,14 @@ def render_pc_state_cards(
     if pc_state_df is None or pc_state_df.empty:
         return
 
-        st.markdown(
-                """
+    st.markdown(
+        """
 <div style="margin-top:14px;margin-bottom:6px;padding:8px 16px;background:rgba(34,52,82,0.55);border-radius:8px;border:1px solid rgba(120,170,255,0.15);font-size:1.12rem;font-weight:600;color:#f4f6fb;letter-spacing:0.01em;">
-    🔧 Resumen de últimas actualizaciones y controles
+  🔧 Resumen de últimas actualizaciones y controles
 </div>
 """,
-                unsafe_allow_html=True,
-        )
+        unsafe_allow_html=True,
+    )
     rows = pc_state_df.drop(columns=[col for col in pc_state_df.columns if col.startswith("__")]).copy()
 
     config_map = {}
@@ -297,8 +297,8 @@ def render_pc_state_cards(
             days_value = str(cfg.get("days", "")).strip() if cfg is not None else ""
             times_value = str(cfg.get("times", "")).strip() if cfg is not None else ""
 
-                        anchor_id = f"pc_anchor_{job_raw.lower()}{key_suffix}"
-                        col_widget.markdown(f"<div id='{anchor_id}'></div>", unsafe_allow_html=True)
+            anchor_id = f"pc_anchor_{job_raw.lower()}{key_suffix}"
+            col_widget.markdown(f"<div id='{anchor_id}'></div>", unsafe_allow_html=True)
 
             card = f"""
 <div style="border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-top:8px;background-color:rgba(17,20,24,0.35);">
@@ -361,21 +361,21 @@ def render_pc_state_cards(
         job_label = st.session_state.pop(feedback_key)
         st.success(f"Ejecución manual iniciada, scraping en curso para {job_label} (status: pending).")
 
-        anchor_target = st.session_state.pop("pc_focus_anchor", None)
-        if anchor_target:
-                st.markdown(
-                        f"""
+    anchor_target = st.session_state.pop("pc_focus_anchor", None)
+    if anchor_target:
+        st.markdown(
+            f"""
 <script>
 setTimeout(function() {{
-    const el = document.getElementById('{anchor_target}');
-    if (el) {{
-        el.scrollIntoView({{behavior: 'instant', block: 'center'}});
-    }}
+  const el = document.getElementById('{anchor_target}');
+  if (el) {{
+    el.scrollIntoView({{behavior: 'instant', block: 'center'}});
+  }}
 }}, 0);
 </script>
 """,
-                        unsafe_allow_html=True,
-                )
+            unsafe_allow_html=True,
+        )
 
 
 def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
