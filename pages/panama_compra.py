@@ -300,6 +300,14 @@ def render_pc_state_cards(
             anchor_id = f"pc_anchor_{job_raw.lower()}{key_suffix}"
             col_widget.markdown(f"<div id='{anchor_id}'></div>", unsafe_allow_html=True)
 
+            days_saved_key = f"{days_key}__saved"
+            if (
+                days_saved_key not in st.session_state
+                or st.session_state[days_saved_key] != days_value
+            ):
+                st.session_state[days_key] = days_value
+                st.session_state[days_saved_key] = days_value
+
             card = f"""
 <div style="border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-top:8px;background-color:rgba(17,20,24,0.35);">
   <div style="font-weight:600;font-size:0.95rem;">{job_label}</div>
@@ -329,6 +337,14 @@ def render_pc_state_cards(
                 help="Horas separadas por comas",
             )
 
+            times_saved_key = f"{times_key}__saved"
+            if (
+                times_saved_key not in st.session_state
+                or st.session_state[times_saved_key] != times_value
+            ):
+                st.session_state[times_key] = times_value
+                st.session_state[times_saved_key] = times_value
+
             if col_widget.button(
                 f"▶ Actualización manual",
                 key=f"pc_manual_btn_{job_raw.lower()}{key_suffix}",
@@ -342,8 +358,10 @@ def render_pc_state_cards(
             ):
                 if days_input.strip() != days_value:
                     cfg["days"] = days_input.strip()
+                    st.session_state[days_saved_key] = days_input.strip()
                 if times_input.strip() != times_value:
                     cfg["times"] = times_input.strip()
+                    st.session_state[times_saved_key] = times_input.strip()
                 updates.append(
                     {
                         "name": cfg.get("name", job_raw),
