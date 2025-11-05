@@ -21,12 +21,23 @@ from pathlib import Path
 
 # Ruta local (fallback) a tu JSON. Se usará solo si NO hay secretos en st.secrets.
 APP_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_SA_FILE = APP_ROOT / "pure-beach-474203-p1-fdc9557f33d0.json"
+
+def _first_service_account_file() -> Path | None:
+    candidates = list(APP_ROOT.glob("pure-beach-*.json"))
+    if not candidates:
+        # Permite reutilizar el archivo del proyecto local anterior si existe.
+        legacy_root = APP_ROOT.parent / "ge"
+        if legacy_root.exists():
+            candidates = list(legacy_root.glob("pure-beach-*.json"))
+    return candidates[0] if candidates else None
+
+_DEFAULT_SA_FILE = _first_service_account_file()
+_DEFAULT_SA_PATH = str(_DEFAULT_SA_FILE) if (_DEFAULT_SA_FILE and _DEFAULT_SA_FILE.exists()) else None
 
 SERVICE_ACCOUNT_PATH = (
     os.environ.get("FINAPP_SERVICE_ACCOUNT_FILE")
     or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    or (str(_DEFAULT_SA_FILE) if _DEFAULT_SA_FILE.exists() else None)
+    or _DEFAULT_SA_PATH
 )
 
 # Scopes (permisos) que usará la cuenta de servicio
@@ -38,20 +49,23 @@ SCOPES = [
 
 
 def get_client():
-    # 1) Tomar SIEMPRE desde st.secrets
+    # 1) Intentar credenciales desde st.secrets
+    info = None
     try:
         info = dict(st.secrets["google_service_account"])
     except Exception:
-        if SERVICE_ACCOUNT_PATH and Path(SERVICE_ACCOUNT_PATH).exists():
-            with open(SERVICE_ACCOUNT_PATH, "r", encoding="utf-8") as fh:
+        pass
+
+    # 2) Fallback a archivo local
+    if info is None:
+        path = SERVICE_ACCOUNT_PATH
+        if path and Path(path).exists():
+            with open(path, "r", encoding="utf-8") as fh:
                 info = json.load(fh)
         else:
-            keys = ", ".join(list(st.secrets.keys()))
             raise RuntimeError(
-                "No se encontró el bloque [google_service_account] en los Secrets "
-                f"de ESTE app. Claves disponibles: {keys}. "
-                "Sube el JSON en Streamlit Secrets o define FINAPP_SERVICE_ACCOUNT_FILE/" 
-                "GOOGLE_APPLICATION_CREDENTIALS apuntando al archivo."
+                "No encontramos credenciales de Google Sheets. "
+                "Configura st.secrets['google_service_account'] o la variable FINAPP_SERVICE_ACCOUNT_FILE." 
             )
 
     # 2) Arreglar saltos de línea del private_key si vienen escapados

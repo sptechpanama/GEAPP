@@ -18,6 +18,18 @@ CHECKBOX_FLAG_NAMES = {
 }
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
 
+
+def _require_authentication() -> None:
+    status = st.session_state.get("authentication_status")
+    if status is True:
+        st.session_state.setdefault("username", st.session_state.get("username"))
+        return
+    if status is False:
+        st.error("Credenciales inválidas. Vuelve a la portada para iniciar sesión.")
+    else:
+        st.info("Debes iniciar sesión desde la portada para acceder a PanamáCompra.")
+    st.stop()
+
 PC_STATE_WORKSHEET = "pc_state"
 PC_CONFIG_WORKSHEET = "pc_config"
 PC_MANUAL_SHEET_ID = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
@@ -228,14 +240,14 @@ def render_pc_state_cards(
     if pc_state_df is None or pc_state_df.empty:
         return
 
-    st.markdown(
-        """
-<div style="margin-top:14px;margin-bottom:6px;padding:6px 12px;background:rgba(63,142,252,0.16);border-radius:6px;font-size:1.12rem;font-weight:600;color:#ffffff;letter-spacing:0.01em;">
-  🔧 Resumen de últimas actualizaciones y controles
+        st.markdown(
+                """
+<div style="margin-top:14px;margin-bottom:6px;padding:8px 16px;background:rgba(34,52,82,0.55);border-radius:8px;border:1px solid rgba(120,170,255,0.15);font-size:1.12rem;font-weight:600;color:#f4f6fb;letter-spacing:0.01em;">
+    🔧 Resumen de últimas actualizaciones y controles
 </div>
 """,
-        unsafe_allow_html=True,
-    )
+                unsafe_allow_html=True,
+        )
     rows = pc_state_df.drop(columns=[col for col in pc_state_df.columns if col.startswith("__")]).copy()
 
     config_map = {}
@@ -456,6 +468,7 @@ def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
     return parsed
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
+_require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
 
 # ---- Config ----
