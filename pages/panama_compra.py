@@ -456,7 +456,7 @@ def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
     return parsed
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
-st.title("📋 Visualizador cómodo de Actos (CL / RIR)")
+st.title("📋 Visualizador de Actos Panamá Compra")
 
 # ---- Config ----
 SHEET_ID = "17hOfP-vMdJ4D7xym1cUp7vAcd8XJPErpY3V-9Ui2tCo"
