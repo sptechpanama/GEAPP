@@ -74,6 +74,24 @@ def _manual_sheet_id() -> str | None:
     return manual_id or None
 
 
+def _pc_config_sheet_id() -> str | None:
+    """Obtiene el Sheet ID donde vive pc_config, con fallbacks sensatos."""
+    try:
+        app_cfg = st.secrets["app"]
+    except Exception:
+        app_cfg = {}
+
+    sheet_id = None
+    if isinstance(app_cfg, dict):
+        sheet_id = (
+            app_cfg.get("PC_CONFIG_SHEET_ID")
+            or app_cfg.get("PC_MANUAL_SHEET_ID")
+            or app_cfg.get("SHEET_ID")
+        )
+
+    return sheet_id or _manual_sheet_id()
+
+
 def _current_user() -> str:
     for key in ("username", "user", "email", "correo", "name", "nombre"):
         value = st.session_state.get(key)
@@ -198,11 +216,7 @@ def load_pc_state() -> pd.DataFrame:
 @st.cache_data(ttl=180)
 def load_pc_config() -> pd.DataFrame:
     """Obtiene la configuración de programación (días/horas) desde la hoja pc_config."""
-    try:
-        sheet_id = st.secrets["app"]["SHEET_ID"]
-    except Exception:
-        return pd.DataFrame()
-
+    sheet_id = _pc_config_sheet_id()
     if not sheet_id:
         return pd.DataFrame()
 
@@ -350,11 +364,7 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
         st.warning("No fue posible sincronizar pc_config: datos base vacíos.")
         return
 
-    try:
-        app_cfg = st.secrets["app"]
-    except Exception:
-        app_cfg = {}
-    sheet_id = app_cfg.get("SHEET_ID")
+    sheet_id = _pc_config_sheet_id()
     if not sheet_id:
         st.warning("No hay SHEET_ID configurado para sincronizar pc_config.")
         return
