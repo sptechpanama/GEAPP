@@ -363,7 +363,7 @@ def _handle_gspread_error(exc: Exception, action: str) -> None:
     st.error(f"No se pudo {action}. {message}")
 
 
-def _on_client_change(prefix: str) -> None:
+def _on_client_change(prefix: str, *, mark_open: bool = True) -> None:
     label = st.session_state.get(f"{prefix}_cliente_raw", "")
     info = st.session_state.get("catalog_clients_label_map", {}).get(label)
     if info:
@@ -373,10 +373,12 @@ def _on_client_change(prefix: str) -> None:
         st.session_state[f"{prefix}_cliente_id"] = ""
         st.session_state[f"{prefix}_cliente_nombre"] = ""
     if not st.session_state.pop(f"{prefix}_skip_project_sync", False):
-        _sync_project_selection(prefix)
+        _sync_project_selection(prefix, mark_open=mark_open)
+    if mark_open:
+        _set_form_open(prefix)
 
 
-def _on_project_change(prefix: str) -> None:
+def _on_project_change(prefix: str, *, mark_open: bool = True) -> None:
     label = st.session_state.get(f"{prefix}_proyecto_raw", "")
     info = st.session_state.get("catalog_projects_label_map", {}).get(label)
     if info:
@@ -390,12 +392,14 @@ def _on_project_change(prefix: str) -> None:
             if current_label != client_label:
                 st.session_state[f"{prefix}_skip_project_sync"] = True
                 st.session_state[f"{prefix}_cliente_raw"] = client_label
-                _on_client_change(prefix)
+                _on_client_change(prefix, mark_open=mark_open)
     else:
         st.session_state[f"{prefix}_proyecto_id"] = ""
         st.session_state[f"{prefix}_proyecto_nombre"] = ""
         st.session_state[f"{prefix}_proyecto_cliente_id"] = ""
         st.session_state[f"{prefix}_proyecto_cliente_nombre"] = ""
+    if mark_open:
+        _set_form_open(prefix)
 
 
 def _build_project_options(prefix: str, client_id: str | None = None) -> list[str]:
@@ -412,13 +416,13 @@ def _build_project_options(prefix: str, client_id: str | None = None) -> list[st
     return [""] + labels if labels else [""]
 
 
-def _sync_project_selection(prefix: str) -> None:
+def _sync_project_selection(prefix: str, mark_open: bool = True) -> None:
     options = _build_project_options(prefix)
     key = f"{prefix}_proyecto_raw"
     if key not in st.session_state or st.session_state[key] not in options:
         st.session_state[key] = options[0] if options else ""
     if st.session_state.get(key):
-        _on_project_change(prefix)
+        _on_project_change(prefix, mark_open=mark_open)
 
 
 def _client_options_for_company(company: str | None) -> list[str]:
@@ -434,6 +438,14 @@ def _client_options_for_company(company: str | None) -> list[str]:
     return st.session_state.get("catalog_clients_opts", [""])
 
 
+def _set_form_open(prefix: str) -> None:
+    st.session_state[f"{prefix}_form_open"] = True
+
+
+def _set_form_closed(prefix: str) -> None:
+    st.session_state[f"{prefix}_form_open"] = False
+
+
 def _ensure_client_selection(prefix: str, options: list[str]) -> None:
     """
     Asegura que el valor en session_state para el cliente pertenezca a `options`.
@@ -442,7 +454,7 @@ def _ensure_client_selection(prefix: str, options: list[str]) -> None:
     key = f"{prefix}_cliente_raw"
     if key not in st.session_state or st.session_state[key] not in options:
         st.session_state[key] = options[0] if options else ""
-    _on_client_change(prefix)
+    _on_client_change(prefix, mark_open=False)
 
 
 def _prepare_entry_defaults(prefix: str) -> list[str]:
@@ -453,7 +465,7 @@ def _prepare_entry_defaults(prefix: str) -> list[str]:
     if proj_key not in st.session_state or st.session_state[proj_key] not in options:
         st.session_state[proj_key] = options[0] if options else ""
     if st.session_state.get(proj_key):
-        _on_project_change(prefix)
+        _on_project_change(prefix, mark_open=False)
     return options
 
 
@@ -924,18 +936,46 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
 # INGRESOS — Añadir ingreso (rápido)
 # ============================================================
 st.markdown("## Ingresos")
-with st.expander("Añadir ingreso (rápido)", expanded=False):
+st.session_state.setdefault("ing_form_open", False)
+with st.expander(
+    "Añadir ingreso (rápido)",
+    expanded=st.session_state.get("ing_form_open", False),
+):
+    _set_form_open("ing")
     _prepare_entry_defaults("ing")
 
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
     with c1:
-        empresa_ing = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="ing_empresa_quick")
+        empresa_ing = st.selectbox(
+            "Empresa",
+            EMPRESAS_OPCIONES,
+            index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
+            key="ing_empresa_quick",
+            on_change=lambda prefix="ing": _set_form_open(prefix),
+        )
     with c2:
-        fecha_nueva = st.date_input("Fecha", value=_today(), key="ing_fecha_quick")
+        fecha_nueva = st.date_input(
+            "Fecha",
+            value=_today(),
+            key="ing_fecha_quick",
+            on_change=lambda prefix="ing": _set_form_open(prefix),
+        )
     with c3:
-        monto_nuevo = st.number_input("Monto", min_value=0.0, step=1.0, key="ing_monto_quick")
+        monto_nuevo = st.number_input(
+            "Monto",
+            min_value=0.0,
+            step=1.0,
+            key="ing_monto_quick",
+            on_change=lambda prefix="ing": _set_form_open(prefix),
+        )
     with c4:
-        por_cobrar_nuevo = st.selectbox("Por_cobrar", ["No", "Sí"], index=0, key="ing_porcob_quick")
+        por_cobrar_nuevo = st.selectbox(
+            "Por_cobrar",
+            ["No", "Sí"],
+            index=0,
+            key="ing_porcob_quick",
+            on_change=lambda prefix="ing": _set_form_open(prefix),
+        )
 
     ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
     client_options = _client_options_for_company(ing_company_code)
@@ -945,7 +985,7 @@ with st.expander("Añadir ingreso (rápido)", expanded=False):
         "Cliente",
         client_options,
         key="ing_cliente_raw",
-        on_change=lambda prefix="ing": _on_client_change(prefix),
+        on_change=lambda prefix="ing": _on_client_change(prefix, mark_open=True),
     )
     project_options = _build_project_options("ing")
     if st.session_state.get("ing_proyecto_raw") not in project_options:
@@ -954,9 +994,17 @@ with st.expander("Añadir ingreso (rápido)", expanded=False):
         "Proyecto",
         project_options,
         key="ing_proyecto_raw",
-        on_change=lambda prefix="ing": _on_project_change(prefix),
+        on_change=lambda prefix="ing": _on_project_change(prefix, mark_open=True),
     )
-    desc_nueva = st.text_input("Descripción", key="ing_desc_quick")
+    desc_nueva = st.text_input(
+        "Descripción",
+        key="ing_desc_quick",
+        on_change=lambda prefix="ing": _set_form_open(prefix),
+    )
+
+    if st.button("Cerrar formulario", key="close_ing_form"):
+        _set_form_closed("ing")
+        st.rerun()
 
     submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
 
@@ -996,8 +1044,9 @@ with st.expander("Añadir ingreso (rápido)", expanded=False):
         wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
         if wrote:
             st.cache_data.clear()
-        _reset_entry_state("ing")
-        st.rerun()
+    _reset_entry_state("ing")
+    _set_form_closed("ing")
+    st.rerun()
 
 
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
@@ -1062,25 +1111,54 @@ sync_cambios(
 # ============================================================
 
 st.markdown("## Gastos")
-with st.expander("Añadir gasto (rápido)", expanded=False):
+st.session_state.setdefault("gas_form_open", False)
+with st.expander(
+    "Añadir gasto (rápido)",
+    expanded=st.session_state.get("gas_form_open", False),
+):
+    _set_form_open("gas")
     _prepare_entry_defaults("gas")
 
     g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
     with g1:
-        empresa_g = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="gas_empresa_quick")
+        empresa_g = st.selectbox(
+            "Empresa",
+            EMPRESAS_OPCIONES,
+            index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
+            key="gas_empresa_quick",
+            on_change=lambda prefix="gas": _set_form_open(prefix),
+        )
     with g2:
-        fecha_g = st.date_input("Fecha", value=_today(), key="gas_fecha_quick")
+        fecha_g = st.date_input(
+            "Fecha",
+            value=_today(),
+            key="gas_fecha_quick",
+            on_change=lambda prefix="gas": _set_form_open(prefix),
+        )
     with g3:
         categoria_g = st.selectbox(
             "Categoría",
             ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina"],
             index=0,
             key="gas_categoria_quick",
+            on_change=lambda prefix="gas": _set_form_open(prefix),
         )
     with g4:
-        monto_g = st.number_input("Monto", min_value=0.0, step=1.0, key="gas_monto_quick")
+        monto_g = st.number_input(
+            "Monto",
+            min_value=0.0,
+            step=1.0,
+            key="gas_monto_quick",
+            on_change=lambda prefix="gas": _set_form_open(prefix),
+        )
     with g5:
-        por_pagar_nuevo = st.selectbox("Por_pagar", ["No", "Sí"], index=0, key="gas_porpag_quick")
+        por_pagar_nuevo = st.selectbox(
+            "Por_pagar",
+            ["No", "Sí"],
+            index=0,
+            key="gas_porpag_quick",
+            on_change=lambda prefix="gas": _set_form_open(prefix),
+        )
 
     cliente_id_g = ""
     cliente_nombre_g = ""
@@ -1093,7 +1171,7 @@ with st.expander("Añadir gasto (rápido)", expanded=False):
             "Cliente",
             client_options,
             key="gas_cliente_raw",
-            on_change=lambda prefix="gas": _on_client_change(prefix),
+            on_change=lambda prefix="gas": _on_client_change(prefix, mark_open=True),
         )
         project_options_g = _build_project_options("gas")
         if st.session_state.get("gas_proyecto_raw") not in project_options_g:
@@ -1102,7 +1180,7 @@ with st.expander("Añadir gasto (rápido)", expanded=False):
             "Proyecto",
             project_options_g,
             key="gas_proyecto_raw",
-            on_change=lambda prefix="gas": _on_project_change(prefix),
+            on_change=lambda prefix="gas": _on_project_change(prefix, mark_open=True),
         )
         cliente_id_g = st.session_state.get("gas_cliente_id", "")
         cliente_nombre_g = st.session_state.get("gas_cliente_nombre", "")
@@ -1113,8 +1191,20 @@ with st.expander("Añadir gasto (rápido)", expanded=False):
             cliente_id_g = linked_client_id_g
             cliente_nombre_g = linked_client_name_g or cliente_nombre_g
 
-    desc_g = st.text_input("Descripción", key="gas_desc_quick")
-    prov_g = st.text_input("Proveedor", key="gas_proveedor_quick")
+    desc_g = st.text_input(
+        "Descripción",
+        key="gas_desc_quick",
+        on_change=lambda prefix="gas": _set_form_open(prefix),
+    )
+    prov_g = st.text_input(
+        "Proveedor",
+        key="gas_proveedor_quick",
+        on_change=lambda prefix="gas": _set_form_open(prefix),
+    )
+
+    if st.button("Cerrar formulario", key="close_gas_form"):
+        _set_form_closed("gas")
+        st.rerun()
 
     submitted_gas = st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick")
 
@@ -1143,8 +1233,9 @@ with st.expander("Añadir gasto (rápido)", expanded=False):
         wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
         if wrote:
             st.cache_data.clear()
-        _reset_entry_state("gas")
-        st.rerun()
+    _reset_entry_state("gas")
+    _set_form_closed("gas")
+    st.rerun()
 
 
 
