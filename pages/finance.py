@@ -1039,7 +1039,12 @@ with st.expander("Añadir gasto (rápido)", expanded=False):
     with g2:
         fecha_g = st.date_input("Fecha", value=_today(), key="gas_fecha_quick")
     with g3:
-        categoria_g = st.selectbox("Categoría", ["Proyectos", "Gastos fijos", "Oficina"], index=0, key="gas_categoria_quick")
+        categoria_g = st.selectbox(
+            "Categoría",
+            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina"],
+            index=0,
+            key="gas_categoria_quick",
+        )
     with g4:
         monto_g = st.number_input("Monto", min_value=0.0, step=1.0, key="gas_monto_quick")
     with g5:
@@ -1113,7 +1118,10 @@ st.markdown("### Gastos (tabla)")
 gas_cols_view = [c for c in df_gas_f.columns if c not in (COL_ROWID, COL_ESC)] + [COL_ROWID]
 gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
-    COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=["Proyectos", "Gastos fijos", "Oficina", "Comisiones"]),
+    COL_CAT:     st.column_config.SelectboxColumn(
+        COL_CAT,
+        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Comisiones"],
+    ),
     COL_CONC:    st.column_config.TextColumn("Descripción"),
     COL_PROV:    st.column_config.TextColumn("Proveedor"),  # ← NUEVO
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
