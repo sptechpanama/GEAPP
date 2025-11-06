@@ -473,17 +473,19 @@ def render_pc_state_cards(
             payload = {"key": job_key, "name": cfg_name_value}
             has_change = False
 
-            if days_col:
-                cleaned_days = days_input.strip()
-                if cleaned_days != days_value:
-                    payload["days"] = cleaned_days
-                    has_change = True
+            cleaned_days = _sanitize_config_value(days_input) if days_col else ""
+            cleaned_times = _sanitize_config_value(times_input) if times_col else ""
 
-            if times_col:
-                cleaned_times = times_input.strip()
-                if cleaned_times != times_value:
+            if days_col and cleaned_days != days_value:
+                has_change = True
+            if times_col and cleaned_times != times_value:
+                has_change = True
+
+            if has_change:
+                if days_col:
+                    payload["days"] = cleaned_days
+                if times_col:
                     payload["times"] = cleaned_times
-                    has_change = True
 
             if has_change:
                 updates.append(payload)
@@ -492,9 +494,9 @@ def render_pc_state_cards(
                 override_entry["name"] = cfg_name_value
                 override_entry["ts"] = time.time()
                 if days_col:
-                    override_entry["days"] = _sanitize_config_value(payload.get("days", days_value))
+                    override_entry["days"] = cleaned_days
                 if times_col:
-                    override_entry["times"] = _sanitize_config_value(payload.get("times", times_value))
+                    override_entry["times"] = cleaned_times
                 st.session_state["pc_focus_anchor"] = anchor_id
 
     if updates:
