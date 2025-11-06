@@ -64,7 +64,7 @@ HEADER_ALIASES = {
 }
 
 
-PC_CONFIG_OVERRIDE_TTL_SECONDS = 600
+PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
 PC_CONFIG_NAME_ALIASES = ("name", "bot", "job", "proceso")
 PC_CONFIG_DAYS_ALIASES = ("days", "dias", "días")
 PC_CONFIG_TIMES_ALIASES = ("times", "horas", "hora", "hours")
@@ -136,25 +136,16 @@ def _apply_pc_config_overrides(df: pd.DataFrame) -> pd.DataFrame:
             continue
 
         row_index = mask[mask].index[0]
-        row_snapshot = work_df.loc[row_index].copy()
-        override_applied = False
 
         if days_column and "days" in payload:
             desired_value = _sanitize_config_value(payload["days"])
-            current_value = _sanitize_config_value(row_snapshot.get(days_column, ""))
-            if current_value != desired_value:
-                work_df.at[row_index, days_column] = desired_value
-                override_applied = True
+            work_df.at[row_index, days_column] = desired_value
+            payload["days"] = desired_value
 
         if times_column and "times" in payload:
             desired_value = _sanitize_config_value(payload["times"])
-            current_value = _sanitize_config_value(row_snapshot.get(times_column, ""))
-            if current_value != desired_value:
-                work_df.at[row_index, times_column] = desired_value
-                override_applied = True
-
-        if not override_applied:
-            resolved_keys.append(key)
+            work_df.at[row_index, times_column] = desired_value
+            payload["times"] = desired_value
 
     for key in resolved_keys:
         overrides.pop(key, None)
@@ -497,6 +488,7 @@ def render_pc_state_cards(
                     override_entry["days"] = cleaned_days
                 if times_col:
                     override_entry["times"] = cleaned_times
+                override_entry["pending"] = True
                 st.session_state["pc_focus_anchor"] = anchor_id
 
     if updates:
@@ -524,7 +516,7 @@ setTimeout(function() {{
   if (el) {{
     el.scrollIntoView({{behavior: 'instant', block: 'center'}});
   }}
-}}, 0);
+}}, 150);
 </script>
 """,
             unsafe_allow_html=True,
@@ -623,6 +615,7 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
             override_entry["days"] = _sanitize_config_value(df.at[job_key, days_col])
         if times_col and times_col in df.columns:
             override_entry["times"] = _sanitize_config_value(df.at[job_key, times_col])
+        override_entry["pending"] = True
 
         applied += 1
 
@@ -644,6 +637,12 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
     except Exception as exc:
         st.error(f"No se pudo sincronizar pc_config: {exc}")
         return
+
+    for job_key in merged.keys():
+        entry = overrides.get(job_key)
+        if entry is not None:
+            entry["pending"] = False
+            entry["ts"] = now
 
     load_pc_config.clear()
 
