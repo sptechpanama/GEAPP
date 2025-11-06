@@ -285,18 +285,27 @@ def _ensure_catalog_data(
     df_cli[COL_CLI_ID] = df_cli[COL_CLI_ID].astype(str).str.strip()
     df_cli[COL_CLI_NOM] = df_cli[COL_CLI_NOM].astype(str).str.strip()
     df_cli = df_cli[df_cli[COL_CLI_ID] != ""].drop_duplicates(subset=[COL_CLI_ID]).reset_index(drop=True)
-    cli_labels = []
-    cli_label_map = {}
-    cli_id_to_label = {}
+    cli_labels: list[str] = []
+    cli_label_map: dict[str, dict[str, str]] = {}
+    cli_id_to_label: dict[str, str] = {}
+    cli_by_emp: dict[str, list[str]] = {}
     for _, row in df_cli.iterrows():
         label = _format_catalog_label(row[COL_CLI_NOM], row[COL_CLI_ID]) or row[COL_CLI_ID]
         cli_labels.append(label)
         cli_label_map[label] = {"ClienteID": row[COL_CLI_ID], "ClienteNombre": row[COL_CLI_NOM]}
         cli_id_to_label[row[COL_CLI_ID]] = label
+        emp_key = (row.get(COL_EMP) or EMPRESA_DEFAULT).strip().upper()
+        bucket = cli_by_emp.setdefault(emp_key, [])
+        if label not in bucket:
+            bucket.append(label)
     st.session_state["catalog_clients_df"] = df_cli
     st.session_state["catalog_clients_opts"] = [""] + cli_labels
     st.session_state["catalog_clients_label_map"] = cli_label_map
     st.session_state["catalog_clients_id_to_label"] = cli_id_to_label
+    st.session_state["catalog_clients_by_emp"] = {
+        emp: [""] + labels if labels and labels[0] != "" else labels or [""]
+        for emp, labels in cli_by_emp.items()
+    }
 
     if projects_df is not None:
         raw_proj = projects_df.copy()
@@ -412,12 +421,33 @@ def _sync_project_selection(prefix: str) -> None:
         _on_project_change(prefix)
 
 
+def _client_options_for_company(company: str | None) -> list[str]:
+    """
+    Devuelve las opciones de cliente filtradas por empresa.
+    Si no hay coincidencias o la empresa es None, se usan todas las opciones.
+    """
+    by_emp = st.session_state.get("catalog_clients_by_emp")
+    if company and isinstance(by_emp, dict):
+        opts = by_emp.get(str(company).strip().upper())
+        if opts:
+            return opts
+    return st.session_state.get("catalog_clients_opts", [""])
+
+
+def _ensure_client_selection(prefix: str, options: list[str]) -> None:
+    """
+    Asegura que el valor en session_state para el cliente pertenezca a `options`.
+    Si no pertenece, se reajusta al primer valor y se sincroniza la info derivada.
+    """
+    key = f"{prefix}_cliente_raw"
+    if key not in st.session_state or st.session_state[key] not in options:
+        st.session_state[key] = options[0] if options else ""
+    _on_client_change(prefix)
+
+
 def _prepare_entry_defaults(prefix: str) -> list[str]:
     client_opts = st.session_state.get("catalog_clients_opts", [""])
-    client_key = f"{prefix}_cliente_raw"
-    if client_key not in st.session_state or st.session_state[client_key] not in client_opts:
-        st.session_state[client_key] = client_opts[0] if client_opts else ""
-    _on_client_change(prefix)
+    _ensure_client_selection(prefix, client_opts)
     options = _build_project_options(prefix)
     proj_key = f"{prefix}_proyecto_raw"
     if proj_key not in st.session_state or st.session_state[proj_key] not in options:
@@ -896,7 +926,6 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
 st.markdown("## Ingresos")
 with st.expander("Añadir ingreso (rápido)", expanded=False):
     _prepare_entry_defaults("ing")
-    client_options = st.session_state.get("catalog_clients_opts", [""])
 
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
     with c1:
@@ -907,6 +936,10 @@ with st.expander("Añadir ingreso (rápido)", expanded=False):
         monto_nuevo = st.number_input("Monto", min_value=0.0, step=1.0, key="ing_monto_quick")
     with c4:
         por_cobrar_nuevo = st.selectbox("Por_cobrar", ["No", "Sí"], index=0, key="ing_porcob_quick")
+
+    ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
+    client_options = _client_options_for_company(ing_company_code)
+    _ensure_client_selection("ing", client_options)
 
     st.selectbox(
         "Cliente",
@@ -1031,7 +1064,6 @@ sync_cambios(
 st.markdown("## Gastos")
 with st.expander("Añadir gasto (rápido)", expanded=False):
     _prepare_entry_defaults("gas")
-    client_options = st.session_state.get("catalog_clients_opts", [""])
 
     g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
     with g1:
@@ -1054,6 +1086,9 @@ with st.expander("Añadir gasto (rápido)", expanded=False):
     cliente_nombre_g = ""
     proyecto_id_g = ""
     if categoria_g == "Proyectos":
+        gas_company_code = (empresa_g or EMPRESA_DEFAULT).strip().upper()
+        client_options = _client_options_for_company(gas_company_code)
+        _ensure_client_selection("gas", client_options)
         st.selectbox(
             "Cliente",
             client_options,
