@@ -677,8 +677,12 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
         st.warning("No se identificaron celdas para actualizar en pc_config.")
         return
 
+    sheet_title = ws.title
+    for item in batch_data:
+        item["range"] = f"{sheet_title}!{item['range']}"
+
     try:
-        ws.batch_update(
+        sh.values_batch_update(
             {
                 "valueInputOption": "USER_ENTERED",
                 "data": batch_data,
