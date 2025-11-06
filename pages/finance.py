@@ -924,13 +924,8 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
 # INGRESOS — Añadir ingreso (rápido)
 # ============================================================
 st.markdown("## Ingresos")
-st.session_state.setdefault("ing_form_open", False)
-with st.expander(
-    "Añadir ingreso (rápido)",
-    expanded=st.session_state.get("ing_form_open", False),
-):
+with st.expander("Añadir ingreso (rápido)", expanded=False):
     _prepare_entry_defaults("ing")
-    st.session_state["ing_form_open"] = True
 
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
     with c1:
@@ -1001,9 +996,8 @@ with st.expander(
         wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
         if wrote:
             st.cache_data.clear()
-    _reset_entry_state("ing")
-    st.session_state["ing_form_open"] = False
-    st.rerun()
+        _reset_entry_state("ing")
+        st.rerun()
 
 
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
@@ -1068,13 +1062,8 @@ sync_cambios(
 # ============================================================
 
 st.markdown("## Gastos")
-st.session_state.setdefault("gas_form_open", False)
-with st.expander(
-    "Añadir gasto (rápido)",
-    expanded=st.session_state.get("gas_form_open", False),
-):
+with st.expander("Añadir gasto (rápido)", expanded=False):
     _prepare_entry_defaults("gas")
-    st.session_state["gas_form_open"] = True
 
     g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
     with g1:
@@ -1154,9 +1143,8 @@ with st.expander(
         wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
         if wrote:
             st.cache_data.clear()
-    _reset_entry_state("gas")
-    st.session_state["gas_form_open"] = False
-    st.rerun()
+        _reset_entry_state("gas")
+        st.rerun()
 
 
 
