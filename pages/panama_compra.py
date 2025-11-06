@@ -393,7 +393,7 @@ def render_pc_state_cards(
             for _, cfg_row in tmp.iterrows():
                 config_map[cfg_row["__pc_key__"]] = cfg_row
 
-    updates = []
+    buffer = st.session_state.setdefault("pc_config_buffer", {})
     missing_config_jobs: set[str] = set()
 
     for start in range(0, len(rows), 3):
@@ -430,9 +430,6 @@ def render_pc_state_cards(
                 if cfg is not None and times_col
                 else ""
             )
-
-            anchor_id = f"pc_anchor_{job_raw.lower()}{key_suffix}"
-            col_widget.markdown(f"<div id='{anchor_id}'></div>", unsafe_allow_html=True)
 
             card = f"""
 <div style="border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px 14px;margin-top:8px;background-color:rgba(17,20,24,0.35);">
@@ -475,38 +472,41 @@ def render_pc_state_cards(
                 missing_config_jobs.add(job_label)
                 continue
 
-            payload = {"key": job_key, "name": cfg_name_value}
-            has_change = False
-
             cleaned_days = _canonicalize_schedule_text(days_input) if days_col else ""
             cleaned_times = _canonicalize_schedule_text(times_input) if times_col else ""
 
-            if days_col and cleaned_days != days_value:
-                has_change = True
-            if times_col and cleaned_times != times_value:
-                has_change = True
+            diff_days = bool(days_col and cleaned_days != days_value)
+            diff_times = bool(times_col and cleaned_times != times_value)
 
-            if has_change:
-                if days_col:
-                    payload["days"] = cleaned_days
-                if times_col:
-                    payload["times"] = cleaned_times
+            entry = buffer.get(job_key)
 
-            if has_change:
-                updates.append(payload)
-                overrides = _pc_config_overrides()
-                override_entry = overrides.setdefault(job_key, {})
-                override_entry["name"] = cfg_name_value
-                override_entry["ts"] = time.time()
-                if days_col:
-                    override_entry["days"] = cleaned_days
-                if times_col:
-                    override_entry["times"] = cleaned_times
-                override_entry["pending"] = True
-                st.session_state["pc_focus_anchor"] = anchor_id
+            if diff_days or diff_times:
+                entry = buffer.setdefault(
+                    job_key,
+                    {"name": cfg_name_value, "label": job_label},
+                )
+                if diff_days:
+                    entry["days"] = cleaned_days
+                elif "days" in entry:
+                    entry.pop("days", None)
 
-    if updates:
-        st.session_state.setdefault("pc_config_pending_updates", []).extend(updates)
+                if diff_times:
+                    entry["times"] = cleaned_times
+                elif "times" in entry:
+                    entry.pop("times", None)
+
+                entry["ts"] = time.time()
+            else:
+                if entry:
+                    entry.pop("days", None)
+                    entry.pop("times", None)
+                    if not any(k in entry for k in ("days", "times")):
+                        buffer.pop(job_key, None)
+
+            if entry and any(k in entry for k in ("days", "times")):
+                col_widget.caption("⬆ Cambios pendientes")
+            else:
+                col_widget.caption("")
 
     if missing_config_jobs:
         st.warning(
@@ -520,34 +520,62 @@ def render_pc_state_cards(
         job_label = st.session_state.pop(feedback_key)
         st.success(f"Ejecución manual iniciada, scraping en curso para {job_label} (status: pending).")
 
-    anchor_target = st.session_state.pop("pc_focus_anchor", None)
-    if anchor_target:
-        st.markdown(
-            f"""
-<script>
-setTimeout(function() {{
-  const el = document.getElementById('{anchor_target}');
-  if (el) {{
-    el.scrollIntoView({{behavior: 'instant', block: 'center'}});
-  }}
-}}, 150);
-</script>
-""",
-            unsafe_allow_html=True,
+    unsaved_jobs = [
+        info.get("label") or key
+        for key, info in buffer.items()
+        if any(k in info for k in ("days", "times"))
+    ]
+
+    if unsaved_jobs:
+        st.info(
+            "Cambios pendientes: "
+            + ", ".join(sorted(set(unsaved_jobs)))
         )
 
+    sync_key = f"pc_sync_btn_{suffix or 'main'}"
+    if st.button(
+        "Sincronizar cambios",
+        key=sync_key,
+        type="primary",
+        disabled=not unsaved_jobs,
+        use_container_width=True,
+    ):
+        st.session_state["pc_config_sync_trigger"] = True
 
-def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
-    """Escribe en la hoja de configuración cualquier cambio realizado desde la UI."""
+    if st.session_state.pop("pc_config_sync_trigger", False):
+        success = sync_pc_config_updates(pc_config_df)
+        if success:
+            st.success("Se sincronizaron los cambios en pc_config.")
+            st.session_state["pc_config_buffer"] = {}
+            st.experimental_rerun()
+        else:
+            st.warning("No se detectaron cambios para sincronizar.")
 
-    pending = st.session_state.pop("pc_config_pending_updates", None)
+
+def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> bool:
+    """Sincroniza con Google Sheets los cambios almacenados en pc_config_buffer."""
+
+    buffer = st.session_state.get("pc_config_buffer", {}) or {}
+    pending: list[dict[str, str]] = []
+    for job_key, info in buffer.items():
+        payload = {"key": job_key}
+        if info.get("name"):
+            payload["name"] = info["name"]
+        if "days" in info:
+            payload["days"] = info["days"]
+        if "times" in info:
+            payload["times"] = info["times"]
+        if len(payload) > 1:
+            payload["label"] = info.get("label", job_key)
+            pending.append(payload)
+
     if not pending:
-        return
+        return False
 
     sheet_id = _pc_config_sheet_id()
     if not sheet_id:
         st.warning("No hay SHEET_ID configurado para sincronizar pc_config.")
-        return
+        return False
 
     client = get_gc()
     sh = client.open_by_key(sheet_id)
@@ -555,17 +583,17 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
         ws = sh.worksheet(PC_CONFIG_WORKSHEET)
     except Exception as exc:
         st.error(f"No se pudo acceder a la hoja pc_config: {exc}")
-        return
+        return False
 
     try:
         df = read_worksheet(client, sheet_id, PC_CONFIG_WORKSHEET)
     except Exception as exc:
         st.error(f"No se pudo leer pc_config: {exc}")
-        return
+        return False
 
     if df is None or df.empty:
         st.warning("pc_config está vacía; no se aplicaron cambios.")
-        return
+        return False
 
     headers = [str(c) for c in df.columns]
     work_df = df.copy()
@@ -574,7 +602,7 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
     name_col = _resolve_config_column(work_df, PC_CONFIG_NAME_ALIASES)
     if not name_col:
         st.warning("No se encontró ninguna columna equivalente a 'name' en pc_config; no se aplicaron cambios.")
-        return
+        return False
 
     days_col = _resolve_config_column(work_df, PC_CONFIG_DAYS_ALIASES)
     times_col = _resolve_config_column(work_df, PC_CONFIG_TIMES_ALIASES)
@@ -605,7 +633,7 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
 
         mask = name_series == job_key
         if not mask.any():
-            missing_jobs.append(job_key)
+            missing_jobs.append(entry.get("label", job_key))
             continue
 
         pos = mask[mask].index[0]
@@ -646,10 +674,15 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
         )
 
     if not updated_any:
-        st.warning("No se identificaron celdas válidas para actualizar en pc_config.")
-        return
+        return False
 
     load_pc_config.clear()
+    st.session_state["pc_config_buffer"] = {
+        key: info
+        for key, info in buffer.items()
+        if key not in {entry["key"] for entry in pending}
+    }
+    return True
 
 
 def _make_unique(headers):
@@ -1289,5 +1322,3 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             st.info("Sin datos en esta pestaña.")
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
-
-sync_pc_config_updates(pc_config_df)
