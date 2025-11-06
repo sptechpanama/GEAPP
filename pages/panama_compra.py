@@ -619,17 +619,71 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
         st.warning("No se identificaron filas validas en pc_config para actualizar.")
         return
 
-    df.reset_index(drop=False, inplace=True)
-    df.drop(columns=["__pc_key__"], inplace=True, errors="ignore")
+    def _column_index(headers: list, colname: str | None) -> int | None:
+        if not colname:
+            return None
+        target = str(colname).strip().lower()
+        for idx, header in enumerate(headers, start=1):
+            if str(header).strip().lower() == target:
+                return idx
+        return None
 
-    if original_headers:
-        header_map = {str(col).strip().lower(): col for col in original_headers}
-        df.columns = [header_map.get(col.lower(), col) for col in df.columns]
+    def _column_letter(col_idx: int) -> str:
+        """Convierte índice (1-based) a referencia de columna estilo Excel."""
+        out = []
+        while col_idx > 0:
+            col_idx, rem = divmod(col_idx - 1, 26)
+            out.append(chr(65 + rem))
+        return "".join(reversed(out))
 
-    values = [list(df.columns)] + df.astype(str).fillna("").values.tolist()
+    target_headers = original_headers or list(df.columns)
+    col_idx_days = _column_index(target_headers, days_col)
+    col_idx_times = _column_index(target_headers, times_col)
+
+    batch_data: list[dict[str, object]] = []
+
+    for entry in pending:
+        job_key = _normalize_job_key(entry.get("key") or entry.get("name"))
+        if not job_key or job_key not in df.index:
+            continue
+
+        loc = df.index.get_loc(job_key)
+        if isinstance(loc, slice):
+            pos = loc.start
+        elif isinstance(loc, (list, tuple)):
+            pos = loc[0]
+        else:
+            pos = int(loc)
+        row_number = pos + 2  # +1 header, +1 for 1-based index
+
+        if col_idx_days:
+            target_days = df.at[job_key, days_col] if days_col else ""
+            batch_data.append(
+                {
+                    "range": f"{_column_letter(col_idx_days)}{row_number}",
+                    "values": [[target_days]],
+                }
+            )
+        if col_idx_times:
+            target_times = df.at[job_key, times_col] if times_col else ""
+            batch_data.append(
+                {
+                    "range": f"{_column_letter(col_idx_times)}{row_number}",
+                    "values": [[target_times]],
+                }
+            )
+
+    if not batch_data:
+        st.warning("No se identificaron celdas para actualizar en pc_config.")
+        return
 
     try:
-        ws.update("A1", values)
+        ws.batch_update(
+            {
+                "valueInputOption": "USER_ENTERED",
+                "data": batch_data,
+            }
+        )
     except Exception as exc:
         st.error(f"No se pudo sincronizar pc_config: {exc}")
         return
