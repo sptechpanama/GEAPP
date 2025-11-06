@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 
 # Ruta local (fallback) a tu JSON. Se usará solo si NO hay secretos en st.secrets.
-APP_ROOT = Path(__file__).resolve().parents[1]
+APP_ROOT = Path(__file__).resolve().parent
 
 def _first_service_account_file() -> Path | None:
     candidates = list(APP_ROOT.glob("pure-beach-*.json"))

@@ -2,6 +2,7 @@
 
 # pages/visualizador.py
 import re
+import time
 import streamlit as st
 import pandas as pd
 import uuid
@@ -61,6 +62,106 @@ HEADER_ALIASES = {
     "requested_by": {"requested_by", "user", "usuario", "solicitado_por"},
     "note": {"note", "nota", "comentario", "observacion", "observación"},
 }
+
+
+PC_CONFIG_OVERRIDE_TTL_SECONDS = 600
+PC_CONFIG_NAME_ALIASES = ("name", "bot", "job", "proceso")
+PC_CONFIG_DAYS_ALIASES = ("days", "dias", "días")
+PC_CONFIG_TIMES_ALIASES = ("times", "horas", "hora", "hours")
+
+
+def _normalize_job_key(value: str | None) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _resolve_config_column(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
+    if df is None or df.empty:
+        return None
+    col_map = {str(col).strip().lower(): col for col in df.columns}
+    for candidate in aliases:
+        key = str(candidate).strip().lower()
+        if key in col_map:
+            return col_map[key]
+    return None
+
+
+def _pc_config_overrides() -> dict[str, dict[str, str]]:
+    overrides = st.session_state.setdefault("pc_config_overrides", {})
+    now = time.time()
+    stale_keys = [
+        key
+        for key, payload in list(overrides.items())
+        if now - float(payload.get("ts", now)) > PC_CONFIG_OVERRIDE_TTL_SECONDS
+    ]
+    for key in stale_keys:
+        overrides.pop(key, None)
+    return overrides
+
+
+def _sanitize_config_value(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _apply_pc_config_overrides(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    name_col = _resolve_config_column(df, PC_CONFIG_NAME_ALIASES)
+    if not name_col:
+        return df
+
+    overrides = _pc_config_overrides()
+    if not overrides:
+        return df
+
+    work_df = df.copy()
+    name_keys = work_df[name_col].astype(str).str.strip().str.lower()
+    days_column = _resolve_config_column(work_df, PC_CONFIG_DAYS_ALIASES)
+    times_column = _resolve_config_column(work_df, PC_CONFIG_TIMES_ALIASES)
+    resolved_keys: list[str] = []
+
+    for key, payload in list(overrides.items()):
+        job_key = _normalize_job_key(key)
+        if not job_key:
+            resolved_keys.append(key)
+            continue
+
+        mask = name_keys == job_key
+        if not mask.any():
+            resolved_keys.append(key)
+            continue
+
+        row_index = mask[mask].index[0]
+        row_snapshot = work_df.loc[row_index].copy()
+        override_applied = False
+
+        if days_column and "days" in payload:
+            desired_value = _sanitize_config_value(payload["days"])
+            current_value = _sanitize_config_value(row_snapshot.get(days_column, ""))
+            if current_value != desired_value:
+                work_df.at[row_index, days_column] = desired_value
+                override_applied = True
+
+        if times_column and "times" in payload:
+            desired_value = _sanitize_config_value(payload["times"])
+            current_value = _sanitize_config_value(row_snapshot.get(times_column, ""))
+            if current_value != desired_value:
+                work_df.at[row_index, times_column] = desired_value
+                override_applied = True
+
+        if not override_applied:
+            resolved_keys.append(key)
+
+    for key in resolved_keys:
+        overrides.pop(key, None)
+
+    # Conserva metadatos como los encabezados originales.
+    work_df.attrs = dict(df.attrs)
+    return work_df
 
 
 def _manual_sheet_id() -> str | None:
@@ -228,7 +329,10 @@ def load_pc_config() -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
 
-    return df.rename(columns=lambda col: str(col).strip().lower())
+    original_columns = list(df.columns)
+    df = df.rename(columns=lambda col: str(col).strip().lower())
+    df.attrs["__original_columns__"] = original_columns
+    return _apply_pc_config_overrides(df)
 
 
 def _format_pc_datetime(value) -> str:
@@ -271,13 +375,21 @@ def render_pc_state_cards(
     rows = pc_state_df.drop(columns=[col for col in pc_state_df.columns if col.startswith("__")]).copy()
 
     config_map = {}
-    if pc_config_df is not None and not pc_config_df.empty and "name" in pc_config_df.columns:
-        tmp = pc_config_df.copy()
-        tmp["name"] = tmp["name"].astype(str).str.strip().str.lower()
-        for _, cfg_row in tmp.iterrows():
-            config_map[cfg_row["name"]] = cfg_row
+    name_col = None
+    days_col = None
+    times_col = None
+    if pc_config_df is not None and not pc_config_df.empty:
+        name_col = _resolve_config_column(pc_config_df, PC_CONFIG_NAME_ALIASES)
+        if name_col:
+            tmp = pc_config_df.copy()
+            tmp["__pc_key__"] = tmp[name_col].astype(str).str.strip().str.lower()
+            days_col = _resolve_config_column(tmp, PC_CONFIG_DAYS_ALIASES)
+            times_col = _resolve_config_column(tmp, PC_CONFIG_TIMES_ALIASES)
+            for _, cfg_row in tmp.iterrows():
+                config_map[cfg_row["__pc_key__"]] = cfg_row
 
     updates = []
+    missing_config_jobs: set[str] = set()
 
     for start in range(0, len(rows), 3):
         chunk = rows.iloc[start : start + 3]
@@ -290,12 +402,29 @@ def render_pc_state_cards(
             started_text = _format_pc_datetime(row.get("started_at"))
             duration_text = _format_pc_duration(row)
 
-            cfg = config_map.get(job_raw.lower()) if config_map else None
+            job_key = job_raw.strip().lower()
+            cfg = config_map.get(job_key) if config_map else None
+            if cfg is not None:
+                cfg_key = _sanitize_config_value(cfg.get("__pc_key__", job_key))
+                job_key = cfg_key or job_key
+            cfg_name_value = (
+                _sanitize_config_value(cfg.get(name_col, job_raw))
+                if (cfg is not None and name_col)
+                else job_raw
+            )
             key_suffix = f"_{suffix}" if suffix else ""
             days_key = f"pc_days_{job_raw.lower()}{key_suffix}"
             times_key = f"pc_times_{job_raw.lower()}{key_suffix}"
-            days_value = str(cfg.get("days", "")).strip() if cfg is not None else ""
-            times_value = str(cfg.get("times", "")).strip() if cfg is not None else ""
+            days_value = (
+                _sanitize_config_value(cfg.get(days_col, ""))
+                if cfg is not None and days_col
+                else ""
+            )
+            times_value = (
+                _sanitize_config_value(cfg.get(times_col, ""))
+                if cfg is not None and times_col
+                else ""
+            )
 
             anchor_id = f"pc_anchor_{job_raw.lower()}{key_suffix}"
             col_widget.markdown(f"<div id='{anchor_id}'></div>", unsafe_allow_html=True)
@@ -337,24 +466,46 @@ def render_pc_state_cards(
                 if append_manual_request(job_raw, job_label, ""):
                     st.session_state["pc_manual_feedback"] = job_label
 
-            if cfg is not None and (
-                days_input.strip() != days_value or times_input.strip() != times_value
-            ):
-                if days_input.strip() != days_value:
-                    cfg["days"] = days_input.strip()
-                if times_input.strip() != times_value:
-                    cfg["times"] = times_input.strip()
-                updates.append(
-                    {
-                        "name": cfg.get("name", job_raw),
-                        "days": days_input.strip(),
-                        "times": times_input.strip(),
-                    }
-                )
+            if cfg is None:
+                missing_config_jobs.add(job_label)
+                continue
+
+            payload = {"key": job_key, "name": cfg_name_value}
+            has_change = False
+
+            if days_col:
+                cleaned_days = days_input.strip()
+                if cleaned_days != days_value:
+                    payload["days"] = cleaned_days
+                    has_change = True
+
+            if times_col:
+                cleaned_times = times_input.strip()
+                if cleaned_times != times_value:
+                    payload["times"] = cleaned_times
+                    has_change = True
+
+            if has_change:
+                updates.append(payload)
+                overrides = _pc_config_overrides()
+                override_entry = overrides.setdefault(job_key, {})
+                override_entry["name"] = cfg_name_value
+                override_entry["ts"] = time.time()
+                if days_col:
+                    override_entry["days"] = _sanitize_config_value(payload.get("days", days_value))
+                if times_col:
+                    override_entry["times"] = _sanitize_config_value(payload.get("times", times_value))
                 st.session_state["pc_focus_anchor"] = anchor_id
 
     if updates:
         st.session_state.setdefault("pc_config_pending_updates", []).extend(updates)
+
+    if missing_config_jobs:
+        st.warning(
+            "No encontramos filas de configuración para: "
+            + ", ".join(sorted(missing_config_jobs))
+            + ". Revisa la hoja pc_config."
+        )
 
     feedback_key = "pc_manual_feedback"
     if feedback_key in st.session_state:
@@ -397,33 +548,100 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
     sh = client.open_by_key(sheet_id)
     ws = sh.worksheet(PC_CONFIG_WORKSHEET)
 
-    df = pc_config_df.copy()
-    df.columns = df.columns.astype(str)
-    name_col = None
-    for col in df.columns:
-        if col.lower() == "name":
-            name_col = col
-            break
-    if name_col is None:
-        st.warning("No se encontró columna 'name' en pc_config; no se aplicaron cambios.")
+    fresh_df = None
+    try:
+        fresh_df = read_worksheet(client, sheet_id, PC_CONFIG_WORKSHEET)
+    except Exception:
+        fresh_df = None
+
+    if isinstance(fresh_df, pd.DataFrame) and not fresh_df.empty:
+        df = fresh_df.copy()
+        original_headers = list(fresh_df.columns)
+    else:
+        df = pc_config_df.copy()
+        original_headers = (
+            pc_config_df.attrs.get("__original_columns__")
+            if isinstance(pc_config_df, pd.DataFrame)
+            else None
+        )
+        if not original_headers:
+            original_headers = list(df.columns)
+
+    df.columns = df.columns.astype(str).str.strip().str.lower()
+
+    name_col = _resolve_config_column(df, PC_CONFIG_NAME_ALIASES)
+    if not name_col:
+        st.warning("No se encontró ninguna columna equivalente a 'name' en pc_config; no se aplicaron cambios.")
         return
 
-    df[name_col] = df[name_col].astype(str).str.strip().str.lower()
-    df.set_index(name_col, inplace=True)
+    key_series = df[name_col].astype(str).str.strip().str.lower()
+    df["__pc_key__"] = key_series
+    df.set_index("__pc_key__", inplace=True)
 
-    for payload in pending:
-        job_name = str(payload.get("name", "")).strip().lower()
-        if not job_name or job_name not in df.index:
+    days_col = _resolve_config_column(df, PC_CONFIG_DAYS_ALIASES)
+    times_col = _resolve_config_column(df, PC_CONFIG_TIMES_ALIASES)
+
+    merged: dict[str, dict[str, str]] = {}
+    for entry in pending:
+        job_key = _normalize_job_key(entry.get("key") or entry.get("name"))
+        if not job_key:
             continue
-        if "days" in payload:
-            df.at[job_name, "days"] = payload["days"]
-        if "times" in payload:
-            df.at[job_name, "times"] = payload["times"]
+        merged_entry = merged.setdefault(job_key, {})
+        if entry.get("name"):
+            merged_entry["name"] = _sanitize_config_value(entry["name"])
+        if "days" in entry and entry["days"] is not None:
+            merged_entry["days"] = _sanitize_config_value(entry["days"])
+        if "times" in entry and entry["times"] is not None:
+            merged_entry["times"] = _sanitize_config_value(entry["times"])
 
-    df.reset_index(inplace=True)
-    headers = list(df.columns)
-    values = [headers] + df.astype(str).fillna("").values.tolist()
-    ws.update("A1", values)
+    if not merged:
+        return
+
+    overrides = _pc_config_overrides()
+    applied = 0
+    now = time.time()
+
+    for job_key, values in merged.items():
+        if job_key not in df.index:
+            continue
+
+        if "name" in values and values["name"]:
+            df.at[job_key, name_col] = values["name"]
+
+        if days_col and "days" in values:
+            df.at[job_key, days_col] = values["days"]
+        if times_col and "times" in values:
+            df.at[job_key, times_col] = values["times"]
+
+        override_entry = overrides.setdefault(job_key, {})
+        override_entry["ts"] = now
+        override_entry["name"] = values.get("name") or _sanitize_config_value(df.at[job_key, name_col])
+        if days_col and days_col in df.columns:
+            override_entry["days"] = _sanitize_config_value(df.at[job_key, days_col])
+        if times_col and times_col in df.columns:
+            override_entry["times"] = _sanitize_config_value(df.at[job_key, times_col])
+
+        applied += 1
+
+    if not applied:
+        st.warning("No se identificaron filas válidas en pc_config para actualizar.")
+        return
+
+    df.reset_index(drop=False, inplace=True)
+    df.drop(columns=["__pc_key__"], inplace=True, errors="ignore")
+
+    if original_headers:
+        header_map = {str(col).strip().lower(): col for col in original_headers}
+        df.columns = [header_map.get(col.lower(), col) for col in df.columns]
+
+    values = [list(df.columns)] + df.astype(str).fillna("").values.tolist()
+
+    try:
+        ws.update("A1", values)
+    except Exception as exc:
+        st.error(f"No se pudo sincronizar pc_config: {exc}")
+        return
+
     load_pc_config.clear()
 
 
