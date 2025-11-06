@@ -443,30 +443,34 @@ def render_pc_state_cards(
 """
             col_widget.markdown(card, unsafe_allow_html=True)
 
-            days_input = col_widget.text_input(
-                f"Días programados ({job_label})",
-                value=days_value,
-                key=days_key,
-                placeholder="Días separados por comas",
-                label_visibility="collapsed",
-                help="Días separados por comas",
-            )
-            times_input = col_widget.text_input(
-                f"Horas programadas ({job_label})",
-                value=times_value,
-                key=times_key,
-                placeholder="Horas separadas por comas",
-                label_visibility="collapsed",
-                help="Horas separadas por comas",
-            )
-
-            if col_widget.button(
-                f"▶ Actualización manual",
+            manual_col = col_widget.container()
+            if manual_col.button(
+                "▶ Actualización manual",
                 key=f"pc_manual_btn_{job_raw.lower()}{key_suffix}",
                 use_container_width=True,
             ):
                 if append_manual_request(job_raw, job_label, ""):
                     st.session_state["pc_manual_feedback"] = job_label
+
+            fields_col = col_widget.container()
+            with fields_col:
+                days_input = st.text_input(
+                    f"Días programados ({job_label})",
+                    value=days_value,
+                    key=days_key,
+                    placeholder="Días separados por comas",
+                    label_visibility="collapsed",
+                    help="Días separados por comas",
+                )
+                times_input = st.text_input(
+                    f"Horas programadas ({job_label})",
+                    value=times_value,
+                    key=times_key,
+                    placeholder="Horas separadas por comas",
+                    label_visibility="collapsed",
+                    help="Horas separadas por comas",
+                )
+
 
             if cfg is None:
                 missing_config_jobs.add(job_label)
@@ -546,8 +550,6 @@ def render_pc_state_cards(
         success = sync_pc_config_updates(pc_config_df)
         if success:
             st.success("Se sincronizaron los cambios en pc_config.")
-            st.session_state["pc_config_buffer"] = {}
-            st.experimental_rerun()
         else:
             st.warning("No se detectaron cambios para sincronizar.")
 
