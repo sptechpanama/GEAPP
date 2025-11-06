@@ -15,6 +15,16 @@ st.set_page_config(page_title="Finanzas Operativas", page_icon="📊", layout="w
 import pandas as pd
 from datetime import date
 
+
+def _safe_rerun() -> None:
+    rerun = getattr(st, "rerun", None)
+    if callable(rerun):
+        rerun()
+        return
+    legacy = getattr(st, "experimental_rerun", None)
+    if callable(legacy):
+        legacy()
+
 from sheets import get_client, read_worksheet, write_worksheet
 from charts import (
     chart_bars_saldo_mensual,
@@ -1000,10 +1010,6 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         on_change=lambda: _mark_form_force_open("ing"),
     )
 
-    if st.button("Cerrar formulario", key="close_ing_form"):
-        _clear_form_force_open("ing")
-        st.experimental_rerun()
-
     submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
 
     if submitted_ing:
@@ -1044,7 +1050,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             st.cache_data.clear()
         _clear_form_force_open("ing")
         _reset_entry_state("ing")
-        st.experimental_rerun()
+        _safe_rerun()
 
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
 st.markdown("### Ingresos (tabla)")
@@ -1196,10 +1202,6 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
-    if st.button("Cerrar formulario", key="close_gas_form"):
-        _clear_form_force_open("gas")
-        st.experimental_rerun()
-
     submitted_gas = st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick")
 
     if submitted_gas:
@@ -1229,7 +1231,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             st.cache_data.clear()
         _clear_form_force_open("gas")
         _reset_entry_state("gas")
-        st.experimental_rerun()
+        _safe_rerun()
 
 # Tabla Gastos (etiqueta "Descripción" para Concepto)
 st.markdown("### Gastos (tabla)")
