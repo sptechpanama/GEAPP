@@ -894,78 +894,77 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
 # INGRESOS — Añadir ingreso (rápido)
 # ============================================================
 st.markdown("## Ingresos")
-st.markdown("### Añadir ingreso (rápido)")
+with st.expander("Añadir ingreso (rápido)", expanded=False):
+    _prepare_entry_defaults("ing")
+    client_options = st.session_state.get("catalog_clients_opts", [""])
 
-_prepare_entry_defaults("ing")
-client_options = st.session_state.get("catalog_clients_opts", [""])
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
+    with c1:
+        empresa_ing = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="ing_empresa_quick")
+    with c2:
+        fecha_nueva = st.date_input("Fecha", value=_today(), key="ing_fecha_quick")
+    with c3:
+        monto_nuevo = st.number_input("Monto", min_value=0.0, step=1.0, key="ing_monto_quick")
+    with c4:
+        por_cobrar_nuevo = st.selectbox("Por_cobrar", ["No", "Sí"], index=0, key="ing_porcob_quick")
 
-c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
-with c1:
-    empresa_ing = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="ing_empresa_quick")
-with c2:
-    fecha_nueva = st.date_input("Fecha", value=_today(), key="ing_fecha_quick")
-with c3:
-    monto_nuevo = st.number_input("Monto", min_value=0.0, step=1.0, key="ing_monto_quick")
-with c4:
-    por_cobrar_nuevo = st.selectbox("Por_cobrar", ["No", "Sí"], index=0, key="ing_porcob_quick")
+    st.selectbox(
+        "Cliente",
+        client_options,
+        key="ing_cliente_raw",
+        on_change=lambda prefix="ing": _on_client_change(prefix),
+    )
+    project_options = _build_project_options("ing")
+    if st.session_state.get("ing_proyecto_raw") not in project_options:
+        st.session_state["ing_proyecto_raw"] = project_options[0] if project_options else ""
+    st.selectbox(
+        "Proyecto",
+        project_options,
+        key="ing_proyecto_raw",
+        on_change=lambda prefix="ing": _on_project_change(prefix),
+    )
+    desc_nueva = st.text_input("Descripción", key="ing_desc_quick")
 
-st.selectbox(
-    "Cliente",
-    client_options,
-    key="ing_cliente_raw",
-    on_change=lambda prefix="ing": _on_client_change(prefix),
-)
-project_options = _build_project_options("ing")
-if st.session_state.get("ing_proyecto_raw") not in project_options:
-    st.session_state["ing_proyecto_raw"] = project_options[0] if project_options else ""
-st.selectbox(
-    "Proyecto",
-    project_options,
-    key="ing_proyecto_raw",
-    on_change=lambda prefix="ing": _on_project_change(prefix),
-)
-desc_nueva = st.text_input("Descripción", key="ing_desc_quick")
+    submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
 
-submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
+    if submitted_ing:
+        cliente_id = st.session_state.get("ing_cliente_id", "")
+        cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
+        proyecto_id = st.session_state.get("ing_proyecto_id", "")
+        linked_client_id = st.session_state.get("ing_proyecto_cliente_id")
+        linked_client_name = st.session_state.get("ing_proyecto_cliente_nombre")
+        if linked_client_id:
+            cliente_id = linked_client_id
+            cliente_nombre = linked_client_name or cliente_nombre
 
-if submitted_ing:
-    cliente_id = st.session_state.get("ing_cliente_id", "")
-    cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
-    proyecto_id = st.session_state.get("ing_proyecto_id", "")
-    linked_client_id = st.session_state.get("ing_proyecto_cliente_id")
-    linked_client_name = st.session_state.get("ing_proyecto_cliente_nombre")
-    if linked_client_id:
-        cliente_id = linked_client_id
-        cliente_nombre = linked_client_name or cliente_nombre
-
-    hoy_ts = pd.Timestamp(_today())
-    rid = uuid.uuid4().hex
-    cobrado = "No" if por_cobrar_nuevo == "Sí" else "Sí"
-    fecha_cobro = hoy_ts if cobrado == "Sí" else pd.NaT
-    nueva = {
-        COL_ROWID: rid,
-        COL_FECHA: _ts(fecha_nueva),
-        COL_MONTO: float(monto_nuevo),
-        COL_PROY: (proyecto_id or "").strip(),
-        COL_CLI_ID: (cliente_id or "").strip(),
-        COL_CLI_NOM: (cliente_nombre or "").strip(),
-        COL_EMP: (empresa_ing or EMPRESA_DEFAULT).strip(),
-        COL_DESC: (desc_nueva or "").strip(),
-        COL_CONC: (desc_nueva or "").strip(),
-        COL_POR_COB: por_cobrar_nuevo,
-        COL_COB: cobrado,
-        COL_FCOBRO: fecha_cobro,
-        COL_CAT: "",
-        COL_ESC: "Real",
-        COL_USER: _current_user(),
-    }
-    st.session_state.df_ing = pd.concat([st.session_state.df_ing, pd.DataFrame([nueva])], ignore_index=True)
-    st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
-    wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
-    if wrote:
-        st.cache_data.clear()
-    _reset_entry_state("ing")
-    st.rerun()
+        hoy_ts = pd.Timestamp(_today())
+        rid = uuid.uuid4().hex
+        cobrado = "No" if por_cobrar_nuevo == "Sí" else "Sí"
+        fecha_cobro = hoy_ts if cobrado == "Sí" else pd.NaT
+        nueva = {
+            COL_ROWID: rid,
+            COL_FECHA: _ts(fecha_nueva),
+            COL_MONTO: float(monto_nuevo),
+            COL_PROY: (proyecto_id or "").strip(),
+            COL_CLI_ID: (cliente_id or "").strip(),
+            COL_CLI_NOM: (cliente_nombre or "").strip(),
+            COL_EMP: (empresa_ing or EMPRESA_DEFAULT).strip(),
+            COL_DESC: (desc_nueva or "").strip(),
+            COL_CONC: (desc_nueva or "").strip(),
+            COL_POR_COB: por_cobrar_nuevo,
+            COL_COB: cobrado,
+            COL_FCOBRO: fecha_cobro,
+            COL_CAT: "",
+            COL_ESC: "Real",
+            COL_USER: _current_user(),
+        }
+        st.session_state.df_ing = pd.concat([st.session_state.df_ing, pd.DataFrame([nueva])], ignore_index=True)
+        st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
+        wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
+        if wrote:
+            st.cache_data.clear()
+        _reset_entry_state("ing")
+        st.rerun()
 
 
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
@@ -1030,83 +1029,82 @@ sync_cambios(
 # ============================================================
 
 st.markdown("## Gastos")
-st.markdown("### Añadir gasto (rápido)")
+with st.expander("Añadir gasto (rápido)", expanded=False):
+    _prepare_entry_defaults("gas")
+    client_options = st.session_state.get("catalog_clients_opts", [""])
 
-_prepare_entry_defaults("gas")
-client_options = st.session_state.get("catalog_clients_opts", [""])
+    g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
+    with g1:
+        empresa_g = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="gas_empresa_quick")
+    with g2:
+        fecha_g = st.date_input("Fecha", value=_today(), key="gas_fecha_quick")
+    with g3:
+        categoria_g = st.selectbox("Categoría", ["Proyectos", "Gastos fijos", "Oficina"], index=0, key="gas_categoria_quick")
+    with g4:
+        monto_g = st.number_input("Monto", min_value=0.0, step=1.0, key="gas_monto_quick")
+    with g5:
+        por_pagar_nuevo = st.selectbox("Por_pagar", ["No", "Sí"], index=0, key="gas_porpag_quick")
 
-g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
-with g1:
-    empresa_g = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="gas_empresa_quick")
-with g2:
-    fecha_g = st.date_input("Fecha", value=_today(), key="gas_fecha_quick")
-with g3:
-    categoria_g = st.selectbox("Categoría", ["Proyectos", "Gastos fijos", "Oficina"], index=0, key="gas_categoria_quick")
-with g4:
-    monto_g = st.number_input("Monto", min_value=0.0, step=1.0, key="gas_monto_quick")
-with g5:
-    por_pagar_nuevo = st.selectbox("Por_pagar", ["No", "Sí"], index=0, key="gas_porpag_quick")
+    cliente_id_g = ""
+    cliente_nombre_g = ""
+    proyecto_id_g = ""
+    if categoria_g == "Proyectos":
+        st.selectbox(
+            "Cliente",
+            client_options,
+            key="gas_cliente_raw",
+            on_change=lambda prefix="gas": _on_client_change(prefix),
+        )
+        project_options_g = _build_project_options("gas")
+        if st.session_state.get("gas_proyecto_raw") not in project_options_g:
+            st.session_state["gas_proyecto_raw"] = project_options_g[0] if project_options_g else ""
+        st.selectbox(
+            "Proyecto",
+            project_options_g,
+            key="gas_proyecto_raw",
+            on_change=lambda prefix="gas": _on_project_change(prefix),
+        )
+        cliente_id_g = st.session_state.get("gas_cliente_id", "")
+        cliente_nombre_g = st.session_state.get("gas_cliente_nombre", "")
+        proyecto_id_g = st.session_state.get("gas_proyecto_id", "")
+        linked_client_id_g = st.session_state.get("gas_proyecto_cliente_id")
+        linked_client_name_g = st.session_state.get("gas_proyecto_cliente_nombre")
+        if linked_client_id_g:
+            cliente_id_g = linked_client_id_g
+            cliente_nombre_g = linked_client_name_g or cliente_nombre_g
 
-cliente_id_g = ""
-cliente_nombre_g = ""
-proyecto_id_g = ""
-if categoria_g == "Proyectos":
-    st.selectbox(
-        "Cliente",
-        client_options,
-        key="gas_cliente_raw",
-        on_change=lambda prefix="gas": _on_client_change(prefix),
-    )
-    project_options_g = _build_project_options("gas")
-    if st.session_state.get("gas_proyecto_raw") not in project_options_g:
-        st.session_state["gas_proyecto_raw"] = project_options_g[0] if project_options_g else ""
-    st.selectbox(
-        "Proyecto",
-        project_options_g,
-        key="gas_proyecto_raw",
-        on_change=lambda prefix="gas": _on_project_change(prefix),
-    )
-    cliente_id_g = st.session_state.get("gas_cliente_id", "")
-    cliente_nombre_g = st.session_state.get("gas_cliente_nombre", "")
-    proyecto_id_g = st.session_state.get("gas_proyecto_id", "")
-    linked_client_id_g = st.session_state.get("gas_proyecto_cliente_id")
-    linked_client_name_g = st.session_state.get("gas_proyecto_cliente_nombre")
-    if linked_client_id_g:
-        cliente_id_g = linked_client_id_g
-        cliente_nombre_g = linked_client_name_g or cliente_nombre_g
+    desc_g = st.text_input("Descripción", key="gas_desc_quick")
+    prov_g = st.text_input("Proveedor", key="gas_proveedor_quick")
 
-desc_g = st.text_input("Descripción", key="gas_desc_quick")
-prov_g = st.text_input("Proveedor", key="gas_proveedor_quick")
+    submitted_gas = st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick")
 
-submitted_gas = st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick")
-
-if submitted_gas:
-    if categoria_g != "Proyectos":
-        cliente_id_g = ""
-        cliente_nombre_g = ""
-        proyecto_id_g = ""
-    nueva_g = {
-        COL_ROWID: uuid.uuid4().hex,
-        COL_FECHA: _ts(fecha_g),
-        COL_MONTO: float(monto_g),
-        COL_DESC: (desc_g or "").strip(),
-        COL_CONC: (desc_g or "").strip(),
-        COL_CAT: categoria_g,
-        COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
-        COL_POR_PAG: por_pagar_nuevo,
-        COL_PROY: (proyecto_id_g or "").strip(),
-        COL_CLI_ID: (cliente_id_g or "").strip(),
-        COL_CLI_NOM: (cliente_nombre_g or "").strip(),
-        COL_PROV: (prov_g or "").strip(),
-        COL_USER: _current_user(),
-    }
-    st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
-    st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
-    wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
-    if wrote:
-        st.cache_data.clear()
-    _reset_entry_state("gas")
-    st.rerun()
+    if submitted_gas:
+        if categoria_g != "Proyectos":
+            cliente_id_g = ""
+            cliente_nombre_g = ""
+            proyecto_id_g = ""
+        nueva_g = {
+            COL_ROWID: uuid.uuid4().hex,
+            COL_FECHA: _ts(fecha_g),
+            COL_MONTO: float(monto_g),
+            COL_DESC: (desc_g or "").strip(),
+            COL_CONC: (desc_g or "").strip(),
+            COL_CAT: categoria_g,
+            COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
+            COL_POR_PAG: por_pagar_nuevo,
+            COL_PROY: (proyecto_id_g or "").strip(),
+            COL_CLI_ID: (cliente_id_g or "").strip(),
+            COL_CLI_NOM: (cliente_nombre_g or "").strip(),
+            COL_PROV: (prov_g or "").strip(),
+            COL_USER: _current_user(),
+        }
+        st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
+        st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
+        wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
+        if wrote:
+            st.cache_data.clear()
+        _reset_entry_state("gas")
+        st.rerun()
 
 
 
