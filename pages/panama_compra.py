@@ -568,6 +568,7 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
             original_headers = list(df.columns)
 
     df.columns = df.columns.astype(str).str.strip().str.lower()
+    df = _apply_pc_config_overrides(df)  # merge cached overrides to keep recent UI edits
 
     name_col = _resolve_config_column(df, PC_CONFIG_NAME_ALIASES)
     if not name_col:
