@@ -551,156 +551,103 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
 
     client = get_gc()
     sh = client.open_by_key(sheet_id)
-    ws = sh.worksheet(PC_CONFIG_WORKSHEET)
-
-    overrides = _pc_config_overrides()
-
-    df = None
-    original_headers = None
-    if isinstance(pc_config_df, pd.DataFrame) and not pc_config_df.empty:
-        df = pc_config_df.copy()
-        original_headers = pc_config_df.attrs.get("__original_columns__")
-        if not original_headers:
-            original_headers = list(pc_config_df.columns)
-    else:
-        try:
-            fresh_df = read_worksheet(client, sheet_id, PC_CONFIG_WORKSHEET)
-        except Exception:
-            fresh_df = None
-        if isinstance(fresh_df, pd.DataFrame) and not fresh_df.empty:
-            df = fresh_df.copy()
-            original_headers = list(fresh_df.columns)
-
-    if df is None or df.empty:
-        st.warning("No fue posible sincronizar pc_config: datos base vacíos.")
+    try:
+        ws = sh.worksheet(PC_CONFIG_WORKSHEET)
+    except Exception as exc:
+        st.error(f"No se pudo acceder a la hoja pc_config: {exc}")
         return
 
-    df.columns = df.columns.astype(str).str.strip().str.lower()
-    df = _apply_pc_config_overrides(df)  # merge cached overrides to keep recent UI edits
+    try:
+        df = read_worksheet(client, sheet_id, PC_CONFIG_WORKSHEET)
+    except Exception as exc:
+        st.error(f"No se pudo leer pc_config: {exc}")
+        return
 
-    name_col = _resolve_config_column(df, PC_CONFIG_NAME_ALIASES)
+    if df is None or df.empty:
+        st.warning("pc_config está vacía; no se aplicaron cambios.")
+        return
+
+    headers = [str(c) for c in df.columns]
+    work_df = df.copy()
+    work_df.columns = [str(c).strip().lower() for c in work_df.columns]
+
+    name_col = _resolve_config_column(work_df, PC_CONFIG_NAME_ALIASES)
     if not name_col:
         st.warning("No se encontró ninguna columna equivalente a 'name' en pc_config; no se aplicaron cambios.")
         return
 
-    key_series = df[name_col].astype(str).str.strip().str.lower()
-    df["__pc_key__"] = key_series
-    df.set_index("__pc_key__", inplace=True)
+    days_col = _resolve_config_column(work_df, PC_CONFIG_DAYS_ALIASES)
+    times_col = _resolve_config_column(work_df, PC_CONFIG_TIMES_ALIASES)
 
-    days_col = _resolve_config_column(df, PC_CONFIG_DAYS_ALIASES)
-    times_col = _resolve_config_column(df, PC_CONFIG_TIMES_ALIASES)
-
-    # Fusiona todos los cambios pendientes sobre el DataFrame más reciente
-    now = time.time()
-    any_written = False
-    for entry in pending:
-        job_key = _normalize_job_key(entry.get("key") or entry.get("name"))
-        if not job_key or job_key not in df.index:
-            continue
-        if entry.get("name"):
-            df.at[job_key, name_col] = _sanitize_config_value(entry["name"])
-        if days_col and "days" in entry and entry["days"] is not None:
-            df.at[job_key, days_col] = _canonicalize_schedule_text(entry["days"])
-        if times_col and "times" in entry and entry["times"] is not None:
-            df.at[job_key, times_col] = _canonicalize_schedule_text(entry["times"])
-
-        # Actualiza el override local para mantener la UI sincronizada
-        override_entry = overrides.setdefault(job_key, {})
-        override_entry["ts"] = now
-        override_entry["name"] = _sanitize_config_value(df.at[job_key, name_col])
-        if days_col and days_col in df.columns:
-            override_entry["days"] = _canonicalize_schedule_text(df.at[job_key, days_col])
-        if times_col and times_col in df.columns:
-            override_entry["times"] = _canonicalize_schedule_text(df.at[job_key, times_col])
-        override_entry["pending"] = True
-        any_written = True
-
-    if not any_written:
-        st.warning("No se identificaron filas validas en pc_config para actualizar.")
-        return
-
-    def _column_index(headers: list, colname: str | None) -> int | None:
-        if not colname:
+    def _column_index(lower_name: str | None) -> int | None:
+        if not lower_name:
             return None
-        target = str(colname).strip().lower()
+        target = lower_name.strip().lower()
         for idx, header in enumerate(headers, start=1):
             if str(header).strip().lower() == target:
                 return idx
         return None
 
-    def _column_letter(col_idx: int) -> str:
-        """Convierte índice (1-based) a referencia de columna estilo Excel."""
-        out = []
-        while col_idx > 0:
-            col_idx, rem = divmod(col_idx - 1, 26)
-            out.append(chr(65 + rem))
-        return "".join(reversed(out))
+    col_idx_days = _column_index(days_col)
+    col_idx_times = _column_index(times_col)
 
-    target_headers = original_headers or list(df.columns)
-    col_idx_days = _column_index(target_headers, days_col)
-    col_idx_times = _column_index(target_headers, times_col)
+    overrides = _pc_config_overrides()
+    missing_jobs: list[str] = []
+    updated_any = False
+    now = time.time()
 
-    batch_data: list[dict[str, object]] = []
+    name_series = work_df[name_col].astype(str).str.strip().str.lower()
 
-    for entry in pending:
-        job_key = _normalize_job_key(entry.get("key") or entry.get("name"))
-        if not job_key or job_key not in df.index:
-            continue
-
-        loc = df.index.get_loc(job_key)
-        if isinstance(loc, slice):
-            pos = loc.start
-        elif isinstance(loc, (list, tuple)):
-            pos = loc[0]
-        else:
-            pos = int(loc)
-        row_number = pos + 2  # +1 header, +1 for 1-based index
-
-        if col_idx_days:
-            target_days = df.at[job_key, days_col] if days_col else ""
-            batch_data.append(
-                {
-                    "range": f"{_column_letter(col_idx_days)}{row_number}",
-                    "values": [[target_days]],
-                }
-            )
-        if col_idx_times:
-            target_times = df.at[job_key, times_col] if times_col else ""
-            batch_data.append(
-                {
-                    "range": f"{_column_letter(col_idx_times)}{row_number}",
-                    "values": [[target_times]],
-                }
-            )
-
-    if not batch_data:
-        st.warning("No se identificaron celdas para actualizar en pc_config.")
-        return
-
-    sheet_title = ws.title
-    for item in batch_data:
-        item["range"] = f"{sheet_title}!{item['range']}"
-
-    try:
-        sh.values_batch_update(
-            {
-                "valueInputOption": "USER_ENTERED",
-                "data": batch_data,
-            }
-        )
-    except Exception as exc:
-        st.error(f"No se pudo sincronizar pc_config: {exc}")
-        return
-
-    # Marca los overrides como no pendientes
     for entry in pending:
         job_key = _normalize_job_key(entry.get("key") or entry.get("name"))
         if not job_key:
             continue
-        override_entry = overrides.get(job_key)
-        if override_entry is not None:
-            override_entry["pending"] = False
-            override_entry["ts"] = now
+
+        mask = name_series == job_key
+        if not mask.any():
+            missing_jobs.append(job_key)
+            continue
+
+        pos = mask[mask].index[0]
+        row_number = int(pos) + 2  # +1 header row, +1 porque DataFrame inicia en 0
+
+        override_entry = overrides.setdefault(job_key, {})
+        override_entry["name"] = _sanitize_config_value(work_df.at[pos, name_col])
+
+        if col_idx_days and "days" in entry and entry["days"] is not None:
+            value = _canonicalize_schedule_text(entry["days"])
+            try:
+                ws.update_cell(row_number, col_idx_days, value)
+            except Exception as exc:
+                st.error(f"No se pudo actualizar los días para '{job_key}': {exc}")
+                return
+            work_df.at[pos, days_col] = value
+            override_entry["days"] = value
+            updated_any = True
+
+        if col_idx_times and "times" in entry and entry["times"] is not None:
+            value = _canonicalize_schedule_text(entry["times"])
+            try:
+                ws.update_cell(row_number, col_idx_times, value)
+            except Exception as exc:
+                st.error(f"No se pudo actualizar las horas para '{job_key}': {exc}")
+                return
+            work_df.at[pos, times_col] = value
+            override_entry["times"] = value
+            updated_any = True
+
+        override_entry["pending"] = False
+        override_entry["ts"] = now
+
+    if missing_jobs:
+        st.warning(
+            "No se encontraron filas en pc_config para: "
+            + ", ".join(sorted(missing_jobs))
+        )
+
+    if not updated_any:
+        st.warning("No se identificaron celdas válidas para actualizar en pc_config.")
+        return
 
     load_pc_config.clear()
 
