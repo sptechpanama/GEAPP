@@ -106,6 +106,20 @@ def _sanitize_config_value(value) -> str:
     return str(value).strip()
 
 
+def _canonicalize_schedule_text(value: str) -> str:
+    """
+    Normaliza listas separadas por comas/semicolons a un formato consistente.
+    Mantiene el orden de entrada y elimina espacios duplicados.
+    """
+    text = _sanitize_config_value(value)
+    if not text:
+        return ""
+    parts = [p.strip() for p in re.split(r"[;,]+", text) if p.strip()]
+    if not parts:
+        return ""
+    return ", ".join(parts)
+
+
 def _apply_pc_config_overrides(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -138,12 +152,12 @@ def _apply_pc_config_overrides(df: pd.DataFrame) -> pd.DataFrame:
         row_index = mask[mask].index[0]
 
         if days_column and "days" in payload:
-            desired_value = _sanitize_config_value(payload["days"])
+            desired_value = _canonicalize_schedule_text(payload["days"])
             work_df.at[row_index, days_column] = desired_value
             payload["days"] = desired_value
 
         if times_column and "times" in payload:
-            desired_value = _sanitize_config_value(payload["times"])
+            desired_value = _canonicalize_schedule_text(payload["times"])
             work_df.at[row_index, times_column] = desired_value
             payload["times"] = desired_value
 
@@ -407,12 +421,12 @@ def render_pc_state_cards(
             days_key = f"pc_days_{job_raw.lower()}{key_suffix}"
             times_key = f"pc_times_{job_raw.lower()}{key_suffix}"
             days_value = (
-                _sanitize_config_value(cfg.get(days_col, ""))
+                _canonicalize_schedule_text(cfg.get(days_col, ""))
                 if cfg is not None and days_col
                 else ""
             )
             times_value = (
-                _sanitize_config_value(cfg.get(times_col, ""))
+                _canonicalize_schedule_text(cfg.get(times_col, ""))
                 if cfg is not None and times_col
                 else ""
             )
@@ -464,8 +478,8 @@ def render_pc_state_cards(
             payload = {"key": job_key, "name": cfg_name_value}
             has_change = False
 
-            cleaned_days = _sanitize_config_value(days_input) if days_col else ""
-            cleaned_times = _sanitize_config_value(times_input) if times_col else ""
+            cleaned_days = _canonicalize_schedule_text(days_input) if days_col else ""
+            cleaned_times = _canonicalize_schedule_text(times_input) if times_col else ""
 
             if days_col and cleaned_days != days_value:
                 has_change = True
@@ -525,12 +539,9 @@ setTimeout(function() {{
 
 def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
     """Escribe en la hoja de configuración cualquier cambio realizado desde la UI."""
+
     pending = st.session_state.pop("pc_config_pending_updates", None)
     if not pending:
-        return
-
-    if pc_config_df is None or pc_config_df.empty:
-        st.warning("No fue posible sincronizar pc_config: datos base vacíos.")
         return
 
     sheet_id = _pc_config_sheet_id()
@@ -542,24 +553,27 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
     sh = client.open_by_key(sheet_id)
     ws = sh.worksheet(PC_CONFIG_WORKSHEET)
 
-    fresh_df = None
-    try:
-        fresh_df = read_worksheet(client, sheet_id, PC_CONFIG_WORKSHEET)
-    except Exception:
-        fresh_df = None
+    overrides = _pc_config_overrides()
 
-    if isinstance(fresh_df, pd.DataFrame) and not fresh_df.empty:
-        df = fresh_df.copy()
-        original_headers = list(fresh_df.columns)
-    else:
+    df = None
+    original_headers = None
+    if isinstance(pc_config_df, pd.DataFrame) and not pc_config_df.empty:
         df = pc_config_df.copy()
-        original_headers = (
-            pc_config_df.attrs.get("__original_columns__")
-            if isinstance(pc_config_df, pd.DataFrame)
-            else None
-        )
+        original_headers = pc_config_df.attrs.get("__original_columns__")
         if not original_headers:
-            original_headers = list(df.columns)
+            original_headers = list(pc_config_df.columns)
+    else:
+        try:
+            fresh_df = read_worksheet(client, sheet_id, PC_CONFIG_WORKSHEET)
+        except Exception:
+            fresh_df = None
+        if isinstance(fresh_df, pd.DataFrame) and not fresh_df.empty:
+            df = fresh_df.copy()
+            original_headers = list(fresh_df.columns)
+
+    if df is None or df.empty:
+        st.warning("No fue posible sincronizar pc_config: datos base vacíos.")
+        return
 
     df.columns = df.columns.astype(str).str.strip().str.lower()
     df = _apply_pc_config_overrides(df)  # merge cached overrides to keep recent UI edits
@@ -576,51 +590,33 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
     days_col = _resolve_config_column(df, PC_CONFIG_DAYS_ALIASES)
     times_col = _resolve_config_column(df, PC_CONFIG_TIMES_ALIASES)
 
-    merged: dict[str, dict[str, str]] = {}
+    # Fusiona todos los cambios pendientes sobre el DataFrame más reciente
+    now = time.time()
+    any_written = False
     for entry in pending:
         job_key = _normalize_job_key(entry.get("key") or entry.get("name"))
-        if not job_key:
+        if not job_key or job_key not in df.index:
             continue
-        merged_entry = merged.setdefault(job_key, {})
         if entry.get("name"):
-            merged_entry["name"] = _sanitize_config_value(entry["name"])
-        if "days" in entry and entry["days"] is not None:
-            merged_entry["days"] = _sanitize_config_value(entry["days"])
-        if "times" in entry and entry["times"] is not None:
-            merged_entry["times"] = _sanitize_config_value(entry["times"])
+            df.at[job_key, name_col] = _sanitize_config_value(entry["name"])
+        if days_col and "days" in entry and entry["days"] is not None:
+            df.at[job_key, days_col] = _canonicalize_schedule_text(entry["days"])
+        if times_col and "times" in entry and entry["times"] is not None:
+            df.at[job_key, times_col] = _canonicalize_schedule_text(entry["times"])
 
-    if not merged:
-        return
-
-    overrides = _pc_config_overrides()
-    applied = 0
-    now = time.time()
-
-    for job_key, values in merged.items():
-        if job_key not in df.index:
-            continue
-
-        if "name" in values and values["name"]:
-            df.at[job_key, name_col] = values["name"]
-
-        if days_col and "days" in values:
-            df.at[job_key, days_col] = values["days"]
-        if times_col and "times" in values:
-            df.at[job_key, times_col] = values["times"]
-
+        # Actualiza el override local para mantener la UI sincronizada
         override_entry = overrides.setdefault(job_key, {})
         override_entry["ts"] = now
-        override_entry["name"] = values.get("name") or _sanitize_config_value(df.at[job_key, name_col])
+        override_entry["name"] = _sanitize_config_value(df.at[job_key, name_col])
         if days_col and days_col in df.columns:
-            override_entry["days"] = _sanitize_config_value(df.at[job_key, days_col])
+            override_entry["days"] = _canonicalize_schedule_text(df.at[job_key, days_col])
         if times_col and times_col in df.columns:
-            override_entry["times"] = _sanitize_config_value(df.at[job_key, times_col])
+            override_entry["times"] = _canonicalize_schedule_text(df.at[job_key, times_col])
         override_entry["pending"] = True
+        any_written = True
 
-        applied += 1
-
-    if not applied:
-        st.warning("No se identificaron filas válidas en pc_config para actualizar.")
+    if not any_written:
+        st.warning("No se identificaron filas validas en pc_config para actualizar.")
         return
 
     df.reset_index(drop=False, inplace=True)
@@ -638,11 +634,15 @@ def sync_pc_config_updates(pc_config_df: pd.DataFrame | None) -> None:
         st.error(f"No se pudo sincronizar pc_config: {exc}")
         return
 
-    for job_key in merged.keys():
-        entry = overrides.get(job_key)
-        if entry is not None:
-            entry["pending"] = False
-            entry["ts"] = now
+    # Marca los overrides como no pendientes
+    for entry in pending:
+        job_key = _normalize_job_key(entry.get("key") or entry.get("name"))
+        if not job_key:
+            continue
+        override_entry = overrides.get(job_key)
+        if override_entry is not None:
+            override_entry["pending"] = False
+            override_entry["ts"] = now
 
     load_pc_config.clear()
 
