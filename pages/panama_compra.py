@@ -1671,12 +1671,12 @@ with st.expander(
 ):
     render_panamacompra_db_panel()
     render_drive_excel_panel(
-        "Excel todas_las_fichas.xlsx",
+        "Excel oferentes_activos.xlsx",
         LOCAL_TODAS_LAS_FICHAS,
         "todas_las_fichas",
     )
     render_drive_excel_panel(
-        "Excel oferentes_activos.xlsx",
+        "Excel todas_las_fichas.xlsx",
         LOCAL_OFERENTES_ACTIVOS,
         "oferentes_activos",
     )
