@@ -1451,7 +1451,7 @@ def render_panamacompra_db_panel() -> None:
     )
 
     limit = st.slider(
-        "L��mite de filas a mostrar",
+        "Límite de filas a mostrar",
         min_value=100,
         max_value=5000,
         value=1000,
