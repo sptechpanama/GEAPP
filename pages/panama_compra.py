@@ -1359,12 +1359,8 @@ def render_df(
             if metric.get("count") is not None:
                 label = f"{label}\n{metric['count']}"
 
-            prefix = "✅ " if active_metric == metric.get("filter") else ""
-            if metric["key"] == "total" and active_metric is None:
-                prefix = "✅ "
-
             clicked = st.button(
-                prefix + label,
+                label,
                 key=keyp + f"metric_btn_{metric['key']}",
                 use_container_width=True,
             )
@@ -1670,13 +1666,14 @@ with st.expander(
     "Base de datos de actos públicos, fichas y oferentes", expanded=False
 ):
     render_panamacompra_db_panel()
-    render_drive_excel_panel(
-        "Excel oferentes_activos.xlsx",
-        LOCAL_TODAS_LAS_FICHAS,
-        "todas_las_fichas",
-    )
-    render_drive_excel_panel(
-        "Excel todas_las_fichas.xlsx",
+        render_drive_excel_panel(
+        "Fichas Técnicas Actualizadas",
         LOCAL_OFERENTES_ACTIVOS,
         "oferentes_activos",
     )
+    render_drive_excel_panel(
+        "Oferentes Activos con Criterio Técnico",
+        LOCAL_TODAS_LAS_FICHAS,
+        "todas_las_fichas",
+    )
+
