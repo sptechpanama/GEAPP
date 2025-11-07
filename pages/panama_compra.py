@@ -12,6 +12,7 @@ from datetime import date, timedelta, datetime, timezone
 
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
+from services.panamacompra_drive import ensure_local_panamacompra_db
 
 
 ROW_ID_COL = "__row__"
@@ -22,6 +23,9 @@ CHECKBOX_FLAG_NAMES = {
     "descarte",
 }
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
+
+# Asegura que la base panamacompra.db esté disponible antes de usarla.
+ensure_local_panamacompra_db()
 
 
 def _require_authentication() -> None:

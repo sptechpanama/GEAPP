@@ -50,10 +50,15 @@ def _load_credentials(subject: str | None = None):
     )
 
 
+def get_service_account_credentials(subject: str | None = None):
+    """Expone las credenciales de la cuenta de servicio para otros módulos."""
+    return _load_credentials(subject=subject)
+
+
 def get_drive_delegated():
     """Retorna un cliente de Drive actuando como el usuario de dominio."""
     try:
-        creds = _load_credentials(subject=DOMAIN_USER)
+        creds = get_service_account_credentials(subject=DOMAIN_USER)
         drive = build("drive", "v3", credentials=creds)
         user = drive.about().get(fields="user").execute().get("user", {}).get("emailAddress")
         if user:

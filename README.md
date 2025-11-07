@@ -35,6 +35,7 @@ DRIVE_BACKUP_FOLDER_ID = "..."
 BACKUP_PREFIX = "Finanzas Backup"
 BACKUP_EVERY_DAYS = 3
 BACKUP_KEEP_LAST = 15
+DRIVE_PANAMACOMPRA_FILE_ID = "1TQYzsflXlE-5OwYKmTx0bTZ0rD9Ayivs"
 ```
 
 ### Variables de entorno (opcionales)
@@ -42,6 +43,7 @@ BACKUP_KEEP_LAST = 15
 - `FINAPP_BASE_PATH`: ruta base para archivos auxiliares.
 - `FINAPP_EXCEL_FICHAS`: ruta al Excel opcional de fichas.
 - `FINAPP_DB_PATH`: ruta a la base SQLite `panamacompra.db`.
+- `FINAPP_DRIVE_DB_FILE_ID`: ID del archivo en Drive usado para sincronizar `panamacompra.db`.
 - `FINAPP_SERVICE_ACCOUNT_FILE`: ruta a un JSON local de service account (se usa si no hay secrets).
 - `FINAPP_DOMAIN_USER`: cuenta delegada para Drive (por defecto `soporte@sptechpanama.com`).
 
@@ -56,5 +58,6 @@ BACKUP_KEEP_LAST = 15
 ## Notas adicionales
 
 - El archivo `.gitignore` bloquea cualquier credencial local (`.streamlit/secrets.toml`, `*.json`).
+- Si `DRIVE_PANAMACOMPRA_FILE_ID` está configurado, la app descargará automáticamente `panamacompra.db` desde Drive y usará la copia local indicada por `FINAPP_DB_PATH` (o el valor por defecto en la raíz del repo).
 - Para desarrollo colaborativo se puede usar el contenedor definido en `.devcontainer/`.
 - Si aparecen advertencias de permisos al respaldar, verifica `DRIVE_BACKUP_FOLDER_ID` y la delegación de la cuenta de servicio.
