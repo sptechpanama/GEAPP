@@ -1,4 +1,4 @@
-"""Sincroniza la base panamacompra.db desde Google Drive."""
+"""Sincroniza archivos críticos desde Google Drive (panamacompra y planillas auxiliares)."""
 
 from __future__ import annotations
 
@@ -12,13 +12,23 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-from core.config import DB_PATH
+from core.config import APP_ROOT, DB_PATH
 from services.auth_drive import DOMAIN_USER, get_service_account_credentials
 
 _ENV_FILE_ID = "FINAPP_DRIVE_DB_FILE_ID"
 _SECRETS_SECTION = "app"
 _SECRETS_KEY = "DRIVE_PANAMACOMPRA_FILE_ID"
 _DEFAULT_FILE_ID = "1TQYzsflXlE-5OwYKmTx0bTZ0rD9Ayivs"
+
+_ENV_TODAS_FICHAS = "FINAPP_DRIVE_TODAS_FICHAS_ID"
+_SECRET_TODAS_FICHAS = "DRIVE_TODAS_LAS_FICHAS_FILE_ID"
+_DEFAULT_TODAS_FICHAS_ID = "1AxQPm7koNkgV1txDdWpMA9SK2CfyY23Z"
+_TODAS_FICHAS_PATH = APP_ROOT / "todas_las_fichas.xlsx"
+
+_ENV_OFERENTES = "FINAPP_DRIVE_OFERENTES_ID"
+_SECRET_OFERENTES = "DRIVE_OFERENTES_ACTIVOS_FILE_ID"
+_DEFAULT_OFERENTES_ID = "18thVq_8AqQ7BvnRd3V5sYFFNccXWWj7E"
+_OFERENTES_PATH = APP_ROOT / "oferentes_activos.xlsx"
 
 
 def _notify(kind: str, message: str) -> None:
@@ -32,17 +42,17 @@ def _notify(kind: str, message: str) -> None:
     print(f"[panamacompra-db][{kind.upper()}] {message}")
 
 
-def _resolve_file_id() -> Optional[str]:
-    env_value = os.environ.get(_ENV_FILE_ID)
+def _resolve_file_id(env_var: str, secret_key: str, default_value: Optional[str]) -> Optional[str]:
+    env_value = os.environ.get(env_var)
     if env_value:
         return env_value.strip()
     try:
         app_conf = st.secrets.get(_SECRETS_SECTION, {})
-        secret_value = app_conf.get(_SECRETS_KEY)
+        secret_value = app_conf.get(secret_key)
         return secret_value.strip() if secret_value else None
     except Exception:
         pass
-    return _DEFAULT_FILE_ID
+    return default_value
 
 
 def _build_drive_client():
@@ -82,26 +92,34 @@ def _download_file(drive, file_id: str, dest: Path) -> None:
                 break
 
 
-def ensure_local_panamacompra_db(force: bool = False) -> Optional[Path]:
+def _ensure_drive_file(
+    *,
+    dest: Path,
+    env_var: str,
+    secret_key: str,
+    default_id: Optional[str],
+    label: str,
+    force: bool = False,
+) -> Optional[Path]:
     """
-    Descarga la base desde Drive si no existe o esta desactualizada.
-    Retorna la ruta local (aunque la descarga falle) para que la UI decida que hacer.
+    Descarga un archivo desde Drive si no existe o está desactualizado.
+    Retorna la ruta aun cuando la descarga falle, para que el llamador decida qué hacer.
     """
-    dest = Path(DB_PATH)
-    file_id = _resolve_file_id()
+    dest = Path(dest)
+    file_id = _resolve_file_id(env_var, secret_key, default_id)
     if not file_id:
         return dest if dest.exists() else None
 
     try:
         drive = _build_drive_client()
     except Exception as exc:
-        _notify("error", f"No se pudo autenticar contra Drive: {exc}")
+        _notify("error", f"No se pudo autenticar contra Drive para '{label}': {exc}")
         return dest if dest.exists() else None
 
     try:
         metadata = _fetch_metadata(drive, file_id)
     except HttpError as exc:
-        _notify("error", f"No se pudo leer la metadata de panamacompra.db en Drive: {exc}")
+        _notify("error", f"No se pudo leer la metadata de '{label}' en Drive: {exc}")
         return dest if dest.exists() else None
 
     remote_ts = _parse_remote_ts(metadata.get("modifiedTime"))
@@ -118,11 +136,48 @@ def ensure_local_panamacompra_db(force: bool = False) -> Optional[Path]:
         if remote_ts:
             ts = remote_ts.timestamp()
             os.utime(dest, (ts, ts))
-        _notify("info", "Descargamos panamacompra.db desde Google Drive.")
+        _notify("info", f"Descargamos '{label}' desde Google Drive.")
     except Exception as exc:
-        _notify("error", f"No se pudo descargar panamacompra.db desde Drive: {exc}")
+        _notify("error", f"No se pudo descargar '{label}' desde Drive: {exc}")
 
     return dest if dest.exists() else None
 
 
-__all__ = ["ensure_local_panamacompra_db"]
+def ensure_local_panamacompra_db(force: bool = False) -> Optional[Path]:
+    return _ensure_drive_file(
+        dest=DB_PATH,
+        env_var=_ENV_FILE_ID,
+        secret_key=_SECRETS_KEY,
+        default_id=_DEFAULT_FILE_ID,
+        label="panamacompra.db",
+        force=force,
+    )
+
+
+def ensure_drive_todas_las_fichas(force: bool = False) -> Optional[Path]:
+    return _ensure_drive_file(
+        dest=_TODAS_FICHAS_PATH,
+        env_var=_ENV_TODAS_FICHAS,
+        secret_key=_SECRET_TODAS_FICHAS,
+        default_id=_DEFAULT_TODAS_FICHAS_ID,
+        label="todas_las_fichas.xlsx",
+        force=force,
+    )
+
+
+def ensure_drive_oferentes_activos(force: bool = False) -> Optional[Path]:
+    return _ensure_drive_file(
+        dest=_OFERENTES_PATH,
+        env_var=_ENV_OFERENTES,
+        secret_key=_SECRET_OFERENTES,
+        default_id=_DEFAULT_OFERENTES_ID,
+        label="oferentes_activos.xlsx",
+        force=force,
+    )
+
+
+__all__ = [
+    "ensure_local_panamacompra_db",
+    "ensure_drive_todas_las_fichas",
+    "ensure_drive_oferentes_activos",
+]
