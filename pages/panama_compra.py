@@ -61,6 +61,7 @@ HEADER_ALIASES = {
     "job_label": {"job_label", "job_desc", "descripcion", "descripción"},
     "requested_by": {"requested_by", "user", "usuario", "solicitado_por"},
     "note": {"note", "nota", "comentario", "observacion", "observación"},
+    "status": {"status", "estado"},
 }
 
 
@@ -242,6 +243,7 @@ def append_manual_request(job_name: str, job_label: str, note: str) -> bool:
         "job_label": job_label,
         "requested_by": _current_user(),
         "note": note.strip(),
+        "status": "pending",
     }
 
     def _value_for_header(header: str) -> str:
@@ -252,12 +254,50 @@ def append_manual_request(job_name: str, job_label: str, note: str) -> bool:
         return payload_map.get(normalized, "")
 
     row = [_value_for_header(header) for header in cleaned_headers]
+    status_idx = None
+    for idx, header in enumerate(cleaned_headers, start=1):
+        header_norm = header.strip().lower()
+        if header_norm in {"status", "estado"}:
+            status_idx = idx
+            break
 
     try:
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        append_result = ws.append_row(row, value_input_option="USER_ENTERED")
     except Exception as exc:
         st.error(f"No se pudo registrar la ejecución manual: {exc}")
         return False
+
+    if status_idx:
+        updated_range = ""
+        try:
+            updated_range = (
+                append_result.get("updates", {}).get("updatedRange", "")
+                if isinstance(append_result, dict)
+                else ""
+            )
+        except AttributeError:
+            updated_range = ""
+
+        row_number = None
+        if updated_range:
+            try:
+                range_bounds = updated_range.split("!")[-1]
+                start_cell = range_bounds.split(":")[0]
+                row_number = int("".join(filter(str.isdigit, start_cell)))
+            except Exception:
+                row_number = None
+
+        if not row_number:
+            try:
+                row_number = len(ws.col_values(1))
+            except Exception:
+                row_number = None
+
+        if row_number:
+            try:
+                ws.update_cell(row_number, status_idx, payload_map.get("status", "pending"))
+            except Exception as exc:
+                st.warning(f"No se pudo actualizar el estado 'pending' en la fila {row_number}: {exc}")
 
     return True
 
