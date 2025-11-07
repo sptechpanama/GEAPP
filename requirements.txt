@@ -1,5 +1,6 @@
 streamlit>=1.38.0            # Framework de UI web en Python
 pandas>=2.2.2               # Manejo de DataFrames y fechas
+openpyxl>=3.1.5              # Lectura de Excel local
 altair>=5.0.0                # Graficación declarativa
 google-api-python-client==2.149.0
 google-auth==2.33.0
@@ -13,4 +14,5 @@ PyYAML>=6.0
 streamlit-authenticator==0.3.2
 bcrypt>=4.1.2
 PyYAML>=6.0
+
 
