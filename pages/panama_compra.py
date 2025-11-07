@@ -1666,14 +1666,14 @@ with st.expander(
     "Base de datos de actos públicos, fichas y oferentes", expanded=False
 ):
     render_panamacompra_db_panel()
-        render_drive_excel_panel(
+    render_drive_excel_panel(
         "Fichas Técnicas Actualizadas",
-        LOCAL_OFERENTES_ACTIVOS,
-        "oferentes_activos",
+        LOCAL_TODAS_LAS_FICHAS,
+        "todas_las_fichas",
     )
     render_drive_excel_panel(
         "Oferentes Activos con Criterio Técnico",
-        LOCAL_TODAS_LAS_FICHAS,
-        "todas_las_fichas",
+        LOCAL_OFERENTES_ACTIVOS,
+        "oferentes_activos",
     )
 
