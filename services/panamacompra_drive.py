@@ -18,6 +18,7 @@ from services.auth_drive import DOMAIN_USER, get_service_account_credentials
 _ENV_FILE_ID = "FINAPP_DRIVE_DB_FILE_ID"
 _SECRETS_SECTION = "app"
 _SECRETS_KEY = "DRIVE_PANAMACOMPRA_FILE_ID"
+_DEFAULT_FILE_ID = "1TQYzsflXlE-5OwYKmTx0bTZ0rD9Ayivs"
 
 
 def _notify(kind: str, message: str) -> None:
@@ -40,7 +41,8 @@ def _resolve_file_id() -> Optional[str]:
         secret_value = app_conf.get(_SECRETS_KEY)
         return secret_value.strip() if secret_value else None
     except Exception:
-        return None
+        pass
+    return _DEFAULT_FILE_ID
 
 
 def _build_drive_client():
