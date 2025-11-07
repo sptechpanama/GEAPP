@@ -68,7 +68,7 @@ HEADER_ALIASES = {
     "status": {"status", "estado"},
 }
 
-FALLBACK_DB_PATH = Path(r"C:\Users\rodri\cl\panamacompra.db")
+FALLBACK_DB_PATH = Path(r"C:\Users\rodri\GEAPP\panamacompra.db")
 
 
 def _candidate_db_paths() -> list[Path]:
@@ -1407,7 +1407,7 @@ def render_panamacompra_db_panel() -> None:
     if not db_path.exists():
         st.warning(
             "No pudimos abrir el archivo. Verifica que la ruta "
-            "`C:\\Users\\rodri\\cl\\panamacompra.db` existe o define `FINAPP_DB_PATH` "
+            "`C:\\Users\\rodri\\GEAPP\\panamacompra.db` existe o define `FINAPP_DB_PATH` "
             "apuntando a una copia local."
         )
         return
