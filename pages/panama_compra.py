@@ -30,8 +30,8 @@ TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
 
 # Asegura que los archivos críticos locales estén sincronizados antes de usarlos.
 ensure_local_panamacompra_db()
-ensure_drive_todas_las_fichas()
-ensure_drive_oferentes_activos()
+LOCAL_TODAS_LAS_FICHAS = ensure_drive_todas_las_fichas()
+LOCAL_OFERENTES_ACTIVOS = ensure_drive_oferentes_activos()
 
 
 def _require_authentication() -> None:
@@ -138,6 +138,14 @@ def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFra
     query = f"SELECT * FROM {identifier} LIMIT {limit}"
     with _connect_sqlite(db_path) as conn:
         return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=300)
+def load_excel_preview(file_path: str, limit: int) -> tuple[pd.DataFrame, int]:
+    limit = max(1, int(limit))
+    df = pd.read_excel(file_path)
+    total_rows = len(df.index)
+    return df.head(limit), total_rows
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -1478,6 +1486,50 @@ def render_panamacompra_db_panel() -> None:
         caption += f" Total en `{selected_table}`: {total_rows:,}."
     st.caption(caption)
 
+
+def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str) -> None:
+    """Muestra una vista previa de un archivo Excel sincronizado desde Drive."""
+    st.divider()
+    st.subheader(title)
+
+    if not file_path:
+        st.info("No hay rutas configuradas para este archivo.")
+        return
+
+    file_path = Path(file_path)
+    st.caption(f"Origen configurado: `{file_path}`")
+
+    if not file_path.exists():
+        st.warning(
+            "No pudimos abrir el archivo. Verifica que la sincronización desde Drive "
+            "esté funcionando o actualiza los secrets con el ID correcto."
+        )
+        return
+
+    limit = st.slider(
+        "Límite de filas a mostrar",
+        min_value=100,
+        max_value=5000,
+        value=1000,
+        step=100,
+        key=f"{key_prefix}_excel_limit",
+    )
+
+    try:
+        preview_df, total_rows = load_excel_preview(str(file_path), limit)
+    except Exception as exc:
+        st.error(f"No pudimos leer `{file_path.name}`: {exc}")
+        return
+
+    if preview_df.empty:
+        st.info("El archivo no contiene datos visibles.")
+        return
+
+    st.dataframe(preview_df, use_container_width=True, height=520)
+    st.caption(
+        f"Mostrando hasta {limit} filas. Total en el archivo: {total_rows:,}."
+    )
+
 # ---- UI: pestañas de categorías + desplegable de hojas ----
 pc_state_df = load_pc_state()
 pc_config_df = load_pc_config()
@@ -1517,3 +1569,13 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
 render_panamacompra_db_panel()
+render_drive_excel_panel(
+    "Excel todas_las_fichas.xlsx",
+    LOCAL_TODAS_LAS_FICHAS,
+    "todas_las_fichas",
+)
+render_drive_excel_panel(
+    "Excel oferentes_activos.xlsx",
+    LOCAL_OFERENTES_ACTIVOS,
+    "oferentes_activos",
+)
