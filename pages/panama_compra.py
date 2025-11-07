@@ -1580,8 +1580,6 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
         return
 
     file_path = Path(file_path)
-    st.caption(f"Origen configurado: `{file_path}`")
-
     if not file_path.exists():
         st.warning(
             "No pudimos abrir el archivo. Verifica que la sincronización desde Drive "
@@ -1605,13 +1603,6 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
         placeholder="Ingresa texto a buscar…",
         key=f"{key_prefix}_search",
     )
-    date_range = st.date_input(
-        "Rango de fechas",
-        value=_default_date_range(),
-        min_value=DEFAULT_DATE_START,
-        max_value=date.today(),
-        key=f"{key_prefix}_date_range",
-    )
 
     max_limit = total_rows
     min_limit = max(1, min(100, max_limit))
@@ -1627,7 +1618,7 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
     )
 
     preview_df = df.head(limit)
-    filtered_df = _filter_dataframe(preview_df, search_text, date_range)
+    filtered_df = _filter_dataframe(preview_df, search_text, None)
 
     if filtered_df.empty:
         st.info("No hay filas que coincidan con los filtros aplicados.")
@@ -1680,12 +1671,12 @@ with st.expander(
 ):
     render_panamacompra_db_panel()
     render_drive_excel_panel(
-        "Excel oferentes_activos.xlsx",
-        LOCAL_OFERENTES_ACTIVOS,
-        "oferentes_activos",
-    )
-    render_drive_excel_panel(
         "Excel todas_las_fichas.xlsx",
         LOCAL_TODAS_LAS_FICHAS,
         "todas_las_fichas",
+    )
+    render_drive_excel_panel(
+        "Excel oferentes_activos.xlsx",
+        LOCAL_OFERENTES_ACTIVOS,
+        "oferentes_activos",
     )
