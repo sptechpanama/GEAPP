@@ -141,11 +141,8 @@ def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFra
 
 
 @st.cache_data(ttl=300)
-def load_excel_preview(file_path: str, limit: int) -> tuple[pd.DataFrame, int]:
-    limit = max(1, int(limit))
-    df = pd.read_excel(file_path)
-    total_rows = len(df.index)
-    return df.head(limit), total_rows
+def load_excel_file(file_path: str) -> pd.DataFrame:
+    return pd.read_excel(file_path)
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -1450,13 +1447,26 @@ def render_panamacompra_db_panel() -> None:
         key="pc_db_table_selector",
     )
 
+    total_rows: int | None = None
+    try:
+        total_rows = count_sqlite_rows(db_path_str, selected_table)
+    except sqlite3.OperationalError:
+        pass
+    except Exception:
+        pass
+
+    max_limit = total_rows if total_rows and total_rows > 0 else 5000
+    max_limit = max(1, max_limit)
+    min_limit = max(1, min(100, max_limit))
+    default_limit = max(min_limit, min(1000, max_limit))
+
     limit = st.slider(
         "Límite de filas a mostrar",
-        min_value=100,
-        max_value=5000,
-        value=1000,
-        step=100,
-        help="Ampl��a el l��mite si necesitas revisar m��s registros.",
+        min_value=min_limit,
+        max_value=max_limit,
+        value=default_limit,
+        step=max(1, min(100, max_limit // 5)),
+        help="Amplía el límite si necesitas revisar más registros.",
     )
 
     try:
@@ -1467,14 +1477,6 @@ def render_panamacompra_db_panel() -> None:
     except Exception as exc:
         st.error(f"Error al consultar {selected_table}: {exc}")
         return
-
-    total_rows: int | None = None
-    try:
-        total_rows = count_sqlite_rows(db_path_str, selected_table)
-    except sqlite3.OperationalError:
-        pass
-    except Exception:
-        pass
 
     if preview_df.empty:
         st.info("La consulta no devolvi�� filas para la tabla seleccionada.")
@@ -1506,25 +1508,31 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
         )
         return
 
-    limit = st.slider(
-        "Límite de filas a mostrar",
-        min_value=100,
-        max_value=5000,
-        value=1000,
-        step=100,
-        key=f"{key_prefix}_excel_limit",
-    )
-
     try:
-        preview_df, total_rows = load_excel_preview(str(file_path), limit)
+        df = load_excel_file(str(file_path))
     except Exception as exc:
         st.error(f"No pudimos leer `{file_path.name}`: {exc}")
         return
 
-    if preview_df.empty:
+    total_rows = len(df.index)
+    if total_rows == 0:
         st.info("El archivo no contiene datos visibles.")
         return
 
+    max_limit = total_rows
+    min_limit = max(1, min(100, max_limit))
+    default_limit = max(min_limit, min(1000, max_limit))
+
+    limit = st.slider(
+        "Límite de filas a mostrar",
+        min_value=min_limit,
+        max_value=max_limit,
+        value=default_limit,
+        step=max(1, min(100, max_limit // 5)),
+        key=f"{key_prefix}_excel_limit",
+    )
+
+    preview_df = df.head(limit)
     st.dataframe(preview_df, use_container_width=True, height=520)
     st.caption(
         f"Mostrando hasta {limit} filas. Total en el archivo: {total_rows:,}."
@@ -1570,12 +1578,12 @@ for tab, category_name in zip(category_tabs, ordered_categories):
 
 render_panamacompra_db_panel()
 render_drive_excel_panel(
-    "Excel todas_las_fichas.xlsx",
-    LOCAL_TODAS_LAS_FICHAS,
-    "todas_las_fichas",
-)
-render_drive_excel_panel(
     "Excel oferentes_activos.xlsx",
     LOCAL_OFERENTES_ACTIVOS,
     "oferentes_activos",
+)
+render_drive_excel_panel(
+    "Excel todas_las_fichas.xlsx",
+    LOCAL_TODAS_LAS_FICHAS,
+    "todas_las_fichas",
 )
