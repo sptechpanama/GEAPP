@@ -36,20 +36,14 @@ BACKUP_PREFIX = "Finanzas Backup"
 BACKUP_EVERY_DAYS = 3
 BACKUP_KEEP_LAST = 15
 DRIVE_PANAMACOMPRA_FILE_ID = "1TQYzsflXlE-5OwYKmTx0bTZ0rD9Ayivs"
-DRIVE_TODAS_LAS_FICHAS_FILE_ID = "1AxQPm7koNkgV1txDdWpMA9SK2CfyY23Z"
-DRIVE_OFERENTES_ACTIVOS_FILE_ID = "18thVq_8AqQ7BvnRd3V5sYFFNccXWWj7E"
 ```
 
 ### Variables de entorno (opcionales)
 
 - `FINAPP_BASE_PATH`: ruta base para archivos auxiliares.
 - `FINAPP_EXCEL_FICHAS`: ruta al Excel opcional de fichas.
-- `FINAPP_DRIVE_TODAS_FICHAS_PATH`: ruta local para la copia descargada de `todas_las_fichas.xlsx`.
-- `FINAPP_DRIVE_OFERENTES_ACTIVOS_PATH`: ruta local para `oferentes_activos.xlsx`.
 - `FINAPP_DB_PATH`: ruta a la base SQLite `panamacompra.db`.
 - `FINAPP_DRIVE_DB_FILE_ID`: ID del archivo en Drive usado para sincronizar `panamacompra.db`.
-- `FINAPP_DRIVE_TODAS_FICHAS_ID`: ID alternativo para sincronizar `todas_las_fichas.xlsx`.
-- `FINAPP_DRIVE_OFERENTES_ID`: ID alternativo para sincronizar `oferentes_activos.xlsx`.
 - `FINAPP_SERVICE_ACCOUNT_FILE`: ruta a un JSON local de service account (se usa si no hay secrets).
 - `FINAPP_DOMAIN_USER`: cuenta delegada para Drive (por defecto `soporte@sptechpanama.com`).
 
@@ -64,6 +58,6 @@ DRIVE_OFERENTES_ACTIVOS_FILE_ID = "18thVq_8AqQ7BvnRd3V5sYFFNccXWWj7E"
 ## Notas adicionales
 
 - El archivo `.gitignore` bloquea cualquier credencial local (`.streamlit/secrets.toml`, `*.json`).
-- Si defines `DRIVE_PANAMACOMPRA_FILE_ID`, `DRIVE_TODAS_LAS_FICHAS_FILE_ID` u `DRIVE_OFERENTES_ACTIVOS_FILE_ID`, la app descargará automáticamente cada archivo desde Drive y usará las copias locales definidas por `FINAPP_DB_PATH`, `FINAPP_DRIVE_TODAS_FICHAS_PATH` y `FINAPP_DRIVE_OFERENTES_ACTIVOS_PATH`.
+- Si `DRIVE_PANAMACOMPRA_FILE_ID` está configurado, la app descargará automáticamente `panamacompra.db` desde Drive y usará la copia local indicada por `FINAPP_DB_PATH` (o el valor por defecto en la raíz del repo).
 - Para desarrollo colaborativo se puede usar el contenedor definido en `.devcontainer/`.
 - Si aparecen advertencias de permisos al respaldar, verifica `DRIVE_BACKUP_FOLDER_ID` y la delegación de la cuenta de servicio.

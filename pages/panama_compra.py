@@ -12,11 +12,7 @@ from datetime import date, timedelta, datetime, timezone
 
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
-from services.drive_assets import (
-    ensure_drive_oferentes_activos,
-    ensure_drive_todas_las_fichas,
-    ensure_local_panamacompra_db,
-)
+from services.panamacompra_drive import ensure_local_panamacompra_db
 
 
 ROW_ID_COL = "__row__"
@@ -28,10 +24,8 @@ CHECKBOX_FLAG_NAMES = {
 }
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
 
-# Sincroniza los archivos críticos antes de usarlos en la vista.
+# Asegura que la base panamacompra.db esté disponible antes de usarla.
 ensure_local_panamacompra_db()
-ensure_drive_todas_las_fichas()
-ensure_drive_oferentes_activos()
 
 
 def _require_authentication() -> None:
