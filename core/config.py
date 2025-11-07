@@ -21,6 +21,14 @@ BASE_PATH = _path_from_env("FINAPP_BASE_PATH", REPO_ROOT)
 
 # Archivos locales opcionales (no obligatorios en Streamlit Cloud).
 EXCEL_FICHAS = _path_from_env("FINAPP_EXCEL_FICHAS", APP_ROOT / "todas_las_fichas.xlsx")
+DRIVE_TODAS_FICHAS_PATH = _path_from_env(
+	"FINAPP_DRIVE_TODAS_FICHAS_PATH",
+	APP_ROOT / "drive_todas_las_fichas.xlsx",
+)
+DRIVE_OFERENTES_ACTIVOS_PATH = _path_from_env(
+	"FINAPP_DRIVE_OFERENTES_ACTIVOS_PATH",
+	APP_ROOT / "drive_oferentes_activos.xlsx",
+)
 DB_PATH = _path_from_env("FINAPP_DB_PATH", APP_ROOT / "panamacompra.db")
 
 # Compatibilidad con código antiguo que esperaba un JSON en disco.
@@ -33,6 +41,8 @@ __all__ = [
 	"REPO_ROOT",
 	"BASE_PATH",
 	"EXCEL_FICHAS",
+	"DRIVE_TODAS_FICHAS_PATH",
+	"DRIVE_OFERENTES_ACTIVOS_PATH",
 	"DB_PATH",
 	"SVC_KEY",
 ]
