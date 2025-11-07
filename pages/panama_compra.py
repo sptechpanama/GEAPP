@@ -27,6 +27,15 @@ CHECKBOX_FLAG_NAMES = {
     "descarte",
 }
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
+DEFAULT_DATE_START = date(2024, 1, 1)
+DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
+
+
+def _default_date_range() -> tuple[date, date]:
+    today = date.today()
+    if today < DEFAULT_DATE_START:
+        return (today, today)
+    return (DEFAULT_DATE_START, today)
 
 # Asegura que los archivos críticos locales estén sincronizados antes de usarlos.
 ensure_local_panamacompra_db()
@@ -143,6 +152,63 @@ def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFra
 @st.cache_data(ttl=300)
 def load_excel_file(file_path: str) -> pd.DataFrame:
     return pd.read_excel(file_path)
+
+
+def _filter_dataframe(
+    df: pd.DataFrame,
+    search_text: str | None,
+    date_range: tuple[date, date] | None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    filtered = df
+    if search_text:
+        needle = str(search_text).strip().lower()
+        if needle:
+            mask = pd.Series(False, index=filtered.index)
+            for col in filtered.columns:
+                series = filtered[col]
+                try:
+                    text_values = series.astype(str).str.lower()
+                except Exception:
+                    text_values = series.map(
+                        lambda v: str(v).lower() if pd.notna(v) else ""
+                    )
+                mask = mask | text_values.str.contains(needle, na=False)
+            filtered = filtered[mask]
+
+    if date_range:
+        if isinstance(date_range, date):
+            date_range = (date_range, date_range)
+        if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+            start, end = date_range
+        if isinstance(start, date) and isinstance(end, date):
+            start_dt = datetime.combine(start, datetime.min.time())
+            end_dt = datetime.combine(end, datetime.max.time())
+            date_masks: list[pd.Series] = []
+            for col in filtered.columns:
+                series = filtered[col]
+                dt_series = None
+
+                if pd.api.types.is_datetime64_any_dtype(series):
+                    dt_series = series
+                else:
+                    col_name = str(col).lower()
+                    if any(token in col_name for token in DATE_COLUMN_KEYWORDS):
+                        dt_series = pd.to_datetime(series, errors="coerce")
+
+                if dt_series is None:
+                    continue
+                date_masks.append(dt_series.between(start_dt, end_dt, inclusive="both"))
+
+            if date_masks:
+                combined = date_masks[0]
+                for extra in date_masks[1:]:
+                    combined = combined | extra
+                filtered = filtered[combined.fillna(False)]
+
+    return filtered
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -1455,6 +1521,19 @@ def render_panamacompra_db_panel() -> None:
     except Exception:
         pass
 
+    search_text = st.text_input(
+        "Buscar en la tabla",
+        placeholder="Ingresa texto a buscar…",
+        key="pc_db_search",
+    )
+    date_range = st.date_input(
+        "Rango de fechas",
+        value=_default_date_range(),
+        min_value=DEFAULT_DATE_START,
+        max_value=date.today(),
+        key="pc_db_date_range",
+    )
+
     max_limit = total_rows if total_rows and total_rows > 0 else 5000
     max_limit = max(1, max_limit)
     min_limit = max(1, min(100, max_limit))
@@ -1478,12 +1557,14 @@ def render_panamacompra_db_panel() -> None:
         st.error(f"Error al consultar {selected_table}: {exc}")
         return
 
-    if preview_df.empty:
-        st.info("La consulta no devolvi�� filas para la tabla seleccionada.")
-    else:
-        st.dataframe(preview_df, use_container_width=True, height=520)
+    filtered_df = _filter_dataframe(preview_df, search_text, date_range)
 
-    caption = f"Mostrando hasta {limit} filas."
+    if filtered_df.empty:
+        st.info("No hay filas que coincidan con los filtros aplicados.")
+    else:
+        st.dataframe(filtered_df, use_container_width=True, height=520)
+
+    caption = f"Mostrando {len(filtered_df)} filas (tope configurado {limit})."
     if total_rows is not None:
         caption += f" Total en `{selected_table}`: {total_rows:,}."
     st.caption(caption)
@@ -1519,6 +1600,19 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
         st.info("El archivo no contiene datos visibles.")
         return
 
+    search_text = st.text_input(
+        "Buscar en el archivo",
+        placeholder="Ingresa texto a buscar…",
+        key=f"{key_prefix}_search",
+    )
+    date_range = st.date_input(
+        "Rango de fechas",
+        value=_default_date_range(),
+        min_value=DEFAULT_DATE_START,
+        max_value=date.today(),
+        key=f"{key_prefix}_date_range",
+    )
+
     max_limit = total_rows
     min_limit = max(1, min(100, max_limit))
     default_limit = max(min_limit, min(1000, max_limit))
@@ -1533,9 +1627,14 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
     )
 
     preview_df = df.head(limit)
-    st.dataframe(preview_df, use_container_width=True, height=520)
+    filtered_df = _filter_dataframe(preview_df, search_text, date_range)
+
+    if filtered_df.empty:
+        st.info("No hay filas que coincidan con los filtros aplicados.")
+    else:
+        st.dataframe(filtered_df, use_container_width=True, height=520)
     st.caption(
-        f"Mostrando hasta {limit} filas. Total en el archivo: {total_rows:,}."
+        f"Mostrando {len(filtered_df)} filas (tope configurado {limit}). Total en el archivo: {total_rows:,}."
     )
 
 # ---- UI: pestañas de categorías + desplegable de hojas ----
@@ -1576,14 +1675,17 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
-render_panamacompra_db_panel()
-render_drive_excel_panel(
-    "Excel oferentes_activos.xlsx",
-    LOCAL_OFERENTES_ACTIVOS,
-    "oferentes_activos",
-)
-render_drive_excel_panel(
-    "Excel todas_las_fichas.xlsx",
-    LOCAL_TODAS_LAS_FICHAS,
-    "todas_las_fichas",
-)
+with st.expander(
+    "Base de datos de actos públicos, fichas y oferentes", expanded=False
+):
+    render_panamacompra_db_panel()
+    render_drive_excel_panel(
+        "Excel oferentes_activos.xlsx",
+        LOCAL_OFERENTES_ACTIVOS,
+        "oferentes_activos",
+    )
+    render_drive_excel_panel(
+        "Excel todas_las_fichas.xlsx",
+        LOCAL_TODAS_LAS_FICHAS,
+        "todas_las_fichas",
+    )
