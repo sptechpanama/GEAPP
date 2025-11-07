@@ -2,11 +2,15 @@
 
 # pages/visualizador.py
 import re
+import sqlite3
 import time
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 import uuid
 from datetime import date, timedelta, datetime, timezone
+
+from core.config import DB_PATH
 from sheets import get_client, read_worksheet
 
 
@@ -63,6 +67,67 @@ HEADER_ALIASES = {
     "note": {"note", "nota", "comentario", "observacion", "observación"},
     "status": {"status", "estado"},
 }
+
+FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
+
+
+def _candidate_db_paths() -> list[Path]:
+    candidates: list[Path] = []
+    for raw in (DB_PATH, FALLBACK_DB_PATH):
+        if not raw:
+            continue
+        try:
+            candidate = Path(raw).expanduser()
+        except Exception:
+            continue
+        if candidate in candidates:
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def _preferred_db_path() -> Path | None:
+    candidates = _candidate_db_paths()
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else None
+
+
+def _quote_identifier(identifier: str) -> str:
+    return f"\"{identifier.replace('\"', '\"\"')}\""
+
+
+def _connect_sqlite(db_path: str):
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+
+@st.cache_data(ttl=300)
+def list_sqlite_tables(db_path: str) -> list[str]:
+    with _connect_sqlite(db_path) as conn:
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+@st.cache_data(ttl=300)
+def count_sqlite_rows(db_path: str, table_name: str) -> int:
+    identifier = _quote_identifier(table_name)
+    with _connect_sqlite(db_path) as conn:
+        cur = conn.execute(f"SELECT COUNT(1) FROM {identifier}")
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+@st.cache_data(ttl=300)
+def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFrame:
+    identifier = _quote_identifier(table_name)
+    limit = max(1, int(limit))
+    query = f"SELECT * FROM {identifier} LIMIT {limit}"
+    with _connect_sqlite(db_path) as conn:
+        return pd.read_sql_query(query, conn)
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -1327,6 +1392,81 @@ def render_df(
 
     render_pc_state_cards(pc_state_df, pc_config_df, suffix=suffix)
 
+
+def render_panamacompra_db_panel() -> None:
+    """Muestra una vista de las tablas disponibles en la base local panamacompra.db."""
+    st.divider()
+    st.subheader("Base panamacompra.db")
+
+    db_path = _preferred_db_path()
+    if db_path is None:
+        st.info("No hay rutas configuradas para la base panamacompra.db.")
+        return
+
+    st.caption(f"Origen configurado: `{db_path}`")
+    if not db_path.exists():
+        st.warning(
+            "No pudimos abrir el archivo. Verifica que OneDrive est�� sincronizado "
+            "o define `FINAPP_DB_PATH` apuntando a una copia local."
+        )
+        return
+
+    db_path_str = str(db_path)
+    try:
+        db_tables = list_sqlite_tables(db_path_str)
+    except sqlite3.OperationalError as exc:
+        st.error(f"No fue posible conectar a la base: {exc}")
+        return
+    except Exception as exc:
+        st.error(f"No fue posible listar las tablas: {exc}")
+        return
+
+    if not db_tables:
+        st.info("La base panamacompra.db no contiene tablas visibles.")
+        return
+
+    selected_table = st.selectbox(
+        "Tabla disponible en la base",
+        db_tables,
+        key="pc_db_table_selector",
+    )
+
+    limit = st.slider(
+        "L��mite de filas a mostrar",
+        min_value=100,
+        max_value=5000,
+        value=1000,
+        step=100,
+        help="Ampl��a el l��mite si necesitas revisar m��s registros.",
+    )
+
+    try:
+        preview_df = load_sqlite_preview(db_path_str, selected_table, limit)
+    except sqlite3.OperationalError as exc:
+        st.error(f"No se pudo leer la tabla {selected_table}: {exc}")
+        return
+    except Exception as exc:
+        st.error(f"Error al consultar {selected_table}: {exc}")
+        return
+
+    total_rows: int | None = None
+    try:
+        total_rows = count_sqlite_rows(db_path_str, selected_table)
+    except sqlite3.OperationalError:
+        pass
+    except Exception:
+        pass
+
+    if preview_df.empty:
+        st.info("La consulta no devolvi�� filas para la tabla seleccionada.")
+    else:
+        st.dataframe(preview_df, use_container_width=True, height=520)
+
+    caption = f"Mostrando hasta {limit} filas."
+    if total_rows is not None:
+        caption += f" Total en `{selected_table}`: {total_rows:,}."
+    st.caption(caption)
+
 # ---- UI: pestañas de categorías + desplegable de hojas ----
 pc_state_df = load_pc_state()
 pc_config_df = load_pc_config()
@@ -1364,3 +1504,5 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             st.info("Sin datos en esta pestaña.")
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
+
+render_panamacompra_db_panel()
