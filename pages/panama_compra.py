@@ -1668,12 +1668,13 @@ with st.expander(
     render_panamacompra_db_panel()
     render_drive_excel_panel(
         "Fichas Técnicas Actualizadas",
-        LOCAL_TODAS_LAS_FICHAS,
-        "todas_las_fichas",
-    )
-    render_drive_excel_panel(
-        "Oferentes Activos con Criterio Técnico",
         LOCAL_OFERENTES_ACTIVOS,
         "oferentes_activos",
     )
+    render_drive_excel_panel(
+        "Oferentes Activos con Criterio Técnico",
+        LOCAL_TODAS_LAS_FICHAS,
+        "todas_las_fichas",
+    )
+
 
