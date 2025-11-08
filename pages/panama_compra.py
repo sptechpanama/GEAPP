@@ -1602,9 +1602,16 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
         key=f"{key_prefix}_search",
     )
 
-    max_limit = total_rows
+    max_limit = total_rows if total_rows and total_rows > 0 else 5000
+    max_limit = max(1, max_limit)
     min_limit = max(1, min(100, max_limit))
     default_limit = max(min_limit, min(1000, max_limit))
+
+    slider_key = f"{key_prefix}_excel_limit"
+    if slider_key in st.session_state:
+        current_value = st.session_state[slider_key]
+        if current_value < min_limit or current_value > max_limit:
+            st.session_state[slider_key] = default_limit
 
     limit = st.slider(
         "Límite de filas a mostrar",
@@ -1612,7 +1619,7 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
         max_value=max_limit,
         value=default_limit,
         step=max(1, min(100, max_limit // 5)),
-        key=f"{key_prefix}_excel_limit",
+        key=slider_key,
     )
 
     preview_df = df.head(limit)
