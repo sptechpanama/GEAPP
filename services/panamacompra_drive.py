@@ -20,15 +20,20 @@ _SECRETS_SECTION = "app"
 _SECRETS_KEY = "DRIVE_PANAMACOMPRA_FILE_ID"
 _DEFAULT_FILE_ID = "1TQYzsflXlE-5OwYKmTx0bTZ0rD9Ayivs"
 
-_ENV_TODAS_FICHAS = "FINAPP_DRIVE_TODAS_FICHAS_ID"
-_SECRET_TODAS_FICHAS = "DRIVE_TODAS_LAS_FICHAS_FILE_ID"
-_DEFAULT_TODAS_FICHAS_ID = "1AxQPm7koNkgV1txDdWpMA9SK2CfyY23Z"
-_TODAS_FICHAS_PATH = APP_ROOT / "todas_las_fichas.xlsx"
+_ENV_FICHAS_CTNI = "FINAPP_DRIVE_FICHAS_CTNI_ID"
+_SECRET_FICHAS_CTNI = "DRIVE_FICHAS_CTNI_FILE_ID"
+_DEFAULT_FICHAS_CTNI_ID = "1glsxTtLd_ZAF1WdLG0uEjLFwmPMOQgxL"
+_FICHAS_CTNI_PATH = APP_ROOT / "fichas_ctni.xlsx"
+
+_ENV_CRITERIOS = "FINAPP_DRIVE_CRITERIOS_ID"
+_SECRET_CRITERIOS = "DRIVE_CRITERIOS_TECNICOS_FILE_ID"
+_DEFAULT_CRITERIOS_ID = "15JoaLJ7Fq8TVob4UXR3kwNbDrXaRE4Vn"
+_CRITERIOS_PATH = APP_ROOT / "criterios_tecnicos.xlsx"
 
 _ENV_OFERENTES = "FINAPP_DRIVE_OFERENTES_ID"
-_SECRET_OFERENTES = "DRIVE_OFERENTES_ACTIVOS_FILE_ID"
-_DEFAULT_OFERENTES_ID = "18thVq_8AqQ7BvnRd3V5sYFFNccXWWj7E"
-_OFERENTES_PATH = APP_ROOT / "oferentes_activos.xlsx"
+_SECRET_OFERENTES = "DRIVE_OFERENTES_CATALOGOS_FILE_ID"
+_DEFAULT_OFERENTES_ID = "1slEyEUUDAG8X0Uw94KEB6-WDHX96lFlf"
+_OFERENTES_PATH = APP_ROOT / "oferentes_catalogos.xlsx"
 
 
 def _notify(kind: str, message: str) -> None:
@@ -154,30 +159,42 @@ def ensure_local_panamacompra_db(force: bool = False) -> Optional[Path]:
     )
 
 
-def ensure_drive_todas_las_fichas(force: bool = False) -> Optional[Path]:
+def ensure_drive_fichas_ctni(force: bool = False) -> Optional[Path]:
     return _ensure_drive_file(
-        dest=_TODAS_FICHAS_PATH,
-        env_var=_ENV_TODAS_FICHAS,
-        secret_key=_SECRET_TODAS_FICHAS,
-        default_id=_DEFAULT_TODAS_FICHAS_ID,
-        label="todas_las_fichas.xlsx",
+        dest=_FICHAS_CTNI_PATH,
+        env_var=_ENV_FICHAS_CTNI,
+        secret_key=_SECRET_FICHAS_CTNI,
+        default_id=_DEFAULT_FICHAS_CTNI_ID,
+        label="fichas_ctni.xlsx",
         force=force,
     )
 
 
-def ensure_drive_oferentes_activos(force: bool = False) -> Optional[Path]:
+def ensure_drive_criterios_tecnicos(force: bool = False) -> Optional[Path]:
+    return _ensure_drive_file(
+        dest=_CRITERIOS_PATH,
+        env_var=_ENV_CRITERIOS,
+        secret_key=_SECRET_CRITERIOS,
+        default_id=_DEFAULT_CRITERIOS_ID,
+        label="criterios_tecnicos.xlsx",
+        force=force,
+    )
+
+
+def ensure_drive_oferentes_catalogos(force: bool = False) -> Optional[Path]:
     return _ensure_drive_file(
         dest=_OFERENTES_PATH,
         env_var=_ENV_OFERENTES,
         secret_key=_SECRET_OFERENTES,
         default_id=_DEFAULT_OFERENTES_ID,
-        label="oferentes_activos.xlsx",
+        label="oferentes_catalogos.xlsx",
         force=force,
     )
 
 
 __all__ = [
     "ensure_local_panamacompra_db",
-    "ensure_drive_todas_las_fichas",
-    "ensure_drive_oferentes_activos",
+    "ensure_drive_fichas_ctni",
+    "ensure_drive_criterios_tecnicos",
+    "ensure_drive_oferentes_catalogos",
 ]

@@ -13,8 +13,9 @@ from datetime import date, timedelta, datetime, timezone
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
 from services.panamacompra_drive import (
-    ensure_drive_oferentes_activos,
-    ensure_drive_todas_las_fichas,
+    ensure_drive_criterios_tecnicos,
+    ensure_drive_fichas_ctni,
+    ensure_drive_oferentes_catalogos,
     ensure_local_panamacompra_db,
 )
 
@@ -39,8 +40,9 @@ def _default_date_range() -> tuple[date, date]:
 
 # Asegura que los archivos críticos locales estén sincronizados antes de usarlos.
 ensure_local_panamacompra_db()
-LOCAL_TODAS_LAS_FICHAS = ensure_drive_todas_las_fichas()
-LOCAL_OFERENTES_ACTIVOS = ensure_drive_oferentes_activos()
+LOCAL_FICHAS_CTNI = ensure_drive_fichas_ctni()
+LOCAL_CRITERIOS_TECNICOS = ensure_drive_criterios_tecnicos()
+LOCAL_OFERENTES_CATALOGOS = ensure_drive_oferentes_catalogos()
 
 
 def _require_authentication() -> None:
@@ -1663,18 +1665,23 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
 with st.expander(
-    "Base de datos de actos públicos, fichas y oferentes", expanded=False
+    "Base de datos de actos pǧblicos, fichas y oferentes", expanded=False
 ):
     render_panamacompra_db_panel()
     render_drive_excel_panel(
-        "Fichas Técnicas Actualizadas",
-        LOCAL_OFERENTES_ACTIVOS,
-        "oferentes_activos",
+        "Fichas Técnica",
+        LOCAL_FICHAS_CTNI,
+        "fichas_ctni",
     )
     render_drive_excel_panel(
-        "Oferentes Activos con Criterio Técnico",
-        LOCAL_TODAS_LAS_FICHAS,
-        "todas_las_fichas",
+        "Criterios Técnicos",
+        LOCAL_CRITERIOS_TECNICOS,
+        "criterios_tecnicos",
+    )
+    render_drive_excel_panel(
+        "Oferentes y Catalogos",
+        LOCAL_OFERENTES_CATALOGOS,
+        "oferentes_catalogos",
     )
 
 
