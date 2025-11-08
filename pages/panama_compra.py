@@ -1613,14 +1613,18 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
         if current_value < min_limit or current_value > max_limit:
             st.session_state[slider_key] = default_limit
 
-    limit = st.slider(
-        "Límite de filas a mostrar",
-        min_value=min_limit,
-        max_value=max_limit,
-        value=default_limit,
-        step=max(1, min(100, max_limit // 5)),
-        key=slider_key,
-    )
+    if max_limit <= min_limit:
+        limit = max_limit
+    else:
+        step = max(1, min(100, max_limit // 5))
+        limit = st.slider(
+            "Límite de filas a mostrar",
+            min_value=min_limit,
+            max_value=max_limit,
+            value=default_limit,
+            step=step,
+            key=slider_key,
+        )
 
     preview_df = df.head(limit)
     filtered_df = _filter_dataframe(preview_df, search_text, None)
