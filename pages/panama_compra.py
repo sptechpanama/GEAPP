@@ -293,13 +293,14 @@ def load_oferente_metadata(
             if crit_value:
                 meta["has_ct"] = True
                 label = _extract_ficha_label(crit_value)
-                if label and label != "Sin ficha detectada":
+                norm_label = _normalize_ct_label(label)
+                if norm_label:
                     meta.setdefault("ct_labels", set()).add(label)
-                    ct_suppliers[label].add(key)
+                    ct_suppliers[norm_label].add(key)
                     if ct_name_col:
                         label_name = str(row.get(ct_name_col) or "").strip()
                         if label_name:
-                            ct_name_lookup.setdefault(label, label_name)
+                            ct_name_lookup.setdefault(norm_label, label_name)
 
     for meta in metadata.values():
         if "ct_labels" in meta:
@@ -396,6 +397,45 @@ def _compute_supplier_ranking(
         display_cols.append("Oferentes con esta ficha")
     return grouped[display_cols]
 
+@st.cache_data(ttl=3600)
+def load_ct_name_map(file_path: Path | None) -> dict[str, str]:
+    if not file_path:
+        return {}
+    path = Path(file_path)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_excel(path)
+    except Exception:
+        return {}
+    df = _clean_drive_dataframe(df)
+    if df.empty:
+        return {}
+
+    normalized_cols = {
+        col: _normalize_text(col).lower()
+        for col in df.columns
+    }
+    criterio_col = next(
+        (col for col, norm in normalized_cols.items() if "criterio" in norm),
+        None,
+    )
+    nombre_col = next(
+        (col for col, norm in normalized_cols.items() if "nombre" in norm and "gener" in norm),
+        None,
+    )
+    if not criterio_col or not nombre_col:
+        return {}
+
+    name_map: dict[str, str] = {}
+    for _, row in df.iterrows():
+        criterio = str(row.get(criterio_col) or "").strip()
+        nombre = str(row.get(nombre_col) or "").strip()
+        norm = _normalize_ct_label(criterio)
+        if norm and nombre:
+            name_map.setdefault(norm, nombre)
+    return name_map
+
 
 def _compute_ct_ranking(
     df: pd.DataFrame,
@@ -485,7 +525,10 @@ def render_supplier_top_panel() -> None:
         )
         return
 
-    metadata, ct_stats, ct_names = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+    metadata, ct_stats, ct_names_oferentes = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+    ct_names_fichas = load_ct_name_map(LOCAL_FICHAS_CTNI)
+    ct_names = ct_names_oferentes.copy()
+    ct_names.update(ct_names_fichas)
     min_date = awards_df["fecha_referencia"].min().date()
     max_date = awards_df["fecha_referencia"].max().date()
     default_start = max(min_date, max_date - timedelta(days=90))
