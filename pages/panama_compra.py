@@ -219,19 +219,21 @@ def load_supplier_awards_df(db_path: str | None) -> pd.DataFrame | None:
 
 
 @st.cache_data(ttl=3600)
-def load_oferente_metadata(file_path: Path | None) -> tuple[dict[str, dict[str, bool]], dict[str, int]]:
+def load_oferente_metadata(
+    file_path: Path | None,
+) -> tuple[dict[str, dict[str, bool]], dict[str, int], dict[str, str]]:
     if not file_path:
-        return {}, {}
+        return {}, {}, {}
     path = Path(file_path)
     if not path.exists():
-        return {}, {}
+        return {}, {}, {}
     try:
         df = pd.read_excel(path)
     except Exception:
-        return {}, {}
+        return {}, {}, {}
     df = _clean_drive_dataframe(df)
     if df.empty:
-        return {}, {}
+        return {}, {}, {}
 
     normalized_cols = {
         col: _normalize_text(col).lower()
@@ -249,11 +251,20 @@ def load_oferente_metadata(file_path: Path | None) -> tuple[dict[str, dict[str, 
         (col for col, norm in normalized_cols.items() if "criterio" in norm),
         None,
     )
+    ct_name_col = next(
+        (
+            col
+            for col, norm in normalized_cols.items()
+            if ("nombre" in norm or "producto" in norm) and ("ctni" in norm or "ficha" in norm or "criterio" in norm)
+        ),
+        None,
+    )
     if not name_col:
-        return {}, {}
+        return {}, {}, {}
 
     metadata: dict[str, dict[str, bool]] = {}
     ct_suppliers: dict[str, set[str]] = defaultdict(set)
+    ct_name_lookup: dict[str, str] = {}
     for _, row in df.iterrows():
         supplier = str(row.get(name_col) or "").strip()
         if not supplier:
@@ -274,12 +285,16 @@ def load_oferente_metadata(file_path: Path | None) -> tuple[dict[str, dict[str, 
                 if label and label != "Sin ficha detectada":
                     meta.setdefault("ct_labels", set()).add(label)
                     ct_suppliers[label].add(key)
+                    if ct_name_col:
+                        label_name = str(row.get(ct_name_col) or "").strip()
+                        if label_name:
+                            ct_name_lookup.setdefault(label, label_name)
 
     for meta in metadata.values():
         if "ct_labels" in meta:
             meta["ct_labels"] = tuple(sorted(meta["ct_labels"]))
     ct_stats = {label: len(keys) for label, keys in ct_suppliers.items()}
-    return metadata, ct_stats
+    return metadata, ct_stats, ct_name_lookup
 
 
 def _compute_supplier_ranking(
@@ -378,6 +393,7 @@ def _compute_ct_ranking(
     metric: str,
     metadata: dict[str, dict[str, bool]],
     ct_stats: dict[str, int],
+    ct_names: dict[str, str],
     top_n: int,
 ) -> pd.DataFrame:
     subset = df[df["tiene_ct"]]
@@ -421,6 +437,7 @@ def _compute_ct_ranking(
         rows.append(
             {
                 "Ficha / Criterio": label,
+                "Nombre de la ficha": ct_names.get(label, ""),
                 "Actos ganados": total_actos,
                 "Monto adjudicado": round(total_monto, 2),
                 "Precio promedio acto": round(avg_price, 2),
@@ -456,7 +473,7 @@ def render_supplier_top_panel() -> None:
         )
         return
 
-    metadata, ct_stats = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+    metadata, ct_stats, ct_names = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
     min_date = awards_df["fecha_referencia"].min().date()
     max_date = awards_df["fecha_referencia"].max().date()
     default_start = max(min_date, max_date - timedelta(days=90))
@@ -492,10 +509,10 @@ def render_supplier_top_panel() -> None:
         return
 
     top_n = st.slider(
-        "Número máximo de proveedores por listado",
+        "Numero maximo de filas por listado",
         min_value=5,
-        max_value=25,
-        value=SUPPLIER_TOP_DEFAULT_ROWS,
+        max_value=100,
+        value=min(SUPPLIER_TOP_DEFAULT_ROWS, 100),
         step=1,
         key="supplier_top_rows",
     )
@@ -520,6 +537,7 @@ def render_supplier_top_panel() -> None:
         ),
     }
     ct_column_config = {
+        "Nombre de la ficha": st.column_config.TextColumn(),
         "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f"),
         "Actos ganados": st.column_config.NumberColumn(format="%d"),
         "Precio promedio acto": st.column_config.NumberColumn(format="$%0.2f"),
@@ -539,6 +557,7 @@ def render_supplier_top_panel() -> None:
                     metric=cfg["metric"],
                     metadata=metadata,
                     ct_stats=ct_stats,
+                    ct_names=ct_names,
                     top_n=top_n,
                 )
                 current_config = ct_column_config
