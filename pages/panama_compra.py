@@ -5,6 +5,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from collections import defaultdict
 import streamlit as st
 import pandas as pd
 import uuid
@@ -39,6 +40,7 @@ SUPPLIER_TOP_CONFIG = [
         "tab_label": "🔝 Más actos ganados · Sin ficha",
         "title": "Proveedores con más actos públicos ganados sin ficha técnica",
         "require_ct": False,
+        "require_registro": None,
         "metric": "count",
     },
     {
@@ -46,6 +48,7 @@ SUPPLIER_TOP_CONFIG = [
         "tab_label": "💰 Más dinero adjudicado · Sin ficha",
         "title": "Proveedores con más dinero adjudicado sin ficha técnica",
         "require_ct": False,
+        "require_registro": None,
         "metric": "amount",
     },
     {
@@ -53,6 +56,7 @@ SUPPLIER_TOP_CONFIG = [
         "tab_label": "📄 Más actos ganados · Con ficha",
         "title": "Proveedores con más actos públicos ganados con ficha técnica",
         "require_ct": True,
+        "require_registro": None,
         "metric": "count",
     },
     {
@@ -60,6 +64,23 @@ SUPPLIER_TOP_CONFIG = [
         "tab_label": "🏅 Más dinero adjudicado · Con ficha",
         "title": "Proveedores con más dinero adjudicado con ficha técnica",
         "require_ct": True,
+        "require_registro": None,
+        "metric": "amount",
+    },
+    {
+        "key": "con_ct_sin_reg_count",
+        "tab_label": "⚠️ Más actos ganados · Con ficha, sin registro",
+        "title": "Proveedores con más actos ganados con ficha técnica pero sin registro sanitario",
+        "require_ct": True,
+        "require_registro": False,
+        "metric": "count",
+    },
+    {
+        "key": "con_ct_sin_reg_amount",
+        "tab_label": "🚨 Más dinero adjudicado · Con ficha, sin registro",
+        "title": "Proveedores con más dinero adjudicado con ficha técnica pero sin registro sanitario",
+        "require_ct": True,
+        "require_registro": False,
         "metric": "amount",
     },
 ]
@@ -191,19 +212,19 @@ def load_supplier_awards_df(db_path: str | None) -> pd.DataFrame | None:
 
 
 @st.cache_data(ttl=3600)
-def load_oferente_metadata(file_path: Path | None) -> dict[str, dict[str, bool]]:
+def load_oferente_metadata(file_path: Path | None) -> tuple[dict[str, dict[str, bool]], dict[str, int]]:
     if not file_path:
-        return {}
+        return {}, {}
     path = Path(file_path)
     if not path.exists():
-        return {}
+        return {}, {}
     try:
         df = pd.read_excel(path)
     except Exception:
-        return {}
+        return {}, {}
     df = _clean_drive_dataframe(df)
     if df.empty:
-        return {}
+        return {}, {}
 
     normalized_cols = {
         col: _normalize_text(col).lower()
@@ -222,9 +243,10 @@ def load_oferente_metadata(file_path: Path | None) -> dict[str, dict[str, bool]]
         None,
     )
     if not name_col:
-        return {}
+        return {}, {}
 
     metadata: dict[str, dict[str, bool]] = {}
+    ct_suppliers: dict[str, set[str]] = defaultdict(set)
     for _, row in df.iterrows():
         supplier = str(row.get(name_col) or "").strip()
         if not supplier:
@@ -241,18 +263,39 @@ def load_oferente_metadata(file_path: Path | None) -> dict[str, dict[str, bool]]
             crit_value = str(row.get(crit_col) or "").strip()
             if crit_value:
                 meta["has_ct"] = True
-    return metadata
+                label = _extract_ficha_label(crit_value)
+                if label and label != "Sin ficha detectada":
+                    meta.setdefault("ct_labels", set()).add(label)
+                    ct_suppliers[label].add(key)
+
+    for meta in metadata.values():
+        if "ct_labels" in meta:
+            meta["ct_labels"] = tuple(sorted(meta["ct_labels"]))
+    ct_stats = {label: len(keys) for label, keys in ct_suppliers.items()}
+    return metadata, ct_stats
 
 
 def _compute_supplier_ranking(
     df: pd.DataFrame,
     *,
     require_ct: bool,
+    require_registro: bool | None,
     metric: str,
     metadata: dict[str, dict[str, bool]],
+    ct_stats: dict[str, int],
     top_n: int,
 ) -> pd.DataFrame:
     subset = df[df["tiene_ct"] == require_ct]
+    if subset.empty:
+        return pd.DataFrame()
+
+    if require_registro is not None:
+        subset = subset[
+            subset["supplier_key"].map(
+                lambda key: metadata.get(key, {}).get("has_registro", False)
+            )
+            == require_registro
+        ]
     if subset.empty:
         return pd.DataFrame()
 
@@ -272,9 +315,21 @@ def _compute_supplier_ranking(
     grouped["Participantes promedio"] = grouped["participantes_prom"].round(2)
     grouped["Participantes máx."] = grouped["participantes_max"].fillna(0).astype(int)
     grouped["Ficha / Criterio más reciente"] = grouped["ultima_ficha"].replace("", "Sin ficha registrada")
-    grouped["Tiene CT"] = grouped["supplier_key"].map(lambda _: require_ct)
-    grouped["Tiene Registro Sanitario"] = grouped["supplier_key"].map(
+    grouped["_has_registro"] = grouped["supplier_key"].map(
         lambda key: metadata.get(key, {}).get("has_registro", False)
+    )
+    grouped["Precio promedio acto"] = (
+        grouped["Monto adjudicado"] / grouped["Actos ganados"].replace(0, pd.NA)
+    ).fillna(0).round(2)
+    if require_registro is not None:
+        grouped = grouped[grouped["_has_registro"] == require_registro]
+    if grouped.empty:
+        return pd.DataFrame()
+
+    grouped["Tiene CT"] = grouped["supplier_key"].map(lambda _: require_ct)
+    grouped["Tiene Registro Sanitario"] = grouped["_has_registro"]
+    grouped["Oferentes con esta ficha"] = grouped["Ficha / Criterio más reciente"].map(
+        lambda label: ct_stats.get(label, 0)
     )
 
     if metric == "amount":
@@ -292,6 +347,7 @@ def _compute_supplier_ranking(
     grouped["Proveedor"] = grouped["supplier_name"]
     grouped["Tiene CT"] = grouped["Tiene CT"].map(_yes_no)
     grouped["Tiene Registro Sanitario"] = grouped["Tiene Registro Sanitario"].map(_yes_no)
+    grouped = grouped.drop(columns=["_has_registro"])
     display_cols = [
         "Proveedor",
         "Actos ganados",
@@ -302,6 +358,9 @@ def _compute_supplier_ranking(
         "Tiene CT",
         "Tiene Registro Sanitario",
     ]
+    if require_ct:
+        display_cols.insert(3, "Precio promedio acto")
+        display_cols.append("Oferentes con esta ficha")
     return grouped[display_cols]
 
 
@@ -314,7 +373,7 @@ def render_supplier_top_panel() -> None:
         )
         return
 
-    metadata = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+    metadata, ct_stats = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
     min_date = awards_df["fecha_referencia"].min().date()
     max_date = awards_df["fecha_referencia"].max().date()
     default_start = max(min_date, max_date - timedelta(days=90))
@@ -363,11 +422,19 @@ def render_supplier_top_panel() -> None:
     column_config = {
         "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f", help="Suma de precio de referencia adjudicado"),
         "Actos ganados": st.column_config.NumberColumn(format="%d"),
+        "Precio promedio acto": st.column_config.NumberColumn(
+            format="$%0.2f",
+            help="Monto promedio adjudicado por acto",
+        ),
         "Participantes promedio": st.column_config.NumberColumn(format="%.2f", help="Promedio de participantes reportados"),
         "Participantes máx.": st.column_config.NumberColumn(format="%d"),
         "Ficha / Criterio más reciente": st.column_config.TextColumn(help="Última referencia detectada en el bot"),
         "Tiene CT": st.column_config.TextColumn(),
         "Tiene Registro Sanitario": st.column_config.TextColumn(),
+        "Oferentes con esta ficha": st.column_config.NumberColumn(
+            format="%d",
+            help="Cantidad de oferentes que en catálogo listan la misma ficha",
+        ),
     }
 
     for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
@@ -375,8 +442,10 @@ def render_supplier_top_panel() -> None:
             ranking = _compute_supplier_ranking(
                 filtered_df,
                 require_ct=cfg["require_ct"],
+                require_registro=cfg.get("require_registro"),
                 metric=cfg["metric"],
                 metadata=metadata,
+                ct_stats=ct_stats,
                 top_n=top_n,
             )
             if ranking.empty:
