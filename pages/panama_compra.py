@@ -474,6 +474,18 @@ def load_ct_name_map(file_path: Path | None) -> dict[str, str]:
     return name_map
 
 
+@st.cache_data(ttl=300)
+def _filter_awards_by_range(
+    df: pd.DataFrame,
+    start_iso: str,
+    end_iso: str,
+) -> pd.DataFrame:
+    start = pd.to_datetime(start_iso)
+    end = pd.to_datetime(end_iso)
+    mask = (df["fecha_referencia"] >= start) & (df["fecha_referencia"] <= end)
+    return df.loc[mask].copy()
+
+
 def _compute_ct_ranking(
     df: pd.DataFrame,
     *,
@@ -595,9 +607,11 @@ def render_supplier_top_panel() -> None:
         start_ts = awards_df["fecha_referencia"].min()
         end_ts = awards_df["fecha_referencia"].max()
 
-    filtered_df = awards_df[
-        (awards_df["fecha_referencia"] >= start_ts) & (awards_df["fecha_referencia"] <= end_ts)
-    ]
+    filtered_df = _filter_awards_by_range(
+        awards_df,
+        start_ts.isoformat(),
+        end_ts.isoformat(),
+    )
     if filtered_df.empty:
         st.warning("No se registran adjudicaciones en el rango seleccionado.")
         return
