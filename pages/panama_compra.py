@@ -149,6 +149,17 @@ def _extract_ficha_label(value: str | None) -> str:
     return text or "Ficha detectada"
 
 
+def _normalize_ct_label(value: str | None) -> str:
+    if not value:
+        return ""
+    text = str(value).upper()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.replace("*", "")
+    text = re.sub(r"[^A-Z0-9/.-]", "", text)
+    return text.strip()
+
+
 def _last_non_empty(values: pd.Series) -> str:
     for raw in reversed(values.tolist()):
         text = str(raw or "").strip()
@@ -351,7 +362,7 @@ def _compute_supplier_ranking(
     grouped["Tiene CT"] = grouped["supplier_key"].map(lambda _: require_ct)
     grouped["Tiene Registro Sanitario"] = grouped["_has_registro"]
     grouped["Oferentes con esta ficha"] = grouped["Ficha / Criterio más reciente"].map(
-        lambda label: ct_stats.get(label, 0)
+        lambda label: ct_stats.get(_normalize_ct_label(label), 0)
     )
 
     if metric == "amount":
@@ -413,6 +424,7 @@ def _compute_ct_ranking(
 
     rows: list[dict[str, Any]] = []
     for label, group in subset.groupby("ct_label"):
+        norm_label = _normalize_ct_label(label)
         total_actos = len(group.index)
         total_monto = group["precio_referencia"].sum()
         avg_price = (total_monto / total_actos) if total_actos else 0.0
@@ -437,13 +449,13 @@ def _compute_ct_ranking(
         rows.append(
             {
                 "Ficha / Criterio": label,
-                "Nombre de la ficha": ct_names.get(label, ""),
+                "Nombre de la ficha": ct_names.get(norm_label, ""),
                 "Actos ganados": total_actos,
                 "Monto adjudicado": round(total_monto, 2),
                 "Precio promedio acto": round(avg_price, 2),
                 "Participantes promedio": round(participantes_prom or 0, 2),
                 "Participantes máx.": int(participantes_max or 0),
-                "Oferentes en catálogo": ct_stats.get(label, 0),
+                "Oferentes en catálogo": ct_stats.get(norm_label, 0),
                 "Top 3 por monto": top_amount_str or "Sin datos",
                 "Top 3 por actos": top_actos_str or "Sin datos",
             }
