@@ -1341,8 +1341,6 @@ st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 _require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
 
-render_supplier_top_panel()
-
 # ---- Config ----
 SHEET_ID = "17hOfP-vMdJ4D7xym1cUp7vAcd8XJPErpY3V-9Ui2tCo"
 
@@ -2060,6 +2058,10 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             st.info("Sin datos en esta pestaña.")
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
+
+with st.expander("Análisis de actos públicos", expanded=False):
+    render_supplier_top_panel()
+
 
 with st.expander(
     "Base de datos de actos pǧblicos, fichas y oferentes", expanded=False
