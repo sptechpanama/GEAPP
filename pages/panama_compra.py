@@ -6,6 +6,7 @@ import sqlite3
 import time
 from pathlib import Path
 from collections import defaultdict
+from typing import Any
 import streamlit as st
 import pandas as pd
 import uuid
@@ -42,6 +43,7 @@ SUPPLIER_TOP_CONFIG = [
         "require_ct": False,
         "require_registro": None,
         "metric": "count",
+        "mode": "supplier",
     },
     {
         "key": "sin_ct_amount",
@@ -50,6 +52,7 @@ SUPPLIER_TOP_CONFIG = [
         "require_ct": False,
         "require_registro": None,
         "metric": "amount",
+        "mode": "supplier",
     },
     {
         "key": "con_ct_count",
@@ -58,6 +61,7 @@ SUPPLIER_TOP_CONFIG = [
         "require_ct": True,
         "require_registro": None,
         "metric": "count",
+        "mode": "supplier",
     },
     {
         "key": "con_ct_amount",
@@ -66,22 +70,25 @@ SUPPLIER_TOP_CONFIG = [
         "require_ct": True,
         "require_registro": None,
         "metric": "amount",
+        "mode": "supplier",
     },
     {
         "key": "con_ct_sin_reg_count",
         "tab_label": "⚠️ Más actos ganados · Con ficha, sin registro",
-        "title": "Proveedores con más actos ganados con ficha técnica pero sin registro sanitario",
+        "title": "Fichas con más actos adjudicados (proveedores sin registro sanitario)",
         "require_ct": True,
         "require_registro": False,
         "metric": "count",
+        "mode": "ct",
     },
     {
         "key": "con_ct_sin_reg_amount",
         "tab_label": "🚨 Más dinero adjudicado · Con ficha, sin registro",
-        "title": "Proveedores con más dinero adjudicado con ficha técnica pero sin registro sanitario",
+        "title": "Fichas con más monto adjudicado (proveedores sin registro sanitario)",
         "require_ct": True,
         "require_registro": False,
         "metric": "amount",
+        "mode": "ct",
     },
 ]
 SUPPLIER_TOP_DEFAULT_ROWS = 10
@@ -364,6 +371,82 @@ def _compute_supplier_ranking(
     return grouped[display_cols]
 
 
+def _compute_ct_ranking(
+    df: pd.DataFrame,
+    *,
+    require_registro: bool | None,
+    metric: str,
+    metadata: dict[str, dict[str, bool]],
+    ct_stats: dict[str, int],
+    top_n: int,
+) -> pd.DataFrame:
+    subset = df[df["tiene_ct"]]
+    subset = subset[subset["ct_label"].astype(str).str.strip().astype(bool)]
+    if subset.empty:
+        return pd.DataFrame()
+
+    if require_registro is not None:
+        subset = subset[
+            subset["supplier_key"].map(
+                lambda key: metadata.get(key, {}).get("has_registro", False)
+            )
+            == require_registro
+        ]
+    if subset.empty:
+        return pd.DataFrame()
+
+    rows: list[dict[str, Any]] = []
+    for label, group in subset.groupby("ct_label"):
+        total_actos = len(group.index)
+        total_monto = group["precio_referencia"].sum()
+        avg_price = (total_monto / total_actos) if total_actos else 0.0
+        participantes_prom = group["num_participantes"].mean()
+        participantes_max = group["num_participantes"].max()
+        supplier_breakdown = (
+            group.groupby("supplier_name", as_index=False)
+            .agg(
+                actos=("supplier_key", "size"),
+                monto=("precio_referencia", "sum"),
+            )
+            .sort_values(["monto", "actos"], ascending=[False, False])
+        )
+        top_amount = supplier_breakdown.nlargest(3, ["monto", "actos"])
+        top_amount_str = ", ".join(
+            f"{row.supplier_name} (${row.monto:,.0f})" for _, row in top_amount.iterrows()
+        )
+        top_actos = supplier_breakdown.nlargest(3, ["actos", "monto"])
+        top_actos_str = ", ".join(
+            f"{row.supplier_name} ({int(row.actos)} actos)" for _, row in top_actos.iterrows()
+        )
+        rows.append(
+            {
+                "Ficha / Criterio": label,
+                "Actos ganados": total_actos,
+                "Monto adjudicado": round(total_monto, 2),
+                "Precio promedio acto": round(avg_price, 2),
+                "Participantes promedio": round(participantes_prom or 0, 2),
+                "Participantes máx.": int(participantes_max or 0),
+                "Oferentes en catálogo": ct_stats.get(label, 0),
+                "Top 3 por monto": top_amount_str or "Sin datos",
+                "Top 3 por actos": top_actos_str or "Sin datos",
+            }
+        )
+
+    ranking_df = pd.DataFrame(rows)
+    if ranking_df.empty:
+        return ranking_df
+
+    if metric == "amount":
+        ranking_df = ranking_df.sort_values(
+            ["Monto adjudicado", "Actos ganados"], ascending=[False, False]
+        )
+    else:
+        ranking_df = ranking_df.sort_values(
+            ["Actos ganados", "Monto adjudicado"], ascending=[False, False]
+        )
+    return ranking_df.head(top_n)
+
+
 def render_supplier_top_panel() -> None:
     db_path = _preferred_db_path()
     awards_df = load_supplier_awards_df(str(db_path) if db_path else None)
@@ -436,18 +519,40 @@ def render_supplier_top_panel() -> None:
             help="Cantidad de oferentes que en catálogo listan la misma ficha",
         ),
     }
+    ct_column_config = {
+        "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f"),
+        "Actos ganados": st.column_config.NumberColumn(format="%d"),
+        "Precio promedio acto": st.column_config.NumberColumn(format="$%0.2f"),
+        "Participantes promedio": st.column_config.NumberColumn(format="%.2f"),
+        "Participantes máx.": st.column_config.NumberColumn(format="%d"),
+        "Oferentes en catálogo": st.column_config.NumberColumn(format="%d"),
+        "Top 3 por monto": st.column_config.TextColumn(help="Empresas con mayor monto adjudicado"),
+        "Top 3 por actos": st.column_config.TextColumn(help="Empresas con más actos adjudicados"),
+    }
 
     for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
         with tab:
-            ranking = _compute_supplier_ranking(
-                filtered_df,
-                require_ct=cfg["require_ct"],
-                require_registro=cfg.get("require_registro"),
-                metric=cfg["metric"],
-                metadata=metadata,
-                ct_stats=ct_stats,
-                top_n=top_n,
-            )
+            if cfg.get("mode") == "ct":
+                ranking = _compute_ct_ranking(
+                    filtered_df,
+                    require_registro=cfg.get("require_registro"),
+                    metric=cfg["metric"],
+                    metadata=metadata,
+                    ct_stats=ct_stats,
+                    top_n=top_n,
+                )
+                current_config = ct_column_config
+            else:
+                ranking = _compute_supplier_ranking(
+                    filtered_df,
+                    require_ct=cfg["require_ct"],
+                    require_registro=cfg.get("require_registro"),
+                    metric=cfg["metric"],
+                    metadata=metadata,
+                    ct_stats=ct_stats,
+                    top_n=top_n,
+                )
+                current_config = column_config
             if ranking.empty:
                 st.info("Sin adjudicaciones disponibles para este subgrupo en el rango seleccionado.")
                 continue
@@ -457,7 +562,7 @@ def render_supplier_top_panel() -> None:
                 ranking,
                 hide_index=True,
                 use_container_width=True,
-                column_config=column_config,
+                column_config=current_config,
             )
 
 def _require_authentication() -> None:
