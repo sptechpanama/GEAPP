@@ -8,6 +8,7 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 import uuid
+import unicodedata
 from datetime import date, timedelta, datetime, timezone
 
 from core.config import DB_PATH
@@ -32,6 +33,39 @@ DEFAULT_DATE_START = date(2024, 1, 1)
 DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
 
 
+SUPPLIER_TOP_CONFIG = [
+    {
+        "key": "sin_ct_count",
+        "tab_label": "🔝 Más actos ganados · Sin ficha",
+        "title": "Proveedores con más actos públicos ganados sin ficha técnica",
+        "require_ct": False,
+        "metric": "count",
+    },
+    {
+        "key": "sin_ct_amount",
+        "tab_label": "💰 Más dinero adjudicado · Sin ficha",
+        "title": "Proveedores con más dinero adjudicado sin ficha técnica",
+        "require_ct": False,
+        "metric": "amount",
+    },
+    {
+        "key": "con_ct_count",
+        "tab_label": "📄 Más actos ganados · Con ficha",
+        "title": "Proveedores con más actos públicos ganados con ficha técnica",
+        "require_ct": True,
+        "metric": "count",
+    },
+    {
+        "key": "con_ct_amount",
+        "tab_label": "🏅 Más dinero adjudicado · Con ficha",
+        "title": "Proveedores con más dinero adjudicado con ficha técnica",
+        "require_ct": True,
+        "metric": "amount",
+    },
+]
+SUPPLIER_TOP_DEFAULT_ROWS = 10
+
+
 def _default_date_range() -> tuple[date, date]:
     today = date.today()
     if today < DEFAULT_DATE_START:
@@ -44,6 +78,318 @@ LOCAL_FICHAS_CTNI = ensure_drive_fichas_ctni()
 LOCAL_CRITERIOS_TECNICOS = ensure_drive_criterios_tecnicos()
 LOCAL_OFERENTES_CATALOGOS = ensure_drive_oferentes_catalogos()
 
+
+def _normalize_text(value: str | None) -> str:
+    if value is None:
+        return ""
+    normalized = unicodedata.normalize("NFKD", str(value))
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return normalized.strip()
+
+
+def _normalize_supplier_key(value: str | None) -> str:
+    base = _normalize_text(value).upper()
+    return re.sub(r"[^A-Z0-9]+", "", base)
+
+
+def _select_supplier_name(row: pd.Series) -> str:
+    for col in ("nombre_comercial", "razon_social"):
+        value = str(row.get(col) or "").strip()
+        if value:
+            return value
+    unidad = str(row.get("unidad_solic", "")).strip()
+    return unidad or "Proveedor sin nombre"
+
+
+def _detect_ct_flag(value: str | None) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = _normalize_text(text).lower()
+    if not normalized or "no detect" in normalized or normalized in {"no", "sin ficha", "sin dato"}:
+        return False
+    return bool(re.search(r"\d", text))
+
+
+def _extract_ficha_label(value: str | None) -> str:
+    if not _detect_ct_flag(value):
+        return "Sin ficha detectada"
+    text = str(value or "").strip()
+    text = text.replace("*", "")
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace(", ,", ",").strip(",; ")
+    return text or "Ficha detectada"
+
+
+def _last_non_empty(values: pd.Series) -> str:
+    for raw in reversed(values.tolist()):
+        text = str(raw or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _yes_no(value: bool | str | int) -> str:
+    return "Sí" if bool(value) else "No"
+
+
+@st.cache_data(ttl=600)
+def load_supplier_awards_df(db_path: str | None) -> pd.DataFrame | None:
+    if not db_path:
+        return None
+    db_path = str(db_path)
+    path = Path(db_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+
+    query = """
+        SELECT
+            razon_social,
+            nombre_comercial,
+            precio_referencia,
+            fecha_adjudicacion,
+            publicacion,
+            fecha_actualizacion,
+            ficha_detectada,
+            num_participantes,
+            estado
+        FROM actos_publicos
+        WHERE estado = 'Adjudicado'
+    """
+    try:
+        with _connect_sqlite(db_path) as conn:
+            df = pd.read_sql_query(query, conn)
+    except Exception:
+        return None
+
+    if df.empty:
+        return df
+
+    for col in ("fecha_adjudicacion", "publicacion", "fecha_actualizacion"):
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    df["fecha_referencia"] = (
+        df["fecha_adjudicacion"]
+        .combine_first(df["publicacion"])
+        .combine_first(df["fecha_actualizacion"])
+    )
+    df = df[df["fecha_referencia"].notna()].copy()
+    df["fecha_referencia"] = df["fecha_referencia"].dt.tz_localize(None)
+    df["precio_referencia"] = pd.to_numeric(df["precio_referencia"], errors="coerce").fillna(0.0)
+    df["num_participantes"] = (
+        pd.to_numeric(df["num_participantes"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    df["supplier_name"] = df.apply(_select_supplier_name, axis=1)
+    df["supplier_name"] = df["supplier_name"].astype(str).str.strip()
+    df = df[df["supplier_name"].astype(bool)]
+    df["supplier_key"] = df["supplier_name"].map(_normalize_supplier_key)
+    df = df[df["supplier_key"].astype(bool)].copy()
+    df["tiene_ct"] = df["ficha_detectada"].map(_detect_ct_flag)
+    df["ct_label"] = df["ficha_detectada"].map(_extract_ficha_label)
+    return df.reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600)
+def load_oferente_metadata(file_path: Path | None) -> dict[str, dict[str, bool]]:
+    if not file_path:
+        return {}
+    path = Path(file_path)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_excel(path)
+    except Exception:
+        return {}
+    df = _clean_drive_dataframe(df)
+    if df.empty:
+        return {}
+
+    normalized_cols = {
+        col: _normalize_text(col).lower()
+        for col in df.columns
+    }
+    name_col = next(
+        (col for col, norm in normalized_cols.items() if "oferente" in norm or "proveedor" in norm),
+        None,
+    )
+    reg_col = next(
+        (col for col, norm in normalized_cols.items() if "reg" in norm and "san" in norm),
+        None,
+    )
+    crit_col = next(
+        (col for col, norm in normalized_cols.items() if "criterio" in norm),
+        None,
+    )
+    if not name_col:
+        return {}
+
+    metadata: dict[str, dict[str, bool]] = {}
+    for _, row in df.iterrows():
+        supplier = str(row.get(name_col) or "").strip()
+        if not supplier:
+            continue
+        key = _normalize_supplier_key(supplier)
+        if not key:
+            continue
+        meta = metadata.setdefault(key, {"has_registro": False, "has_ct": False})
+        if reg_col:
+            reg_value = str(row.get(reg_col) or "").strip()
+            if reg_value:
+                meta["has_registro"] = True
+        if crit_col:
+            crit_value = str(row.get(crit_col) or "").strip()
+            if crit_value:
+                meta["has_ct"] = True
+    return metadata
+
+
+def _compute_supplier_ranking(
+    df: pd.DataFrame,
+    *,
+    require_ct: bool,
+    metric: str,
+    metadata: dict[str, dict[str, bool]],
+    top_n: int,
+) -> pd.DataFrame:
+    subset = df[df["tiene_ct"] == require_ct]
+    if subset.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        subset.sort_values("fecha_referencia")
+        .groupby(["supplier_key", "supplier_name"], as_index=False)
+        .agg(
+            actos=("supplier_key", "size"),
+            monto=("precio_referencia", "sum"),
+            participantes_prom=("num_participantes", "mean"),
+            participantes_max=("num_participantes", "max"),
+            ultima_ficha=("ct_label", _last_non_empty),
+        )
+    )
+    grouped["Monto adjudicado"] = grouped["monto"].round(2)
+    grouped["Actos ganados"] = grouped["actos"]
+    grouped["Participantes promedio"] = grouped["participantes_prom"].round(2)
+    grouped["Participantes máx."] = grouped["participantes_max"].fillna(0).astype(int)
+    grouped["Ficha / Criterio más reciente"] = grouped["ultima_ficha"].replace("", "Sin ficha registrada")
+    grouped["Tiene CT"] = grouped["supplier_key"].map(lambda _: require_ct)
+    grouped["Tiene Registro Sanitario"] = grouped["supplier_key"].map(
+        lambda key: metadata.get(key, {}).get("has_registro", False)
+    )
+
+    if metric == "amount":
+        grouped = grouped.sort_values(
+            ["Monto adjudicado", "Actos ganados"],
+            ascending=[False, False],
+        )
+    else:
+        grouped = grouped.sort_values(
+            ["Actos ganados", "Monto adjudicado"],
+            ascending=[False, False],
+        )
+
+    grouped = grouped.head(top_n).copy()
+    grouped["Proveedor"] = grouped["supplier_name"]
+    grouped["Tiene CT"] = grouped["Tiene CT"].map(_yes_no)
+    grouped["Tiene Registro Sanitario"] = grouped["Tiene Registro Sanitario"].map(_yes_no)
+    display_cols = [
+        "Proveedor",
+        "Actos ganados",
+        "Monto adjudicado",
+        "Participantes promedio",
+        "Participantes máx.",
+        "Ficha / Criterio más reciente",
+        "Tiene CT",
+        "Tiene Registro Sanitario",
+    ]
+    return grouped[display_cols]
+
+
+def render_supplier_top_panel() -> None:
+    db_path = _preferred_db_path()
+    awards_df = load_supplier_awards_df(str(db_path) if db_path else None)
+    if awards_df is None or awards_df.empty:
+        st.info(
+            "Aún no hay adjudicaciones sincronizadas en `panamacompra.db` para mostrar el top de proveedores."
+        )
+        return
+
+    metadata = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+    min_date = awards_df["fecha_referencia"].min().date()
+    max_date = awards_df["fecha_referencia"].max().date()
+    default_start = max(min_date, max_date - timedelta(days=90))
+
+    st.markdown("### 🏆 Tops de proveedores adjudicados")
+    st.caption(
+        "Explora rápidamente qué proveedores dominan las adjudicaciones, separados por si cuentan o no con ficha técnica."
+    )
+    date_input = st.date_input(
+        "Rango de adjudicación",
+        value=(default_start, max_date),
+        min_value=min_date,
+        max_value=max_date,
+        key="supplier_top_date_range",
+    )
+    if isinstance(date_input, (list, tuple)) and len(date_input) == 2:
+        start_date, end_date = date_input
+    else:
+        start_date = end_date = date_input
+
+    if isinstance(start_date, date) and isinstance(end_date, date):
+        start_ts = datetime.combine(start_date, datetime.min.time())
+        end_ts = datetime.combine(end_date, datetime.max.time())
+    else:
+        start_ts = awards_df["fecha_referencia"].min()
+        end_ts = awards_df["fecha_referencia"].max()
+
+    filtered_df = awards_df[
+        (awards_df["fecha_referencia"] >= start_ts) & (awards_df["fecha_referencia"] <= end_ts)
+    ]
+    if filtered_df.empty:
+        st.warning("No se registran adjudicaciones en el rango seleccionado.")
+        return
+
+    top_n = st.slider(
+        "Número máximo de proveedores por listado",
+        min_value=5,
+        max_value=25,
+        value=SUPPLIER_TOP_DEFAULT_ROWS,
+        step=1,
+        key="supplier_top_rows",
+    )
+    st.caption(f"El rango seleccionado contiene {len(filtered_df)} adjudicaciones únicas.")
+
+    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
+    column_config = {
+        "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f", help="Suma de precio de referencia adjudicado"),
+        "Actos ganados": st.column_config.NumberColumn(format="%d"),
+        "Participantes promedio": st.column_config.NumberColumn(format="%.2f", help="Promedio de participantes reportados"),
+        "Participantes máx.": st.column_config.NumberColumn(format="%d"),
+        "Ficha / Criterio más reciente": st.column_config.TextColumn(help="Última referencia detectada en el bot"),
+        "Tiene CT": st.column_config.TextColumn(),
+        "Tiene Registro Sanitario": st.column_config.TextColumn(),
+    }
+
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
+        with tab:
+            ranking = _compute_supplier_ranking(
+                filtered_df,
+                require_ct=cfg["require_ct"],
+                metric=cfg["metric"],
+                metadata=metadata,
+                top_n=top_n,
+            )
+            if ranking.empty:
+                st.info("Sin adjudicaciones disponibles para este subgrupo en el rango seleccionado.")
+                continue
+
+            st.caption(cfg["title"])
+            st.dataframe(
+                ranking,
+                hide_index=True,
+                use_container_width=True,
+                column_config=column_config,
+            )
 
 def _require_authentication() -> None:
     status = st.session_state.get("authentication_status")
@@ -994,6 +1340,8 @@ def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 _require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
+
+render_supplier_top_panel()
 
 # ---- Config ----
 SHEET_ID = "17hOfP-vMdJ4D7xym1cUp7vAcd8XJPErpY3V-9Ui2tCo"
