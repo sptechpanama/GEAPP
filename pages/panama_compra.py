@@ -213,6 +213,42 @@ def _filter_dataframe(
     return filtered
 
 
+def _clean_drive_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Remueve columnas auxiliares y filas de paginación de los Excel."""
+    if df is None or df.empty:
+        return df
+
+    cols_to_drop = [
+        col for col in df.columns if str(col).strip().lower().startswith("unnamed")
+    ]
+    if cols_to_drop:
+        df = df.drop(columns=cols_to_drop, errors="ignore")
+
+    def _looks_like_pagination(row: pd.Series) -> bool:
+        values: list[int] = []
+        for value in row:
+            if pd.isna(value):
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            if text.endswith("..."):
+                text = text.rstrip(".").strip()
+            if not text.isdigit():
+                return False
+            values.append(int(text))
+        if len(values) < 3:
+            return False
+        expected = list(range(values[0], values[0] + len(values)))
+        return values == expected
+
+    mask = df.apply(_looks_like_pagination, axis=1)
+    if mask.any():
+        df = df[~mask].reset_index(drop=True)
+
+    return df
+
+
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
 PC_CONFIG_NAME_ALIASES = ("name", "bot", "job", "proceso")
 PC_CONFIG_DAYS_ALIASES = ("days", "dias", "días")
@@ -1590,6 +1626,8 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
     except Exception as exc:
         st.error(f"No pudimos leer `{file_path.name}`: {exc}")
         return
+
+    df = _clean_drive_dataframe(df)
 
     total_rows = len(df.index)
     if total_rows == 0:
