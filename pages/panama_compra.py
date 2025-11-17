@@ -149,6 +149,20 @@ def _extract_ficha_label(value: str | None) -> str:
     return text or "Ficha detectada"
 
 
+def _normalize_ct_code(value: str | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+(\.0+)?", text):
+        try:
+            text = str(int(float(text)))
+        except Exception:
+            text = text.split(".", 1)[0]
+    return text
+
+
 def _normalize_ct_label(value: str | None) -> str:
     if not value:
         return ""
@@ -158,6 +172,24 @@ def _normalize_ct_label(value: str | None) -> str:
     text = text.replace("*", "")
     text = re.sub(r"[^A-Z0-9/.-]", "", text)
     return text.strip()
+
+
+def _extract_ct_candidates(value: str | None) -> list[str]:
+    tokens = re.findall(r"[A-Z0-9/.-]+", str(value or "").upper())
+    candidates: list[str] = []
+    for token in tokens:
+        normalized = _normalize_ct_label(token)
+        if normalized:
+            candidates.append(normalized)
+    return candidates
+
+
+def _match_known_ct_code(label: str, known_codes: set[str]) -> str:
+    candidates = _extract_ct_candidates(label)
+    for candidate in candidates:
+        if candidate in known_codes:
+            return candidate
+    return candidates[0] if candidates else ""
 
 
 def _last_non_empty(values: pd.Series) -> str:
@@ -258,16 +290,16 @@ def load_oferente_metadata(
         (col for col, norm in normalized_cols.items() if "reg" in norm and "san" in norm),
         None,
     )
+    ficha_col = next(
+        (col for col, norm in normalized_cols.items() if "ficha" in norm and "ctni" in norm),
+        None,
+    )
     crit_col = next(
         (col for col, norm in normalized_cols.items() if "criterio" in norm),
         None,
     )
     ct_name_col = next(
-        (
-            col
-            for col, norm in normalized_cols.items()
-            if ("nombre" in norm or "producto" in norm) and ("ctni" in norm or "ficha" in norm or "criterio" in norm)
-        ),
+        (col for col, norm in normalized_cols.items() if "nombre" in norm and "gener" in norm),
         None,
     )
     if not name_col:
@@ -288,19 +320,22 @@ def load_oferente_metadata(
             reg_value = str(row.get(reg_col) or "").strip()
             if reg_value:
                 meta["has_registro"] = True
-        if crit_col:
+        norm_label = ""
+        if ficha_col:
+            ct_value = _normalize_ct_code(row.get(ficha_col))
+            norm_label = _normalize_ct_label(ct_value)
+        if not norm_label and crit_col:
             crit_value = str(row.get(crit_col) or "").strip()
             if crit_value:
-                meta["has_ct"] = True
-                label = _extract_ficha_label(crit_value)
-                norm_label = _normalize_ct_label(label)
-                if norm_label:
-                    meta.setdefault("ct_labels", set()).add(label)
-                    ct_suppliers[norm_label].add(key)
-                    if ct_name_col:
-                        label_name = str(row.get(ct_name_col) or "").strip()
-                        if label_name:
-                            ct_name_lookup.setdefault(norm_label, label_name)
+                norm_label = _normalize_ct_label(_extract_ficha_label(crit_value))
+        if norm_label:
+            meta["has_ct"] = True
+            meta.setdefault("ct_labels", set()).add(norm_label)
+            ct_suppliers[norm_label].add(key)
+            if ct_name_col:
+                label_name = str(row.get(ct_name_col) or "").strip()
+                if label_name:
+                    ct_name_lookup.setdefault(norm_label, label_name)
 
     for meta in metadata.values():
         if "ct_labels" in meta:
@@ -362,9 +397,11 @@ def _compute_supplier_ranking(
 
     grouped["Tiene CT"] = grouped["supplier_key"].map(lambda _: require_ct)
     grouped["Tiene Registro Sanitario"] = grouped["_has_registro"]
-    grouped["Oferentes con esta ficha"] = grouped["Ficha / Criterio más reciente"].map(
-        lambda label: ct_stats.get(_normalize_ct_label(label), 0)
+    known_ct_codes = set(ct_stats.keys())
+    grouped["_ct_code"] = grouped["Ficha / Criterio más reciente"].map(
+        lambda label: _match_known_ct_code(label, known_ct_codes)
     )
+    grouped["Oferentes con esta ficha"] = grouped["_ct_code"].map(lambda code: ct_stats.get(code, 0))
 
     if metric == "amount":
         grouped = grouped.sort_values(
@@ -381,7 +418,7 @@ def _compute_supplier_ranking(
     grouped["Proveedor"] = grouped["supplier_name"]
     grouped["Tiene CT"] = grouped["Tiene CT"].map(_yes_no)
     grouped["Tiene Registro Sanitario"] = grouped["Tiene Registro Sanitario"].map(_yes_no)
-    grouped = grouped.drop(columns=["_has_registro"])
+    grouped = grouped.drop(columns=["_has_registro", "_ct_code"])
     display_cols = [
         "Proveedor",
         "Actos ganados",
@@ -416,20 +453,20 @@ def load_ct_name_map(file_path: Path | None) -> dict[str, str]:
         col: _normalize_text(col).lower()
         for col in df.columns
     }
-    criterio_col = next(
-        (col for col, norm in normalized_cols.items() if "criterio" in norm),
+    ficha_col = next(
+        (col for col, norm in normalized_cols.items() if "ficha" in norm and "ctni" in norm),
         None,
     )
     nombre_col = next(
         (col for col, norm in normalized_cols.items() if "nombre" in norm and "gener" in norm),
         None,
     )
-    if not criterio_col or not nombre_col:
+    if not ficha_col or not nombre_col:
         return {}
 
     name_map: dict[str, str] = {}
     for _, row in df.iterrows():
-        criterio = str(row.get(criterio_col) or "").strip()
+        criterio = _normalize_ct_code(row.get(ficha_col))
         nombre = str(row.get(nombre_col) or "").strip()
         norm = _normalize_ct_label(criterio)
         if norm and nombre:
@@ -462,9 +499,11 @@ def _compute_ct_ranking(
     if subset.empty:
         return pd.DataFrame()
 
+    known_codes = set(ct_stats.keys()) | set(ct_names.keys())
     rows: list[dict[str, Any]] = []
     for label, group in subset.groupby("ct_label"):
-        norm_label = _normalize_ct_label(label)
+        norm_label = _match_known_ct_code(label, known_codes)
+        display_label = norm_label or label
         total_actos = len(group.index)
         total_monto = group["precio_referencia"].sum()
         avg_price = (total_monto / total_actos) if total_actos else 0.0
@@ -488,7 +527,7 @@ def _compute_ct_ranking(
         )
         rows.append(
             {
-                "Ficha / Criterio": label,
+                "Ficha / Criterio": display_label,
                 "Nombre de la ficha": ct_names.get(norm_label, ""),
                 "Actos ganados": total_actos,
                 "Monto adjudicado": round(total_monto, 2),
