@@ -341,7 +341,6 @@ def _compute_supplier_ranking(
     metric: str,
     metadata: dict[str, dict[str, bool]],
     ct_stats: dict[str, int],
-    top_n: int,
 ) -> pd.DataFrame:
     subset = df[df["tiene_ct"] == require_ct]
     if subset.empty:
@@ -403,7 +402,7 @@ def _compute_supplier_ranking(
             ascending=[False, False],
         )
 
-    grouped = grouped.head(top_n).copy()
+    grouped = grouped.copy()
     grouped["Proveedor"] = grouped["supplier_name"]
     grouped["Tiene CT"] = grouped["Tiene CT"].map(_yes_no)
     grouped["Tiene Registro Sanitario"] = grouped["Tiene Registro Sanitario"].map(_yes_no)
@@ -483,7 +482,6 @@ def _compute_ct_ranking(
     metadata: dict[str, dict[str, bool]],
     ct_stats: dict[str, int],
     ct_names: dict[str, str],
-    top_n: int,
 ) -> pd.DataFrame:
     subset = df[df["tiene_ct"]]
     subset = subset[subset["ct_label"].astype(str).str.strip().astype(bool)]
@@ -553,7 +551,7 @@ def _compute_ct_ranking(
         ranking_df = ranking_df.sort_values(
             ["Actos ganados", "Monto adjudicado"], ascending=[False, False]
         )
-    return ranking_df.head(top_n)
+    return ranking_df
 
 
 def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
@@ -726,7 +724,6 @@ def render_supplier_top_panel() -> None:
                     metadata=metadata,
                     ct_stats=ct_stats,
                     ct_names=ct_names,
-                    top_n=top_n,
                 )
                 current_config = ct_column_config
             else:
@@ -737,16 +734,17 @@ def render_supplier_top_panel() -> None:
                     metric=cfg["metric"],
                     metadata=metadata,
                     ct_stats=ct_stats,
-                    top_n=top_n,
                 )
                 current_config = column_config
             if ranking.empty:
                 st.info("Sin adjudicaciones disponibles para este subgrupo en el rango seleccionado.")
                 continue
 
+            display_df = ranking.head(top_n)
+
             st.caption(cfg["title"])
             st.dataframe(
-                ranking,
+                display_df,
                 hide_index=True,
                 use_container_width=True,
                 column_config=current_config,

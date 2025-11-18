@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sqlite3
 from pathlib import Path
 import sys
@@ -126,21 +125,20 @@ def build_top_proveedores(
     mask: Optional[pd.Series],
     order_field: str,
     ascending: bool,
-    top_n: int,
 ) -> pd.DataFrame:
     if mask is not None:
         df = df[mask]
     if df.empty:
         return pd.DataFrame()
     grouped = _supplier_group(df)
-    grouped = grouped.sort_values(order_field, ascending=ascending).head(top_n)
+    grouped = grouped.sort_values(order_field, ascending=ascending)
     grouped["num_participantes_promedio"] = grouped[
         "num_participantes_promedio"
     ].round(2)
     return grouped
 
 
-def build_top_entidades(df: pd.DataFrame, *, mask: Optional[pd.Series], top_n: int) -> pd.DataFrame:
+def build_top_entidades(df: pd.DataFrame, *, mask: Optional[pd.Series]) -> pd.DataFrame:
     if mask is not None:
         df = df[mask]
     if df.empty:
@@ -156,10 +154,10 @@ def build_top_entidades(df: pd.DataFrame, *, mask: Optional[pd.Series], top_n: i
         .reset_index()
         .rename(columns={ENTIDAD_COL: "entidad"})
     )
-    return grouped.sort_values("monto_total", ascending=False).head(top_n)
+    return grouped.sort_values("monto_total", ascending=False)
 
 
-def build_top_entidades_ct_sin_rs(df: pd.DataFrame, *, top_n: int) -> pd.DataFrame:
+def build_top_entidades_ct_sin_rs(df: pd.DataFrame) -> pd.DataFrame:
     mask = df[TIENE_FICHA_COL] & df[TIENE_CT_COL] & ~df[TIENE_RS_COL]
     if not mask.any():
         return pd.DataFrame()
@@ -175,10 +173,10 @@ def build_top_entidades_ct_sin_rs(df: pd.DataFrame, *, top_n: int) -> pd.DataFra
         .reset_index()
         .rename(columns={ENTIDAD_COL: "entidad"})
     )
-    return grouped.sort_values("monto_ct_sin_rs", ascending=False).head(top_n)
+    return grouped.sort_values("monto_ct_sin_rs", ascending=False)
 
 
-def build_top_fichas(df: pd.DataFrame, *, mask: Optional[pd.Series], top_n: int) -> pd.DataFrame:
+def build_top_fichas(df: pd.DataFrame, *, mask: Optional[pd.Series]) -> pd.DataFrame:
     if mask is not None:
         df = df[mask]
     df = df[df[FICHA_COL].notna()]
@@ -197,12 +195,12 @@ def build_top_fichas(df: pd.DataFrame, *, mask: Optional[pd.Series], top_n: int)
         .rename(columns={FICHA_COL: "num_ficha"})
     )
     grouped["nombre_ficha"] = grouped["nombre_ficha"].fillna("").astype(str)
-    monto_sorted = grouped.sort_values("monto_total", ascending=False).head(top_n)
-    actos_sorted = grouped.sort_values("actos_con_esa_ficha", ascending=False).head(top_n)
+    monto_sorted = grouped.sort_values("monto_total", ascending=False)
+    actos_sorted = grouped.sort_values("actos_con_esa_ficha", ascending=False)
     return monto_sorted, actos_sorted
 
 
-def build_top_fichas_ct_sin_rs(df: pd.DataFrame, *, top_n: int) -> pd.DataFrame:
+def build_top_fichas_ct_sin_rs(df: pd.DataFrame) -> pd.DataFrame:
     mask = df[TIENE_FICHA_COL] & df[TIENE_CT_COL] & ~df[TIENE_RS_COL] & df[FICHA_COL].notna()
     if not mask.any():
         return pd.DataFrame()
@@ -219,7 +217,7 @@ def build_top_fichas_ct_sin_rs(df: pd.DataFrame, *, top_n: int) -> pd.DataFrame:
         .reset_index()
         .rename(columns={FICHA_COL: "num_ficha"})
     )
-    return grouped.sort_values("monto_ct_sin_rs", ascending=False).head(top_n)
+    return grouped.sort_values("monto_ct_sin_rs", ascending=False)
 
 
 def build_resumen_competencia(df: pd.DataFrame) -> pd.DataFrame:
@@ -279,12 +277,6 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=str(DEFAULT_OUTPUT_DIR),
         help="Carpeta donde se guardarán los DataFrames agregados.",
     )
-    parser.add_argument(
-        "--top-n",
-        type=int,
-        default=50,
-        help="Número máximo de filas a conservar en cada ranking.",
-    )
     return parser.parse_args(argv)
 
 
@@ -292,7 +284,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parse_args(argv)
     db_path = Path(args.db_path).expanduser()
     output_dir = Path(args.output_dir).expanduser()
-    top_n = max(5, int(args.top_n))
 
     df = load_base_dataframe(db_path)
     if df.empty:
@@ -304,57 +295,57 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     resumen_global = build_resumen_global(df)
     generated["resumen_global"] = save_table(resumen_global, "resumen_global", output_dir)
 
-    top_gen = build_top_proveedores(df, mask=None, order_field="monto_total", ascending=False, top_n=top_n)
+    top_gen = build_top_proveedores(df, mask=None, order_field="monto_total", ascending=False)
     generated["top_proveedores_general"] = save_table(top_gen, "top_proveedores_general", output_dir)
 
     sin_ficha = ~df[TIENE_FICHA_COL]
-    top_sf_actos = build_top_proveedores(df, mask=sin_ficha, order_field="actos_ganados", ascending=False, top_n=top_n)
+    top_sf_actos = build_top_proveedores(df, mask=sin_ficha, order_field="actos_ganados", ascending=False)
     generated["top_proveedores_sin_ficha_por_actos"] = save_table(
         top_sf_actos, "top_proveedores_sin_ficha_por_actos", output_dir
     )
-    top_sf_monto = build_top_proveedores(df, mask=sin_ficha, order_field="monto_total", ascending=False, top_n=top_n)
+    top_sf_monto = build_top_proveedores(df, mask=sin_ficha, order_field="monto_total", ascending=False)
     generated["top_proveedores_sin_ficha_por_monto"] = save_table(
         top_sf_monto, "top_proveedores_sin_ficha_por_monto", output_dir
     )
 
     con_ficha = df[TIENE_FICHA_COL]
-    top_cf_actos = build_top_proveedores(df, mask=con_ficha, order_field="actos_ganados", ascending=False, top_n=top_n)
+    top_cf_actos = build_top_proveedores(df, mask=con_ficha, order_field="actos_ganados", ascending=False)
     generated["top_proveedores_con_ficha_por_actos"] = save_table(
         top_cf_actos, "top_proveedores_con_ficha_por_actos", output_dir
     )
-    top_cf_monto = build_top_proveedores(df, mask=con_ficha, order_field="monto_total", ascending=False, top_n=top_n)
+    top_cf_monto = build_top_proveedores(df, mask=con_ficha, order_field="monto_total", ascending=False)
     generated["top_proveedores_con_ficha_por_monto"] = save_table(
         top_cf_monto, "top_proveedores_con_ficha_por_monto", output_dir
     )
 
     mask_ct_sin_rs = df[TIENE_FICHA_COL] & df[TIENE_CT_COL] & ~df[TIENE_RS_COL]
     top_ct_actos = build_top_proveedores(
-        df, mask=mask_ct_sin_rs, order_field="actos_ganados", ascending=False, top_n=top_n
+        df, mask=mask_ct_sin_rs, order_field="actos_ganados", ascending=False
     )
     generated["top_proveedores_ct_sin_rs_por_actos"] = save_table(
         top_ct_actos, "top_proveedores_ct_sin_rs_por_actos", output_dir
     )
     top_ct_monto = build_top_proveedores(
-        df, mask=mask_ct_sin_rs, order_field="monto_total", ascending=False, top_n=top_n
+        df, mask=mask_ct_sin_rs, order_field="monto_total", ascending=False
     )
     generated["top_proveedores_ct_sin_rs_por_monto"] = save_table(
         top_ct_monto, "top_proveedores_ct_sin_rs_por_monto", output_dir
     )
 
-    top_entidades = build_top_entidades(df, mask=None, top_n=top_n)
+    top_entidades = build_top_entidades(df, mask=None)
     generated["top_entidades_por_monto_total"] = save_table(
         top_entidades, "top_entidades_por_monto_total", output_dir
     )
-    top_entidades_ct = build_top_entidades_ct_sin_rs(df, top_n=top_n)
+    top_entidades_ct = build_top_entidades_ct_sin_rs(df)
     generated["top_entidades_ct_sin_rs"] = save_table(
         top_entidades_ct, "top_entidades_ct_sin_rs", output_dir
     )
 
-    fichas_monto, fichas_actos = build_top_fichas(df, mask=df[TIENE_FICHA_COL], top_n=top_n)
+    fichas_monto, fichas_actos = build_top_fichas(df, mask=df[TIENE_FICHA_COL])
     generated["top_fichas_por_monto"] = save_table(fichas_monto, "top_fichas_por_monto", output_dir)
     generated["top_fichas_por_actos"] = save_table(fichas_actos, "top_fichas_por_actos", output_dir)
 
-    fichas_ct_sin_rs = build_top_fichas_ct_sin_rs(df, top_n=top_n)
+    fichas_ct_sin_rs = build_top_fichas_ct_sin_rs(df)
     generated["top_fichas_ct_sin_rs"] = save_table(
         fichas_ct_sin_rs, "top_fichas_ct_sin_rs", output_dir
     )

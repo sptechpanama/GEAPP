@@ -298,7 +298,6 @@ def _compute_supplier_ranking(
     metric: str,
     metadata: dict[str, dict[str, bool]],
     ct_stats: dict[str, int],
-    top_n: int,
 ) -> pd.DataFrame:
     subset = df[df["tiene_ct"] == require_ct]
     if subset.empty:
@@ -360,7 +359,7 @@ def _compute_supplier_ranking(
             ascending=[False, False],
         )
 
-    grouped = grouped.head(top_n).copy()
+    grouped = grouped.copy()
     grouped["Proveedor"] = grouped["supplier_name"]
     grouped["Tiene CT"] = grouped["Tiene CT"].map(_yes_no)
     grouped["Tiene Registro Sanitario"] = grouped["Tiene Registro Sanitario"].map(_yes_no)
@@ -389,7 +388,6 @@ def _compute_ct_ranking(
     metadata: dict[str, dict[str, bool]],
     ct_stats: dict[str, int],
     ct_names: dict[str, str],
-    top_n: int,
 ) -> pd.DataFrame:
     subset = df[df["tiene_ct"]]
     if subset.empty:
@@ -461,7 +459,7 @@ def _compute_ct_ranking(
         ranking_df = ranking_df.sort_values(
             ["Actos ganados", "Monto adjudicado"], ascending=[False, False]
         )
-    return ranking_df.head(top_n)
+    return ranking_df
 
 
 def generate_top_tables(
@@ -470,7 +468,6 @@ def generate_top_tables(
     fichas_path: Optional[Path],
     criterios_path: Optional[Path],
     oferentes_path: Optional[Path],
-    top_n: int,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, str], pd.DataFrame]:
     awards_df = load_supplier_awards_df(db_path)
     if awards_df.empty:
@@ -491,7 +488,6 @@ def generate_top_tables(
                 metadata=metadata,
                 ct_stats=ct_stats,
                 ct_names=ct_names,
-                top_n=top_n,
             )
         else:
             df = _compute_supplier_ranking(
@@ -501,7 +497,6 @@ def generate_top_tables(
                 metric=cfg["metric"],
                 metadata=metadata,
                 ct_stats=ct_stats,
-                top_n=top_n,
             )
         top_tables[cfg["key"]] = df
 
@@ -514,7 +509,6 @@ def generate_top_tables(
         "fichas_path": str(fichas_path) if fichas_path else "",
         "criterios_path": str(criterios_path) if criterios_path else "",
         "oferentes_path": str(oferentes_path) if oferentes_path else "",
-        "top_n": str(top_n),
     }
     return top_tables, meta_info, awards_df
 
@@ -562,12 +556,6 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Excel de oferentes y catálogos.",
     )
     parser.add_argument(
-        "--top-n",
-        type=int,
-        default=100,
-        help="Número máximo de filas a conservar por cada ranking.",
-    )
-    parser.add_argument(
         "--output",
         default=str(DEFAULT_OUTPUT),
         help="Ruta del archivo Excel destino.",
@@ -582,7 +570,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     fichas_path = Path(args.fichas).expanduser() if args.fichas else None
     criterios_path = Path(args.criterios).expanduser() if args.criterios else None
     oferentes_path = Path(args.oferentes).expanduser() if args.oferentes else None
-    top_n = max(5, int(args.top_n))
     output_path = Path(args.output).expanduser()
 
     try:
@@ -591,7 +578,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             fichas_path=fichas_path if fichas_path and fichas_path.exists() else None,
             criterios_path=criterios_path if criterios_path and criterios_path.exists() else None,
             oferentes_path=oferentes_path if oferentes_path and oferentes_path.exists() else None,
-            top_n=top_n,
         )
     except Exception as exc:
         print(f"[ERROR] No se pudieron generar los tops: {exc}")
