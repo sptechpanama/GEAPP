@@ -7,9 +7,6 @@ from core.config import APP_ROOT
 
 DATA_TOPS_DIR = APP_ROOT / "data" / "tops"
 ALT_TOPS_DIR = APP_ROOT / "outputs" / "tops"
-DATA_TOPS_DIR.mkdir(parents=True, exist_ok=True)
-ALT_TOPS_DIR.mkdir(parents=True, exist_ok=True)
-
 TOPS_EXCEL_PATH = DATA_TOPS_DIR / "tops_panamacompra.xlsx"
 TOPS_EXCEL_FALLBACK = ALT_TOPS_DIR / "tops_panamacompra.xlsx"
 TOPS_METADATA_SHEET = "metadata"
