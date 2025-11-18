@@ -58,21 +58,36 @@ TOPS_OUTPUT_FILE = TOPS_EXCEL_PATH
 TOPS_FALLBACK_FILE = TOPS_EXCEL_FALLBACK
 
 
+def _tops_cache_signature() -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+    for path in (TOPS_OUTPUT_FILE, TOPS_FALLBACK_FILE):
+        if not path:
+            continue
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        signature.append((str(path), int(stat.st_mtime_ns), stat.st_size))
+    return tuple(signature)
+
+
 @st.cache_data(ttl=300)
-def load_precomputed_top_tables() -> dict[str, pd.DataFrame]:
+def load_precomputed_top_tables(signature: tuple[tuple[str, int, int], ...]) -> dict[str, pd.DataFrame]:
     """Carga los tops precomputados en Excel si estan disponibles."""
-    candidate_paths = []
-    if TOPS_OUTPUT_FILE and TOPS_OUTPUT_FILE.exists():
-        candidate_paths.append(TOPS_OUTPUT_FILE)
-    if TOPS_FALLBACK_FILE and TOPS_FALLBACK_FILE.exists():
-        candidate_paths.append(TOPS_FALLBACK_FILE)
-    if not candidate_paths:
+    if not signature:
         return {}
 
-    selected_path = candidate_paths[0]
-    try:
-        xls = pd.ExcelFile(selected_path)
-    except Exception:
+    xls = None
+    selected_path: Path | None = None
+    for path_str, _, _ in signature:
+        path = Path(path_str)
+        try:
+            xls = pd.ExcelFile(path)
+            selected_path = path
+            break
+        except Exception:
+            continue
+    if xls is None or selected_path is None:
         return {}
 
     tables: dict[str, pd.DataFrame] = {}
@@ -613,7 +628,8 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
 
 
 def render_supplier_top_panel() -> None:
-    precomputed_tables = load_precomputed_top_tables()
+    tops_signature = _tops_cache_signature()
+    precomputed_tables = load_precomputed_top_tables(tops_signature)
     if render_precomputed_top_panel(precomputed_tables):
         return
 
