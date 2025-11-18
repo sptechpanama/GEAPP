@@ -583,10 +583,7 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
         key="precomputed_top_rows",
     )
 
-    tabs = st.tabs(
-        [cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG],
-        key="precomputed_top_tabs",
-    )
+    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
     for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
         with tab:
             df = precomputed.get(cfg["key"])
@@ -676,10 +673,7 @@ def render_supplier_top_panel() -> None:
     )
     st.caption(f"El rango seleccionado contiene {len(filtered_df)} adjudicaciones únicas.")
 
-    tabs = st.tabs(
-        [cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG],
-        key="supplier_top_tabs_runtime",
-    )
+    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
     column_config = {
         "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f", help="Suma de precio de referencia adjudicado"),
         "Actos ganados": st.column_config.NumberColumn(format="%d"),
@@ -2379,7 +2373,7 @@ def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str
 pc_state_df = load_pc_state()
 pc_config_df = load_pc_config()
 ordered_categories = [c for c in CATEGORY_ORDER if c in SHEET_GROUPS]
-category_tabs = st.tabs(ordered_categories, key="pc_category_tabs")
+category_tabs = st.tabs(ordered_categories)
 
 for tab, category_name in zip(category_tabs, ordered_categories):
     with tab:
