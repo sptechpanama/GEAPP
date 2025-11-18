@@ -629,14 +629,18 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
 
 def render_supplier_top_panel() -> None:
     tops_signature = _tops_cache_signature()
-    precomputed_tables = load_precomputed_top_tables(tops_signature)
+    fresh_tables = load_precomputed_top_tables(tops_signature)
+    if fresh_tables:
+        st.session_state["precomputed_top_tables"] = fresh_tables
+    precomputed_tables = fresh_tables or st.session_state.get("precomputed_top_tables", {})
+
     if render_precomputed_top_panel(precomputed_tables):
         return
 
     st.warning(
-        "No se encontraron tops precomputados en `data/tops` ni en `outputs/tops`. "
-        "Ejecuta `scripts/genera_tops_panamacompra.py` (o el nuevo `scripts/build_panamacompra_aggregates.py`) "
-        "y vuelve a cargar la página. También puedes usar el botón para calcularlos "
+        "No se encontraron tops precomputados en data/tops ni en outputs/tops. "
+        "Ejecuta scripts/genera_tops_panamacompra.py (o el nuevo scripts/build_panamacompra_aggregates.py) "
+        "y vuelve a cargar la p??gina. Tambi?n puedes usar el bot?n para calcularlos "
         "temporalmente (puede demorar)."
     )
     if not st.button("Calcular en vivo (proceso lento)", key="compute_supplier_top_fallback"):
