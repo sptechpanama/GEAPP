@@ -639,12 +639,9 @@ def render_supplier_top_panel() -> None:
 
     st.warning(
         "No se encontraron tops precomputados en data/tops ni en outputs/tops. "
-        "Ejecuta scripts/genera_tops_panamacompra.py (o el nuevo scripts/build_panamacompra_aggregates.py) "
-        "y vuelve a cargar la p??gina. Tambi?n puedes usar el bot?n para calcularlos "
-        "temporalmente (puede demorar)."
+        "Mostrando un cálculo en vivo temporal mientras ejecutas scripts/genera_tops_panamacompra.py "
+        "o scripts/build_panamacompra_aggregates.py para la próxima sesión."
     )
-    if not st.button("Calcular en vivo (proceso lento)", key="compute_supplier_top_fallback"):
-        return
 
     db_path = _preferred_db_path()
     awards_df = load_supplier_awards_df(str(db_path) if db_path else None)
@@ -2461,6 +2458,7 @@ with st.expander(
         LOCAL_OFERENTES_CATALOGOS,
         "oferentes_catalogos",
     )
+
 
 
 
