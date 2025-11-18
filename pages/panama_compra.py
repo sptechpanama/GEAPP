@@ -18,6 +18,7 @@ from core.panamacompra_tops import (
     SUPPLIER_TOP_CONFIG,
     SUPPLIER_TOP_DEFAULT_ROWS,
     TOPS_EXCEL_PATH,
+    TOPS_EXCEL_FALLBACK,
     TOPS_METADATA_SHEET,
     sheet_name_for_top,
 )
@@ -54,16 +55,23 @@ LOCAL_FICHAS_CTNI = ensure_drive_fichas_ctni()
 LOCAL_CRITERIOS_TECNICOS = ensure_drive_criterios_tecnicos()
 LOCAL_OFERENTES_CATALOGOS = ensure_drive_oferentes_catalogos()
 TOPS_OUTPUT_FILE = TOPS_EXCEL_PATH
+TOPS_FALLBACK_FILE = TOPS_EXCEL_FALLBACK
 
 
 @st.cache_data(ttl=300)
 def load_precomputed_top_tables() -> dict[str, pd.DataFrame]:
     """Carga los tops precomputados en Excel si estan disponibles."""
-    path = TOPS_OUTPUT_FILE
-    if not path or not path.exists():
+    candidate_paths = []
+    if TOPS_OUTPUT_FILE and TOPS_OUTPUT_FILE.exists():
+        candidate_paths.append(TOPS_OUTPUT_FILE)
+    if TOPS_FALLBACK_FILE and TOPS_FALLBACK_FILE.exists():
+        candidate_paths.append(TOPS_FALLBACK_FILE)
+    if not candidate_paths:
         return {}
+
+    selected_path = candidate_paths[0]
     try:
-        xls = pd.ExcelFile(path)
+        xls = pd.ExcelFile(selected_path)
     except Exception:
         return {}
 
@@ -82,6 +90,7 @@ def load_precomputed_top_tables() -> dict[str, pd.DataFrame]:
             meta_df = pd.read_excel(xls, sheet_name=TOPS_METADATA_SHEET)
             if not meta_df.empty and meta_df.shape[1] >= 2:
                 metadata = dict(zip(meta_df.iloc[:, 0], meta_df.iloc[:, 1]))
+                metadata.setdefault("archivo", str(selected_path))
                 tables['__metadata__'] = metadata
         except Exception:
             pass
@@ -557,8 +566,11 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
     st.markdown("### ⚙ Tops precomputados de adjudicaciones")
     if metadata:
         generated_at = metadata.get("generated_at", "sin fecha")
+        origen = metadata.get("db_path", "panamacompra.db")
+        archivo = metadata.get("archivo")
+        extra = f" · Archivo: {archivo}" if archivo else ""
         st.caption(
-            f"Generado: {generated_at} · Fuente: {metadata.get('db_path', 'panamacompra.db')}"
+            f"Generado: {generated_at} · Fuente: {origen}{extra}"
         )
 
     max_rows = max(
@@ -608,8 +620,9 @@ def render_supplier_top_panel() -> None:
         return
 
     st.warning(
-        "No se encontraron tops precomputados. Ejecuta el script "
-        "`scripts/genera_tops_panamacompra.py` o usa el botón para calcularlos "
+        "No se encontraron tops precomputados en `data/tops` ni en `outputs/tops`. "
+        "Ejecuta `scripts/genera_tops_panamacompra.py` (o el nuevo `scripts/build_panamacompra_aggregates.py`) "
+        "y vuelve a cargar la página. También puedes usar el botón para calcularlos "
         "temporalmente (puede demorar)."
     )
     if not st.button("Calcular en vivo (proceso lento)", key="compute_supplier_top_fallback"):

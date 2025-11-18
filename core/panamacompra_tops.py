@@ -5,10 +5,13 @@ from __future__ import annotations
 from core.config import APP_ROOT
 
 
-TOPS_DIR = APP_ROOT / "data" / "tops"
-TOPS_DIR.mkdir(parents=True, exist_ok=True)
+DATA_TOPS_DIR = APP_ROOT / "data" / "tops"
+ALT_TOPS_DIR = APP_ROOT / "outputs" / "tops"
+DATA_TOPS_DIR.mkdir(parents=True, exist_ok=True)
+ALT_TOPS_DIR.mkdir(parents=True, exist_ok=True)
 
-TOPS_EXCEL_PATH = TOPS_DIR / "tops_panamacompra.xlsx"
+TOPS_EXCEL_PATH = DATA_TOPS_DIR / "tops_panamacompra.xlsx"
+TOPS_EXCEL_FALLBACK = ALT_TOPS_DIR / "tops_panamacompra.xlsx"
 TOPS_METADATA_SHEET = "metadata"
 
 
@@ -81,8 +84,10 @@ def sheet_name_for_top(key: str) -> str:
 __all__ = [
     "SUPPLIER_TOP_CONFIG",
     "SUPPLIER_TOP_DEFAULT_ROWS",
-    "TOPS_DIR",
+    "DATA_TOPS_DIR",
+    "ALT_TOPS_DIR",
     "TOPS_EXCEL_PATH",
+    "TOPS_EXCEL_FALLBACK",
     "TOPS_METADATA_SHEET",
     "sheet_name_for_top",
 ]

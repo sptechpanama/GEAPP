@@ -15,6 +15,7 @@ fichas_ctni.xlsx
 criterios_tecnicos.xlsx
 oferentes_catalogos.xlsx
 data/
+outputs/
 
 # Claves/credenciales (variantes comunes)
 *service*account*.json
