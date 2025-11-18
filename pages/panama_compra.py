@@ -14,6 +14,13 @@ import unicodedata
 from datetime import date, timedelta, datetime, timezone
 
 from core.config import DB_PATH
+from core.panamacompra_tops import (
+    SUPPLIER_TOP_CONFIG,
+    SUPPLIER_TOP_DEFAULT_ROWS,
+    TOPS_EXCEL_PATH,
+    TOPS_METADATA_SHEET,
+    sheet_name_for_top,
+)
 from sheets import get_client, read_worksheet
 from services.panamacompra_drive import (
     ensure_drive_criterios_tecnicos,
@@ -35,65 +42,6 @@ DEFAULT_DATE_START = date(2024, 1, 1)
 DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
 
 
-SUPPLIER_TOP_CONFIG = [
-    {
-        "key": "sin_ct_count",
-        "tab_label": "🔝 Más actos ganados · Sin ficha",
-        "title": "Proveedores con más actos públicos ganados sin ficha técnica",
-        "require_ct": False,
-        "require_registro": None,
-        "metric": "count",
-        "mode": "supplier",
-    },
-    {
-        "key": "sin_ct_amount",
-        "tab_label": "💰 Más dinero adjudicado · Sin ficha",
-        "title": "Proveedores con más dinero adjudicado sin ficha técnica",
-        "require_ct": False,
-        "require_registro": None,
-        "metric": "amount",
-        "mode": "supplier",
-    },
-    {
-        "key": "con_ct_count",
-        "tab_label": "📄 Más actos ganados · Con ficha",
-        "title": "Proveedores con más actos públicos ganados con ficha técnica",
-        "require_ct": True,
-        "require_registro": None,
-        "metric": "count",
-        "mode": "supplier",
-    },
-    {
-        "key": "con_ct_amount",
-        "tab_label": "🏅 Más dinero adjudicado · Con ficha",
-        "title": "Proveedores con más dinero adjudicado con ficha técnica",
-        "require_ct": True,
-        "require_registro": None,
-        "metric": "amount",
-        "mode": "supplier",
-    },
-    {
-        "key": "con_ct_sin_reg_count",
-        "tab_label": "⚠️ Más actos ganados · Con ficha, sin registro",
-        "title": "Fichas con más actos adjudicados (proveedores sin registro sanitario)",
-        "require_ct": True,
-        "require_registro": False,
-        "metric": "count",
-        "mode": "ct",
-    },
-    {
-        "key": "con_ct_sin_reg_amount",
-        "tab_label": "🚨 Más dinero adjudicado · Con ficha, sin registro",
-        "title": "Fichas con más monto adjudicado (proveedores sin registro sanitario)",
-        "require_ct": True,
-        "require_registro": False,
-        "metric": "amount",
-        "mode": "ct",
-    },
-]
-SUPPLIER_TOP_DEFAULT_ROWS = 10
-
-
 def _default_date_range() -> tuple[date, date]:
     today = date.today()
     if today < DEFAULT_DATE_START:
@@ -105,7 +53,39 @@ ensure_local_panamacompra_db()
 LOCAL_FICHAS_CTNI = ensure_drive_fichas_ctni()
 LOCAL_CRITERIOS_TECNICOS = ensure_drive_criterios_tecnicos()
 LOCAL_OFERENTES_CATALOGOS = ensure_drive_oferentes_catalogos()
+TOPS_OUTPUT_FILE = TOPS_EXCEL_PATH
 
+
+@st.cache_data(ttl=300)
+def load_precomputed_top_tables() -> dict[str, pd.DataFrame]:
+    """Carga los tops precomputados en Excel si estan disponibles."""
+    path = TOPS_OUTPUT_FILE
+    if not path or not path.exists():
+        return {}
+    try:
+        xls = pd.ExcelFile(path)
+    except Exception:
+        return {}
+
+    tables: dict[str, pd.DataFrame] = {}
+    for cfg in SUPPLIER_TOP_CONFIG:
+        sheet_name = sheet_name_for_top(cfg['key'])
+        if sheet_name not in xls.sheet_names:
+            continue
+        try:
+            tables[cfg['key']] = pd.read_excel(xls, sheet_name=sheet_name)
+        except Exception:
+            continue
+
+    if TOPS_METADATA_SHEET in xls.sheet_names:
+        try:
+            meta_df = pd.read_excel(xls, sheet_name=TOPS_METADATA_SHEET)
+            if not meta_df.empty and meta_df.shape[1] >= 2:
+                metadata = dict(zip(meta_df.iloc[:, 0], meta_df.iloc[:, 1]))
+                tables['__metadata__'] = metadata
+        except Exception:
+            pass
+    return tables
 
 def _normalize_text(value: str | None) -> str:
     if value is None:
@@ -567,7 +547,74 @@ def _compute_ct_ranking(
     return ranking_df.head(top_n)
 
 
+def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
+    """Muestra los tops precomputados si existen."""
+    available = [cfg for cfg in SUPPLIER_TOP_CONFIG if cfg["key"] in precomputed]
+    if not available:
+        return False
+
+    metadata = precomputed.get("__metadata__", {})
+    st.markdown("### ⚙ Tops precomputados de adjudicaciones")
+    if metadata:
+        generated_at = metadata.get("generated_at", "sin fecha")
+        st.caption(
+            f"Generado: {generated_at} · Fuente: {metadata.get('db_path', 'panamacompra.db')}"
+        )
+
+    max_rows = max(
+        (len(precomputed[cfg["key"]]) for cfg in available if not precomputed[cfg["key"]].empty),
+        default=0,
+    )
+    if max_rows <= 0:
+        st.info(
+            "Los archivos precomputados no contienen filas. Ejecuta el script "
+            "`scripts/genera_tops_panamacompra.py` y vuelve a intentarlo."
+        )
+        return True
+
+    slider_max = max_rows
+    slider_min = min(5, slider_max)
+    slider_value = min(SUPPLIER_TOP_DEFAULT_ROWS, slider_max)
+    top_n = st.slider(
+        "Número máximo de filas por listado",
+        min_value=slider_min,
+        max_value=slider_max,
+        value=slider_value,
+        key="precomputed_top_rows",
+    )
+
+    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
+        with tab:
+            df = precomputed.get(cfg["key"])
+            if df is None or df.empty:
+                st.info(
+                    "Sin datos precalculados para este ranking. "
+                    "Ejecuta el script externo para regenerarlo."
+                )
+                continue
+            st.caption(cfg["title"])
+            st.dataframe(
+                df.head(top_n),
+                hide_index=True,
+                use_container_width=True,
+            )
+    return True
+
+
 def render_supplier_top_panel() -> None:
+    precomputed_tables = load_precomputed_top_tables()
+    if render_precomputed_top_panel(precomputed_tables):
+        return
+
+    st.warning(
+        "No se encontraron tops precomputados. Ejecuta el script "
+        "`scripts/genera_tops_panamacompra.py` o usa el botón para calcularlos "
+        "temporalmente (puede demorar)."
+    )
+    if not st.button("Calcular en vivo (proceso lento)", key="compute_supplier_top_fallback"):
+        return
+
     db_path = _preferred_db_path()
     awards_df = load_supplier_awards_df(str(db_path) if db_path else None)
     if awards_df is None or awards_df.empty:
@@ -2383,5 +2430,6 @@ with st.expander(
         LOCAL_OFERENTES_CATALOGOS,
         "oferentes_catalogos",
     )
+
 
 

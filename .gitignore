@@ -11,6 +11,10 @@ __pycache__/
 panamacompra.db
 todas_las_fichas.xlsx
 oferentes_activos.xlsx
+fichas_ctni.xlsx
+criterios_tecnicos.xlsx
+oferentes_catalogos.xlsx
+data/
 
 # Claves/credenciales (variantes comunes)
 *service*account*.json
