@@ -270,13 +270,27 @@ def load_ct_name_map(file_path: Optional[Path]) -> dict[str, str]:
         col: _normalize_text(col).lower()
         for col in df.columns
     }
-    ficha_col = next(
-        (col for col, norm in normalized_cols.items() if "ficha" in norm and "ctni" in norm),
-        None,
+    def _find_column(patterns: list[tuple[str, ...]]) -> Optional[str]:
+        for tokens in patterns:
+            for col, norm in normalized_cols.items():
+                if all(token in norm for token in tokens):
+                    return col
+        return None
+
+    ficha_col = _find_column(
+        [
+            ("ficha", "ctni"),
+            ("numero", "ficha"),
+            ("codigo", "ficha"),
+            ("ficha",),
+        ]
     )
-    nombre_col = next(
-        (col for col, norm in normalized_cols.items() if "nombre" in norm and "gener" in norm),
-        None,
+    nombre_col = _find_column(
+        [
+            ("nombre", "gener"),
+            ("descripcion", "gener"),
+            ("nombre",),
+        ]
     )
     if not ficha_col or not nombre_col:
         return {}
