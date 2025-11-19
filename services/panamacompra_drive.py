@@ -10,7 +10,7 @@ from typing import Optional
 import streamlit as st
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from core.config import APP_ROOT, DB_PATH
 from services.auth_drive import DOMAIN_USER, get_service_account_credentials
@@ -35,15 +35,22 @@ _SECRET_OFERENTES = "DRIVE_OFERENTES_CATALOGOS_FILE_ID"
 _DEFAULT_OFERENTES_ID = "1slEyEUUDAG8X0Uw94KEB6-WDHX96lFlf"
 _OFERENTES_PATH = APP_ROOT / "oferentes_catalogos.xlsx"
 
+_ENV_TOPS_FOLDER = "FINAPP_DRIVE_TOPS_FOLDER_ID"
+_SECRET_TOPS_FOLDER = "DRIVE_TOPS_FOLDER_ID"
+_DEFAULT_TOPS_FOLDER_ID = "0AMdsC0UugWLkUk9PVA"
+
+
 
 def _notify(kind: str, message: str) -> None:
+    printed = False
     func = getattr(st, kind, None)
     if callable(func):
         try:
             func(message)
-            return
         except Exception:
             pass
+        else:
+            printed = True
     print(f"[panamacompra-db][{kind.upper()}] {message}")
 
 
@@ -192,9 +199,78 @@ def ensure_drive_oferentes_catalogos(force: bool = False) -> Optional[Path]:
     )
 
 
+def upload_tops_excel_to_drive(source: Path, *, label: str = "tops_panamacompra.xlsx") -> bool:
+    """Sube o reemplaza el Excel de tops en la carpeta de Drive configurada."""
+    source = Path(source)
+    if not source.exists():
+        _notify("error", f"No existe el archivo a subir: {source}")
+        return False
+
+    folder_id = _resolve_file_id(_ENV_TOPS_FOLDER, _SECRET_TOPS_FOLDER, _DEFAULT_TOPS_FOLDER_ID)
+    if not folder_id:
+        _notify("error", "No se configuró FINAPP_DRIVE_TOPS_FOLDER_ID / DRIVE_TOPS_FOLDER_ID.")
+        return False
+
+    try:
+        drive = _build_drive_client()
+    except Exception as exc:
+        _notify("error", f"No se pudo autenticar contra Drive para subir '{label}': {exc}")
+        return False
+
+    query = (
+        f"name = '{source.name}' and '{folder_id}' in parents and trashed = false"
+    )
+    try:
+        result = (
+            drive.files()
+            .list(
+                q=query,
+                spaces="drive",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                fields="files(id,name)",
+            )
+            .execute()
+        )
+        files = result.get("files", [])
+    except HttpError as exc:
+        _notify("error", f"No se pudo consultar el archivo '{label}' en Drive: {exc}")
+        return False
+
+    media = MediaFileUpload(
+        str(source),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        resumable=False,
+    )
+
+    try:
+        if files:
+            file_id = files[0]["id"]
+            drive.files().update(
+                fileId=file_id,
+                media_body=media,
+                supportsAllDrives=True,
+            ).execute()
+            _notify("info", f"Actualizamos '{source.name}' en la carpeta de tops.")
+        else:
+            metadata = {"name": source.name, "parents": [folder_id]}
+            drive.files().create(
+                body=metadata,
+                media_body=media,
+                supportsAllDrives=True,
+            ).execute()
+            _notify("info", f"Subimos '{source.name}' a la carpeta de tops.")
+    except HttpError as exc:
+        _notify("error", f"No se pudo subir '{label}' a Drive: {exc}")
+        return False
+
+    return True
+
+
 __all__ = [
     "ensure_local_panamacompra_db",
     "ensure_drive_fichas_ctni",
     "ensure_drive_criterios_tecnicos",
     "ensure_drive_oferentes_catalogos",
+    "upload_tops_excel_to_drive",
 ]

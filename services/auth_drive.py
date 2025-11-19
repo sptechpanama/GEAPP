@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+from core.config import APP_ROOT
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -14,6 +18,12 @@ SCOPES = [
 
 DOMAIN_USER = os.environ.get("FINAPP_DOMAIN_USER", "soporte@sptechpanama.com")
 
+_CREDENTIAL_HINTS = [
+    APP_ROOT / "credentials" / "service-account.json",
+    APP_ROOT.parent / "scrapers_repo" / "credentials" / "service-account.json",
+    Path.home() / "scrapers_repo" / "credentials" / "service-account.json",
+]
+
 
 def _load_credentials(subject: str | None = None):
     """Obtiene credenciales de la cuenta de servicio desde secrets o un JSON."""
@@ -21,12 +31,17 @@ def _load_credentials(subject: str | None = None):
         os.environ.get("FINAPP_SERVICE_ACCOUNT_FILE")
         or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     )
+    candidate_paths = []
     if json_path:
-        return service_account.Credentials.from_service_account_file(
-            json_path,
-            scopes=SCOPES,
-            subject=subject,
-        )
+        candidate_paths.append(Path(json_path).expanduser())
+    candidate_paths.extend(_CREDENTIAL_HINTS)
+    for candidate in candidate_paths:
+        if candidate and Path(candidate).exists():
+            return service_account.Credentials.from_service_account_file(
+                str(candidate),
+                scopes=SCOPES,
+                subject=subject,
+            )
 
     try:  # Streamlit Cloud espera secrets vía st.secrets
         import streamlit as st  # type: ignore

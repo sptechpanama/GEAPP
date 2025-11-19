@@ -25,6 +25,7 @@ from core.panamacompra_tops import (  # noqa: E402
     TOPS_METADATA_SHEET,
     sheet_name_for_top,
 )
+from services.panamacompra_drive import upload_tops_excel_to_drive  # noqa: E402
 
 
 DEFAULT_FICHAS = APP_ROOT / "fichas_ctni.xlsx"
@@ -560,6 +561,11 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=str(DEFAULT_OUTPUT),
         help="Ruta del archivo Excel destino.",
     )
+    parser.add_argument(
+        "--upload-to-drive",
+        action="store_true",
+        help="Sube el Excel generado a la carpeta de Drive configurada.",
+    )
     return parser.parse_args(argv)
 
 
@@ -588,6 +594,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     except Exception as exc:
         print(f"[ERROR] No se pudo escribir el archivo de salida: {exc}")
         return 1
+
+    if args.upload_to_drive:
+        if upload_tops_excel_to_drive(output_path):
+            print(f"[DRIVE] Archivo actualizado en la carpeta configurada ({output_path.name}).")
+        else:
+            print("[WARN] No se pudo subir el archivo a Drive.")
 
     print(f"[OK] Tops guardados en {output_path}")
     print(f"[LOG] Total adjudicaciones procesadas: {len(awards)}")
