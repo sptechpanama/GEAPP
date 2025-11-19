@@ -39,8 +39,6 @@ _ENV_TOPS_FOLDER = "FINAPP_DRIVE_TOPS_FOLDER_ID"
 _SECRET_TOPS_FOLDER = "DRIVE_TOPS_FOLDER_ID"
 _DEFAULT_TOPS_FOLDER_ID = "0AMdsC0UugWLkUk9PVA"
 
-
-
 def _notify(kind: str, message: str) -> None:
     printed = False
     func = getattr(st, kind, None)
@@ -267,10 +265,72 @@ def upload_tops_excel_to_drive(source: Path, *, label: str = "tops_panamacompra.
     return True
 
 
+def ensure_drive_tops_excel(dest: Path, *, force: bool = False) -> Optional[Path]:
+    """Descarga el Excel de tops desde la carpeta de Drive configurada."""
+    dest = Path(dest)
+    folder_id = _resolve_file_id(_ENV_TOPS_FOLDER, _SECRET_TOPS_FOLDER, _DEFAULT_TOPS_FOLDER_ID)
+    if not folder_id:
+        _notify("warning", "No hay carpeta de Drive configurada para los tops.")
+        return dest if dest.exists() else None
+
+    try:
+        drive = _build_drive_client()
+    except Exception as exc:
+        _notify("error", f"No se pudo autenticar contra Drive para descargar tops: {exc}")
+        return dest if dest.exists() else None
+
+    query = (
+        f"'{folder_id}' in parents and trashed = false and name = '{dest.name}'"
+    )
+    try:
+        result = (
+            drive.files()
+            .list(
+                q=query,
+                spaces="drive",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                orderBy="modifiedTime desc",
+                fields="files(id,name,modifiedTime)",
+            )
+            .execute()
+        )
+        files = result.get("files", [])
+    except HttpError as exc:
+        _notify("error", f"No se pudo buscar '{dest.name}' en la carpeta de tops: {exc}")
+        return dest if dest.exists() else None
+
+    if not files:
+        _notify("warning", f"No se encontró '{dest.name}' en la carpeta de tops.")
+        return dest if dest.exists() else None
+
+    file_metadata = files[0]
+    remote_ts = _parse_remote_ts(file_metadata.get("modifiedTime"))
+    needs_download = force or not dest.exists()
+    if not needs_download and remote_ts:
+        local_ts = datetime.fromtimestamp(dest.stat().st_mtime, timezone.utc)
+        needs_download = remote_ts > local_ts
+
+    if not needs_download:
+        return dest
+
+    try:
+        _download_file(drive, file_metadata["id"], dest)
+        if remote_ts:
+            ts = remote_ts.timestamp()
+            os.utime(dest, (ts, ts))
+        _notify("info", f"Descargamos '{dest.name}' desde la carpeta de tops.")
+    except Exception as exc:
+        _notify("error", f"No se pudo descargar '{dest.name}' desde Drive: {exc}")
+
+    return dest if dest.exists() else None
+
+
 __all__ = [
     "ensure_local_panamacompra_db",
     "ensure_drive_fichas_ctni",
     "ensure_drive_criterios_tecnicos",
     "ensure_drive_oferentes_catalogos",
+    "ensure_drive_tops_excel",
     "upload_tops_excel_to_drive",
 ]

@@ -27,6 +27,7 @@ from services.panamacompra_drive import (
     ensure_drive_criterios_tecnicos,
     ensure_drive_fichas_ctni,
     ensure_drive_oferentes_catalogos,
+    ensure_drive_tops_excel,
     ensure_local_panamacompra_db,
 )
 
@@ -50,12 +51,13 @@ def _default_date_range() -> tuple[date, date]:
     return (DEFAULT_DATE_START, today)
 
 # Asegura que los archivos críticos locales estén sincronizados antes de usarlos.
+TOPS_OUTPUT_FILE = TOPS_EXCEL_PATH
+TOPS_FALLBACK_FILE = TOPS_EXCEL_FALLBACK
 ensure_local_panamacompra_db()
 LOCAL_FICHAS_CTNI = ensure_drive_fichas_ctni()
 LOCAL_CRITERIOS_TECNICOS = ensure_drive_criterios_tecnicos()
 LOCAL_OFERENTES_CATALOGOS = ensure_drive_oferentes_catalogos()
-TOPS_OUTPUT_FILE = TOPS_EXCEL_PATH
-TOPS_FALLBACK_FILE = TOPS_EXCEL_FALLBACK
+ensure_drive_tops_excel(TOPS_OUTPUT_FILE)
 
 
 def _tops_cache_signature() -> tuple[tuple[str, int, int], ...]:
