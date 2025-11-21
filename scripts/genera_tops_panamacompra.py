@@ -305,6 +305,25 @@ def load_ct_name_map(file_path: Optional[Path]) -> dict[str, str]:
     return name_map
 
 
+def _resolve_ct_display_name(label: str, ct_names: dict[str, str]) -> str:
+    norm_label = _normalize_ct_label(label)
+    if not norm_label:
+        return ""
+    if norm_label in ct_names:
+        return ct_names[norm_label]
+    seen: set[str] = set()
+    resolved: list[str] = []
+    for candidate in _extract_ct_candidates(label):
+        norm = _normalize_ct_label(candidate)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        name = ct_names.get(norm)
+        if name:
+            resolved.append(name)
+    return ", ".join(resolved)
+
+
 def _compute_supplier_ranking(
     df: pd.DataFrame,
     *,
@@ -450,7 +469,7 @@ def _compute_ct_ranking(
         rows.append(
             {
                 "Ficha / Criterio": display_label,
-                "Nombre de la ficha": ct_names.get(norm_label, ""),
+                "Nombre de la ficha": _resolve_ct_display_name(display_label, ct_names),
                 "Actos ganados": total_actos,
                 "Monto adjudicado": round(total_monto, 2),
                 "Precio promedio acto": round(avg_price, 2),
