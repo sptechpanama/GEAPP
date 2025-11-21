@@ -95,22 +95,53 @@ def _render_precomputed_summary(metadata: dict[str, str]) -> None:
         return
     rows = [
         ("Total adjudicaciones", metadata.get("total_adjudicaciones", "-")),
-        ("Monto total", _format_currency(metadata.get("total_monto"))),
+        ("Monto total adjudicado", _format_currency(metadata.get("total_monto"))),
+        ("Actos con ficha", metadata.get("actos_con_ficha", "-")),
+        ("Actos sin ficha", metadata.get("actos_sin_ficha", "-")),
+        ("Actos CT sin RS", metadata.get("actos_ct_sin_rs", "-")),
+        ("Monto CT sin RS", _format_currency(metadata.get("monto_ct_sin_rs"))),
+        ("Proveedores distintos", metadata.get("proveedores_distintos", "-")),
+        ("Fichas distintas", metadata.get("fichas_distintas", "-")),
         (
             "Rango de fechas",
-            f"{metadata.get('fecha_min', '-') or '-'} -> {metadata.get('fecha_max', '-') or '-'}",
+            f"{metadata.get('fecha_min', '-') or '-'}  →  {metadata.get('fecha_max', '-') or '-'}",
         ),
     ]
     _render_summary_table(rows)
 
-def _render_runtime_summary(filtered_df: pd.DataFrame, start_ts: datetime, end_ts: datetime) -> None:
+def _render_runtime_summary(
+    filtered_df: pd.DataFrame,
+    start_ts: datetime,
+    end_ts: datetime,
+    supplier_meta: dict[str, dict[str, bool]],
+) -> None:
     if filtered_df.empty:
         st.info("No hay adjudicaciones en el rango seleccionado.")
         return
+    mask_ct = filtered_df["tiene_ct"]
+    supplier_registro = filtered_df["supplier_key"].map(
+        lambda key: supplier_meta.get(key, {}).get("has_registro", False)
+    )
+    mask_ct_sin_rs = mask_ct & ~supplier_registro
+    fichas_distintas = (
+        filtered_df["ct_label"]
+        .replace("", pd.NA)
+        .dropna()
+        .nunique()
+    )
     rows = [
         ("Total adjudicaciones", f"{len(filtered_df):,}"),
-        ("Monto total", _format_currency(filtered_df["precio_referencia"].sum())),
-        ("Rango aplicado", f"{start_ts.date()} -> {end_ts.date()}"),
+        ("Monto total adjudicado", _format_currency(filtered_df["precio_referencia"].sum())),
+        ("Actos con ficha", f"{int(mask_ct.sum()):,}"),
+        ("Actos sin ficha", f"{int(len(filtered_df) - mask_ct.sum()):,}"),
+        ("Actos CT sin RS", f"{int(mask_ct_sin_rs.sum()):,}"),
+        (
+            "Monto CT sin RS",
+            _format_currency(filtered_df.loc[mask_ct_sin_rs, "precio_referencia"].sum()),
+        ),
+        ("Proveedores distintos", f"{filtered_df['supplier_key'].nunique():,}"),
+        ("Fichas distintas", f"{fichas_distintas:,}"),
+        ("Rango aplicado", f"{start_ts.date()}  →  {end_ts.date()}"),
     ]
     _render_summary_table(rows)
 
@@ -666,13 +697,14 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
         key="precomputed_top_rows",
     )
 
-    tab_labels = [SUMMARY_TAB_LABEL] + [cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG]
-    tabs = st.tabs(tab_labels)
-
-    with tabs[0]:
+    with st.expander(SUMMARY_TAB_LABEL, expanded=False):
         _render_precomputed_summary(metadata)
 
-    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs[1:]):
+    with st.expander(SUMMARY_TAB_LABEL, expanded=False):
+        _render_runtime_summary(filtered_df, start_ts, end_ts, metadata)
+
+    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
         with tab:
             df = precomputed.get(cfg["key"])
             if df is None or df.empty:
@@ -805,7 +837,7 @@ def render_supplier_top_panel() -> None:
         "Top 3 por actos": st.column_config.TextColumn(help="Empresas con más actos adjudicados"),
     }
 
-    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs[1:]):
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
         with tab:
             if cfg.get("mode") == "ct":
                 ranking = _compute_ct_ranking(

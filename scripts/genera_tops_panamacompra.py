@@ -534,11 +534,26 @@ def generate_top_tables(
             )
         top_tables[cfg["key"]] = df
 
+    mask_ct = awards_df["tiene_ct"]
+    supplier_registro = awards_df["supplier_key"].map(
+        lambda key: metadata.get(key, {}).get("has_registro", False)
+    )
+    mask_ct_sin_rs = mask_ct & ~supplier_registro
     meta_info = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(db_path),
         "total_adjudicaciones": str(len(awards_df)),
         "total_monto": str(float(awards_df["precio_referencia"].sum())),
+        "actos_con_ficha": str(int(mask_ct.sum())),
+        "actos_sin_ficha": str(int(len(awards_df) - mask_ct.sum())),
+        "actos_ct_sin_rs": str(int(mask_ct_sin_rs.sum())),
+        "monto_ct_sin_rs": str(
+            float(awards_df.loc[mask_ct_sin_rs, "precio_referencia"].sum())
+        ),
+        "proveedores_distintos": str(int(awards_df["supplier_key"].nunique())),
+        "fichas_distintas": str(
+            int(awards_df["ct_label"].replace("", pd.NA).dropna().nunique())
+        ),
         "fecha_min": awards_df["fecha_referencia"].min().isoformat() if not awards_df.empty else "",
         "fecha_max": awards_df["fecha_referencia"].max().isoformat() if not awards_df.empty else "",
         "fichas_path": str(fichas_path) if fichas_path else "",
