@@ -538,6 +538,7 @@ def generate_top_tables(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(db_path),
         "total_adjudicaciones": str(len(awards_df)),
+        "total_monto": str(float(awards_df["precio_referencia"].sum())),
         "fecha_min": awards_df["fecha_referencia"].min().isoformat() if not awards_df.empty else "",
         "fecha_max": awards_df["fecha_referencia"].max().isoformat() if not awards_df.empty else "",
         "fichas_path": str(fichas_path) if fichas_path else "",

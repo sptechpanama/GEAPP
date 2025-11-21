@@ -42,6 +42,7 @@ CHECKBOX_FLAG_NAMES = {
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
 DEFAULT_DATE_START = date(2024, 1, 1)
 DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
+SUMMARY_TAB_LABEL = "Resumen general"
 
 
 def _default_date_range() -> tuple[date, date]:
@@ -72,6 +73,61 @@ def _tops_cache_signature() -> tuple[tuple[str, int, int], ...]:
         signature.append((str(path), int(stat.st_mtime_ns), stat.st_size))
     return tuple(signature)
 
+
+
+
+def _format_currency(value: str | float | None) -> str:
+    try:
+        return f"${float(value):,.2f}"
+    except Exception:
+        return str(value) if value not in (None, "", "None") else "-"
+
+def _render_summary_table(rows: list[tuple[str, str]]) -> None:
+    if not rows:
+        st.info("Sin datos de resumen.")
+        return
+    df = pd.DataFrame(rows, columns=["Metrica", "Valor"])
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+def _render_precomputed_summary(metadata: dict[str, str]) -> None:
+    if not metadata:
+        st.info("El archivo precalculado no contiene metadatos de resumen.")
+        return
+    rows = [
+        ("Total adjudicaciones", metadata.get("total_adjudicaciones", "-")),
+        ("Monto total", _format_currency(metadata.get("total_monto"))),
+        (
+            "Rango de fechas",
+            f"{metadata.get('fecha_min', '-') or '-'} -> {metadata.get('fecha_max', '-') or '-'}",
+        ),
+    ]
+    _render_summary_table(rows)
+
+def _render_runtime_summary(filtered_df: pd.DataFrame, start_ts: datetime, end_ts: datetime) -> None:
+    if filtered_df.empty:
+        st.info("No hay adjudicaciones en el rango seleccionado.")
+        return
+    rows = [
+        ("Total adjudicaciones", f"{len(filtered_df):,}"),
+        ("Monto total", _format_currency(filtered_df["precio_referencia"].sum())),
+        ("Rango aplicado", f"{start_ts.date()} -> {end_ts.date()}"),
+    ]
+    _render_summary_table(rows)
+
+def _apply_search_filter(df: pd.DataFrame, search_text: str) -> pd.DataFrame:
+    if not search_text:
+        return df
+    term = search_text.strip().lower()
+    if not term:
+        return df
+    mask = pd.Series(False, index=df.index)
+    for col in df.columns:
+        try:
+            series = df[col].astype(str).str.lower()
+        except Exception:
+            series = df[col].map(lambda v: str(v).lower() if pd.notna(v) else "")
+        mask |= series.str.contains(term, na=False)
+    return df[mask]
 
 @st.cache_data(ttl=300)
 def load_precomputed_top_tables(signature: tuple[tuple[str, int, int], ...]) -> dict[str, pd.DataFrame]:
@@ -610,8 +666,13 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
         key="precomputed_top_rows",
     )
 
-    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
-    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
+    tab_labels = [SUMMARY_TAB_LABEL] + [cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG]
+    tabs = st.tabs(tab_labels)
+
+    with tabs[0]:
+        _render_precomputed_summary(metadata)
+
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs[1:]):
         with tab:
             df = precomputed.get(cfg["key"])
             if df is None or df.empty:
@@ -620,6 +681,12 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
                     "Ejecuta el script externo para regenerarlo."
                 )
                 continue
+            search_value = st.text_input(
+                "Buscar en este top",
+                key=f"precomputed_search_{cfg['key']}",
+                placeholder="Proveedor, ficha, país, etc.",
+            )
+            df = _apply_search_filter(df, search_value)
             st.caption(cfg["title"])
             st.dataframe(
                 df.head(top_n),
@@ -703,7 +770,12 @@ def render_supplier_top_panel() -> None:
     )
     st.caption(f"El rango seleccionado contiene {len(filtered_df)} adjudicaciones únicas.")
 
-    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
+    tab_labels = [SUMMARY_TAB_LABEL] + [cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG]
+    tabs = st.tabs(tab_labels)
+
+    with tabs[0]:
+        _render_runtime_summary(filtered_df, start_ts, end_ts)
+
     column_config = {
         "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f", help="Suma de precio de referencia adjudicado"),
         "Actos ganados": st.column_config.NumberColumn(format="%d"),
@@ -733,7 +805,7 @@ def render_supplier_top_panel() -> None:
         "Top 3 por actos": st.column_config.TextColumn(help="Empresas con más actos adjudicados"),
     }
 
-    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs[1:]):
         with tab:
             if cfg.get("mode") == "ct":
                 ranking = _compute_ct_ranking(
@@ -759,6 +831,12 @@ def render_supplier_top_panel() -> None:
                 st.info("Sin adjudicaciones disponibles para este subgrupo en el rango seleccionado.")
                 continue
 
+            search_value = st.text_input(
+                "Buscar en este top",
+                key=f"runtime_search_{cfg['key']}",
+                placeholder="Proveedor, ficha, país, etc.",
+            )
+            ranking = _apply_search_filter(ranking, search_value)
             display_df = ranking.head(top_n)
 
             st.caption(cfg["title"])
