@@ -700,9 +700,6 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
     with st.expander(SUMMARY_TAB_LABEL, expanded=False):
         _render_precomputed_summary(metadata)
 
-    with st.expander(SUMMARY_TAB_LABEL, expanded=False):
-        _render_runtime_summary(filtered_df, start_ts, end_ts, metadata)
-
     tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
     for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
         with tab:
