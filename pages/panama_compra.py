@@ -44,6 +44,7 @@ DEFAULT_DATE_START = date(2024, 1, 1)
 DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
 SUMMARY_TAB_LABEL = "Resumen general"
 DB_PANEL_EXPANDED_KEY = "pc_db_section_open"
+ANALYSIS_PANEL_EXPANDED_KEY = "pc_analysis_section_open"
 
 
 def _default_date_range() -> tuple[date, date]:
@@ -2720,8 +2721,13 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
-with st.expander("Análisis de actos públicos", expanded=False):
+analysis_expanded = st.session_state.get(ANALYSIS_PANEL_EXPANDED_KEY, False)
+with st.expander("Análisis de actos públicos", expanded=analysis_expanded):
+    st.session_state[ANALYSIS_PANEL_EXPANDED_KEY] = True
     render_supplier_top_panel()
+    if st.button("Ocultar esta sección", key="pc_analysis_hide_panel"):
+        st.session_state[ANALYSIS_PANEL_EXPANDED_KEY] = False
+        st.experimental_rerun()
 
 
 db_panel_expanded = st.session_state.get(DB_PANEL_EXPANDED_KEY, False)
