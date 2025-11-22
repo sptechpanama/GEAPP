@@ -8,7 +8,7 @@ import sqlite3
 import sys
 import unicodedata
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -32,6 +32,113 @@ DEFAULT_FICHAS = APP_ROOT / "fichas_ctni.xlsx"
 DEFAULT_CRITERIOS = APP_ROOT / "criterios_tecnicos.xlsx"
 DEFAULT_OFERENTES = APP_ROOT / "oferentes_catalogos.xlsx"
 DEFAULT_OUTPUT = TOPS_EXCEL_PATH
+
+PERIOD_DEFINITIONS = [
+    ("global", "Todo el periodo", None, None),
+    ("2024", "Anio 2024", date(2024, 1, 1), date(2024, 12, 31)),
+    ("2024_S1", "2024  -  Primer semestre", date(2024, 1, 1), date(2024, 6, 30)),
+    ("2024_S2", "2024  -  Segundo semestre", date(2024, 7, 1), date(2024, 12, 31)),
+    ("2025", "Anio 2025", date(2025, 1, 1), date(2025, 12, 31)),
+    ("2025_S1", "2025  -  Primer semestre", date(2025, 1, 1), date(2025, 6, 30)),
+    ("2025_S2", "2025  -  Segundo semestre", date(2025, 7, 1), date(2025, 12, 31)),
+]
+
+
+def _slice_period_df(
+    df: pd.DataFrame,
+    start_date: Optional[date],
+    end_date: Optional[date],
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    mask = pd.Series(True, index=df.index)
+    date_series = df["fecha_referencia_date"]
+    if start_date:
+        mask &= date_series >= start_date
+    if end_date:
+        mask &= date_series <= end_date
+    return df.loc[mask].copy()
+
+
+def _build_period_summary(
+    *,
+    period_id: str,
+    period_label: str,
+    period_order: int,
+    defined_start: Optional[date],
+    defined_end: Optional[date],
+    subset: pd.DataFrame,
+    supplier_meta: dict[str, dict[str, bool]],
+    generated_at: str,
+    db_path: Path,
+    fichas_path: Optional[Path],
+    criterios_path: Optional[Path],
+    oferentes_path: Optional[Path],
+) -> dict[str, object]:
+    total_actos = int(len(subset))
+    fecha_min_data = (
+        subset["fecha_referencia"].min().date().isoformat() if total_actos else ""
+    )
+    fecha_max_data = (
+        subset["fecha_referencia"].max().date().isoformat() if total_actos else ""
+    )
+    mask_ct = subset["tiene_ct"] if total_actos else pd.Series(dtype=bool)
+    monto_total = float(subset["precio_referencia"].sum()) if total_actos else 0.0
+    actos_con_ficha = int(mask_ct.sum()) if total_actos else 0
+    monto_con_ficha = float(subset.loc[mask_ct, "precio_referencia"].sum()) if total_actos else 0.0
+    monto_sin_ficha = monto_total - monto_con_ficha
+    supplier_registro = (
+        subset["supplier_key"].map(lambda key: supplier_meta.get(key, {}).get("has_registro", False))
+        if total_actos
+        else pd.Series(dtype=bool)
+    )
+    mask_ct_sin_rs = (mask_ct & ~supplier_registro) if total_actos else pd.Series(dtype=bool)
+    actos_ct_sin_rs = int(mask_ct_sin_rs.sum()) if total_actos else 0
+    monto_ct_sin_rs = (
+        float(subset.loc[mask_ct_sin_rs, "precio_referencia"].sum()) if total_actos else 0.0
+    )
+    proveedores_distintos = int(subset["supplier_key"].nunique()) if total_actos else 0
+    entidades_distintas = 0
+    if total_actos and "entidad" in subset.columns:
+        entidades_distintas = int(subset["entidad"].nunique())
+    fichas_distintas = (
+        int(subset["ct_label"].replace("", pd.NA).dropna().nunique()) if total_actos else 0
+    )
+    participantes_prom = float(subset["num_participantes"].mean()) if total_actos else 0.0
+
+    def _iso(value: Optional[date]) -> str:
+        return value.isoformat() if isinstance(value, date) else ""
+
+    return {
+        "period_id": period_id,
+        "period_label": period_label,
+        "period_order": period_order,
+        "fecha_inicio": _iso(defined_start),
+        "fecha_fin": _iso(defined_end),
+        "fecha_min_data": fecha_min_data,
+        "fecha_max_data": fecha_max_data,
+        "total_actos": total_actos,
+        "total_monto": monto_total,
+        "actos_con_ficha": actos_con_ficha,
+        "actos_sin_ficha": total_actos - actos_con_ficha,
+        "monto_con_ficha": monto_con_ficha,
+        "monto_sin_ficha": monto_sin_ficha,
+        "actos_ct_sin_rs": actos_ct_sin_rs,
+        "monto_ct_sin_rs": monto_ct_sin_rs,
+        "proveedores_distintos": proveedores_distintos,
+        "entidades_distintas": entidades_distintas,
+        "fichas_distintas": fichas_distintas,
+        "participantes_promedio": participantes_prom,
+        "generated_at": generated_at,
+        "db_path": str(db_path),
+        "fichas_path": str(fichas_path) if fichas_path else "",
+        "criterios_path": str(criterios_path) if criterios_path else "",
+        "oferentes_path": str(oferentes_path) if oferentes_path else "",
+        "has_data": bool(total_actos),
+    }
+
+
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -181,6 +288,7 @@ def load_supplier_awards_df(db_path: Path) -> pd.DataFrame:
     df = df[df["supplier_key"].astype(bool)].copy()
     df["tiene_ct"] = df["ficha_detectada"].map(_detect_ct_flag)
     df["ct_label"] = df["ficha_detectada"].map(_extract_ficha_label)
+    df["fecha_referencia_date"] = df["fecha_referencia"].dt.date
     return df.reset_index(drop=True)
 
 
@@ -502,70 +610,82 @@ def generate_top_tables(
     fichas_path: Optional[Path],
     criterios_path: Optional[Path],
     oferentes_path: Optional[Path],
-) -> tuple[dict[str, pd.DataFrame], dict[str, str], pd.DataFrame]:
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame]:
     awards_df = load_supplier_awards_df(db_path)
     if awards_df.empty:
         raise RuntimeError("La base panamacompra.db no contiene adjudicaciones para procesar.")
 
-    metadata, ct_stats, ct_names_oferentes = load_oferente_metadata(oferentes_path)
+    supplier_meta, ct_stats, ct_names_oferentes = load_oferente_metadata(oferentes_path)
     ct_names = ct_names_oferentes.copy()
     ct_names.update(load_ct_name_map(fichas_path))
     ct_names.update(load_ct_name_map(criterios_path))
 
+    generated_at = datetime.now(timezone.utc).isoformat()
+    period_tables: dict[str, list[pd.DataFrame]] = {cfg["key"]: [] for cfg in SUPPLIER_TOP_CONFIG}
+    metadata_rows: list[dict[str, object]] = []
+
+    for order, (period_id, period_label, start_date, end_date) in enumerate(PERIOD_DEFINITIONS):
+        period_df = _slice_period_df(awards_df, start_date, end_date)
+        summary_row = _build_period_summary(
+            period_id=period_id,
+            period_label=period_label,
+            period_order=order,
+            defined_start=start_date,
+            defined_end=end_date,
+            subset=period_df,
+            supplier_meta=supplier_meta,
+            generated_at=generated_at,
+            db_path=db_path,
+            fichas_path=fichas_path,
+            criterios_path=criterios_path,
+            oferentes_path=oferentes_path,
+        )
+        metadata_rows.append(summary_row)
+        if period_df.empty:
+            continue
+
+        for cfg in SUPPLIER_TOP_CONFIG:
+            if cfg["mode"] == "ct":
+                df = _compute_ct_ranking(
+                    period_df,
+                    require_registro=cfg.get("require_registro"),
+                    metric=cfg["metric"],
+                    metadata=supplier_meta,
+                    ct_stats=ct_stats,
+                    ct_names=ct_names,
+                )
+            else:
+                df = _compute_supplier_ranking(
+                    period_df,
+                    require_ct=cfg["require_ct"],
+                    require_registro=cfg.get("require_registro"),
+                    metric=cfg["metric"],
+                    metadata=supplier_meta,
+                    ct_stats=ct_stats,
+                )
+            if df.empty:
+                continue
+            df.insert(0, "Periodo", period_label)
+            df.insert(0, "period_id", period_id)
+            df["fecha_inicio"] = summary_row["fecha_inicio"]
+            df["fecha_fin"] = summary_row["fecha_fin"]
+            period_tables[cfg["key"]].append(df)
+
     top_tables: dict[str, pd.DataFrame] = {}
     for cfg in SUPPLIER_TOP_CONFIG:
-        if cfg["mode"] == "ct":
-            df = _compute_ct_ranking(
-                awards_df,
-                require_registro=cfg.get("require_registro"),
-                metric=cfg["metric"],
-                metadata=metadata,
-                ct_stats=ct_stats,
-                ct_names=ct_names,
-            )
-        else:
-            df = _compute_supplier_ranking(
-                awards_df,
-                require_ct=cfg["require_ct"],
-                require_registro=cfg.get("require_registro"),
-                metric=cfg["metric"],
-                metadata=metadata,
-                ct_stats=ct_stats,
-            )
-        top_tables[cfg["key"]] = df
+        frames = period_tables[cfg["key"]]
+        top_tables[cfg["key"]] = (
+            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        )
 
-    mask_ct = awards_df["tiene_ct"]
-    supplier_registro = awards_df["supplier_key"].map(
-        lambda key: metadata.get(key, {}).get("has_registro", False)
-    )
-    mask_ct_sin_rs = mask_ct & ~supplier_registro
-    meta_info = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "db_path": str(db_path),
-        "total_adjudicaciones": str(len(awards_df)),
-        "total_monto": str(float(awards_df["precio_referencia"].sum())),
-        "actos_con_ficha": str(int(mask_ct.sum())),
-        "actos_sin_ficha": str(int(len(awards_df) - mask_ct.sum())),
-        "actos_ct_sin_rs": str(int(mask_ct_sin_rs.sum())),
-        "monto_ct_sin_rs": str(
-            float(awards_df.loc[mask_ct_sin_rs, "precio_referencia"].sum())
-        ),
-        "proveedores_distintos": str(int(awards_df["supplier_key"].nunique())),
-        "fichas_distintas": str(
-            int(awards_df["ct_label"].replace("", pd.NA).dropna().nunique())
-        ),
-        "fecha_min": awards_df["fecha_referencia"].min().isoformat() if not awards_df.empty else "",
-        "fecha_max": awards_df["fecha_referencia"].max().isoformat() if not awards_df.empty else "",
-        "fichas_path": str(fichas_path) if fichas_path else "",
-        "criterios_path": str(criterios_path) if criterios_path else "",
-        "oferentes_path": str(oferentes_path) if oferentes_path else "",
-    }
-    return top_tables, meta_info, awards_df
+    metadata_df = pd.DataFrame(metadata_rows).sort_values("period_order").reset_index(drop=True)
+    awards_result = awards_df.drop(columns=["fecha_referencia_date"])
+    return top_tables, metadata_df, awards_result
 
 
 def export_to_excel(
     tables: dict[str, pd.DataFrame],
-    metadata: dict[str, str],
+    metadata: pd.DataFrame,
     *,
     output_path: Path,
 ) -> Path:
@@ -574,10 +694,7 @@ def export_to_excel(
         for key, df in tables.items():
             sheet_name = sheet_name_for_top(key)
             df.to_excel(writer, sheet_name=sheet_name, index=False)
-        meta_df = pd.DataFrame(
-            [{"clave": key, "valor": value} for key, value in metadata.items()]
-        )
-        meta_df.to_excel(writer, sheet_name=TOPS_METADATA_SHEET, index=False)
+        metadata.to_excel(writer, sheet_name=TOPS_METADATA_SHEET, index=False)
     return output_path
 
 
@@ -628,7 +745,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     output_path = Path(args.output).expanduser()
 
     try:
-        tables, meta_info, awards = generate_top_tables(
+        tables, metadata_df, awards = generate_top_tables(
             db_path=db_path,
             fichas_path=fichas_path if fichas_path and fichas_path.exists() else None,
             criterios_path=criterios_path if criterios_path and criterios_path.exists() else None,
@@ -639,7 +756,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 1
 
     try:
-        export_to_excel(tables, meta_info, output_path=output_path)
+        export_to_excel(tables, metadata_df, output_path=output_path)
     except Exception as exc:
         print(f"[ERROR] No se pudo escribir el archivo de salida: {exc}")
         return 1

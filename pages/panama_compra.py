@@ -82,6 +82,32 @@ def _format_currency(value: str | float | None) -> str:
     except Exception:
         return str(value) if value not in (None, "", "None") else "-"
 
+
+def _safe_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        if isinstance(value, str) and not value.strip():
+            return 0
+        if isinstance(value, str):
+            return int(float(value.replace(",", "")))
+        return int(float(value))
+    except Exception:
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        if isinstance(value, str) and not value.strip():
+            return 0.0
+        if isinstance(value, str):
+            return float(value.replace(",", ""))
+        return float(value)
+    except Exception:
+        return 0.0
+
 def _render_summary_table(rows: list[tuple[str, str]]) -> None:
     if not rows:
         st.info("Sin datos de resumen.")
@@ -89,25 +115,88 @@ def _render_summary_table(rows: list[tuple[str, str]]) -> None:
     df = pd.DataFrame(rows, columns=["Metrica", "Valor"])
     st.dataframe(df, hide_index=True, use_container_width=True)
 
-def _render_precomputed_summary(metadata: dict[str, str]) -> None:
-    if not metadata:
+def _render_precomputed_summary(summary: dict[str, Any]) -> None:
+    if not summary:
         st.info("El archivo precalculado no contiene metadatos de resumen.")
         return
+
+    def _fmt_range(start_key: str, end_key: str) -> str:
+        start_val = summary.get(start_key) or "-"
+        end_val = summary.get(end_key) or "-"
+        return f"{start_val} - {end_val}"
+
     rows = [
-        ("Total adjudicaciones", metadata.get("total_adjudicaciones", "-")),
-        ("Monto total adjudicado", _format_currency(metadata.get("total_monto"))),
-        ("Actos con ficha", metadata.get("actos_con_ficha", "-")),
-        ("Actos sin ficha", metadata.get("actos_sin_ficha", "-")),
-        ("Actos CT sin RS", metadata.get("actos_ct_sin_rs", "-")),
-        ("Monto CT sin RS", _format_currency(metadata.get("monto_ct_sin_rs"))),
-        ("Proveedores distintos", metadata.get("proveedores_distintos", "-")),
-        ("Fichas distintas", metadata.get("fichas_distintas", "-")),
+        ("Periodo", summary.get("period_label") or summary.get("Periodo") or summary.get("period_id", "-")),
+        ("Rango configurado", _fmt_range("fecha_inicio", "fecha_fin")),
+        ("Rango con datos", _fmt_range("fecha_min_data", "fecha_max_data")),
+        ("Total adjudicaciones", f"{_safe_int(summary.get('total_actos')):,}"),
+        ("Monto total adjudicado", _format_currency(summary.get("total_monto"))),
+        ("Actos con ficha", f"{_safe_int(summary.get('actos_con_ficha')):,}"),
+        ("Monto con ficha", _format_currency(summary.get("monto_con_ficha"))),
+        ("Actos sin ficha", f"{_safe_int(summary.get('actos_sin_ficha')):,}"),
+        ("Monto sin ficha", _format_currency(summary.get("monto_sin_ficha"))),
+        ("Actos CT sin RS", f"{_safe_int(summary.get('actos_ct_sin_rs')):,}"),
+        ("Monto CT sin RS", _format_currency(summary.get("monto_ct_sin_rs"))),
+        ("Proveedores distintos", f"{_safe_int(summary.get('proveedores_distintos')):,}"),
+        ("Entidades distintas", f"{_safe_int(summary.get('entidades_distintas')):,}"),
+        ("Fichas distintas", f"{_safe_int(summary.get('fichas_distintas')):,}"),
         (
-            "Rango de fechas",
-            f"{metadata.get('fecha_min', '-') or '-'}  →  {metadata.get('fecha_max', '-') or '-'}",
+            "Promedio de participantes",
+            f"{_safe_float(summary.get('participantes_promedio')):,.2f}",
         ),
+        ("Base utilizada", summary.get("db_path") or "-"),
+        ("Archivo origen", summary.get("archivo") or summary.get("archivo_local") or "-"),
     ]
     _render_summary_table(rows)
+
+
+def _legacy_metadata_to_row(metadata: dict[str, Any]) -> dict[str, Any]:
+    if not metadata:
+        return {}
+    row = {
+        "period_id": metadata.get("period_id", "global"),
+        "period_label": metadata.get("period_label", metadata.get("label", "Todo el periodo")),
+        "fecha_inicio": metadata.get("fecha_inicio", metadata.get("fecha_min", "")),
+        "fecha_fin": metadata.get("fecha_fin", metadata.get("fecha_max", "")),
+        "fecha_min_data": metadata.get("fecha_min", ""),
+        "fecha_max_data": metadata.get("fecha_max", ""),
+        "total_actos": _safe_int(metadata.get("total_adjudicaciones")),
+        "total_monto": _safe_float(metadata.get("total_monto")),
+        "actos_con_ficha": _safe_int(metadata.get("actos_con_ficha")),
+        "actos_sin_ficha": _safe_int(metadata.get("actos_sin_ficha")),
+        "monto_con_ficha": _safe_float(metadata.get("monto_con_ficha")),
+        "monto_sin_ficha": _safe_float(metadata.get("monto_sin_ficha")),
+        "actos_ct_sin_rs": _safe_int(metadata.get("actos_ct_sin_rs")),
+        "monto_ct_sin_rs": _safe_float(metadata.get("monto_ct_sin_rs")),
+        "proveedores_distintos": _safe_int(metadata.get("proveedores_distintos")),
+        "entidades_distintas": _safe_int(metadata.get("entidades_distintas")),
+        "fichas_distintas": _safe_int(metadata.get("fichas_distintas")),
+        "participantes_promedio": _safe_float(metadata.get("participantes_promedio")),
+        "generated_at": metadata.get("generated_at", metadata.get("generated")),
+        "db_path": metadata.get("db_path", ""),
+        "fichas_path": metadata.get("fichas_path", ""),
+        "criterios_path": metadata.get("criterios_path", ""),
+        "oferentes_path": metadata.get("oferentes_path", ""),
+        "archivo": metadata.get("archivo", ""),
+        "has_data": _safe_int(metadata.get("total_adjudicaciones")) > 0,
+    }
+    return row
+
+
+def _format_period_option(record: dict[str, Any]) -> str:
+    label = record.get("period_label") or record.get("Periodo") or record.get("period_id") or "Periodo"
+    start = record.get("fecha_inicio") or record.get("fecha_min_data") or "?"
+    end = record.get("fecha_fin") or record.get("fecha_max_data") or "?"
+    suffix = "" if record.get("has_data", True) else " - sin datos"
+    return f"{label} ({start} - {end}){suffix}"
+
+
+def _filter_precomputed_by_period(df: pd.DataFrame | None, period_id: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if "period_id" not in df.columns:
+        return df.copy()
+    return df[df["period_id"] == period_id].copy()
 
 def _render_runtime_summary(
     filtered_df: pd.DataFrame,
@@ -192,10 +281,22 @@ def load_precomputed_top_tables(signature: tuple[tuple[str, int, int], ...]) -> 
     if TOPS_METADATA_SHEET in xls.sheet_names:
         try:
             meta_df = pd.read_excel(xls, sheet_name=TOPS_METADATA_SHEET)
-            if not meta_df.empty and meta_df.shape[1] >= 2:
+            if not meta_df.empty and {"period_id", "period_label"}.issubset(meta_df.columns):
+                meta_copy = meta_df.copy()
+                meta_copy["archivo"] = str(selected_path)
+                tables["__metadata_table__"] = meta_copy
+                metadata: dict[str, str] = {}
+                for key in ("generated_at", "db_path", "fichas_path", "criterios_path", "oferentes_path"):
+                    if key in meta_copy.columns:
+                        series = meta_copy[key].dropna()
+                        if not series.empty:
+                            metadata[key] = str(series.iloc[0])
+                metadata["archivo"] = str(selected_path)
+                tables["__metadata__"] = metadata
+            elif not meta_df.empty and meta_df.shape[1] >= 2:
                 metadata = dict(zip(meta_df.iloc[:, 0], meta_df.iloc[:, 1]))
                 metadata.setdefault("archivo", str(selected_path))
-                tables['__metadata__'] = metadata
+                tables["__metadata__"] = metadata
         except Exception:
             pass
     return tables
@@ -665,65 +766,91 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
         return False
 
     metadata = precomputed.get("__metadata__", {})
-    st.markdown("### ⚙ Tops precomputados de adjudicaciones")
-    if metadata:
-        generated_at = metadata.get("generated_at", "sin fecha")
-        origen = metadata.get("db_path", "panamacompra.db")
-        archivo = metadata.get("archivo")
-        extra = f" · Archivo: {archivo}" if archivo else ""
-        st.caption(
-            f"Generado: {generated_at} · Fuente: {origen}{extra}"
-        )
+    metadata_table = precomputed.get("__metadata_table__")
+    st.markdown("### Tops precomputados de adjudicaciones")
 
-    max_rows = max(
-        (len(precomputed[cfg["key"]]) for cfg in available if not precomputed[cfg["key"]].empty),
-        default=0,
+    period_records: list[dict[str, Any]] = []
+    if isinstance(metadata_table, pd.DataFrame) and not metadata_table.empty:
+        for _, row in metadata_table.iterrows():
+            record = {col: row[col] for col in metadata_table.columns}
+            record["period_id"] = str(record.get("period_id") or f"period_{len(period_records)}")
+            record["has_data"] = bool(record.get("has_data", True))
+            period_records.append(record)
+    elif metadata:
+        legacy_row = _legacy_metadata_to_row(metadata)
+        if legacy_row:
+            period_records.append(legacy_row)
+
+    if not period_records:
+        period_records.append({"period_id": "global", "period_label": "Todo el periodo", "has_data": False})
+
+    period_lookup = {rec["period_id"]: rec for rec in period_records}
+    options = [rec["period_id"] for rec in period_records]
+    default_period_id = next((rec["period_id"] for rec in period_records if rec.get("has_data")), options[0])
+    default_index = options.index(default_period_id)
+    selected_period_id = st.selectbox(
+        "Periodo precalculado",
+        options=options,
+        format_func=lambda pid: _format_period_option(period_lookup[pid]),
+        index=default_index,
+        key="pc_precomputed_period",
     )
+    selected_summary = period_lookup[selected_period_id]
+
+    generated_at = metadata.get("generated_at") or selected_summary.get("generated_at") or "sin fecha"
+    origen = metadata.get("db_path") or selected_summary.get("db_path") or "panamacompra.db"
+    archivo = metadata.get("archivo") or selected_summary.get("archivo")
+    extra = f" - Archivo: {archivo}" if archivo else ""
+    st.caption(f"Generado: {generated_at} - Fuente: {origen}{extra}")
+
+    filtered_tables: dict[str, pd.DataFrame] = {}
+    max_rows = 0
+    for cfg in available:
+        df_period = _filter_precomputed_by_period(precomputed.get(cfg["key"]), selected_period_id)
+        filtered_tables[cfg["key"]] = df_period
+        max_rows = max(max_rows, len(df_period))
+
+    with st.expander("Resumen del periodo seleccionado", expanded=False):
+        _render_precomputed_summary(selected_summary)
+
     if max_rows <= 0:
-        st.info(
-            "Los archivos precomputados no contienen filas. Ejecuta el script "
-            "`scripts/genera_tops_panamacompra.py` y vuelve a intentarlo."
-        )
+        st.info("No se encontraron filas precalculadas para el periodo seleccionado.")
         return True
 
-    slider_max = max_rows
-    slider_min = min(5, slider_max)
-    slider_value = min(SUPPLIER_TOP_DEFAULT_ROWS, slider_max)
+    slider_min = max(1, min(5, max_rows))
+    slider_value = min(SUPPLIER_TOP_DEFAULT_ROWS, max_rows)
     top_n = st.slider(
-        "Número máximo de filas por listado",
+        "Numero maximo de filas por listado",
         min_value=slider_min,
-        max_value=slider_max,
+        max_value=max_rows,
         value=slider_value,
         key="precomputed_top_rows",
     )
 
-    with st.expander(SUMMARY_TAB_LABEL, expanded=False):
-        _render_precomputed_summary(metadata)
-
     tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
     for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
         with tab:
-            df = precomputed.get(cfg["key"])
-            if df is None or df.empty:
-                st.info(
-                    "Sin datos precalculados para este ranking. "
-                    "Ejecuta el script externo para regenerarlo."
-                )
+            df_period = filtered_tables.get(cfg["key"])
+            if df_period is None or df_period.empty:
+                st.info("Sin datos precalculados para este ranking en el periodo elegido.")
                 continue
             search_value = st.text_input(
                 "Buscar en este top",
                 key=f"precomputed_search_{cfg['key']}",
-                placeholder="Proveedor, ficha, país, etc.",
+                placeholder="Proveedor, ficha, entidad, etc.",
             )
-            df = _apply_search_filter(df, search_value)
+            df_filtered = _apply_search_filter(df_period, search_value)
+            if df_filtered.empty:
+                st.info("Sin filas que coincidan con el criterio de busqueda.")
+                continue
             st.caption(cfg["title"])
+            display_df = df_filtered.drop(columns=["period_id", "fecha_inicio", "fecha_fin"], errors="ignore")
             st.dataframe(
-                df.head(top_n),
+                display_df.head(top_n),
                 hide_index=True,
                 use_container_width=True,
             )
     return True
-
 
 def render_supplier_top_panel() -> None:
     tops_signature = _tops_cache_signature()
@@ -749,7 +876,7 @@ def render_supplier_top_panel() -> None:
         )
         return
 
-    metadata, ct_stats, ct_names_oferentes = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+    supplier_meta, ct_stats, ct_names_oferentes = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
     ct_names_fichas = load_ct_name_map(LOCAL_FICHAS_CTNI)
     ct_names = ct_names_oferentes.copy()
     ct_names.update(ct_names_fichas)
@@ -803,7 +930,7 @@ def render_supplier_top_panel() -> None:
     tabs = st.tabs(tab_labels)
 
     with tabs[0]:
-        _render_runtime_summary(filtered_df, start_ts, end_ts)
+        _render_runtime_summary(filtered_df, start_ts, end_ts, supplier_meta)
 
     column_config = {
         "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f", help="Suma de precio de referencia adjudicado"),
@@ -841,7 +968,7 @@ def render_supplier_top_panel() -> None:
                     filtered_df,
                     require_registro=cfg.get("require_registro"),
                     metric=cfg["metric"],
-                    metadata=metadata,
+                    metadata=supplier_meta,
                     ct_stats=ct_stats,
                     ct_names=ct_names,
                 )
@@ -852,7 +979,7 @@ def render_supplier_top_panel() -> None:
                     require_ct=cfg["require_ct"],
                     require_registro=cfg.get("require_registro"),
                     metric=cfg["metric"],
-                    metadata=metadata,
+                    metadata=supplier_meta,
                     ct_stats=ct_stats,
                 )
                 current_config = column_config
