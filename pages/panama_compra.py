@@ -2732,18 +2732,18 @@ with st.expander("Análisis de actos públicos", expanded=analysis_expanded):
 
 db_panel_expanded = st.session_state.get(DB_PANEL_EXPANDED_KEY, False)
 with st.expander(
-    "Base de datos de actos p��blicos, fichas y oferentes",
+    "Base de datos de actos publicos, fichas y oferentes",
     expanded=db_panel_expanded,
 ):
     st.session_state[DB_PANEL_EXPANDED_KEY] = True
     render_panamacompra_db_panel()
     render_drive_excel_panel(
-        "Fichas TǸcnica",
+        "Fichas tecnicas",
         LOCAL_FICHAS_CTNI,
         "fichas_ctni",
     )
     render_drive_excel_panel(
-        "Criterios TǸcnicos",
+        "Criterios tecnicos",
         LOCAL_CRITERIOS_TECNICOS,
         "criterios_tecnicos",
     )
@@ -2755,6 +2755,5 @@ with st.expander(
     if st.button("Ocultar esta secci��n", key="pc_db_hide_panel"):
         st.session_state[DB_PANEL_EXPANDED_KEY] = False
         st.experimental_rerun()
-
 
 
