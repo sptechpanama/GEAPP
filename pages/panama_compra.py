@@ -2725,9 +2725,6 @@ analysis_expanded = st.session_state.get(ANALYSIS_PANEL_EXPANDED_KEY, False)
 with st.expander("Análisis de actos públicos", expanded=analysis_expanded):
     st.session_state[ANALYSIS_PANEL_EXPANDED_KEY] = True
     render_supplier_top_panel()
-    if st.button("Ocultar esta sección", key="pc_analysis_hide_panel"):
-        st.session_state[ANALYSIS_PANEL_EXPANDED_KEY] = False
-        st.experimental_rerun()
 
 
 db_panel_expanded = st.session_state.get(DB_PANEL_EXPANDED_KEY, False)
@@ -2752,8 +2749,5 @@ with st.expander(
         LOCAL_OFERENTES_CATALOGOS,
         "oferentes_catalogos",
     )
-    if st.button("Ocultar esta secci��n", key="pc_db_hide_panel"):
-        st.session_state[DB_PANEL_EXPANDED_KEY] = False
-        st.experimental_rerun()
 
 
