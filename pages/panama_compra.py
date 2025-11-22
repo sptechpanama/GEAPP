@@ -43,6 +43,7 @@ TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
 DEFAULT_DATE_START = date(2024, 1, 1)
 DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
 SUMMARY_TAB_LABEL = "Resumen general"
+DB_PANEL_EXPANDED_KEY = "pc_db_section_open"
 
 
 def _default_date_range() -> tuple[date, date]:
@@ -1101,12 +1102,55 @@ def count_sqlite_rows(db_path: str, table_name: str) -> int:
 
 
 @st.cache_data(ttl=300)
-def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFrame:
+def describe_sqlite_table(db_path: str, table_name: str) -> list[tuple[str, str]]:
+    identifier = _quote_identifier(table_name)
+    with _connect_sqlite(db_path) as conn:
+        cur = conn.execute(f"PRAGMA table_info({identifier})")
+        rows = cur.fetchall()
+    return [(row[1], row[2]) for row in rows]
+
+
+@st.cache_data(ttl=300)
+def load_sqlite_preview(
+    db_path: str,
+    table_name: str,
+    limit: int,
+    search_text: str | None = None,
+) -> pd.DataFrame:
     identifier = _quote_identifier(table_name)
     limit = max(1, int(limit))
-    query = f"SELECT * FROM {identifier} LIMIT {limit}"
+    params: list[Any] = []
+    base_query = f"SELECT * FROM {identifier}"
+
+    cleaned_search = (search_text or "").strip()
+    if cleaned_search:
+        columns = describe_sqlite_table(db_path, table_name)
+        if columns:
+            normalized = cleaned_search.lower()
+            pattern_raw = f"%{cleaned_search}%"
+            pattern_lower = f"%{normalized}%"
+            like_clauses: list[str] = []
+            for col_name, col_type in columns:
+                norm_type = (col_type or "").lower()
+                identifier_col = _quote_identifier(col_name)
+                if not norm_type:
+                    like_clauses.append(f"{identifier_col} LIKE ?")
+                    params.append(pattern_raw)
+                elif any(token in norm_type for token in ("char", "text", "clob", "string")):
+                    like_clauses.append(f"LOWER({identifier_col}) LIKE ?")
+                    params.append(pattern_lower)
+                elif any(token in norm_type for token in ("int", "dec", "num", "real", "double", "float")):
+                    like_clauses.append(f"CAST({identifier_col} AS TEXT) LIKE ?")
+                    params.append(pattern_raw)
+            if like_clauses:
+                where_clause = " OR ".join(like_clauses)
+                base_query += f" WHERE {where_clause}"
+
+    base_query += " LIMIT ?"
+    params.append(limit)
+
     with _connect_sqlite(db_path) as conn:
-        return pd.read_sql_query(query, conn)
+        return pd.read_sql_query(base_query, conn, params=tuple(params))
 
 
 @st.cache_data(ttl=300)
@@ -2541,7 +2585,12 @@ def render_panamacompra_db_panel() -> None:
     )
 
     try:
-        preview_df = load_sqlite_preview(db_path_str, selected_table, limit)
+        preview_df = load_sqlite_preview(
+            db_path_str,
+            selected_table,
+            limit,
+            search_text=search_text,
+        )
     except sqlite3.OperationalError as exc:
         st.error(f"No se pudo leer la tabla {selected_table}: {exc}")
         return
@@ -2675,17 +2724,20 @@ with st.expander("Análisis de actos públicos", expanded=False):
     render_supplier_top_panel()
 
 
+db_panel_expanded = st.session_state.get(DB_PANEL_EXPANDED_KEY, False)
 with st.expander(
-    "Base de datos de actos pǧblicos, fichas y oferentes", expanded=False
+    "Base de datos de actos p��blicos, fichas y oferentes",
+    expanded=db_panel_expanded,
 ):
+    st.session_state[DB_PANEL_EXPANDED_KEY] = True
     render_panamacompra_db_panel()
     render_drive_excel_panel(
-        "Fichas Técnica",
+        "Fichas TǸcnica",
         LOCAL_FICHAS_CTNI,
         "fichas_ctni",
     )
     render_drive_excel_panel(
-        "Criterios Técnicos",
+        "Criterios TǸcnicos",
         LOCAL_CRITERIOS_TECNICOS,
         "criterios_tecnicos",
     )
@@ -2694,7 +2746,9 @@ with st.expander(
         LOCAL_OFERENTES_CATALOGOS,
         "oferentes_catalogos",
     )
-
+    if st.button("Ocultar esta secci��n", key="pc_db_hide_panel"):
+        st.session_state[DB_PANEL_EXPANDED_KEY] = False
+        st.experimental_rerun()
 
 
 
