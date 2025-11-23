@@ -50,6 +50,13 @@ DEFAULT_DATE_START = date(2024, 1, 1)
 DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
 SUMMARY_TAB_LABEL = "Resumen general"
 CHAT_HISTORY_KEY = "analysis_chat_history"
+CORE_SOURCES = (
+    ("Base panamacompra.db", lambda: _preferred_db_path()),
+    ("Fichas técnicas", lambda: LOCAL_FICHAS_CTNI),
+    ("Criterios técnicos", lambda: LOCAL_CRITERIOS_TECNICOS),
+    ("Oferentes en catálogo", lambda: LOCAL_OFERENTES_CATALOGOS),
+    ("Tops precalculados", lambda: TOPS_OUTPUT_FILE),
+)
 DB_PANEL_EXPANDED_KEY = "pc_db_section_open"
 ANALYSIS_PANEL_EXPANDED_KEY = "pc_analysis_section_open"
 
@@ -244,6 +251,55 @@ def _render_runtime_summary(
     _render_summary_table(rows)
 
 
+def _file_status(label: str, path: Path | None) -> dict[str, object]:
+    if not path:
+        return {"name": label, "ok": False, "detail": "Ruta no configurada."}
+    try_path = Path(path)
+    if not try_path.exists():
+        return {"name": label, "ok": False, "detail": f"No encontrado en {try_path}."}
+    size_kb = try_path.stat().st_size / 1024
+    return {"name": label, "ok": True, "detail": f"{try_path} ({size_kb:,.1f} KB)"}
+
+
+def _collect_data_health_status() -> list[dict[str, object]]:
+    statuses: list[dict[str, object]] = []
+    db_path = _preferred_db_path()
+    db_entry = _file_status("Base panamacompra.db", db_path)
+    if db_entry["ok"]:
+        try:
+            tables = list_sqlite_tables(str(db_path))
+            if "actos_publicos" in tables:
+                count = count_sqlite_rows(str(db_path), "actos_publicos")
+                db_entry["detail"] = f"{db_entry['detail']} · actos_publicos: {count:,} filas."
+            else:
+                db_entry["ok"] = False
+                db_entry["detail"] = f"{db_entry['detail']} · Tabla actos_publicos no encontrada."
+        except Exception as exc:  # pragma: no cover
+            db_entry["ok"] = False
+            db_entry["detail"] = f"No fue posible leer la base: {exc}"
+    statuses.append(db_entry)
+
+    for label, resolver in CORE_SOURCES[1:]:
+        try:
+            entry = _file_status(label, resolver())
+        except Exception as exc:
+            entry = {"name": label, "ok": False, "detail": f"Error al validar: {exc}"}
+        statuses.append(entry)
+    return statuses
+
+
+def _render_data_health_summary() -> bool:
+    statuses = _collect_data_health_status()
+    all_ready = all(entry.get("ok") for entry in statuses)
+    with st.expander("Estado de datos base", expanded=not all_ready):
+        for entry in statuses:
+            icon = "✅" if entry.get("ok") else "⚠️"
+            st.write(f"{icon} **{entry['name']}** — {entry['detail']}")
+    if not all_ready:
+        st.warning("Aún hay archivos sin sincronizar; verifica el panel anterior.")
+    return all_ready
+
+
 def _render_analysis_chatbot() -> None:
     st.subheader("Asistente GPT para análisis")
     db_path = _preferred_db_path()
@@ -256,6 +312,22 @@ def _render_analysis_chatbot() -> None:
         )
     except Exception as exc:
         st.error(f"No se pudieron cargar los datos para el chat: {exc}")
+        return
+    source_status = []
+    missing_sources = []
+    for label, df in chat_data.items():
+        rows = len(df.index) if isinstance(df, pd.DataFrame) else 0
+        cols = len(df.columns) if rows and hasattr(df, "columns") else 0
+        source_status.append(f"{label}: {rows:,} filas, {cols} columnas")
+        if rows == 0:
+            missing_sources.append(label)
+    st.caption("Fuentes cargadas para el asistente:\n- " + "\n- ".join(source_status))
+    if missing_sources:
+        st.error(
+            "Aún no están disponibles las siguientes tablas para el asistente: "
+            + ", ".join(missing_sources)
+        )
+        st.info("Verifica la sincronización de esos archivos antes de usar el chat.")
         return
     api_key = (
         os.getenv("OPENAI_API_KEY")
@@ -277,6 +349,67 @@ def _render_analysis_chatbot() -> None:
         answer = _answer_analysis_question(user_prompt, chat_data, api_key)
     st.chat_message("assistant").write(answer)
     history.append({"role": "assistant", "content": answer})
+
+
+def _file_status(label: str, path_candidate: Path | str | None) -> dict[str, Any]:
+    if not path_candidate:
+        return {
+            "name": label,
+            "ok": False,
+            "detail": "Ruta no configurada",
+        }
+    path = Path(path_candidate)
+    if not path.exists():
+        return {
+            "name": label,
+            "ok": False,
+            "detail": f"{path} (no encontrado)",
+        }
+    size_kb = path.stat().st_size / 1024 if path.is_file() else 0
+    detail = f"{path} ({size_kb:,.1f} KB)" if size_kb else str(path)
+    return {
+        "name": label,
+        "ok": True,
+        "detail": detail,
+        "path": path,
+    }
+
+
+def _collect_data_source_statuses() -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for label, resolver in CORE_SOURCES:
+        try:
+            path_candidate = resolver()
+        except Exception:
+            path_candidate = None
+        if label.startswith("Base"):
+            status = _file_status(label, path_candidate)
+            if status.get("ok") and status.get("path"):
+                try:
+                    db_tables = list_sqlite_tables(str(status["path"]))
+                    if "actos_publicos" in db_tables:
+                        total_rows = count_sqlite_rows(str(status["path"]), "actos_publicos")
+                        status["detail"] = f"{status['path']} (actos_publicos: {total_rows:,} filas)"
+                    else:
+                        status["ok"] = False
+                        status["detail"] = f"{status['path']} (no se encontró la tabla actos_publicos)"
+                except Exception as exc:
+                    status["ok"] = False
+                    status["detail"] = f"Error al verificar la base: {exc}"
+        else:
+            status = _file_status(label, path_candidate)
+        statuses.append(status)
+    return statuses
+
+
+def _render_data_sources_status_panel() -> bool:
+    statuses = _collect_data_source_statuses()
+    all_ready = all(item.get("ok") for item in statuses)
+    with st.expander("Estado de datos base", expanded=not all_ready):
+        for item in statuses:
+            icon = "✅" if item.get("ok") else "⚠️"
+            st.write(f"{icon} **{item['name']}** — {item['detail']}")
+    return all_ready
 
 
 def _render_ct_without_reg_chart_section(
@@ -1375,6 +1508,48 @@ def load_excel_file(file_path: str) -> pd.DataFrame:
     return pd.read_excel(file_path)
 
 
+def _verify_analysis_requirements() -> list[dict[str, str | bool]]:
+    checks: list[dict[str, str | bool]] = []
+
+    db_path = _preferred_db_path()
+    db_ok = False
+    db_detail = "Ruta no configurada."
+    if db_path:
+        if db_path.exists():
+            try:
+                tables = list_sqlite_tables(str(db_path))
+                if "actos_publicos" in tables:
+                    db_ok = True
+                    db_detail = f"{db_path} (tablas: {len(tables)})"
+                else:
+                    db_detail = f"No se encontró la tabla actos_publicos en {db_path}."
+            except Exception as exc:
+                db_detail = f"Error al leer la base: {exc}"
+        else:
+            db_detail = f"No existe el archivo {db_path}."
+    checks.append(
+        {"label": "Base panamacompra.db", "ok": db_ok, "detail": db_detail}
+    )
+
+    def _file_check(label: str, path: Path | None) -> dict[str, str | bool]:
+        if not path:
+            return {"label": label, "ok": False, "detail": "No se configuró la ruta."}
+        path = Path(path)
+        if not path.exists():
+            return {"label": label, "ok": False, "detail": f"No existe {path}."}
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return {"label": label, "ok": False, "detail": f"No se pudo leer: {exc}"}
+        detail = f"{path} ({size / 1024:.1f} KB)"
+        return {"label": label, "ok": size > 0, "detail": detail}
+
+    checks.append(_file_check("Fichas CTNI", LOCAL_FICHAS_CTNI))
+    checks.append(_file_check("Criterios técnicos", LOCAL_CRITERIOS_TECNICOS))
+    checks.append(_file_check("Oferentes y catálogos", LOCAL_OFERENTES_CATALOGOS))
+    return checks
+
+
 @st.cache_data(ttl=1800)
 def load_analysis_chat_dataframes(
     db_path: Path | None,
@@ -1483,6 +1658,96 @@ def _answer_analysis_question(
         return f"No se pudo obtener respuesta de GPT: {exc}"
 
 
+def _collect_core_source_statuses() -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for label, resolver in CORE_SOURCES:
+        try:
+            path_value = resolver() if callable(resolver) else resolver
+        except Exception as exc:  # pragma: no cover
+            statuses.append(
+                {"name": label, "ok": False, "detail": f"Error al resolver ruta: {exc}"}
+            )
+            continue
+        if not path_value:
+            statuses.append({"name": label, "ok": False, "detail": "Ruta no configurada"})
+            continue
+        path = Path(path_value)
+        if not path.exists():
+            statuses.append({"name": label, "ok": False, "detail": f"No se encontró: {path}"})
+            continue
+        detail = f"{path} ({path.stat().st_size / 1024:.1f} KB)"
+        ok = True
+        if label == "Base panamacompra.db":
+            try:
+                tables = list_sqlite_tables(str(path))
+                if "actos_publicos" not in tables:
+                    ok = False
+                    detail = f"{detail} — falta la tabla actos_publicos"
+                else:
+                    rows = count_sqlite_rows(str(path), "actos_publicos")
+                    detail = f"{detail} — actos_publicos: {rows:,} filas"
+            except Exception as exc:
+                ok = False
+                detail = f"Error al leer: {exc}"
+        statuses.append({"name": label, "ok": ok, "detail": detail})
+    return statuses
+
+
+def _render_data_readiness_panel() -> bool:
+    statuses = _collect_core_source_statuses()
+    all_ready = all(item["ok"] for item in statuses) if statuses else True
+    with st.expander("Estado de datos base", expanded=not all_ready):
+        for item in statuses:
+            icon = "✅" if item["ok"] else "⚠️"
+            st.write(f"{icon} **{item['name']}** — {item['detail']}")
+    return all_ready
+
+
+def _collect_data_health_statuses() -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for label, resolver in CORE_SOURCES:
+        raw_path = resolver()
+        status = {"name": label, "ok": False, "detail": ""}
+        path_obj: Path | None = None
+        if raw_path:
+            path_obj = Path(raw_path)
+        if not path_obj:
+            status["detail"] = "Ruta no configurada"
+            statuses.append(status)
+            continue
+        if not path_obj.exists():
+            status["detail"] = f"{path_obj} no existe"
+            statuses.append(status)
+            continue
+        detail = f"{path_obj} ({path_obj.stat().st_size / 1024:.1f} KB)"
+        status["ok"] = True
+        status["detail"] = detail
+        if label == "Base panamacompra.db":
+            try:
+                tables = list_sqlite_tables(str(path_obj))
+                if "actos_publicos" in tables:
+                    total_rows = count_sqlite_rows(str(path_obj), "actos_publicos")
+                    status["detail"] += f" - actos_publicos: {total_rows:,} filas"
+                else:
+                    status["ok"] = False
+                    status["detail"] += " - tabla actos_publicos no encontrada"
+            except Exception as exc:
+                status["ok"] = False
+                status["detail"] = f"Error al leer la base: {exc}"
+        statuses.append(status)
+    return statuses
+
+
+def _render_data_health_summary() -> bool:
+    statuses = _collect_data_health_statuses()
+    all_ok = all(item["ok"] for item in statuses)
+    with st.expander("Estado de datos base", expanded=not all_ok):
+        for item in statuses:
+            icon = "✅" if item["ok"] else "⚠️"
+            st.write(f"{icon} **{item['name']}** — {item['detail']}")
+    return all_ok
+
+
 def _filter_dataframe(
     df: pd.DataFrame,
     search_text: str | None,
@@ -1538,6 +1803,72 @@ def _filter_dataframe(
                 filtered = filtered[combined.fillna(False)]
 
     return filtered
+
+
+@st.cache_data(ttl=300)
+def _gather_data_status(
+    db_path: Path | None,
+    fichas_path: Path | None,
+    criterios_path: Path | None,
+    oferentes_path: Path | None,
+) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+
+    if db_path and db_path.exists():
+        try:
+            total = count_sqlite_rows(str(db_path), "actos_publicos")
+            ok = total > 0
+            statuses.append(
+                {
+                    "label": "Base panamacompra.db",
+                    "ok": ok,
+                    "detail": f"{total:,} filas en actos_publicos" if ok else "Sin filas visibles en actos_publicos",
+                }
+            )
+        except Exception as exc:  # pragma: no cover
+            statuses.append(
+                {
+                    "label": "Base panamacompra.db",
+                    "ok": False,
+                    "detail": f"No se pudo leer: {exc}",
+                }
+            )
+    else:
+        statuses.append(
+            {
+                "label": "Base panamacompra.db",
+                "ok": False,
+                "detail": "Archivo no encontrado en la ruta configurada.",
+            }
+        )
+
+    def _check_excel(label: str, path_value: Path | None) -> None:
+        if not path_value:
+            statuses.append({"label": label, "ok": False, "detail": "Ruta no configurada."})
+            return
+        path_obj = Path(path_value)
+        if not path_obj.exists():
+            statuses.append({"label": label, "ok": False, "detail": "Archivo no encontrado."})
+            return
+        try:
+            df = pd.read_excel(path_obj, nrows=5)
+            has_rows = not df.empty
+        except Exception as exc:  # pragma: no cover
+            statuses.append({"label": label, "ok": False, "detail": f"No se pudo leer: {exc}"})
+            return
+        statuses.append(
+            {
+                "label": label,
+                "ok": has_rows,
+                "detail": "Datos detectados" if has_rows else "El archivo no tiene filas visibles.",
+            }
+        )
+
+    _check_excel("Fichas CTNI", fichas_path)
+    _check_excel("Criterios técnicos", criterios_path)
+    _check_excel("Oferentes y catálogos", oferentes_path)
+
+    return statuses
 
 
 def _clean_drive_dataframe(df: pd.DataFrame) -> pd.DataFrame:
