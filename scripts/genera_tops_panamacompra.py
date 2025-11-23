@@ -294,12 +294,17 @@ def load_supplier_awards_df(db_path: Path) -> pd.DataFrame:
 
 def load_oferente_metadata(
     file_path: Optional[Path],
-) -> tuple[dict[str, dict[str, bool]], dict[str, int], dict[str, str]]:
+) -> tuple[
+    dict[str, dict[str, bool]],
+    dict[str, int],
+    dict[str, str],
+    dict[str, int],
+]:
     if not file_path or not file_path.exists():
-        return {}, {}, {}
+        return {}, {}, {}, {}
     df = pd.read_excel(file_path)
     if df.empty:
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     normalized_cols = {
         col: _normalize_text(col).lower()
@@ -325,12 +330,23 @@ def load_oferente_metadata(
         (col for col, norm in normalized_cols.items() if "nombre" in norm and "gener" in norm),
         None,
     )
+    cert_exp_col = next(
+        (col for col, norm in normalized_cols.items() if "venc" in norm and "cert" in norm),
+        None,
+    )
+    cert_status_col = next(
+        (col for col, norm in normalized_cols.items() if "certificado" in norm),
+        None,
+    )
     if not name_col:
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     metadata: dict[str, dict[str, bool]] = {}
     ct_suppliers: dict[str, set[str]] = defaultdict(set)
     ct_name_lookup: dict[str, str] = {}
+    ct_catalog_availability: dict[str, set[str]] = defaultdict(set)
+    today = pd.Timestamp.today().normalize()
+
     for _, row in df.iterrows():
         supplier = str(row.get(name_col) or "").strip()
         if not supplier:
@@ -359,12 +375,24 @@ def load_oferente_metadata(
                 label_name = str(row.get(ct_name_col) or "").strip()
                 if label_name:
                     ct_name_lookup.setdefault(norm_label, label_name)
+            cert_valid = False
+            if cert_exp_col:
+                exp_value = pd.to_datetime(row.get(cert_exp_col), errors="coerce")
+                if pd.notna(exp_value):
+                    cert_valid = exp_value.normalize() >= today
+            if not cert_valid and cert_status_col:
+                status_value = str(row.get(cert_status_col) or "").strip().lower()
+                if status_value:
+                    cert_valid = "cert" in status_value or "habilit" in status_value or "vigente" in status_value
+            if cert_valid:
+                ct_catalog_availability[norm_label].add(key)
 
     for meta in metadata.values():
         if "ct_labels" in meta:
             meta["ct_labels"] = tuple(sorted(meta["ct_labels"]))
     ct_stats = {label: len(keys) for label, keys in ct_suppliers.items()}
-    return metadata, ct_stats, ct_name_lookup
+    ct_available_counts = {label: len(keys) for label, keys in ct_catalog_availability.items()}
+    return metadata, ct_stats, ct_name_lookup, ct_available_counts
 
 
 def load_ct_name_map(file_path: Optional[Path]) -> dict[str, str]:
@@ -530,6 +558,9 @@ def _compute_ct_ranking(
     metadata: dict[str, dict[str, bool]],
     ct_stats: dict[str, int],
     ct_names: dict[str, str],
+    ct_availability: Optional[dict[str, int]] = None,
+    ct_days_map: Optional[dict[str, float]] = None,
+    missing_availability: Optional[set[str]] = None,
 ) -> pd.DataFrame:
     subset = df[df["tiene_ct"]]
     if subset.empty:
@@ -574,6 +605,14 @@ def _compute_ct_ranking(
         top_actos_str = ", ".join(
             f"{row.supplier_name} ({int(row.actos)} actos)" for _, row in top_actos.iterrows()
         )
+        available_count = None
+        if ct_availability is not None:
+            available_count = ct_availability.get(norm_label)
+            if available_count is None and missing_availability is not None:
+                missing_availability.add(norm_label or display_label)
+        dias_prom = None
+        if ct_days_map is not None:
+            dias_prom = ct_days_map.get(norm_label)
         rows.append(
             {
                 "Ficha / Criterio": display_label,
@@ -586,6 +625,8 @@ def _compute_ct_ranking(
                 "Oferentes en catálogo": ct_stats.get(norm_label, 0),
                 "Top 3 por monto": top_amount_str or "Sin datos",
                 "Top 3 por actos": top_actos_str or "Sin datos",
+                "oferentes_disponibles_por_CT": available_count if available_count is not None else pd.NA,
+                "dias_promedio_pub_a_adj_por_CT": round(dias_prom, 2) if dias_prom is not None else pd.NA,
             }
         )
 
@@ -610,15 +651,32 @@ def generate_top_tables(
     fichas_path: Optional[Path],
     criterios_path: Optional[Path],
     oferentes_path: Optional[Path],
-) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame, dict[str, object]]:
     awards_df = load_supplier_awards_df(db_path)
     if awards_df.empty:
         raise RuntimeError("La base panamacompra.db no contiene adjudicaciones para procesar.")
 
-    supplier_meta, ct_stats, ct_names_oferentes = load_oferente_metadata(oferentes_path)
+    supplier_meta, ct_stats, ct_names_oferentes, ct_availability_map = load_oferente_metadata(oferentes_path)
     ct_names = ct_names_oferentes.copy()
     ct_names.update(load_ct_name_map(fichas_path))
     ct_names.update(load_ct_name_map(criterios_path))
+    known_ct_codes = set(ct_stats.keys()) | set(ct_names.keys()) | set(ct_availability_map.keys())
+    awards_df["norm_ct_code"] = awards_df["ct_label"].map(
+        lambda label: _match_known_ct_code(label, known_ct_codes)
+    )
+    if {"fecha_adjudicacion", "publicacion"}.issubset(awards_df.columns):
+        awards_df["dias_pub_adj"] = (
+            awards_df["fecha_adjudicacion"] - awards_df["publicacion"]
+        ).dt.days
+    else:
+        awards_df["dias_pub_adj"] = pd.NA
+    ct_days_map = (
+        awards_df.dropna(subset=["norm_ct_code", "dias_pub_adj"])
+        .groupby("norm_ct_code")["dias_pub_adj"]
+        .mean()
+        .to_dict()
+    )
+    missing_availability_labels: set[str] = set()
 
     generated_at = datetime.now(timezone.utc).isoformat()
     period_tables: dict[str, list[pd.DataFrame]] = {cfg["key"]: [] for cfg in SUPPLIER_TOP_CONFIG}
@@ -653,6 +711,9 @@ def generate_top_tables(
                     metadata=supplier_meta,
                     ct_stats=ct_stats,
                     ct_names=ct_names,
+                    ct_availability=ct_availability_map,
+                    ct_days_map=ct_days_map,
+                    missing_availability=missing_availability_labels,
                 )
             else:
                 df = _compute_supplier_ranking(
@@ -679,8 +740,11 @@ def generate_top_tables(
         )
 
     metadata_df = pd.DataFrame(metadata_rows).sort_values("period_order").reset_index(drop=True)
-    awards_result = awards_df.drop(columns=["fecha_referencia_date"])
-    return top_tables, metadata_df, awards_result
+    awards_result = awards_df.drop(columns=["fecha_referencia_date"], errors="ignore")
+    extras = {
+        "ct_availability_null_count": len(missing_availability_labels),
+    }
+    return top_tables, metadata_df, awards_result, extras
 
 
 def export_to_excel(
@@ -745,7 +809,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     output_path = Path(args.output).expanduser()
 
     try:
-        tables, metadata_df, awards = generate_top_tables(
+        tables, metadata_df, awards, extras = generate_top_tables(
             db_path=db_path,
             fichas_path=fichas_path if fichas_path and fichas_path.exists() else None,
             criterios_path=criterios_path if criterios_path and criterios_path.exists() else None,
@@ -769,6 +833,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     print(f"[OK] Tops guardados en {output_path}")
     print(f"[LOG] Total adjudicaciones procesadas: {len(awards)}")
+    null_cts = extras.get("ct_availability_null_count", 0)
+    print(f"[LOG] CT sin oferentes disponibles reportados: {null_cts}")
     return 0
 
 

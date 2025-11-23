@@ -1,6 +1,7 @@
 """Vista PanamáCompra para GE FinApp."""
 
 # pages/visualizador.py
+import os
 import re
 import sqlite3
 import time
@@ -13,6 +14,7 @@ import altair as alt
 import uuid
 import unicodedata
 from datetime import date, timedelta, datetime, timezone
+from openai import OpenAI
 
 from core.config import DB_PATH
 from core.panamacompra_tops import (
@@ -44,6 +46,7 @@ TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
 DEFAULT_DATE_START = date(2024, 1, 1)
 DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
 SUMMARY_TAB_LABEL = "Resumen general"
+CHAT_HISTORY_KEY = "analysis_chat_history"
 DB_PANEL_EXPANDED_KEY = "pc_db_section_open"
 ANALYSIS_PANEL_EXPANDED_KEY = "pc_analysis_section_open"
 
@@ -236,6 +239,37 @@ def _render_runtime_summary(
         ("Rango aplicado", f"{start_ts.date()}  →  {end_ts.date()}"),
     ]
     _render_summary_table(rows)
+
+
+def _render_analysis_chatbot() -> None:
+    st.subheader("Asistente GPT para análisis")
+    db_path = _preferred_db_path()
+    try:
+        chat_data = load_analysis_chat_dataframes(
+            db_path,
+            LOCAL_FICHAS_CTNI,
+            LOCAL_CRITERIOS_TECNICOS,
+            LOCAL_OFERENTES_CATALOGOS,
+        )
+    except Exception as exc:
+        st.error(f"No se pudieron cargar los datos para el chat: {exc}")
+        return
+    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        st.info("Configura la variable de entorno OPENAI_API_KEY para usar el asistente.")
+        return
+    history: list[dict[str, str]] = st.session_state.setdefault(CHAT_HISTORY_KEY, [])
+    for message in history:
+        st.chat_message(message["role"]).write(message["content"])
+    user_prompt = st.chat_input("Haz una pregunta sobre los actos, fichas o oferentes.")
+    if not user_prompt:
+        return
+    st.chat_message("user").write(user_prompt)
+    history.append({"role": "user", "content": user_prompt})
+    with st.spinner("Consultando GPT..."):
+        answer = _answer_analysis_question(user_prompt, chat_data, api_key)
+    st.chat_message("assistant").write(answer)
+    history.append({"role": "assistant", "content": answer})
 
 
 def _render_ct_without_reg_chart_section(
@@ -961,6 +995,7 @@ def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
     return True
 
 def render_supplier_top_panel() -> None:
+    _render_analysis_chatbot()
     tops_signature = _tops_cache_signature()
     fresh_tables = load_precomputed_top_tables(tops_signature)
     if fresh_tables:
@@ -1078,6 +1113,14 @@ def render_supplier_top_panel() -> None:
         "Oferentes en catálogo": st.column_config.NumberColumn(format="%d"),
         "Top 3 por monto": st.column_config.TextColumn(help="Empresas con mayor monto adjudicado"),
         "Top 3 por actos": st.column_config.TextColumn(help="Empresas con más actos adjudicados"),
+        "oferentes_disponibles_por_CT": st.column_config.NumberColumn(
+            format="%d",
+            help="Cantidad de oferentes con certificado vigente en catálogo para esta ficha.",
+        ),
+        "dias_promedio_pub_a_adj_por_CT": st.column_config.NumberColumn(
+            format="%.2f",
+            help="Promedio de días entre publicación y adjudicación de actos con esta ficha.",
+        ),
     }
 
     for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
@@ -1323,6 +1366,112 @@ def load_sqlite_preview(
 @st.cache_data(ttl=300)
 def load_excel_file(file_path: str) -> pd.DataFrame:
     return pd.read_excel(file_path)
+
+
+@st.cache_data(ttl=1800)
+def load_analysis_chat_dataframes(
+    db_path: Path | None,
+    fichas_path: Path | None,
+    criterios_path: Path | None,
+    oferentes_path: Path | None,
+) -> dict[str, pd.DataFrame]:
+    actos_df = load_supplier_awards_df(str(db_path) if db_path else None)
+    if actos_df is None:
+        actos_df = pd.DataFrame()
+
+    def _try_read_excel(path: Path | None) -> pd.DataFrame:
+        if not path:
+            return pd.DataFrame()
+        path = Path(path)
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            df_local = pd.read_excel(path)
+        except Exception:
+            return pd.DataFrame()
+        return _clean_drive_dataframe(df_local)
+
+    fichas_df = _try_read_excel(fichas_path)
+    criterios_df = _try_read_excel(criterios_path)
+    oferentes_df = _try_read_excel(oferentes_path)
+    return {
+        "actos": actos_df,
+        "fichas": fichas_df,
+        "criterios": criterios_df,
+        "oferentes": oferentes_df,
+    }
+
+
+def _filter_df_for_terms(
+    df: pd.DataFrame,
+    terms: list[str],
+    *,
+    limit: int = 10,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    cols = list(df.columns[: min(6, len(df.columns))])
+    work_df = df[cols]
+    if not terms:
+        return work_df.head(limit)
+    mask = pd.Series(False, index=work_df.index)
+    for col in cols:
+        try:
+            series = work_df[col].astype(str).str.lower()
+        except Exception:
+            series = work_df[col].map(lambda v: str(v).lower() if pd.notna(v) else "")
+        for term in terms:
+            mask = mask | series.str.contains(term.lower(), na=False)
+    return work_df[mask].head(limit)
+
+
+def _build_chat_context(question: str, dataframes: dict[str, pd.DataFrame]) -> str:
+    terms = [tok.lower() for tok in re.findall(r"\d{3,}", question or "")]
+    context_parts: list[str] = []
+    for name, df in dataframes.items():
+        if df is None or df.empty:
+            continue
+        context_parts.append(
+            f"Tabla {name}: {len(df)} filas, columnas principales: {', '.join(df.columns[:5])}"
+        )
+        snippet = _filter_df_for_terms(df, terms, limit=8)
+        if not snippet.empty:
+            snippet_text = snippet.to_string(index=False)
+            context_parts.append(f"Ejemplos en {name}:\n{snippet_text}")
+    context_text = "\n\n".join(context_parts)
+    return context_text[-4000:] if len(context_text) > 4000 else context_text
+
+
+def _answer_analysis_question(
+    question: str,
+    dataframes: dict[str, pd.DataFrame],
+    api_key: str,
+) -> str:
+    context = _build_chat_context(question, dataframes) or "No se encontraron coincidencias directas."
+    try:
+        client = OpenAI(api_key=api_key)
+    except Exception as exc:
+        return f"No se pudo inicializar el cliente de OpenAI: {exc}"
+    system_prompt = (
+        "Eres un analista que responde en español usando exclusivamente los datos proporcionados. "
+        "Si la respuesta no está en el contexto, indica qué información falta. "
+        "Los dataframes disponibles son: actos (actos públicos adjudicados con campos como ficha_detectada, ct_label, "
+        "proveedores y fechas), fichas_ctni (número de ficha y nombre genérico), criterios_tecnicos y oferentes_catalogos. "
+        "Cuando piden detalles de una CT específica, usa las filas correspondientes del contexto."
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Contexto:\n{context}\n\nPregunta del usuario:\n{question}"},
+    ]
+    try:
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=messages,
+            max_output_tokens=500,
+        )
+        return response.output_text
+    except Exception as exc:
+        return f"No se pudo obtener respuesta de GPT: {exc}"
 
 
 def _filter_dataframe(
@@ -2915,5 +3064,4 @@ with st.expander(
         LOCAL_OFERENTES_CATALOGOS,
         "oferentes_catalogos",
     )
-
 
