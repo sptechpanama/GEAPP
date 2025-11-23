@@ -258,11 +258,12 @@ def _render_ct_without_reg_chart_section(
 
     min_date = min_ts.date()
     max_date = max_ts.date()
-    start_range = min_date
+    default_start = max(min_date, date(2025, 1, 1))
+    start_range = default_start
     end_range = max_date
+    apply_date_filter = False
 
     if show_controls:
-        default_start = max(min_date, max_date - timedelta(days=90))
         date_input = st.date_input(
             "Rango de adjudicación para la gráfica CT sin RS",
             value=(default_start, max_date),
@@ -272,10 +273,14 @@ def _render_ct_without_reg_chart_section(
         )
         if isinstance(date_input, (tuple, list)) and len(date_input) == 2:
             start_range, end_range = date_input
-    elif isinstance(start_range, date) and isinstance(end_range, date):
+            apply_date_filter = True
+        elif isinstance(date_input, date):
+            start_range = end_range = date_input
+            apply_date_filter = True
+    else:
         st.caption("La gráfica usa el mismo rango de fechas seleccionado en los filtros superiores.")
 
-    if isinstance(start_range, date) and isinstance(end_range, date):
+    if apply_date_filter and isinstance(start_range, date) and isinstance(end_range, date):
         start_ts = datetime.combine(start_range, datetime.min.time())
         end_ts = datetime.combine(end_range, datetime.max.time())
         filtered_df = _filter_awards_by_range(
@@ -308,20 +313,24 @@ def _render_ct_without_reg_chart_section(
         .sort_values("fecha_dia")
     )
     trend_df["fecha_dia"] = pd.to_datetime(trend_df["fecha_dia"])
+    trend_df["monto_promedio"] = trend_df["monto_total"].rolling(window=7, min_periods=1).mean()
+    trend_df["actos_promedio"] = trend_df["actos"].rolling(window=7, min_periods=1).mean()
 
     base_chart = alt.Chart(trend_df).encode(
         x=alt.X("fecha_dia:T", title="Fecha de adjudicación"),
         tooltip=[
             alt.Tooltip("fecha_dia:T", title="Fecha"),
             alt.Tooltip("monto_total:Q", title="Monto total", format=",.2f"),
+            alt.Tooltip("monto_promedio:Q", title="Monto promedio (7d)", format=",.2f"),
             alt.Tooltip("actos:Q", title="Actos"),
+            alt.Tooltip("actos_promedio:Q", title="Actos promedio (7d)", format=",.2f"),
         ],
     )
     amount_area = base_chart.mark_area(color="#2a9d8f", opacity=0.35).encode(
-        y=alt.Y("monto_total:Q", title="Monto total (B/.)"),
+        y=alt.Y("monto_promedio:Q", title="Monto promedio (B/.)"),
     )
     count_line = base_chart.mark_line(color="#e76f51", opacity=0.9).encode(
-        y=alt.Y("actos:Q", title="Cantidad de actos"),
+        y=alt.Y("actos_promedio:Q", title="Cantidad de actos (promedio)"),
     )
     ct_trend_chart = (
         alt.layer(amount_area, count_line)
