@@ -237,6 +237,102 @@ def _render_runtime_summary(
     ]
     _render_summary_table(rows)
 
+
+def _render_ct_without_reg_chart_section(
+    df: pd.DataFrame,
+    supplier_meta: dict[str, dict[str, bool]],
+    *,
+    show_controls: bool,
+    key_prefix: str,
+) -> None:
+    if df is None or df.empty or "fecha_referencia" not in df.columns:
+        st.info("No hay adjudicaciones disponibles para graficar actos con ficha sin registro sanitario.")
+        return
+
+    base_df = df.copy()
+    min_ts = base_df["fecha_referencia"].min()
+    max_ts = base_df["fecha_referencia"].max()
+    if pd.isna(min_ts) or pd.isna(max_ts):
+        st.info("No se detectaron fechas válidas para la gráfica.")
+        return
+
+    min_date = min_ts.date()
+    max_date = max_ts.date()
+    start_range = min_date
+    end_range = max_date
+
+    if show_controls:
+        default_start = max(min_date, max_date - timedelta(days=90))
+        date_input = st.date_input(
+            "Rango de adjudicación para la gráfica CT sin RS",
+            value=(default_start, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            key=f"{key_prefix}_ct_trend_range",
+        )
+        if isinstance(date_input, (tuple, list)) and len(date_input) == 2:
+            start_range, end_range = date_input
+    elif isinstance(start_range, date) and isinstance(end_range, date):
+        st.caption("La gráfica usa el mismo rango de fechas seleccionado en los filtros superiores.")
+
+    if isinstance(start_range, date) and isinstance(end_range, date):
+        start_ts = datetime.combine(start_range, datetime.min.time())
+        end_ts = datetime.combine(end_range, datetime.max.time())
+        filtered_df = _filter_awards_by_range(
+            base_df,
+            start_ts.isoformat(),
+            end_ts.isoformat(),
+        )
+    else:
+        filtered_df = base_df
+
+    if filtered_df.empty:
+        st.info("En el rango seleccionado no se registran adjudicaciones.")
+        return
+
+    subset = filtered_df[
+        filtered_df["tiene_ct"]
+        & ~filtered_df["supplier_key"].map(lambda key: supplier_meta.get(key, {}).get("has_registro", False))
+    ].copy()
+    if subset.empty:
+        st.info("En el rango seleccionado no se registran actos con ficha técnica y sin registro sanitario.")
+        return
+
+    subset["fecha_dia"] = subset["fecha_referencia"].dt.floor("D")
+    trend_df = (
+        subset.groupby("fecha_dia", as_index=False)
+        .agg(
+            monto_total=("precio_referencia", "sum"),
+            actos=("supplier_key", "size"),
+        )
+        .sort_values("fecha_dia")
+    )
+    trend_df["fecha_dia"] = pd.to_datetime(trend_df["fecha_dia"])
+
+    base_chart = alt.Chart(trend_df).encode(
+        x=alt.X("fecha_dia:T", title="Fecha de adjudicación"),
+        tooltip=[
+            alt.Tooltip("fecha_dia:T", title="Fecha"),
+            alt.Tooltip("monto_total:Q", title="Monto total", format=",.2f"),
+            alt.Tooltip("actos:Q", title="Actos"),
+        ],
+    )
+    amount_area = base_chart.mark_area(color="#2a9d8f", opacity=0.35).encode(
+        y=alt.Y("monto_total:Q", title="Monto total (B/.)"),
+    )
+    count_line = base_chart.mark_line(color="#e76f51", opacity=0.9).encode(
+        y=alt.Y("actos:Q", title="Cantidad de actos"),
+    )
+    ct_trend_chart = (
+        alt.layer(amount_area, count_line)
+        .resolve_scale(y="independent")
+        .properties(
+            height=320,
+            title="Evolución de actos con ficha técnica sin registro sanitario",
+        )
+    )
+    st.altair_chart(ct_trend_chart, use_container_width=True)
+
 def _apply_search_filter(df: pd.DataFrame, search_text: str) -> pd.DataFrame:
     if not search_text:
         return df
@@ -862,14 +958,7 @@ def render_supplier_top_panel() -> None:
         st.session_state["precomputed_top_tables"] = fresh_tables
     precomputed_tables = fresh_tables or st.session_state.get("precomputed_top_tables", {})
 
-    if render_precomputed_top_panel(precomputed_tables):
-        return
-
-    st.warning(
-        "No se encontraron tops precomputados en data/tops ni en outputs/tops. "
-        "Mostrando un cálculo en vivo temporal mientras ejecutas scripts/genera_tops_panamacompra.py "
-        "o scripts/build_panamacompra_aggregates.py para la próxima sesión."
-    )
+    precomputed_rendered = render_precomputed_top_panel(precomputed_tables)
 
     db_path = _preferred_db_path()
     awards_df = load_supplier_awards_df(str(db_path) if db_path else None)
@@ -877,7 +966,25 @@ def render_supplier_top_panel() -> None:
         st.info(
             "Aún no hay adjudicaciones sincronizadas en `panamacompra.db` para mostrar el top de proveedores."
         )
+        if precomputed_rendered:
+            st.info("No se pudo generar la gráfica CT sin RS porque la base local está vacía.")
         return
+
+    if precomputed_rendered:
+        supplier_meta, _, _ = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+        _render_ct_without_reg_chart_section(
+            awards_df,
+            supplier_meta,
+            show_controls=True,
+            key_prefix="precomputed_ct_trend",
+        )
+        return
+
+    st.warning(
+        "No se encontraron tops precomputados en data/tops ni en outputs/tops. "
+        "Mostrando un cálculo en vivo temporal mientras ejecutas scripts/genera_tops_panamacompra.py "
+        "o scripts/build_panamacompra_aggregates.py para la próxima sesión."
+    )
 
     supplier_meta, ct_stats, ct_names_oferentes = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
     ct_names_fichas = load_ct_name_map(LOCAL_FICHAS_CTNI)
@@ -1005,6 +1112,13 @@ def render_supplier_top_panel() -> None:
                 use_container_width=True,
                 column_config=current_config,
             )
+
+    _render_ct_without_reg_chart_section(
+        filtered_df,
+        supplier_meta,
+        show_controls=False,
+        key_prefix="runtime_ct_trend",
+    )
 
     ct_without_reg = filtered_df[
         filtered_df["tiene_ct"]
