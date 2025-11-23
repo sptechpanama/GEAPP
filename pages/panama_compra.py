@@ -9,6 +9,7 @@ from collections import defaultdict
 from typing import Any
 import streamlit as st
 import pandas as pd
+import altair as alt
 import uuid
 import unicodedata
 from datetime import date, timedelta, datetime, timezone
@@ -1004,6 +1005,48 @@ def render_supplier_top_panel() -> None:
                 use_container_width=True,
                 column_config=current_config,
             )
+
+    ct_without_reg = filtered_df[
+        filtered_df["tiene_ct"]
+        & ~filtered_df["supplier_key"].map(lambda key: supplier_meta.get(key, {}).get("has_registro", False))
+    ].copy()
+    if not ct_without_reg.empty:
+        ct_without_reg["fecha_dia"] = ct_without_reg["fecha_referencia"].dt.floor("D")
+        trend_df = (
+            ct_without_reg.groupby("fecha_dia", as_index=False)
+            .agg(
+                monto_total=("precio_referencia", "sum"),
+                actos=("supplier_key", "size"),
+            )
+            .sort_values("fecha_dia")
+        )
+        trend_df["fecha_dia"] = pd.to_datetime(trend_df["fecha_dia"])
+
+        base_chart = alt.Chart(trend_df).encode(
+            x=alt.X("fecha_dia:T", title="Fecha de adjudicación"),
+            tooltip=[
+                alt.Tooltip("fecha_dia:T", title="Fecha"),
+                alt.Tooltip("monto_total:Q", title="Monto total", format=",.2f"),
+                alt.Tooltip("actos:Q", title="Actos"),
+            ],
+        )
+        amount_area = base_chart.mark_area(color="#2a9d8f", opacity=0.35).encode(
+            y=alt.Y("monto_total:Q", title="Monto total (B/.)"),
+        )
+        count_line = base_chart.mark_line(color="#e76f51", opacity=0.9).encode(
+            y=alt.Y("actos:Q", title="Cantidad de actos"),
+        )
+        ct_trend_chart = (
+            alt.layer(amount_area, count_line)
+            .resolve_scale(y="independent")
+            .properties(
+                height=320,
+                title="Evolución de actos con ficha técnica sin registro sanitario",
+            )
+        )
+        st.altair_chart(ct_trend_chart, use_container_width=True)
+    else:
+        st.info("En el rango seleccionado no se registran actos con ficha y sin registro sanitario.")
 
 def _require_authentication() -> None:
     status = st.session_state.get("authentication_status")
