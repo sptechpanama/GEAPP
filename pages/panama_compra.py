@@ -1659,7 +1659,11 @@ def _request_analysis_plan(question: str, schema_context: str, api_key: str) -> 
         ],
         max_output_tokens=400,
     )
-    raw_text = response.output_text
+    raw_text = (response.output_text or "").strip()
+    if raw_text.startswith("```"):
+        segments = raw_text.split("```")
+        if len(segments) >= 2:
+            raw_text = segments[1].strip()
     try:
         plan = json.loads(raw_text)
     except json.JSONDecodeError:
