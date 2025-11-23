@@ -257,7 +257,11 @@ def _render_analysis_chatbot() -> None:
     except Exception as exc:
         st.error(f"No se pudieron cargar los datos para el chat: {exc}")
         return
-    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+    api_key = (
+        os.getenv("OPENAI_API_KEY")
+        or st.secrets.get("OPENAI_API_KEY")
+        or st.secrets.get("app", {}).get("OPENAI_API_KEY")
+    )
     if not api_key:
         st.info("Configura la variable de entorno OPENAI_API_KEY para usar el asistente.")
         return
