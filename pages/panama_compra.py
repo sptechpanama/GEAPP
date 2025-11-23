@@ -1592,19 +1592,23 @@ def _filter_df_for_terms(
 ) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    cols = list(df.columns[: min(6, len(df.columns))])
-    work_df = df[cols]
+    display_cols = list(df.columns[: min(8, len(df.columns))])
+    work_df = df.copy()
     if not terms:
-        return work_df.head(limit)
+        return work_df[display_cols].head(limit)
     mask = pd.Series(False, index=work_df.index)
-    for col in cols:
+    lowered_terms = [term.lower() for term in terms if term]
+    for col in work_df.columns:
         try:
             series = work_df[col].astype(str).str.lower()
         except Exception:
             series = work_df[col].map(lambda v: str(v).lower() if pd.notna(v) else "")
-        for term in terms:
-            mask = mask | series.str.contains(term.lower(), na=False)
-    return work_df[mask].head(limit)
+        for term in lowered_terms:
+            mask = mask | series.str.contains(term, na=False)
+    filtered = work_df[mask]
+    if filtered.empty:
+        return filtered
+    return filtered[display_cols].head(limit)
 
 
 def _build_chat_context(question: str, dataframes: dict[str, pd.DataFrame]) -> str:
