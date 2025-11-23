@@ -14,7 +14,10 @@ import altair as alt
 import uuid
 import unicodedata
 from datetime import date, timedelta, datetime, timezone
-from openai import OpenAI
+try:
+    from openai import OpenAI  # type: ignore
+except ImportError:  # pragma: no cover
+    OpenAI = None  # type: ignore
 
 from core.config import DB_PATH
 from core.panamacompra_tops import (
@@ -1448,6 +1451,8 @@ def _answer_analysis_question(
     api_key: str,
 ) -> str:
     context = _build_chat_context(question, dataframes) or "No se encontraron coincidencias directas."
+    if OpenAI is None:
+        return "El paquete openai no está disponible en este entorno."
     try:
         client = OpenAI(api_key=api_key)
     except Exception as exc:
