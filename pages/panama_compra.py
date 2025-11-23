@@ -1,6 +1,7 @@
 """Vista PanamáCompra para GE FinApp."""
 
 # pages/visualizador.py
+import json
 import os
 import re
 import sqlite3
@@ -329,6 +330,7 @@ def _render_analysis_chatbot() -> None:
         )
         st.info("Verifica la sincronización de esos archivos antes de usar el chat.")
         return
+    schema_context = _build_schema_context(chat_data)
     api_key = (
         os.getenv("OPENAI_API_KEY")
         or st.secrets.get("OPENAI_API_KEY")
@@ -346,7 +348,15 @@ def _render_analysis_chatbot() -> None:
     st.chat_message("user").write(user_prompt)
     history.append({"role": "user", "content": user_prompt})
     with st.spinner("Consultando GPT..."):
-        answer = _answer_analysis_question(user_prompt, chat_data, api_key)
+        plan = _request_analysis_plan(user_prompt, schema_context, api_key)
+        if plan.get("tool") == "none":
+            answer = plan.get("reason", "El plan generado no es válido.")
+        else:
+            result_df, error_msg = _execute_analysis_plan(plan, chat_data, db_path)
+            if error_msg:
+                answer = error_msg
+            else:
+                answer = _summarize_plan_answer(user_prompt, plan, result_df, api_key)
     st.chat_message("assistant").write(answer)
     history.append({"role": "assistant", "content": answer})
 
@@ -1611,6 +1621,163 @@ def _filter_df_for_terms(
     return filtered[display_cols].head(limit)
 
 
+def _build_schema_context(dataframes: dict[str, pd.DataFrame]) -> str:
+    parts: list[str] = []
+    for name, df in dataframes.items():
+        if df is None or df.empty:
+            continue
+        dtypes = ", ".join(f"{col} ({str(dtype)})" for col, dtype in df.dtypes.items())
+        sample = df.sample(min(3, len(df)), random_state=42)[df.columns[:8]]
+        sample_text = sample.to_string(index=False)
+        parts.append(f"Tabla {name}:\nColumnas y tipos: {dtypes}\nMuestras:\n{sample_text}")
+    context = "\n\n".join(parts)
+    return context[-6000:] if len(context) > 6000 else context
+
+
+def _request_analysis_plan(question: str, schema_context: str, api_key: str) -> dict[str, Any]:
+    if OpenAI is None:
+        return {"tool": "none", "reason": "El paquete openai no está disponible en este entorno."}
+    client = OpenAI(api_key=api_key)
+    system_prompt = (
+        "Eres un analista que genera planes JSON para responder preguntas sobre tablas. "
+        "Debes devolver exclusivamente JSON válido con el formato:\n"
+        "{tool: 'sql'|'pandas'|'semantic'|'none', query: '...', dataframe: 'actos', "
+        "filters:[{column:'', operator:'contains|equals|gt|lt', value:''}], columns:['col'], limit:int, reason:''}\n"
+        "Usa tool='semantic' para búsquedas por texto general, 'pandas' para filtros simples por columnas "
+        "y 'sql' solo cuando necesites agrupar en SQLite. Si no puedes resolverlo, usa tool='none' y explica en reason."
+    )
+    user_prompt = (
+        f"Esquema de datos:\n{schema_context}\n\n"
+        f"Pregunta del usuario:\n{question}\n\n"
+        "Responde solo con un objeto JSON válido."
+    )
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_output_tokens=400,
+    )
+    raw_text = response.output_text
+    try:
+        plan = json.loads(raw_text)
+    except json.JSONDecodeError:
+        plan = {"tool": "none", "reason": f"No se pudo interpretar el plan: {raw_text}"}
+    return plan
+
+
+def _apply_plan_filters(df: pd.DataFrame, filters: list[dict[str, Any]]) -> pd.DataFrame:
+    if df is None or df.empty or not filters:
+        return df
+    mask = pd.Series(True, index=df.index)
+    for rule in filters:
+        col = rule.get("column")
+        if not col or col not in df.columns:
+            continue
+        op = (rule.get("operator") or "contains").lower()
+        value = rule.get("value")
+        series = df[col]
+        if op == "contains":
+            if value is None:
+                continue
+            series = series.astype(str).str.lower()
+            mask = mask & series.str.contains(str(value).lower(), na=False)
+        elif op == "equals":
+            mask = mask & (series == value)
+        elif op == "gt":
+            mask = mask & (pd.to_numeric(series, errors="coerce") > float(value))
+        elif op == "lt":
+            mask = mask & (pd.to_numeric(series, errors="coerce") < float(value))
+    return df[mask]
+
+
+def _execute_analysis_plan(
+    plan: dict[str, Any],
+    dataframes: dict[str, pd.DataFrame],
+    db_path: Path | None,
+) -> tuple[pd.DataFrame | None, str]:
+    tool = plan.get("tool")
+    limit = int(plan.get("limit") or 200)
+    if limit <= 0 or limit > 200:
+        limit = 200
+
+    if tool == "sql":
+        query = (plan.get("query") or "").strip()
+        if not query.lower().startswith("select"):
+            return None, "Solo se permiten consultas SELECT."
+        if "limit" not in query.lower():
+            query = f"{query.rstrip(';')} LIMIT {limit}"
+        if not db_path or not db_path.exists():
+            return None, "La base panamacompra.db no está disponible para ejecutar SQL."
+        with sqlite3.connect(db_path) as conn:
+            try:
+                df = pd.read_sql_query(query, conn)
+            except Exception as exc:
+                return None, f"Error al ejecutar SQL: {exc}"
+        return df, ""
+
+    if tool == "pandas":
+        df_name = plan.get("dataframe")
+        df = dataframes.get(df_name)
+        if df is None or df.empty:
+            return None, f"No hay datos cargados para {df_name}."
+        filtered = _apply_plan_filters(df, plan.get("filters", []))
+        columns = plan.get("columns")
+        if columns:
+            valid_cols = [col for col in columns if col in filtered.columns]
+            if valid_cols:
+                filtered = filtered[valid_cols]
+        return filtered.head(limit), ""
+
+    if tool == "semantic":
+        df_name = plan.get("dataframe")
+        df = dataframes.get(df_name)
+        if df is None or df.empty:
+            return None, f"No hay datos cargados para {df_name}."
+        terms = plan.get("terms") or re.findall(r"\w{3,}", plan.get("query") or "")
+        result = _filter_df_for_terms(df, terms, limit=limit)
+        return result, ""
+
+    reason = plan.get("reason") or "El plan no especificó una herramienta válida."
+    return None, reason
+
+
+def _summarize_plan_answer(
+    question: str,
+    plan: dict[str, Any],
+    result_df: pd.DataFrame | None,
+    api_key: str,
+) -> str:
+    if OpenAI is None:
+        return "El paquete openai no está disponible en este entorno."
+    preview = "Sin resultados."
+    if result_df is not None and not result_df.empty:
+        preview = result_df.to_markdown(index=False)
+    plan_text = json.dumps(plan, ensure_ascii=False)
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {
+                "role": "system",
+                "content": "Eres un analista que responde basándote en resultados tabulares locales.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Pregunta original: {question}\n"
+                    f"Plan ejecutado: {plan_text}\n"
+                    f"Resultados (máx 200 filas):\n{preview}\n"
+                    "Redacta una respuesta en español, cita cifras relevantes y aclara si se truncaron filas."
+                ),
+            },
+        ],
+        max_output_tokens=500,
+    )
+    return response.output_text
+
+
 def _build_chat_context(question: str, dataframes: dict[str, pd.DataFrame]) -> str:
 	terms = [tok.lower() for tok in re.findall(r"\w{3,}", question or "")]
 	context_parts: list[str] = []
@@ -1629,38 +1796,6 @@ def _build_chat_context(question: str, dataframes: dict[str, pd.DataFrame]) -> s
 	return context_text[-4000:] if len(context_text) > 4000 else context_text
 
 
-def _answer_analysis_question(
-    question: str,
-    dataframes: dict[str, pd.DataFrame],
-    api_key: str,
-) -> str:
-    context = _build_chat_context(question, dataframes) or "No se encontraron coincidencias directas."
-    if OpenAI is None:
-        return "El paquete openai no está disponible en este entorno."
-    try:
-        client = OpenAI(api_key=api_key)
-    except Exception as exc:
-        return f"No se pudo inicializar el cliente de OpenAI: {exc}"
-    system_prompt = (
-        "Eres un analista que responde en español usando exclusivamente los datos proporcionados. "
-        "Si la respuesta no está en el contexto, indica qué información falta. "
-        "Los dataframes disponibles son: actos (actos públicos adjudicados con campos como ficha_detectada, ct_label, "
-        "proveedores y fechas), fichas_ctni (número de ficha y nombre genérico), criterios_tecnicos y oferentes_catalogos. "
-        "Cuando piden detalles de una CT específica, usa las filas correspondientes del contexto."
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Contexto:\n{context}\n\nPregunta del usuario:\n{question}"},
-    ]
-    try:
-        response = client.responses.create(
-            model="gpt-4o-mini",
-            input=messages,
-            max_output_tokens=500,
-        )
-        return response.output_text
-    except Exception as exc:
-        return f"No se pudo obtener respuesta de GPT: {exc}"
 
 
 def _collect_core_source_statuses() -> list[dict[str, Any]]:
