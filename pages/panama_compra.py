@@ -1612,20 +1612,21 @@ def _filter_df_for_terms(
 
 
 def _build_chat_context(question: str, dataframes: dict[str, pd.DataFrame]) -> str:
-    terms = [tok.lower() for tok in re.findall(r"\d{3,}", question or "")]
-    context_parts: list[str] = []
-    for name, df in dataframes.items():
-        if df is None or df.empty:
-            continue
-        context_parts.append(
-            f"Tabla {name}: {len(df)} filas, columnas principales: {', '.join(df.columns[:5])}"
-        )
-        snippet = _filter_df_for_terms(df, terms, limit=8)
-        if not snippet.empty:
-            snippet_text = snippet.to_string(index=False)
-            context_parts.append(f"Ejemplos en {name}:\n{snippet_text}")
-    context_text = "\n\n".join(context_parts)
-    return context_text[-4000:] if len(context_text) > 4000 else context_text
+	terms = [tok.lower() for tok in re.findall(r"\w{3,}", question or "")]
+	context_parts: list[str] = []
+	for name, df in dataframes.items():
+		if df is None or df.empty:
+			continue
+		context_parts.append(
+			f"Tabla {name}: {len(df)} filas, columnas principales: {', '.join(df.columns[:5])}"
+		)
+		snippet = _filter_df_for_terms(df, terms, limit=8)
+		if snippet.empty:
+			snippet = df.head(5)[df.columns[:8]]
+		snippet_text = snippet.to_string(index=False)
+		context_parts.append(f"Ejemplos en {name}:\n{snippet_text}")
+	context_text = "\n\n".join(context_parts)
+	return context_text[-4000:] if len(context_text) > 4000 else context_text
 
 
 def _answer_analysis_question(
