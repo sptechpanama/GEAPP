@@ -952,7 +952,7 @@ if ing_should_expand:
 with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     _prepare_entry_defaults("ing")
 
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
     with c1:
         empresa_ing = st.selectbox(
             "Empresa",
@@ -969,6 +969,14 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             on_change=lambda: _mark_form_force_open("ing"),
         )
     with c3:
+        categoria_ing = st.selectbox(
+            "Categoria",
+            ["Proyectos", "Oficina"],
+            index=0,
+            key="ing_categoria_quick",
+            on_change=lambda: _mark_form_force_open("ing"),
+        )
+    with c4:
         monto_nuevo = st.number_input(
             "Monto",
             min_value=0.0,
@@ -976,7 +984,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             key="ing_monto_quick",
             on_change=lambda: _mark_form_force_open("ing"),
         )
-    with c4:
+    with c5:
         por_cobrar_nuevo = st.selectbox(
             "Por_cobrar",
             ["No", "Sí"],
@@ -985,25 +993,38 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             on_change=lambda: _mark_form_force_open("ing"),
         )
 
-    ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
-    client_options = _client_options_for_company(ing_company_code)
-    _ensure_client_selection("ing", client_options)
+    cliente_id = ""
+    cliente_nombre = ""
+    proyecto_id = ""
+    if categoria_ing == "Proyectos":
+        ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
+        client_options = _client_options_for_company(ing_company_code)
+        _ensure_client_selection("ing", client_options)
 
-    st.selectbox(
-        "Cliente",
-        client_options,
-        key="ing_cliente_raw",
-        on_change=lambda prefix="ing": _on_client_change(prefix, mark_open=True),
-    )
-    project_options = _build_project_options("ing")
-    if st.session_state.get("ing_proyecto_raw") not in project_options:
-        st.session_state["ing_proyecto_raw"] = project_options[0] if project_options else ""
-    st.selectbox(
-        "Proyecto",
-        project_options,
-        key="ing_proyecto_raw",
-        on_change=lambda prefix="ing": _on_project_change(prefix, mark_open=True),
-    )
+        st.selectbox(
+            "Cliente",
+            client_options,
+            key="ing_cliente_raw",
+            on_change=lambda prefix="ing": _on_client_change(prefix, mark_open=True),
+        )
+        project_options = _build_project_options("ing")
+        if st.session_state.get("ing_proyecto_raw") not in project_options:
+            st.session_state["ing_proyecto_raw"] = project_options[0] if project_options else ""
+        st.selectbox(
+            "Proyecto",
+            project_options,
+            key="ing_proyecto_raw",
+            on_change=lambda prefix="ing": _on_project_change(prefix, mark_open=True),
+        )
+        cliente_id = st.session_state.get("ing_cliente_id", "")
+        cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
+        proyecto_id = st.session_state.get("ing_proyecto_id", "")
+    else:
+        st.session_state["ing_cliente_id"] = ""
+        st.session_state["ing_cliente_nombre"] = ""
+        st.session_state["ing_proyecto_id"] = ""
+        st.session_state["ing_proyecto_raw"] = ""
+        st.session_state["ing_cliente_raw"] = ""
     desc_nueva = st.text_input(
         "Descripcion",
         key="ing_desc_quick",
@@ -1013,14 +1034,19 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
 
     if submitted_ing:
-        cliente_id = st.session_state.get("ing_cliente_id", "")
-        cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
-        proyecto_id = st.session_state.get("ing_proyecto_id", "")
-        linked_client_id = st.session_state.get("ing_proyecto_cliente_id")
-        linked_client_name = st.session_state.get("ing_proyecto_cliente_nombre")
-        if linked_client_id:
-            cliente_id = linked_client_id
-            cliente_nombre = linked_client_name or cliente_nombre
+        if categoria_ing == "Proyectos":
+            cliente_id = st.session_state.get("ing_cliente_id", "")
+            cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
+            proyecto_id = st.session_state.get("ing_proyecto_id", "")
+            linked_client_id = st.session_state.get("ing_proyecto_cliente_id")
+            linked_client_name = st.session_state.get("ing_proyecto_cliente_nombre")
+            if linked_client_id:
+                cliente_id = linked_client_id
+                cliente_nombre = linked_client_name or cliente_nombre
+        else:
+            cliente_id = ""
+            cliente_nombre = ""
+            proyecto_id = ""
 
         hoy_ts = pd.Timestamp(_today())
         rid = uuid.uuid4().hex
@@ -1030,6 +1056,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             COL_ROWID: rid,
             COL_FECHA: _ts(fecha_nueva),
             COL_MONTO: float(monto_nuevo),
+            COL_CAT: categoria_ing,
             COL_PROY: (proyecto_id or "").strip(),
             COL_CLI_ID: (cliente_id or "").strip(),
             COL_CLI_NOM: (cliente_nombre or "").strip(),
