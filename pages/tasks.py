@@ -109,13 +109,23 @@ div.stButton>button:hover {
   border-radius: 12px !important;
 }
 [data-testid="stSegmentedControl"] button {
-  background: rgba(15,23,42,0.7) !important;
-  color: var(--pc-text) !important;
-  border: 1px solid var(--pc-border) !important;
+  background: rgba(15,23,42,0.72) !important;
+  color: #d8e2f5 !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
   border-radius: 10px !important;
   padding: 0.45rem 0.8rem !important;
   font-weight: 700 !important;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
+}
+[data-testid="stSegmentedControl"] button[aria-pressed="false"] {
+  background: rgba(12,18,36,0.85) !important;
+  color: #d8e2f5 !important;
+  border-color: rgba(255,255,255,0.10) !important;
+}
+[data-testid="stSegmentedControl"] button[aria-pressed="false"]:hover {
+  background: rgba(14,165,233,0.12) !important;
+  border-color: rgba(14,165,233,0.25) !important;
+  color: #f2f6ff !important;
 }
 [data-testid="stSegmentedControl"] button[aria-pressed="true"] {
   background: linear-gradient(135deg, rgba(14,165,233,0.24), rgba(34,197,94,0.22)) !important;
