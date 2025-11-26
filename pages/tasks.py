@@ -108,6 +108,12 @@ div.stButton>button:hover {
   border: 1px solid var(--pc-border) !important;
   border-radius: 12px !important;
 }
+[data-testid="stSegmentedControl"] [role="tablist"] {
+  background: rgba(10,16,30,0.92) !important;
+  border: 1px solid rgba(255,255,255,0.14) !important;
+  border-radius: 12px !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
+}
 [data-testid="stSegmentedControl"] button,
 [data-testid="stSegmentedControl"] [role="tab"] {
   background: rgba(12,18,36,0.88) !important;
@@ -118,11 +124,19 @@ div.stButton>button:hover {
   font-weight: 700 !important;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.05) !important;
 }
+[data-testid="stSegmentedControl"] button *,
+[data-testid="stSegmentedControl"] [role="tab"] * {
+  color: inherit !important;
+}
 [data-testid="stSegmentedControl"] button[aria-pressed="false"],
 [data-testid="stSegmentedControl"] [role="tab"][aria-pressed="false"] {
   background: rgba(12,18,36,0.9) !important;
   color: #dce6f8 !important;
   border-color: rgba(255,255,255,0.14) !important;
+}
+[data-testid="stSegmentedControl"] button[aria-pressed="false"]::before,
+[data-testid="stSegmentedControl"] [role="tab"][aria-pressed="false"]::before {
+  background: transparent !important;
 }
 [data-testid="stSegmentedControl"] button[aria-pressed="false"]:hover,
 [data-testid="stSegmentedControl"] [role="tab"][aria-pressed="false"]:hover {
