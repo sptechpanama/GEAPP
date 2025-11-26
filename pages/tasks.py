@@ -114,6 +114,11 @@ div.stButton>button:hover {
   border-radius: 12px !important;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
 }
+[data-testid="stSegmentedControl"] [role="tablist"] > div {
+  background: rgba(14,165,233,0.16) !important;
+  border-radius: 10px !important;
+  border: 1px solid rgba(14,165,233,0.28) !important;
+}
 [data-testid="stSegmentedControl"] [role="tablist"] *,
 [data-testid="stSegmentedControl"] [role="tablist"] *::before,
 [data-testid="stSegmentedControl"] [role="tablist"] *::after {
