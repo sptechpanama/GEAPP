@@ -782,10 +782,11 @@ def _filter_valid_names(names):
 
 current_assignable_options = sorted(set(_filter_valid_names(ASSIGNABLE_USERS)) | set(existing_assignees_all))
 
+st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 col_a, col_b, col_c = st.columns(3)
 def _metric_chip(label: str, value: int | float, color: str) -> str:
     return f"""
-<div style="text-align:center;line-height:1.15;margin-top:6px;margin-bottom:4px;">
+<div style="text-align:center;line-height:1.15;margin-top:18px;margin-bottom:6px;">
   <div style="font-size:2.2rem;font-weight:800;color:{color};margin-bottom:4px;">{value}</div>
   <div style="font-size:0.85rem;color:#aebdd4;letter-spacing:0.03em;text-transform:uppercase;">{label}</div>
 </div>
