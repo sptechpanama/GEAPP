@@ -118,6 +118,14 @@ def answer_question(question: str, api_key: str) -> Tuple[str, pd.DataFrame | No
     sql = _extract_sql(raw_text)
     if not sql:
         return "No se pudo generar una consulta clara. Reformula tu pregunta.", None, raw_text
+    if " from " not in sql.lower():
+        hint = ", ".join(tables) if tables else "sin tablas detectadas"
+        return (
+            "La consulta generada no especificó tabla. Intenta mencionar el nombre de la tabla, por ejemplo: "
+            f"{hint}.",
+            None,
+            raw_text,
+        )
 
     try:
         df = run_query(sql)
