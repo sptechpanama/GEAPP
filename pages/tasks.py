@@ -10,6 +10,276 @@ from datetime import datetime
 from gspread.exceptions import WorksheetNotFound, APIError
 from sheets import get_client, read_worksheet, write_worksheet
 
+
+def _apply_visual_theme() -> None:
+    """Inyecta el tema oscuro para Tasks sin alterar la lógica."""
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600&display=swap');
+
+:root {
+  --pc-bg: #0b1224;
+  --pc-surface: #0f172a;
+  --pc-card: rgba(255,255,255,0.04);
+  --pc-border: rgba(255,255,255,0.08);
+  --pc-accent: #22c55e;
+  --pc-accent-2: #0ea5e9;
+  --pc-text: #e7edf7;
+  --pc-muted: #9fb2c7;
+}
+
+.stApp {
+  background: radial-gradient(140% 120% at 18% 10%, #1c3d7133 0%, transparent 40%),
+              radial-gradient(120% 120% at 80% 0%, #0ea5e926 0%, transparent 45%),
+              linear-gradient(125deg, #0b1224 0%, #0c1a30 45%, #10223f 100%);
+  color: var(--pc-text);
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+}
+
+.block-container {
+  padding-top: 1.25rem;
+  max-width: 1280px;
+}
+
+h1, h2, h3, h4 {
+  color: var(--pc-text);
+  font-family: 'Space Grotesk','Manrope',sans-serif;
+  letter-spacing: -0.015em;
+}
+
+label {
+  color: #cdd6e5 !important;
+  font-weight: 600;
+}
+
+[data-testid="stMarkdown"] a {
+  color: var(--pc-accent-2);
+  text-decoration: none;
+}
+[data-testid="stMarkdown"] a:hover {
+  text-decoration: underline;
+}
+
+div.stButton>button {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  color: #f8fbff;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 12px;
+  padding: 0.5rem 0.9rem;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(14,165,233,0.18);
+}
+div.stButton>button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(34,197,94,0.28);
+}
+
+.stTabs [data-baseweb="tab"] {
+  color: #c8d2e3;
+  padding: 0.6rem 0.9rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px 10px 0 0;
+  font-weight: 600;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+  background: rgba(34,197,94,0.16);
+  border-color: rgba(34,197,94,0.35);
+  color: #f9fbff;
+}
+
+div[data-testid="stExpander"] {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--pc-border);
+  border-radius: 14px;
+}
+div[data-testid="stExpander"] summary {
+  color: var(--pc-text);
+  font-weight: 700;
+}
+div[data-testid="stExpander"] > details {
+  background: var(--pc-card);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--pc-border);
+}
+div[data-testid="stExpander"] > details > summary {
+  background: linear-gradient(120deg, rgba(14,165,233,0.12), rgba(34,197,94,0.10));
+  color: var(--pc-text);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--pc-border);
+}
+div[data-testid="stExpander"] > details[open] > summary {
+  background: linear-gradient(120deg, rgba(14,165,233,0.16), rgba(34,197,94,0.14));
+}
+div[data-testid="stExpander"] > details > div[role="group"] {
+  background: #0c1528;
+  padding: 12px 14px 16px;
+}
+
+[data-testid="stForm"],
+form {
+  background: #0f172a !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+}
+[data-testid="stForm"] > div {
+  background: transparent !important;
+}
+
+.stTextInput>div>div>input,
+.stTextArea textarea,
+[data-baseweb="select"]>div {
+  background: #0f172a;
+  color: var(--pc-text);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px rgba(14,165,233,0.08);
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+textarea {
+  background: #0f172a !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+}
+
+.stDateInput input {
+  background: #0f172a !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+}
+
+.stSlider [role="slider"] {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  box-shadow: 0 0 0 4px rgba(34,197,94,0.2);
+}
+.stSlider [data-baseweb="slider"]>div>div {
+  background: rgba(255,255,255,0.08);
+  height: 6px;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #8fa2bd;
+}
+
+[data-testid="stDataFrame"] {
+  background: rgba(15,23,42,0.5);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+  padding: 6px;
+}
+.dataframe thead tr {
+  background: rgba(255,255,255,0.05);
+}
+.stDataFrame thead th {
+  color: #e9effa;
+}
+.stDataFrame tbody td {
+  color: #e4e9f3;
+}
+.stDataFrame tbody tr:nth-child(odd) {
+  background: rgba(255,255,255,0.02);
+}
+.dataframe tbody tr:hover {
+  background: rgba(14,165,233,0.08);
+}
+.stDataFrame table,
+.stDataFrame tbody tr,
+.stDataFrame tbody td {
+  background: transparent !important;
+}
+[data-testid="stDataFrame"] .ag-theme-streamlit,
+[data-testid="stDataFrame"] .ag-root-wrapper,
+[data-testid="stDataFrame"] .ag-root-wrapper-body {
+  background-color: rgba(15,23,42,0.6) !important;
+}
+[data-testid="stDataFrame"] .ag-root,
+[data-testid="stDataFrame"] .ag-body,
+[data-testid="stDataFrame"] .ag-body-viewport,
+[data-testid="stDataFrame"] .ag-center-cols-viewport,
+[data-testid="stDataFrame"] .ag-center-cols-container,
+[data-testid="stDataFrame"] .ag-center-cols-clipper,
+[data-testid="stDataFrame"] .ag-pinned-left-cols-container,
+[data-testid="stDataFrame"] .ag-pinned-right-cols-container,
+[data-testid="stDataFrame"] .ag-body-horizontal-scroll,
+[data-testid="stDataFrame"] .ag-body-vertical-scroll {
+  background: rgba(15,23,42,0.55) !important;
+}
+[data-testid="stDataFrame"] .ag-center-cols-container .ag-row,
+[data-testid="stDataFrame"] .ag-pinned-left-cols-container .ag-row,
+[data-testid="stDataFrame"] .ag-pinned-right-cols-container .ag-row {
+  background: transparent !important;
+}
+[data-testid="stDataFrame"] .ag-row:nth-child(odd) {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataFrame"] .ag-row-hover {
+  background: rgba(14,165,233,0.08) !important;
+}
+[data-testid="stDataFrame"] .ag-cell {
+  background: transparent !important;
+  color: #e6ebf7 !important;
+  border-color: var(--pc-border) !important;
+}
+[data-testid="stDataFrame"] .ag-row-even .ag-cell {
+  background: rgba(255,255,255,0.01) !important;
+}
+[data-testid="stDataFrame"] .ag-row-odd .ag-cell {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataFrame"] .ag-ltr .ag-cell-focus,
+[data-testid="stDataFrame"] .ag-ltr .ag-cell-no-focus {
+  border-color: rgba(34,197,94,0.35) !important;
+  outline: none !important;
+}
+[data-testid="stDataFrame"] .ag-watermark {
+  display: none !important;
+}
+
+[data-testid="stDataEditor"] {
+  background: rgba(15,23,42,0.45);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+}
+[data-testid="stDataEditor"] table,
+[data-testid="stDataEditor"] tbody tr,
+[data-testid="stDataEditor"] tbody td {
+  background: transparent !important;
+  color: #e4e9f3;
+}
+[data-testid="stDataEditor"] tbody tr:nth-child(odd) {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataEditor"] tbody tr:hover {
+  background: rgba(14,165,233,0.08) !important;
+}
+
+.stAlert {
+  border-radius: 12px;
+  border: 1px solid var(--pc-border);
+}
+
+[data-testid="stMetricValue"] {
+  color: var(--pc-accent);
+  font-weight: 800;
+}
+[data-testid="stMetricDelta"] {
+  color: var(--pc-accent-2);
+}
+
+@media (max-width: 1180px) {
+  .block-container { max-width: 100%; padding-top: 1rem; }
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
 # --------- Guard: require inicio de sesión -----------
 # Usar la misma clave que `Inicio.py` (streamlit-authenticator pone
 # `authentication_status` en `st.session_state`). Antes se revisaba
@@ -26,6 +296,7 @@ if status is not True:
     st.stop()
 # ------
 st.set_page_config(page_title="✅ Tasks", page_icon="✅", layout="wide")
+_apply_visual_theme()
 WS_TASKS = st.secrets.get("app", {}).get("WS_TASKS", "pendientes")
 ESTADOS_VALIDOS = ["Pendiente", "Completada", "Descartar"]
 DEFAULT_TASK_COLUMNS = [
