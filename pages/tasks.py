@@ -104,27 +104,31 @@ div.stButton>button:hover {
 }
 
 [data-testid="stSegmentedControl"] > div {
-  background: rgba(255,255,255,0.03);
-  border: 1px solid var(--pc-border);
-  border-radius: 12px;
+  background: rgba(255,255,255,0.03) !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
 }
 [data-testid="stSegmentedControl"] button {
-  background: transparent;
-  color: var(--pc-text);
-  border: none;
-  border-radius: 10px;
-  padding: 0.45rem 0.8rem;
-  font-weight: 600;
+  background: rgba(15,23,42,0.7) !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 10px !important;
+  padding: 0.45rem 0.8rem !important;
+  font-weight: 700 !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
 }
 [data-testid="stSegmentedControl"] button[aria-pressed="true"] {
-  background: rgba(14,165,233,0.16);
-  color: #f9fbff;
+  background: linear-gradient(135deg, rgba(14,165,233,0.24), rgba(34,197,94,0.22)) !important;
+  color: #f9fbff !important;
+  border-color: rgba(34,197,94,0.35) !important;
 }
 [data-testid="stSegmentedControl"] button:nth-child(2)[aria-pressed="true"] {
-  background: rgba(239,68,68,0.18);
+  background: linear-gradient(135deg, rgba(239,68,68,0.28), rgba(239,68,68,0.20)) !important;
+  border-color: rgba(239,68,68,0.35) !important;
 }
 [data-testid="stSegmentedControl"] button:nth-child(3)[aria-pressed="true"] {
-  background: rgba(34,197,94,0.22);
+  background: linear-gradient(135deg, rgba(34,197,94,0.28), rgba(34,197,94,0.22)) !important;
+  border-color: rgba(34,197,94,0.35) !important;
 }
 
 div[data-testid="stExpander"] {
