@@ -96,7 +96,8 @@ def answer_question(question: str, api_key: str) -> Tuple[str, pd.DataFrame | No
     system_prompt = (
         "Eres un asistente de análisis de datos. Genera UNA consulta SQL segura sobre SQLite. "
         f"Máximo {MAX_ROWS} filas. Solo SELECT. Siempre incluye FROM con el nombre de la tabla (ej: actos_publicos). "
-        "Usa los nombres reales de columnas. Si la pregunta no es clara, responde con un mensaje corto en español."
+        "Usa los nombres reales de columnas. Si la pregunta no es clara, responde con un mensaje corto en español. "
+        "Ejemplo: SELECT * FROM actos_publicos WHERE precio_referencia > 50000 LIMIT 50;"
     )
 
     user_prompt = (
@@ -118,14 +119,23 @@ def answer_question(question: str, api_key: str) -> Tuple[str, pd.DataFrame | No
     sql = _extract_sql(raw_text)
     if not sql:
         return "No se pudo generar una consulta clara. Reformula tu pregunta.", None, raw_text
-    if " from " not in sql.lower():
-        hint = ", ".join(tables) if tables else "sin tablas detectadas"
-        return (
-            "La consulta generada no especificó tabla. Intenta mencionar el nombre de la tabla, por ejemplo: "
-            f"{hint}.",
-            None,
-            raw_text,
-        )
+    sql_lower = sql.lower()
+    if " from " not in sql_lower:
+        # Intenta asumir la primera tabla disponible (fallback)
+        default_table = tables[0] if tables else None
+        if default_table:
+            # si viene "select *" sin from, lo completamos
+            sql = re.sub(r";\s*$", "", sql.strip())
+            sql = f"{sql} FROM {default_table}"
+            sql_lower = sql.lower()
+        else:
+            hint = ", ".join(tables) if tables else "sin tablas detectadas"
+            return (
+                "La consulta generada no especificó tabla. Menciona el nombre de la tabla, por ejemplo: "
+                f"{hint}.",
+                None,
+                raw_text,
+            )
 
     try:
         df = run_query(sql)
