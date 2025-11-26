@@ -73,7 +73,7 @@ def run_query(sql: str) -> pd.DataFrame:
 
 def _extract_sql(text: str) -> str | None:
     # Busca bloque ```sql ... ```
-    match = re.search(r"```sql\\s*(select[\\s\\S]+?)```", text, flags=re.IGNORECASE)
+    match = re.search(r"```sql\s*(select[\s\S]+?)```", text, flags=re.IGNORECASE)
     if match:
         return match.group(1).strip()
     # Fallback: primera línea que empiece con select
@@ -95,8 +95,8 @@ def answer_question(question: str, api_key: str) -> Tuple[str, pd.DataFrame | No
 
     system_prompt = (
         "Eres un asistente de análisis de datos. Genera UNA consulta SQL segura sobre SQLite. "
-        f"Máximo {MAX_ROWS} filas. Solo SELECT. Usa los nombres reales de columnas. "
-        "Si la pregunta no es clara, responde con un mensaje corto en español."
+        f"Máximo {MAX_ROWS} filas. Solo SELECT. Siempre incluye FROM con el nombre de la tabla (ej: actos_publicos). "
+        "Usa los nombres reales de columnas. Si la pregunta no es clara, responde con un mensaje corto en español."
     )
 
     user_prompt = (
