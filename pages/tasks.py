@@ -120,9 +120,28 @@ div.stButton>button:hover {
   background-color: transparent !important;
   box-shadow: none !important;
 }
+[data-testid="stSegmentedControl"] [role="tablist"] > * {
+  background-color: rgba(12,18,36,0.9) !important;
+}
 [data-testid="stSegmentedControl"] [role="tab"] {
   background-color: rgba(12,18,36,0.9) !important;
   border-color: rgba(255,255,255,0.14) !important;
+}
+[data-testid="stSegmentedControl"] [role="tab"][aria-selected="false"],
+[data-testid="stSegmentedControl"] button[aria-selected="false"] {
+  background: rgba(12,18,36,0.92) !important;
+  color: #dce6f8 !important;
+  border-color: rgba(255,255,255,0.16) !important;
+}
+[data-testid="stSegmentedControl"] [role="tab"][aria-selected="false"]::before,
+[data-testid="stSegmentedControl"] button[aria-selected="false"]::before {
+  background: transparent !important;
+}
+[data-testid="stSegmentedControl"] [role="tab"][aria-selected="false"]:hover,
+[data-testid="stSegmentedControl"] button[aria-selected="false"]:hover {
+  background: rgba(14,165,233,0.16) !important;
+  border-color: rgba(14,165,233,0.28) !important;
+  color: #f2f6ff !important;
 }
 [data-testid="stSegmentedControl"] button,
 [data-testid="stSegmentedControl"] [role="tab"] {
