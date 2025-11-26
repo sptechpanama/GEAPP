@@ -103,6 +103,30 @@ div.stButton>button:hover {
   color: #f9fbff;
 }
 
+[data-testid="stSegmentedControl"] > div {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+}
+[data-testid="stSegmentedControl"] button {
+  background: transparent;
+  color: var(--pc-text);
+  border: none;
+  border-radius: 10px;
+  padding: 0.45rem 0.8rem;
+  font-weight: 600;
+}
+[data-testid="stSegmentedControl"] button[aria-pressed="true"] {
+  background: rgba(14,165,233,0.16);
+  color: #f9fbff;
+}
+[data-testid="stSegmentedControl"] button:nth-child(2)[aria-pressed="true"] {
+  background: rgba(239,68,68,0.18);
+}
+[data-testid="stSegmentedControl"] button:nth-child(3)[aria-pressed="true"] {
+  background: rgba(34,197,94,0.22);
+}
+
 div[data-testid="stExpander"] {
   background: rgba(255,255,255,0.03);
   border: 1px solid var(--pc-border);
