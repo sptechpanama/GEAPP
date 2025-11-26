@@ -93,7 +93,20 @@ def _inject_modern_style() -> None:
 
 .block-container {
   padding-top: 1.25rem;
-  max-width: 1400px;
+  max-width: 1280px;
+}
+
+label {
+  color: #cdd6e5 !important;
+  font-weight: 600;
+}
+
+[data-testid="stMarkdown"] a {
+  color: var(--pc-accent-2);
+  text-decoration: none;
+}
+[data-testid="stMarkdown"] a:hover {
+  text-decoration: underline;
 }
 
 h1, h2, h3, h4 {
@@ -154,6 +167,45 @@ div[data-testid="stExpander"] summary {
   color: var(--pc-text);
   border: 1px solid var(--pc-border);
   border-radius: 12px;
+  box-shadow: inset 0 0 0 1px rgba(45,212,191,0.08);
+}
+
+.stSelectbox>div>div,
+.stMultiSelect>div>div {
+  background: #0f172a !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+  box-shadow: inset 0 0 0 1px rgba(45,212,191,0.08) !important;
+  border-radius: 12px !important;
+}
+
+.stSlider [role="slider"] {
+  background: linear-gradient(135deg, #0ea5e9, #22c55e);
+  box-shadow: 0 0 0 4px rgba(45,212,191,0.16);
+}
+.stSlider [data-baseweb="slider"]>div>div {
+  background: rgba(255,255,255,0.08);
+  height: 6px;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #8fa2bd;
+}
+
+.stAlert {
+  border-radius: 12px;
+  border: 1px solid var(--pc-border);
+}
+
+.stDataFrame thead th {
+  color: #dfe6f5;
+}
+.stDataFrame tbody td {
+  color: #e5e9f0;
+}
+.stDataFrame tbody tr:nth-child(odd) {
+  background: rgba(255,255,255,0.02);
 }
 
 [data-testid="stDataFrame"] {
@@ -321,6 +373,11 @@ div[data-testid="stExpander"] summary {
   margin-top: 6px;
   font-size: 0.9rem;
   line-height: 1.35;
+}
+
+@media (max-width: 1100px) {
+  .block-container { padding-top: 1rem; }
+  .pc-hero { grid-template-columns: 1fr; }
 }
 </style>
 """,
@@ -3128,7 +3185,7 @@ def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 _require_authentication()
-st.title("📋 Visualizador de Actos Panamá Compra")
+st.title("📋 Visualizador de Actos PanamaCompra")
 
 # ---- Config ----
 SHEET_ID = "17hOfP-vMdJ4D7xym1cUp7vAcd8XJPErpY3V-9Ui2tCo"
