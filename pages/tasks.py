@@ -125,6 +125,39 @@ div.stButton>button:hover {
   border-radius: 10px !important;
   border: 1px solid rgba(14,165,233,0.28) !important;
 }
+[data-testid="stSegmentedControl"] [data-baseweb="tab"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab"]:not([aria-selected="true"]),
+[data-testid="stSegmentedControl"] [data-baseweb="tab"]:not([aria-pressed="true"]) {
+  background: rgba(14,165,233,0.12) !important;
+  border: 1px solid rgba(14,165,233,0.24) !important;
+  color: #e9f2ff !important;
+  border-radius: 10px !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05) !important;
+}
+[data-testid="stSegmentedControl"] [data-baseweb="tab"][aria-selected="true"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab"][aria-pressed="true"] {
+  background: rgba(239,68,68,0.24) !important;
+  border: 1px solid rgba(239,68,68,0.6) !important;
+  color: #fbe2e2 !important;
+}
+[data-testid="stSegmentedControl"] [data-baseweb="tab"]:nth-child(2)[aria-selected="true"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab"]:nth-child(2)[aria-pressed="true"] {
+  background: rgba(239,68,68,0.24) !important;
+  border: 1px solid rgba(239,68,68,0.6) !important;
+}
+[data-testid="stSegmentedControl"] [data-baseweb="tab"]:nth-child(3)[aria-selected="true"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab"]:nth-child(3)[aria-pressed="true"] {
+  background: rgba(34,197,94,0.26) !important;
+  border: 1px solid rgba(34,197,94,0.45) !important;
+  color: #f4fff7 !important;
+}
+[data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab-border"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"]::before,
+[data-testid="stSegmentedControl"] [data-baseweb="tab-border"]::before {
+  background: rgba(14,165,233,0.12) !important;
+  border: none !important;
+}
 [data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"],
 [data-testid="stSegmentedControl"] [data-baseweb="tab-border"],
 [data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"]::before,
