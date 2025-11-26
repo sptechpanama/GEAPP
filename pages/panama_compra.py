@@ -160,6 +160,20 @@ div[data-testid="stExpander"] summary {
   box-shadow: inset 0 0 0 1px rgba(14,165,233,0.08);
 }
 
+input:not([type="checkbox"]):not([type="radio"]),
+textarea {
+  background: #0f172a !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+}
+
+.stDateInput input {
+  background: #0f172a !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+}
+
 .stSlider [role="slider"] {
   background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
   box-shadow: 0 0 0 4px rgba(34,197,94,0.2);
@@ -194,6 +208,29 @@ textarea::placeholder {
 }
 .dataframe tbody tr:hover {
   background: rgba(14,165,233,0.08);
+}
+.stDataFrame table,
+.stDataFrame tbody tr,
+.stDataFrame tbody td {
+  background: transparent !important;
+}
+
+[data-testid="stDataEditor"] {
+  background: rgba(15,23,42,0.45);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+}
+[data-testid="stDataEditor"] table,
+[data-testid="stDataEditor"] tbody tr,
+[data-testid="stDataEditor"] tbody td {
+  background: transparent !important;
+  color: #e4e9f3;
+}
+[data-testid="stDataEditor"] tbody tr:nth-child(odd) {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataEditor"] tbody tr:hover {
+  background: rgba(14,165,233,0.08) !important;
 }
 
 .stAlert {
