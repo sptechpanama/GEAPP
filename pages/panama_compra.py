@@ -169,6 +169,17 @@ div[data-testid="stExpander"] > details > div[role="group"] {
   padding: 12px 14px 16px;
 }
 
+[data-testid="stForm"],
+form {
+  background: #0f172a !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+}
+[data-testid="stForm"] > div {
+  background: transparent !important;
+}
+
 .stTextInput>div>div>input,
 .stTextArea textarea,
 [data-baseweb="select"]>div {
