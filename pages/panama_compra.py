@@ -245,6 +245,43 @@ textarea::placeholder {
   background: transparent !important;
 }
 
+[data-testid="stDataFrame"] .ag-root-wrapper {
+  background: rgba(15,23,42,0.55) !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+}
+[data-testid="stDataFrame"] .ag-header {
+  background: rgba(255,255,255,0.04) !important;
+  color: var(--pc-text) !important;
+}
+[data-testid="stDataFrame"] .ag-header-cell {
+  background: transparent !important;
+  border-color: var(--pc-border) !important;
+  color: var(--pc-text) !important;
+}
+[data-testid="stDataFrame"] .ag-row {
+  background: transparent !important;
+  color: var(--pc-text) !important;
+}
+[data-testid="stDataFrame"] .ag-row:nth-child(odd) {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataFrame"] .ag-row-hover {
+  background: rgba(14,165,233,0.08) !important;
+}
+[data-testid="stDataFrame"] .ag-cell {
+  color: #e6ebf7 !important;
+  border-color: var(--pc-border) !important;
+}
+[data-testid="stDataFrame"] .ag-ltr .ag-cell-focus,
+[data-testid="stDataFrame"] .ag-ltr .ag-cell-no-focus {
+  border-color: rgba(34,197,94,0.35) !important;
+  outline: none !important;
+}
+[data-testid="stDataFrame"] .ag-watermark {
+  display: none !important;
+}
+
 [data-testid="stDataEditor"] {
   background: rgba(15,23,42,0.45);
   border: 1px solid var(--pc-border);
