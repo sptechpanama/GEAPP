@@ -74,6 +74,20 @@ div.stButton>button:hover {
   transform: translateY(-1px);
   box-shadow: 0 12px 30px rgba(34,197,94,0.28);
 }
+[data-testid="stForm"] button,
+[data-testid="stFormSubmitButton"] button {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent)) !important;
+  color: #f8fbff !important;
+  border: 1px solid rgba(255,255,255,0.15) !important;
+  border-radius: 12px !important;
+  font-weight: 700 !important;
+  box-shadow: 0 8px 24px rgba(14,165,233,0.18) !important;
+}
+[data-testid="stForm"] button:hover,
+[data-testid="stFormSubmitButton"] button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(34,197,94,0.28) !important;
+}
 
 .stTabs [data-baseweb="tab"] {
   color: #c8d2e3;
