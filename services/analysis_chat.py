@@ -20,7 +20,8 @@ except ImportError:  # pragma: no cover
 from core.config import DB_PATH
 
 DEFAULT_DB = Path(DB_PATH) if DB_PATH else Path("panamacompra.db")
-MAX_ROWS = 200
+# Límite seguro de filas; súbelo si necesitas más amplitud
+MAX_ROWS = 5000
 
 
 def _db_path() -> Path:
