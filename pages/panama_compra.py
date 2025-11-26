@@ -62,6 +62,162 @@ DB_PANEL_EXPANDED_KEY = "pc_db_section_open"
 ANALYSIS_PANEL_EXPANDED_KEY = "pc_analysis_section_open"
 
 
+def _apply_visual_theme() -> None:
+    """Inyecta una capa de estilos sin tocar la distribucion de la pagina."""
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600&display=swap');
+
+:root {
+  --pc-bg: #0b1224;
+  --pc-surface: #0f172a;
+  --pc-card: rgba(255,255,255,0.04);
+  --pc-border: rgba(255,255,255,0.08);
+  --pc-accent: #22c55e;
+  --pc-accent-2: #0ea5e9;
+  --pc-text: #e7edf7;
+  --pc-muted: #9fb2c7;
+}
+
+.stApp {
+  background: radial-gradient(140% 120% at 18% 10%, #1c3d7133 0%, transparent 40%),
+              radial-gradient(120% 120% at 80% 0%, #0ea5e926 0%, transparent 45%),
+              linear-gradient(125deg, #0b1224 0%, #0c1a30 45%, #10223f 100%);
+  color: var(--pc-text);
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+}
+
+.block-container {
+  padding-top: 1.25rem;
+  max-width: 1280px;
+}
+
+h1, h2, h3, h4 {
+  color: var(--pc-text);
+  font-family: 'Space Grotesk','Manrope',sans-serif;
+  letter-spacing: -0.015em;
+}
+
+label {
+  color: #cdd6e5 !important;
+  font-weight: 600;
+}
+
+[data-testid="stMarkdown"] a {
+  color: var(--pc-accent-2);
+  text-decoration: none;
+}
+[data-testid="stMarkdown"] a:hover {
+  text-decoration: underline;
+}
+
+div.stButton>button {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  color: #f8fbff;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 12px;
+  padding: 0.5rem 0.9rem;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(14,165,233,0.18);
+}
+div.stButton>button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(34,197,94,0.28);
+}
+
+.stTabs [data-baseweb="tab"] {
+  color: #c8d2e3;
+  padding: 0.6rem 0.9rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px 10px 0 0;
+  font-weight: 600;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+  background: rgba(34,197,94,0.16);
+  border-color: rgba(34,197,94,0.35);
+  color: #f9fbff;
+}
+
+div[data-testid="stExpander"] {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--pc-border);
+  border-radius: 14px;
+}
+div[data-testid="stExpander"] summary {
+  color: var(--pc-text);
+  font-weight: 700;
+}
+
+.stTextInput>div>div>input,
+.stTextArea textarea,
+[data-baseweb="select"]>div {
+  background: #0f172a;
+  color: var(--pc-text);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px rgba(14,165,233,0.08);
+}
+
+.stSlider [role="slider"] {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  box-shadow: 0 0 0 4px rgba(34,197,94,0.2);
+}
+.stSlider [data-baseweb="slider"]>div>div {
+  background: rgba(255,255,255,0.08);
+  height: 6px;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #8fa2bd;
+}
+
+[data-testid="stDataFrame"] {
+  background: rgba(15,23,42,0.5);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+  padding: 6px;
+}
+.dataframe thead tr {
+  background: rgba(255,255,255,0.05);
+}
+.stDataFrame thead th {
+  color: #e9effa;
+}
+.stDataFrame tbody td {
+  color: #e4e9f3;
+}
+.stDataFrame tbody tr:nth-child(odd) {
+  background: rgba(255,255,255,0.02);
+}
+.dataframe tbody tr:hover {
+  background: rgba(14,165,233,0.08);
+}
+
+.stAlert {
+  border-radius: 12px;
+  border: 1px solid var(--pc-border);
+}
+
+[data-testid="stMetricValue"] {
+  color: var(--pc-accent);
+  font-weight: 800;
+}
+[data-testid="stMetricDelta"] {
+  color: var(--pc-accent-2);
+}
+
+@media (max-width: 1180px) {
+  .block-container { max-width: 100%; padding-top: 1rem; }
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 def _default_date_range() -> tuple[date, date]:
     today = date.today()
     if today < DEFAULT_DATE_START:
@@ -2796,6 +2952,7 @@ def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
     return parsed
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
+_apply_visual_theme()
 _require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
 
