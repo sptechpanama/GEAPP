@@ -108,35 +108,41 @@ div.stButton>button:hover {
   border: 1px solid var(--pc-border) !important;
   border-radius: 12px !important;
 }
-[data-testid="stSegmentedControl"] button {
-  background: rgba(15,23,42,0.72) !important;
+[data-testid="stSegmentedControl"] button,
+[data-testid="stSegmentedControl"] [role="tab"] {
+  background: rgba(12,18,36,0.88) !important;
   color: #d8e2f5 !important;
-  border: 1px solid rgba(255,255,255,0.08) !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
   border-radius: 10px !important;
   padding: 0.45rem 0.8rem !important;
   font-weight: 700 !important;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05) !important;
 }
-[data-testid="stSegmentedControl"] button[aria-pressed="false"] {
-  background: rgba(12,18,36,0.85) !important;
-  color: #d8e2f5 !important;
-  border-color: rgba(255,255,255,0.10) !important;
+[data-testid="stSegmentedControl"] button[aria-pressed="false"],
+[data-testid="stSegmentedControl"] [role="tab"][aria-pressed="false"] {
+  background: rgba(12,18,36,0.9) !important;
+  color: #dce6f8 !important;
+  border-color: rgba(255,255,255,0.14) !important;
 }
-[data-testid="stSegmentedControl"] button[aria-pressed="false"]:hover {
-  background: rgba(14,165,233,0.12) !important;
-  border-color: rgba(14,165,233,0.25) !important;
+[data-testid="stSegmentedControl"] button[aria-pressed="false"]:hover,
+[data-testid="stSegmentedControl"] [role="tab"][aria-pressed="false"]:hover {
+  background: rgba(14,165,233,0.16) !important;
+  border-color: rgba(14,165,233,0.28) !important;
   color: #f2f6ff !important;
 }
-[data-testid="stSegmentedControl"] button[aria-pressed="true"] {
+[data-testid="stSegmentedControl"] button[aria-pressed="true"],
+[data-testid="stSegmentedControl"] [role="tab"][aria-pressed="true"] {
   background: linear-gradient(135deg, rgba(14,165,233,0.24), rgba(34,197,94,0.22)) !important;
   color: #f9fbff !important;
   border-color: rgba(34,197,94,0.35) !important;
 }
-[data-testid="stSegmentedControl"] button:nth-child(2)[aria-pressed="true"] {
+[data-testid="stSegmentedControl"] button:nth-child(2)[aria-pressed="true"],
+[data-testid="stSegmentedControl"] [role="tab"]:nth-child(2)[aria-pressed="true"] {
   background: linear-gradient(135deg, rgba(239,68,68,0.28), rgba(239,68,68,0.20)) !important;
   border-color: rgba(239,68,68,0.35) !important;
 }
-[data-testid="stSegmentedControl"] button:nth-child(3)[aria-pressed="true"] {
+[data-testid="stSegmentedControl"] button:nth-child(3)[aria-pressed="true"],
+[data-testid="stSegmentedControl"] [role="tab"]:nth-child(3)[aria-pressed="true"] {
   background: linear-gradient(135deg, rgba(34,197,94,0.28), rgba(34,197,94,0.22)) !important;
   border-color: rgba(34,197,94,0.35) !important;
 }
