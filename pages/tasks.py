@@ -785,9 +785,9 @@ current_assignable_options = sorted(set(_filter_valid_names(ASSIGNABLE_USERS)) |
 col_a, col_b, col_c = st.columns(3)
 def _metric_chip(label: str, value: int | float, color: str) -> str:
     return f"""
-<div style="text-align:center;padding:8px 0 6px 0;line-height:1.1;">
-  <div style="font-size:0.9rem;color:#cfd9ed;letter-spacing:0.04em;text-transform:uppercase;">{label}</div>
-  <div style="font-size:2.1rem;font-weight:800;color:{color};margin-top:2px;">{value}</div>
+<div style="text-align:center;line-height:1.15;margin-top:6px;margin-bottom:4px;">
+  <div style="font-size:2.2rem;font-weight:800;color:{color};margin-bottom:4px;">{value}</div>
+  <div style="font-size:0.85rem;color:#aebdd4;letter-spacing:0.03em;text-transform:uppercase;">{label}</div>
 </div>
 """
 

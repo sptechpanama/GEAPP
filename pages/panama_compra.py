@@ -3452,7 +3452,7 @@ def render_df(
     metrics_defs = []
     metrics_defs.append({
         "key": "total",
-        "label": "Total de actos públicos",
+        "label": "Total de actos",
         "count": int(len(df_base)),
         "filter": None,
     })
@@ -3495,7 +3495,7 @@ def render_df(
 
     metrics_defs.append({
         "key": "top_unidades",
-        "label": "Top unidades solicitantes (próximamente)",
+        "label": "Top Recomendadas AI",
         "count": None,
         "filter": None,
         "placeholder": True,
@@ -3506,7 +3506,7 @@ def render_df(
         with metric_col:
             label = metric["label"]
             if metric.get("count") is not None:
-                label = f"{label}\n{metric['count']}"
+                label = f"{label} ({metric['count']})"
 
             clicked = st.button(
                 label,
