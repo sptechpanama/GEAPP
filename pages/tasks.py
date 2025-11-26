@@ -158,6 +158,40 @@ div.stButton>button:hover {
   background: rgba(14,165,233,0.12) !important;
   border: none !important;
 }
+[data-testid="stSegmentedControl"],
+[data-testid="stSegmentedControl"] * {
+  background-clip: padding-box !important;
+}
+/* Forced palette so tabs never render blancos */
+[data-testid="stSegmentedControl"] {
+  background: #0b162d !important;
+  border: 1px solid rgba(14,165,233,0.25) !important;
+  border-radius: 12px !important;
+  padding: 4px !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
+}
+[data-testid="stSegmentedControl"] [role="tab"],
+[data-testid="stSegmentedControl"] button[role="tab"] {
+  background: #0f233f !important;
+  background-image: none !important;
+  border: 1px solid #1f4368 !important;
+  color: #dfe8f9 !important;
+  box-shadow: none !important;
+}
+[data-testid="stSegmentedControl"] [role="tab"][aria-selected="true"],
+[data-testid="stSegmentedControl"] [role="tab"][aria-pressed="true"],
+[data-testid="stSegmentedControl"] button[role="tab"][aria-selected="true"],
+[data-testid="stSegmentedControl"] button[role="tab"][aria-pressed="true"] {
+  background: #2a111b !important;
+  border: 1px solid #e85b5b !important;
+  color: #ffe7e7 !important;
+}
+[data-testid="stSegmentedControl"] [role="tab"]:not([aria-selected="true"]),
+[data-testid="stSegmentedControl"] button[role="tab"]:not([aria-selected="true"]) {
+  background: #0f233f !important;
+  border: 1px solid #1f4368 !important;
+  color: #dfe8f9 !important;
+}
 [data-testid="stSegmentedControl"] * {
   background-color: rgba(12,18,36,0.9) !important;
   border-color: rgba(14,165,233,0.24) !important;
