@@ -6,6 +6,9 @@ import streamlit as st
 import pandas as pd
 import uuid
 import re
+import smtplib
+import time
+import unicodedata
 from datetime import datetime
 from gspread.exceptions import WorksheetNotFound, APIError
 from sheets import get_client, read_worksheet, write_worksheet
@@ -515,6 +518,77 @@ ASSIGNABLE_USERS = [
     "Iris Grisel Sánchez",
 ]
 
+USER_EMAILS = {
+    "rsanchez": "rjsp100493@gmail.com",
+    "rodrigo sanchez": "rjsp100493@gmail.com",
+    "rodrigo sánchez": "rjsp100493@gmail.com",
+    "isanchez": "irvin16jesus@gmail.com",
+    "irvin sanchez": "irvin16jesus@gmail.com",
+    "irvin sánchez": "irvin16jesus@gmail.com",
+    "igsanchez": "irisgriselsp15@gmail.com",
+    "iris grisel sanchez": "irisgriselsp15@gmail.com",
+    "iris grisel sánchez": "irisgriselsp15@gmail.com",
+}
+
+
+def _normalize_name(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return text.strip().lower()
+
+
+def _email_for_assignee(name: str) -> str | None:
+    norm = _normalize_name(name)
+    return USER_EMAILS.get(norm)
+
+
+def _send_email(to_address: str, subject: str, body: str) -> bool:
+    cfg = st.secrets.get("email") or {}
+    host = cfg.get("host")
+    port = int(cfg.get("port", 465))
+    user = cfg.get("user")
+    password = cfg.get("password")
+    from_addr = cfg.get("from", user)
+    if not (host and user and password and to_address):
+        return False
+    try:
+        with smtplib.SMTP_SSL(host, port, timeout=10) as server:
+            server.login(user, password)
+            msg = (
+                f"From: {from_addr}\r\n"
+                f"To: {to_address}\r\n"
+                f"Subject: {subject}\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n"
+                "\r\n"
+                f"{body}"
+            )
+            server.sendmail(from_addr, [to_address], msg.encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
+    recipients = []
+    for name in assignees or []:
+        email = _email_for_assignee(name)
+        if email:
+            recipients.append(email)
+    recipients = list(dict.fromkeys(recipients))
+    if not recipients:
+        return
+    subject = f"Se te asignó una tarea: {tarea}"
+    body = (
+        f"Hola,\n\n"
+        f"Se te ha asignado la tarea: {tarea}\n"
+        f"Categoría: {categoria or 'Sin categoría'}\n"
+        f"Fecha: {datetime.today().date()}\n\n"
+        f"Ingresa a la app para actualizar su estado."
+    )
+    for to in recipients:
+        _send_email(to, subject, body)
+
 MAPA_ESTADO_VISUAL = {
     "Pendiente": "🟥 Pendiente",
     "Completada": "🟩 Completada",
@@ -841,6 +915,7 @@ with st.form("new_task_form", clear_on_submit=True):
             dfb = pd.concat([nueva_fila, dfb], ignore_index=True)
             dfb = compute_days(dfb)
             write_all(dfb)        # escribe todo
+            notify_assignment(asignado_multi, nueva_tarea.strip(), (nueva_categoria or "").strip())
             st.success("Tarea agregada.")
             st.rerun()            # <- rerun inmediato para reflejar en UI
 
