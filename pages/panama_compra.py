@@ -37,6 +37,7 @@ from services.panamacompra_drive import (
     ensure_drive_tops_excel,
     ensure_local_panamacompra_db,
 )
+from services.analysis_chat import answer_question
 
 
 ROW_ID_COL = "__row__"
@@ -609,62 +610,37 @@ def _render_data_health_summary() -> bool:
 
 def _render_analysis_chatbot() -> None:
     st.subheader("Asistente GPT para análisis")
-    db_path = _preferred_db_path()
-    try:
-        chat_data = load_analysis_chat_dataframes(
-            db_path,
-            LOCAL_FICHAS_CTNI,
-            LOCAL_CRITERIOS_TECNICOS,
-            LOCAL_OFERENTES_CATALOGOS,
-        )
-    except Exception as exc:
-        st.error(f"No se pudieron cargar los datos para el chat: {exc}")
-        return
-    source_status = []
-    missing_sources = []
-    for label, df in chat_data.items():
-        rows = len(df.index) if isinstance(df, pd.DataFrame) else 0
-        cols = len(df.columns) if rows and hasattr(df, "columns") else 0
-        source_status.append(f"{label}: {rows:,} filas, {cols} columnas")
-        if rows == 0:
-            missing_sources.append(label)
-    st.caption("Fuentes cargadas para el asistente:\n- " + "\n- ".join(source_status))
-    if missing_sources:
-        st.error(
-            "Aún no están disponibles las siguientes tablas para el asistente: "
-            + ", ".join(missing_sources)
-        )
-        st.info("Verifica la sincronización de esos archivos antes de usar el chat.")
-        return
-    schema_context = _build_schema_context(chat_data)
     api_key = (
         os.getenv("OPENAI_API_KEY")
+        or st.secrets.get("openai_api_key")
         or st.secrets.get("OPENAI_API_KEY")
         or st.secrets.get("app", {}).get("OPENAI_API_KEY")
     )
     if not api_key:
-        st.info("Configura la variable de entorno OPENAI_API_KEY para usar el asistente.")
+        st.info("Configura `openai_api_key` en secrets para usar el chat.")
         return
+
     history: list[dict[str, str]] = st.session_state.setdefault(CHAT_HISTORY_KEY, [])
     for message in history:
         st.chat_message(message["role"]).write(message["content"])
-    user_prompt = st.chat_input("Haz una pregunta sobre los actos, fichas o oferentes.")
+
+    user_prompt = st.chat_input("Haz una pregunta sobre la base de actos y tablas relacionadas.")
     if not user_prompt:
         return
+
     st.chat_message("user").write(user_prompt)
     history.append({"role": "user", "content": user_prompt})
-    with st.spinner("Consultando GPT..."):
-        plan = _request_analysis_plan(user_prompt, schema_context, api_key)
-        if plan.get("tool") == "none":
-            answer = plan.get("reason", "El plan generado no es válido.")
-        else:
-            result_df, error_msg = _execute_analysis_plan(plan, chat_data, db_path)
-            if error_msg:
-                answer = error_msg
-            else:
-                answer = _summarize_plan_answer(user_prompt, plan, result_df, api_key)
-    st.chat_message("assistant").write(answer)
-    history.append({"role": "assistant", "content": answer})
+
+    with st.spinner("Consultando..."):
+        summary, df, raw = answer_question(user_prompt, api_key)
+
+    st.chat_message("assistant").write(summary)
+    if df is not None and not df.empty:
+        st.dataframe(df.head(100), use_container_width=True)
+    with st.expander("Detalle de la respuesta del modelo"):
+        st.code(raw, language="markdown")
+
+    history.append({"role": "assistant", "content": summary})
 
 
 def _file_status(label: str, path_candidate: Path | str | None) -> dict[str, Any]:
