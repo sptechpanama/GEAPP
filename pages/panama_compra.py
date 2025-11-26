@@ -263,6 +263,15 @@ textarea::placeholder {
   background: transparent !important;
   color: var(--pc-text) !important;
 }
+[data-testid="stDataFrame"] .ag-root,
+[data-testid="stDataFrame"] .ag-body,
+[data-testid="stDataFrame"] .ag-body-viewport,
+[data-testid="stDataFrame"] .ag-center-cols-viewport,
+[data-testid="stDataFrame"] .ag-center-cols-container,
+[data-testid="stDataFrame"] .ag-center-cols-clipper,
+[data-testid="stDataFrame"] .ag-pinned-left-cols-container {
+  background: rgba(15,23,42,0.55) !important;
+}
 [data-testid="stDataFrame"] .ag-row:nth-child(odd) {
   background: rgba(255,255,255,0.02) !important;
 }
