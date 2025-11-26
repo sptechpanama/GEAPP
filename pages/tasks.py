@@ -158,6 +158,11 @@ div.stButton>button:hover {
   background: rgba(14,165,233,0.12) !important;
   border: none !important;
 }
+[data-testid="stSegmentedControl"] * {
+  background-color: rgba(12,18,36,0.9) !important;
+  border-color: rgba(14,165,233,0.24) !important;
+  color: #e9f2ff !important;
+}
 [data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"],
 [data-testid="stSegmentedControl"] [data-baseweb="tab-border"],
 [data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"]::before,
