@@ -149,6 +149,25 @@ div[data-testid="stExpander"] summary {
   color: var(--pc-text);
   font-weight: 700;
 }
+div[data-testid="stExpander"] > details {
+  background: var(--pc-card);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--pc-border);
+}
+div[data-testid="stExpander"] > details > summary {
+  background: linear-gradient(120deg, rgba(14,165,233,0.12), rgba(34,197,94,0.10));
+  color: var(--pc-text);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--pc-border);
+}
+div[data-testid="stExpander"] > details[open] > summary {
+  background: linear-gradient(120deg, rgba(14,165,233,0.16), rgba(34,197,94,0.14));
+}
+div[data-testid="stExpander"] > details > div[role="group"] {
+  background: #0c1528;
+  padding: 12px 14px 16px;
+}
 
 .stTextInput>div>div>input,
 .stTextArea textarea,
