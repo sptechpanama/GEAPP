@@ -338,6 +338,19 @@ textarea::placeholder {
   border: 1px solid var(--pc-border);
 }
 
+[data-baseweb="tag"] {
+  background: rgba(14,165,233,0.14) !important;
+  border: 1px solid rgba(14,165,233,0.28) !important;
+  color: #e8f2ff !important;
+  border-radius: 10px !important;
+}
+[data-baseweb="tag"] span {
+  color: inherit !important;
+}
+[data-baseweb="tag"] svg {
+  fill: #cde7ff !important;
+}
+
 [data-testid="stMetricValue"] {
   color: var(--pc-accent);
   font-weight: 800;
