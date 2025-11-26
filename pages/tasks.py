@@ -108,6 +108,12 @@ div.stButton>button:hover {
   border: 1px solid var(--pc-border) !important;
   border-radius: 12px !important;
 }
+[data-testid="stSegmentedControl"] {
+  background: rgba(10,16,30,0.95) !important;
+  padding: 4px !important;
+  border-radius: 14px !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
+}
 [data-testid="stSegmentedControl"] [role="tablist"] {
   background: rgba(10,16,30,0.92) !important;
   border: 1px solid rgba(255,255,255,0.14) !important;
@@ -118,6 +124,13 @@ div.stButton>button:hover {
   background: rgba(14,165,233,0.16) !important;
   border-radius: 10px !important;
   border: 1px solid rgba(14,165,233,0.28) !important;
+}
+[data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab-border"],
+[data-testid="stSegmentedControl"] [data-baseweb="tab-highlight"]::before,
+[data-testid="stSegmentedControl"] [data-baseweb="tab-border"]::before {
+  background: rgba(14,165,233,0.12) !important;
+  border: none !important;
 }
 [data-testid="stSegmentedControl"] [role="tablist"] *,
 [data-testid="stSegmentedControl"] [role="tablist"] *::before,
@@ -137,6 +150,13 @@ div.stButton>button:hover {
   background: rgba(12,18,36,0.92) !important;
   color: #dce6f8 !important;
   border-color: rgba(255,255,255,0.16) !important;
+}
+[data-testid="stSegmentedControl"] [role="tab"][aria-selected="false"],
+[data-testid="stSegmentedControl"] button[aria-selected="false"],
+[data-testid="stSegmentedControl"] [role="tab"][aria-selected="false"] * {
+  background: rgba(14,165,233,0.12) !important;
+  color: #dce6f8 !important;
+  border-color: rgba(14,165,233,0.24) !important;
 }
 [data-testid="stSegmentedControl"] [role="tab"][aria-selected="false"]::before,
 [data-testid="stSegmentedControl"] button[aria-selected="false"]::before {
