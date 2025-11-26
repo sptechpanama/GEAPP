@@ -83,6 +83,18 @@ def _extract_sql(text: str) -> str | None:
     return None
 
 
+def _normalize_sql(sql: str) -> str:
+    # Normaliza símbolos y espacios para detectar FROM y comparadores.
+    replacements = {
+        "≥": ">=",
+        "≤": "<=",
+        "==": "=",
+    }
+    for src, dst in replacements.items():
+        sql = sql.replace(src, dst)
+    return sql.strip()
+
+
 def answer_question(question: str, api_key: str) -> Tuple[str, pd.DataFrame | None, str]:
     if OpenAI is None:
         return "OpenAI no está instalado en este entorno.", None, ""
@@ -119,8 +131,9 @@ def answer_question(question: str, api_key: str) -> Tuple[str, pd.DataFrame | No
     sql = _extract_sql(raw_text)
     if not sql:
         return "No se pudo generar una consulta clara. Reformula tu pregunta.", None, raw_text
+    sql = _normalize_sql(sql)
     sql_lower = sql.lower()
-    if " from " not in sql_lower:
+    if not re.search(r"\bfrom\b", sql_lower):
         # Intenta asumir la primera tabla disponible (fallback)
         default_table = tables[0] if tables else None
         if default_table:
