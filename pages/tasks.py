@@ -783,9 +783,17 @@ def _filter_valid_names(names):
 current_assignable_options = sorted(set(_filter_valid_names(ASSIGNABLE_USERS)) | set(existing_assignees_all))
 
 col_a, col_b, col_c = st.columns(3)
-col_a.metric("Total", total)
-col_b.metric("Pendientes", pend)
-col_c.metric("Completadas", comp)
+def _metric_chip(label: str, value: int | float, color: str) -> str:
+    return f"""
+<div style="padding:10px 12px;border:1px solid rgba(255,255,255,0.08);border-radius:12px;background:rgba(255,255,255,0.03);display:flex;flex-direction:column;align-items:center;gap:2px;">
+  <div style="font-size:0.85rem;color:#cfd9ed;">{label}</div>
+  <div style="font-size:1.75rem;font-weight:800;color:{color};line-height:1;">{value}</div>
+</div>
+"""
+
+col_a.markdown(_metric_chip("Total", total, "#22c55e"), unsafe_allow_html=True)
+col_b.markdown(_metric_chip("Pendientes", pend, "#e85b5b"), unsafe_allow_html=True)
+col_c.markdown(_metric_chip("Completadas", comp, "#22c55e"), unsafe_allow_html=True)
 
 # Selector SIN título (etiqueta colapsada)
 filtro_estado = st.segmented_control(
