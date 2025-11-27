@@ -1013,6 +1013,10 @@ if not st.session_state.get("tasks_saving", False):
         st.session_state["tasks_saving"] = True
 
         base_full = ensure_schema(st.session_state["df_tasks"]).copy()
+        base_assignments = {
+            str(row.get("ID")): deserialize_asignado(row.get("Asignado a", ""))
+            for _, row in base_full.iterrows()
+        }
         edited_clean = edited.drop(columns=["Estado (visual)"], errors="ignore").copy()
         if "Asignado a" in edited_clean.columns:
             edited_clean["Asignado a"] = edited_clean["Asignado a"].apply(
@@ -1055,7 +1059,21 @@ if not st.session_state.get("tasks_saving", False):
         merged_full = compute_days(ensure_schema(merged_full))
         sig = simple_signature(merged_full)
         if sig != st.session_state["tasks_last_sig"]:
+            notifications: list[tuple[list[str], str, str]] = []
+            for _, row in merged_full.iterrows():
+                tid = str(row.get("ID"))
+                if tid in discard_ids:
+                    continue
+                new_assignees = deserialize_asignado(row.get("Asignado a", ""))
+                old_assignees = base_assignments.get(tid, [])
+                if set(new_assignees) != set(old_assignees) and new_assignees:
+                    notifications.append(
+                        (new_assignees, str(row.get("Tarea", "")), str(row.get("Categoria", "")))
+                    )
+
             write_all(merged_full)
+            for assignees, tarea_txt, cat_txt in notifications:
+                notify_assignment(assignees, tarea_txt, cat_txt)
             st.toast("✅ Cambios guardados.", icon="✅")
             st.rerun()  # <- rerun inmediato tras guardar
 
