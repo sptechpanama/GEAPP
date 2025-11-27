@@ -878,6 +878,9 @@ total = len(df_all)
 pend = int((df_all["Estado"] == "Pendiente").sum())
 comp = int((df_all["Estado"] == "Completada").sum())
 
+# Separador para evitar que los avisos queden pegados al borde superior
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+
 alert = st.session_state.pop("tasks_alert", None)
 if alert:
     level, msg = alert
