@@ -549,7 +549,7 @@ def _email_for_assignee(name: str) -> str | None:
     return USER_EMAILS.get(norm)
 
 
-def _send_email(to_address: str, subject: str, body: str) -> bool:
+def _send_email(to_address: str, subject: str, body: str) -> tuple[bool, str | None]:
     cfg = st.secrets.get("email") or {}
     provider = (cfg.get("provider") or "smtp").lower()
 
@@ -557,7 +557,7 @@ def _send_email(to_address: str, subject: str, body: str) -> bool:
         api_key = cfg.get("api_key")
         sender = cfg.get("from") or cfg.get("user")
         if not (api_key and sender and to_address):
-            return False
+            return False, "Faltan api_key/from en secrets"
         try:
             resp = requests.post(
                 "https://api.resend.com/emails",
@@ -573,9 +573,11 @@ def _send_email(to_address: str, subject: str, body: str) -> bool:
                 },
                 timeout=10,
             )
-            return resp.status_code in (200, 202)
-        except Exception:
-            return False
+            if resp.status_code in (200, 202):
+                return True, None
+            return False, f"HTTP {resp.status_code}: {resp.text}"
+        except Exception as exc:
+            return False, str(exc)
 
     # Fallback SMTP (necesita host/port/user/password en secrets)
     host = cfg.get("host")
@@ -584,7 +586,7 @@ def _send_email(to_address: str, subject: str, body: str) -> bool:
     password = cfg.get("password")
     from_addr = cfg.get("from", user)
     if not (host and user and password and to_address):
-        return False
+        return False, "Faltan host/port/user/password en secrets"
     try:
         with smtplib.SMTP_SSL(host, port, timeout=10) as server:
             server.login(user, password)
@@ -597,9 +599,9 @@ def _send_email(to_address: str, subject: str, body: str) -> bool:
                 f"{body}"
             )
             server.sendmail(from_addr, [to_address], msg.encode("utf-8"))
-        return True
-    except Exception:
-        return False
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
 
 
 def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
@@ -621,11 +623,16 @@ def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
         f"Ingresa a la app para actualizar su estado."
     )
     failures: list[str] = []
+    failure_reasons: list[str] = []
     for to in recipients:
-        if not _send_email(to, subject, body):
+        ok, reason = _send_email(to, subject, body)
+        if not ok:
             failures.append(to)
+            if reason:
+                failure_reasons.append(f"{to}: {reason}")
     if failures:
-        _set_alert(f"No se pudo enviar correo a: {', '.join(failures)}", "warning")
+        detail = "; ".join(failure_reasons) if failure_reasons else ""
+        _set_alert(f"No se pudo enviar correo a: {', '.join(failures)}. {detail}", "warning")
     else:
         _set_alert(f"✉️ Notificación enviada a: {', '.join(recipients)}", "success")
 
