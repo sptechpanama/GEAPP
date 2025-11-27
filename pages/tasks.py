@@ -532,6 +532,11 @@ USER_EMAILS = {
 }
 
 
+def _set_alert(message: str, level: str = "info") -> None:
+    """Guarda un aviso persistente en session_state para mostrarlo en UI."""
+    st.session_state["tasks_alert"] = (level, message)
+
+
 def _normalize_name(text: str) -> str:
     if not isinstance(text, str):
         return ""
@@ -620,9 +625,9 @@ def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
         if not _send_email(to, subject, body):
             failures.append(to)
     if failures:
-        st.toast(f"No se pudo enviar correo a: {', '.join(failures)}", icon="⚠️", duration=15)
+        _set_alert(f"No se pudo enviar correo a: {', '.join(failures)}", "warning")
     else:
-        st.toast(f"✉️ Notificación enviada a: {', '.join(recipients)}", icon="✉️", duration=12)
+        _set_alert(f"✉️ Notificación enviada a: {', '.join(recipients)}", "success")
 
 MAPA_ESTADO_VISUAL = {
     "Pendiente": "🟥 Pendiente",
@@ -872,6 +877,18 @@ df_all = ensure_schema(st.session_state["df_tasks"]).copy()
 total = len(df_all)
 pend = int((df_all["Estado"] == "Pendiente").sum())
 comp = int((df_all["Estado"] == "Completada").sum())
+
+alert = st.session_state.pop("tasks_alert", None)
+if alert:
+    level, msg = alert
+    if level == "success":
+        st.success(msg)
+    elif level == "warning":
+        st.warning(msg)
+    elif level == "error":
+        st.error(msg)
+    else:
+        st.info(msg)
 
 if "Asignado a" in df_all.columns:
     asignado_series_all = df_all["Asignado a"]
