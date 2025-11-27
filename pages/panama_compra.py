@@ -37,7 +37,7 @@ from services.panamacompra_drive import (
     ensure_drive_tops_excel,
     ensure_local_panamacompra_db,
 )
-from services.analysis_chat import answer_question
+from services.analysis_chat import answer_question, list_tables
 
 
 ROW_ID_COL = "__row__"
@@ -618,6 +618,12 @@ def _render_analysis_chatbot() -> None:
     )
     if not api_key:
         st.info("Configura `openai_api_key` en secrets para usar el chat.")
+        return
+
+    # Evita lanzar el chat si aún no hay tablas cargadas
+    available_tables = list_tables()
+    if not available_tables:
+        st.info("Las tablas aún no están disponibles para el asistente (verifica la sincronización).")
         return
 
     history: list[dict[str, str]] = st.session_state.setdefault(CHAT_HISTORY_KEY, [])
