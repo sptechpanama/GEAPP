@@ -7,6 +7,7 @@ import pandas as pd
 import uuid
 import re
 import smtplib
+import requests
 import time
 import unicodedata
 from datetime import datetime
@@ -545,6 +546,33 @@ def _email_for_assignee(name: str) -> str | None:
 
 def _send_email(to_address: str, subject: str, body: str) -> bool:
     cfg = st.secrets.get("email") or {}
+    provider = (cfg.get("provider") or "smtp").lower()
+
+    if provider == "resend":
+        api_key = cfg.get("api_key")
+        sender = cfg.get("from") or cfg.get("user")
+        if not (api_key and sender and to_address):
+            return False
+        try:
+            resp = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": sender,
+                    "to": [to_address],
+                    "subject": subject,
+                    "text": body,
+                },
+                timeout=10,
+            )
+            return resp.status_code in (200, 202)
+        except Exception:
+            return False
+
+    # Fallback SMTP (necesita host/port/user/password en secrets)
     host = cfg.get("host")
     port = int(cfg.get("port", 465))
     user = cfg.get("user")
