@@ -68,7 +68,11 @@ def _has_agg(sql_lower: str) -> bool:
 
 
 def _has_where(sql_lower: str) -> bool:
-    return " where " in f" {sql_lower} "
+    return re.search(r"\bwhere\b", sql_lower, flags=re.IGNORECASE) is not None
+
+
+def _has_star(sql_lower: str) -> bool:
+    return re.search(r"select\s+\*", sql_lower, flags=re.IGNORECASE) is not None
 
 
 def _has_limit(sql_lower: str) -> int | None:
@@ -92,7 +96,7 @@ def _enforce_limit(sql: str) -> tuple[str, str]:
     sql_lower = sql.lower()
 
     # Evita SELECT * sin filtros ni agrupación para tablas completas
-    if "select *" in sql_lower and not _has_where(sql_lower) and not _has_agg(sql_lower):
+    if _has_star(sql_lower) and not _has_where(sql_lower) and not _has_agg(sql_lower):
         raise ValueError(
             "La consulta intenta traer todas las filas sin filtros. Añade un WHERE o usa agregaciones (COUNT, SUM, etc.)."
         )
