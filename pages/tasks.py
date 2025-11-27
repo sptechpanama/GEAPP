@@ -622,7 +622,7 @@ def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
     if failures:
         st.error(f"No se pudo enviar correo a: {', '.join(failures)}")
     else:
-        st.toast(f"✉️ Notificación enviada a: {', '.join(recipients)}", icon="✉️", duration=8)
+        st.toast(f"✉️ Notificación enviada a: {', '.join(recipients)}", icon="✉️", duration=12)
 
 MAPA_ESTADO_VISUAL = {
     "Pendiente": "🟥 Pendiente",
