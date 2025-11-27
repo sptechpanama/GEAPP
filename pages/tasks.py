@@ -620,7 +620,7 @@ def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
         if not _send_email(to, subject, body):
             failures.append(to)
     if failures:
-        st.error(f"No se pudo enviar correo a: {', '.join(failures)}")
+        st.toast(f"No se pudo enviar correo a: {', '.join(failures)}", icon="⚠️", duration=15)
     else:
         st.toast(f"✉️ Notificación enviada a: {', '.join(recipients)}", icon="✉️", duration=12)
 
