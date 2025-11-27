@@ -605,6 +605,7 @@ def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
             recipients.append(email)
     recipients = list(dict.fromkeys(recipients))
     if not recipients:
+        st.warning("No se encontró correo para los asignados; revisa USER_EMAILS o el nombre seleccionado.")
         return
     subject = f"Se te asignó una tarea: {tarea}"
     body = (
@@ -614,8 +615,14 @@ def notify_assignment(assignees: list[str], tarea: str, categoria: str) -> None:
         f"Fecha: {datetime.today().date()}\n\n"
         f"Ingresa a la app para actualizar su estado."
     )
+    failures: list[str] = []
     for to in recipients:
-        _send_email(to, subject, body)
+        if not _send_email(to, subject, body):
+            failures.append(to)
+    if failures:
+        st.error(f"No se pudo enviar correo a: {', '.join(failures)}")
+    else:
+        st.toast(f"✉️ Notificación enviada a: {', '.join(recipients)}", icon="✉️")
 
 MAPA_ESTADO_VISUAL = {
     "Pendiente": "🟥 Pendiente",
