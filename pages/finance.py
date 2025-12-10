@@ -801,6 +801,8 @@ if search_q.strip():
 # Reales (excluyen por cobrar / por pagar)
 df_ing_reales  = df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "No"].copy()
 df_gas_reales  = df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "No"].copy()
+if not df_gas_reales.empty and COL_CAT in df_gas_reales.columns:
+    df_gas_reales = df_gas_reales[df_gas_reales[COL_CAT].astype(str) != "Miscelaneos"].copy()
 
 # -------------------- KPIs principales --------------------
 ing_total = float(df_ing_reales[COL_MONTO].sum()) if COL_MONTO in df_ing_reales.columns else 0.0
