@@ -1270,7 +1270,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     with g3:
         categoria_g = st.selectbox(
             "Categoria",
-            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina"],
+            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos"],
             index=0,
             key="gas_categoria_quick",
             on_change=lambda: _mark_form_force_open("gas"),
@@ -1372,7 +1372,7 @@ gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
     COL_CAT:     st.column_config.SelectboxColumn(
         COL_CAT,
-        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Comisiones"],
+        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos", "Comisiones"],
     ),
     COL_CONC:    st.column_config.TextColumn("Descripción"),
     COL_PROV:    st.column_config.TextColumn("Proveedor"),  # ← NUEVO
