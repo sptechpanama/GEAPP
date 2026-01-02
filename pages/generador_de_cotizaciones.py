@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import bcrypt
+import streamlit_authenticator as stauth
 
 
 def _require_authentication() -> None:
+    _rehydrate_authentication()
     status = st.session_state.get("authentication_status")
     if status is True:
         return
@@ -20,6 +23,37 @@ def _require_authentication() -> None:
     except Exception:
         st.stop()
     st.stop()
+
+
+def _rehydrate_authentication() -> None:
+    if st.session_state.get("authentication_status") is not None:
+        return
+
+    users = {
+        "rsanchez": ("Rodrigo Sanchez", "Sptech-71"),
+        "isanchez": ("Irvin Sanchez", "Sptech-71"),
+        "igsanchez": ("Iris Grisel Sanchez", "Sptech-71"),
+    }
+
+    def _hash(password: str) -> str:
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    credentials = {"usernames": {}}
+    for user, (name, plain) in users.items():
+        credentials["usernames"][user] = {"name": name, "password": _hash(plain)}
+
+    authenticator = stauth.Authenticate(
+        credentials,
+        "finapp_auth",
+        "finapp_key_123",
+        30,
+    )
+
+    try:
+        authenticator.login(" ", location="sidebar", key="auth_cotizaciones_silent")
+        st.sidebar.empty()
+    except Exception:
+        return
 
 
 @st.cache_data(show_spinner=False)
