@@ -5,16 +5,57 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import bcrypt
+import streamlit_authenticator as stauth
+
+
+def _build_authenticator() -> stauth.Authenticate:
+    users = {
+        "rsanchez": ("Rodrigo Sanchez", "Sptech-71"),
+        "isanchez": ("Irvin Sanchez", "Sptech-71"),
+        "igsanchez": ("Iris Grisel Sanchez", "Sptech-71"),
+    }
+
+    def _hash(password: str) -> str:
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    credentials = {"usernames": {}}
+    for user, (name, plain) in users.items():
+        credentials["usernames"][user] = {"name": name, "password": _hash(plain)}
+
+    return stauth.Authenticate(
+        credentials,
+        "finapp_auth",
+        "finapp_key_123",
+        30,
+    )
+
+
 def _require_authentication() -> None:
+    authenticator = _build_authenticator()
     status = st.session_state.get("authentication_status")
+
+    if status is None:
+        try:
+            authenticator.login(" ", location="sidebar", key="auth_cotizaciones_silent")
+            st.sidebar.empty()
+        except Exception:
+            pass
+        status = st.session_state.get("authentication_status")
+
+    if status is not True:
+        st.subheader("Login")
+        try:
+            authenticator.login("Login", location="main", key="auth_cotizaciones_form")
+        except Exception:
+            pass
+        status = st.session_state.get("authentication_status")
+
     if status is True:
+        authenticator.logout("Cerrar sesion", location="sidebar")
         return
 
-    st.warning("Debes iniciar sesion para entrar.")
-    try:
-        st.switch_page("Inicio.py")
-    except Exception:
-        st.info("Abre la pagina de Inicio para iniciar sesion.")
+    st.info("Inicia sesion para continuar.")
     st.stop()
 
 
@@ -311,10 +352,7 @@ def _render_quote_preview(
 """
 
 
-BUILD_ID = "gen-2025-11-07-01"
-
 st.set_page_config(page_title="Generador de Cotizaciones", layout="wide")
-st.caption(f"Build: {BUILD_ID}")
 _require_authentication()
 
 APP_ROOT = Path(__file__).resolve().parents[1]
