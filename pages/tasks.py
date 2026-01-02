@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 from gspread.exceptions import WorksheetNotFound, APIError
 from sheets import get_client, read_worksheet, write_worksheet
+from ui.theme import apply_global_theme
 
 # --------- Guard: require inicio de sesión -----------
 # Usar la misma clave que `Inicio.py` (streamlit-authenticator pone
@@ -26,6 +27,7 @@ if status is not True:
     st.stop()
 # ------
 st.set_page_config(page_title="✅ Tasks", page_icon="✅", layout="wide")
+apply_global_theme()
 WS_TASKS = st.secrets.get("app", {}).get("WS_TASKS", "pendientes")
 ESTADOS_VALIDOS = ["Pendiente", "Completada", "Descartar"]
 DEFAULT_TASK_COLUMNS = [

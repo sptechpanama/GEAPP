@@ -2,8 +2,10 @@
 import streamlit as st
 import bcrypt
 import streamlit_authenticator as stauth
+from ui.theme import apply_global_theme
 
 st.set_page_config(page_title="Panel Principal", page_icon="🏠", layout="wide")
+apply_global_theme()
 st.title("🏠 Panel Principal")
 st.caption("Bienvenido...")
 

@@ -9,9 +9,12 @@ import streamlit as st
 import pandas as pd
 import uuid
 from datetime import date, timedelta, datetime, timezone
+from ui.theme import apply_global_theme
 
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
+
+apply_global_theme()
 
 
 ROW_ID_COL = "__row__"
