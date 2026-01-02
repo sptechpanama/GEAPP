@@ -12,6 +12,73 @@ import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Generador de cotizaciones", page_icon="🧾", layout="wide")
 
+
+def _apply_visual_theme() -> None:
+    """Tema oscuro/gradiente similar al usado en finanzas, sin tocar layout."""
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap');
+:root {
+  --pc-bg: #0b1224;
+  --pc-surface: #0f172a;
+  --pc-border: rgba(255,255,255,0.08);
+  --pc-accent: #22c55e;
+  --pc-accent-2: #0ea5e9;
+  --pc-text: #e7edf7;
+  --pc-muted: #9fb2c7;
+}
+.stApp {
+  background: radial-gradient(140% 120% at 18% 10%, #1c3d7133 0%, transparent 40%),
+              radial-gradient(120% 120% at 80% 0%, #0ea5e926 0%, transparent 45%),
+              linear-gradient(125deg, #0b1224 0%, #0c1a30 45%, #10223f 100%);
+  color: var(--pc-text);
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+}
+.block-container { padding-top: 1.25rem; max-width: 1200px; }
+h1, h2, h3, h4 { color: var(--pc-text); letter-spacing: -0.015em; }
+label { color: #cdd6e5 !important; font-weight: 600; }
+[data-testid="stMarkdown"] a { color: var(--pc-accent-2); text-decoration: none; }
+[data-testid="stMarkdown"] a:hover { text-decoration: underline; }
+
+div.stButton>button,
+[data-testid="stForm"] button,
+[data-testid="stFormSubmitButton"] button {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  color: #f8fbff; border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 10px; padding: 0.45rem 0.85rem; font-weight: 700;
+  box-shadow: 0 8px 24px rgba(14,165,233,0.18);
+}
+div.stButton>button:hover,
+[data-testid="stForm"] button:hover,
+[data-testid="stFormSubmitButton"] button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(34,197,94,0.28);
+}
+
+div[data-testid="stExpander"] { background: rgba(255,255,255,0.04); border: 1px solid var(--pc-border); border-radius: 14px; }
+div[data-testid="stExpander"] summary { color: var(--pc-text); font-weight: 700; }
+div[data-testid="stExpander"] > details { background: var(--pc-surface); border-radius: 12px; overflow: hidden; border: 1px solid var(--pc-border); }
+div[data-testid="stExpander"] > details > summary { background: linear-gradient(120deg, rgba(14,165,233,0.12), rgba(34,197,94,0.10)); color: var(--pc-text); padding: 10px 14px; border-bottom: 1px solid var(--pc-border); }
+div[data-testid="stExpander"] > details[open] > summary { background: linear-gradient(120deg, rgba(14,165,233,0.16), rgba(34,197,94,0.14)); }
+div[data-testid="stExpander"] > details > div[role="group"] { background: #0c1528; padding: 12px 14px 16px; }
+
+.stTextInput>div>div>input, .stTextArea textarea, [data-baseweb="select"]>div {
+  background: #0f172a; color: var(--pc-text); border: 1px solid var(--pc-border); border-radius: 10px;
+  box-shadow: inset 0 0 0 1px rgba(14,165,233,0.08);
+}
+.stDataFrame, [data-testid="stDataEditor"] { background: rgba(15,23,42,0.45); border: 1px solid var(--pc-border); border-radius: 12px; }
+.stDataFrame table, .stDataFrame tbody tr, .stDataFrame tbody td { background: transparent !important; color: #e4e9f3; }
+.stDataFrame tbody tr:nth-child(odd) { background: rgba(255,255,255,0.02); }
+.stDataFrame tbody tr:hover { background: rgba(14,165,233,0.08); }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+_apply_visual_theme()
+
 # ---- Guard simple ----
 if st.session_state.get("authentication_status") is not True:
     st.switch_page("Inicio.py")
@@ -242,11 +309,14 @@ with st.expander("Cotizacion - Privada", expanded=False):
         entrega = st.text_input("Entrega", value="15 días hábiles")
 
     st.markdown("### Ítems de la cotización")
-    initial_rows = [
-        {"producto_servicio": "Producto o servicio", "cantidad": 1, "precio_unitario": 100.0},
-    ]
+    items_state_key = "cotizacion_privada_items_data"
+    if items_state_key not in st.session_state:
+        st.session_state[items_state_key] = [
+            {"producto_servicio": "Producto o servicio", "cantidad": 1, "precio_unitario": 100.0},
+        ]
+
     items_raw = st.data_editor(
-        pd.DataFrame(initial_rows),
+        pd.DataFrame(st.session_state[items_state_key]),
         num_rows="dynamic",
         use_container_width=True,
         key="cotizacion_privada_items",
@@ -261,6 +331,9 @@ with st.expander("Cotizacion - Privada", expanded=False):
     )
 
     items_df = _build_items_dataframe(pd.DataFrame(items_raw))
+    st.session_state[items_state_key] = items_df[
+        ["producto_servicio", "cantidad", "precio_unitario"]
+    ].to_dict(orient="records")
     subtotal = float(items_df["importe"].sum())
     impuesto_valor = subtotal * (impuesto_pct / 100.0)
     total = subtotal + impuesto_valor
