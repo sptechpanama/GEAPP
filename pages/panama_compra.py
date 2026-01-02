@@ -1,17 +1,43 @@
 """Vista PanamáCompra para GE FinApp."""
 
 # pages/visualizador.py
+import json
+import os
 import re
 import sqlite3
 import time
 from pathlib import Path
+from collections import defaultdict
+from typing import Any
 import streamlit as st
 import pandas as pd
+import altair as alt
 import uuid
+import unicodedata
 from datetime import date, timedelta, datetime, timezone
+try:
+    from openai import OpenAI  # type: ignore
+except ImportError:  # pragma: no cover
+    OpenAI = None  # type: ignore
 
 from core.config import DB_PATH
+from core.panamacompra_tops import (
+    SUPPLIER_TOP_CONFIG,
+    SUPPLIER_TOP_DEFAULT_ROWS,
+    TOPS_EXCEL_PATH,
+    TOPS_EXCEL_FALLBACK,
+    TOPS_METADATA_SHEET,
+    sheet_name_for_top,
+)
 from sheets import get_client, read_worksheet
+from services.panamacompra_drive import (
+    ensure_drive_criterios_tecnicos,
+    ensure_drive_fichas_ctni,
+    ensure_drive_oferentes_catalogos,
+    ensure_drive_tops_excel,
+    ensure_local_panamacompra_db,
+)
+from services.analysis_chat import answer_question, list_tables
 
 
 ROW_ID_COL = "__row__"
@@ -22,7 +48,1609 @@ CHECKBOX_FLAG_NAMES = {
     "descarte",
 }
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
+DEFAULT_DATE_START = date(2024, 1, 1)
+DATE_COLUMN_KEYWORDS = ("fecha", "date", "dia", "día", "time", "hora", "timestamp")
+SUMMARY_TAB_LABEL = "Resumen general"
+CHAT_HISTORY_KEY = "analysis_chat_history"
+CORE_SOURCES = (
+    ("Base panamacompra.db", lambda: _preferred_db_path()),
+    ("Fichas técnicas", lambda: LOCAL_FICHAS_CTNI),
+    ("Criterios técnicos", lambda: LOCAL_CRITERIOS_TECNICOS),
+    ("Oferentes en catálogo", lambda: LOCAL_OFERENTES_CATALOGOS),
+    ("Tops precalculados", lambda: TOPS_OUTPUT_FILE),
+)
+DB_PANEL_EXPANDED_KEY = "pc_db_section_open"
+ANALYSIS_PANEL_EXPANDED_KEY = "pc_analysis_section_open"
 
+
+def _apply_visual_theme() -> None:
+    """Inyecta una capa de estilos sin tocar la distribucion de la pagina."""
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600&display=swap');
+
+:root {
+  --pc-bg: #0b1224;
+  --pc-surface: #0f172a;
+  --pc-card: rgba(255,255,255,0.04);
+  --pc-border: rgba(255,255,255,0.08);
+  --pc-accent: #22c55e;
+  --pc-accent-2: #0ea5e9;
+  --pc-text: #e7edf7;
+  --pc-muted: #9fb2c7;
+}
+
+.stApp {
+  background: radial-gradient(140% 120% at 18% 10%, #1c3d7133 0%, transparent 40%),
+              radial-gradient(120% 120% at 80% 0%, #0ea5e926 0%, transparent 45%),
+              linear-gradient(125deg, #0b1224 0%, #0c1a30 45%, #10223f 100%);
+  color: var(--pc-text);
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+}
+
+.block-container {
+  padding-top: 1.25rem;
+  max-width: 1280px;
+}
+
+h1, h2, h3, h4 {
+  color: var(--pc-text);
+  font-family: 'Space Grotesk','Manrope',sans-serif;
+  letter-spacing: -0.015em;
+}
+
+label {
+  color: #cdd6e5 !important;
+  font-weight: 600;
+}
+
+[data-testid="stMarkdown"] a {
+  color: var(--pc-accent-2);
+  text-decoration: none;
+}
+[data-testid="stMarkdown"] a:hover {
+  text-decoration: underline;
+}
+
+div.stButton>button {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  color: #f8fbff;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 12px;
+  padding: 0.5rem 0.9rem;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(14,165,233,0.18);
+}
+div.stButton>button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(34,197,94,0.28);
+}
+
+.stTabs [data-baseweb="tab"] {
+  color: #c8d2e3;
+  padding: 0.6rem 0.9rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px 10px 0 0;
+  font-weight: 600;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+  background: rgba(34,197,94,0.16);
+  border-color: rgba(34,197,94,0.35);
+  color: #f9fbff;
+}
+
+div[data-testid="stExpander"] {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--pc-border);
+  border-radius: 14px;
+}
+div[data-testid="stExpander"] summary {
+  color: var(--pc-text);
+  font-weight: 700;
+}
+div[data-testid="stExpander"] > details {
+  background: var(--pc-card);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--pc-border);
+}
+div[data-testid="stExpander"] > details > summary {
+  background: linear-gradient(120deg, rgba(14,165,233,0.12), rgba(34,197,94,0.10));
+  color: var(--pc-text);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--pc-border);
+}
+div[data-testid="stExpander"] > details[open] > summary {
+  background: linear-gradient(120deg, rgba(14,165,233,0.16), rgba(34,197,94,0.14));
+}
+div[data-testid="stExpander"] > details > div[role="group"] {
+  background: #0c1528;
+  padding: 12px 14px 16px;
+}
+
+[data-testid="stForm"],
+form {
+  background: #0f172a !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+}
+[data-testid="stForm"] > div {
+  background: transparent !important;
+}
+
+.stTextInput>div>div>input,
+.stTextArea textarea,
+[data-baseweb="select"]>div {
+  background: #0f172a;
+  color: var(--pc-text);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px rgba(14,165,233,0.08);
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+textarea {
+  background: #0f172a !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+}
+
+.stDateInput input {
+  background: #0f172a !important;
+  color: var(--pc-text) !important;
+  border: 1px solid var(--pc-border) !important;
+}
+
+.stSlider [role="slider"] {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  box-shadow: 0 0 0 4px rgba(34,197,94,0.2);
+}
+.stSlider [data-baseweb="slider"]>div>div {
+  background: rgba(255,255,255,0.08);
+  height: 6px;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #8fa2bd;
+}
+
+[data-testid="stDataFrame"] {
+  background: rgba(15,23,42,0.5);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+  padding: 6px;
+}
+.dataframe thead tr {
+  background: rgba(255,255,255,0.05);
+}
+.stDataFrame thead th {
+  color: #e9effa;
+}
+.stDataFrame tbody td {
+  color: #e4e9f3;
+}
+.stDataFrame tbody tr:nth-child(odd) {
+  background: rgba(255,255,255,0.02);
+}
+.dataframe tbody tr:hover {
+  background: rgba(14,165,233,0.08);
+}
+.stDataFrame table,
+.stDataFrame tbody tr,
+.stDataFrame tbody td {
+  background: transparent !important;
+}
+
+[data-testid="stDataFrame"] .ag-root-wrapper {
+  background: rgba(15,23,42,0.55) !important;
+  border: 1px solid var(--pc-border) !important;
+  border-radius: 12px !important;
+}
+[data-testid="stDataFrame"] .ag-header {
+  background: rgba(255,255,255,0.04) !important;
+  color: var(--pc-text) !important;
+}
+[data-testid="stDataFrame"] .ag-header-cell {
+  background: transparent !important;
+  border-color: var(--pc-border) !important;
+  color: var(--pc-text) !important;
+}
+[data-testid="stDataFrame"] .ag-row {
+  background: transparent !important;
+  color: var(--pc-text) !important;
+}
+[data-testid="stDataFrame"] .ag-theme-streamlit,
+[data-testid="stDataFrame"] .ag-root-wrapper,
+[data-testid="stDataFrame"] .ag-root-wrapper-body {
+  background-color: rgba(15,23,42,0.6) !important;
+}
+[data-testid="stDataFrame"] .ag-root,
+[data-testid="stDataFrame"] .ag-body,
+[data-testid="stDataFrame"] .ag-body-viewport,
+[data-testid="stDataFrame"] .ag-center-cols-viewport,
+[data-testid="stDataFrame"] .ag-center-cols-container,
+[data-testid="stDataFrame"] .ag-center-cols-clipper,
+[data-testid="stDataFrame"] .ag-pinned-left-cols-container,
+[data-testid="stDataFrame"] .ag-pinned-right-cols-container,
+[data-testid="stDataFrame"] .ag-body-horizontal-scroll,
+[data-testid="stDataFrame"] .ag-body-vertical-scroll {
+  background: rgba(15,23,42,0.55) !important;
+}
+[data-testid="stDataFrame"] .ag-center-cols-container .ag-row,
+[data-testid="stDataFrame"] .ag-pinned-left-cols-container .ag-row,
+[data-testid="stDataFrame"] .ag-pinned-right-cols-container .ag-row {
+  background: transparent !important;
+}
+[data-testid="stDataFrame"] .ag-row:nth-child(odd) {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataFrame"] .ag-row-hover {
+  background: rgba(14,165,233,0.08) !important;
+}
+[data-testid="stDataFrame"] .ag-cell {
+  background: transparent !important;
+  color: #e6ebf7 !important;
+  border-color: var(--pc-border) !important;
+}
+[data-testid="stDataFrame"] .ag-row-even .ag-cell {
+  background: rgba(255,255,255,0.01) !important;
+}
+[data-testid="stDataFrame"] .ag-row-odd .ag-cell {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataFrame"] .ag-cell {
+  color: #e6ebf7 !important;
+  border-color: var(--pc-border) !important;
+}
+[data-testid="stDataFrame"] .ag-ltr .ag-cell-focus,
+[data-testid="stDataFrame"] .ag-ltr .ag-cell-no-focus {
+  border-color: rgba(34,197,94,0.35) !important;
+  outline: none !important;
+}
+[data-testid="stDataFrame"] .ag-watermark {
+  display: none !important;
+}
+
+[data-testid="stDataEditor"] {
+  background: rgba(15,23,42,0.45);
+  border: 1px solid var(--pc-border);
+  border-radius: 12px;
+}
+[data-testid="stDataEditor"] table,
+[data-testid="stDataEditor"] tbody tr,
+[data-testid="stDataEditor"] tbody td {
+  background: transparent !important;
+  color: #e4e9f3;
+}
+[data-testid="stDataEditor"] tbody tr:nth-child(odd) {
+  background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataEditor"] tbody tr:hover {
+  background: rgba(14,165,233,0.08) !important;
+}
+
+.stAlert {
+  border-radius: 12px;
+  border: 1px solid var(--pc-border);
+}
+
+[data-baseweb="tag"] {
+  background: rgba(14,165,233,0.14) !important;
+  border: 1px solid rgba(14,165,233,0.28) !important;
+  color: #e8f2ff !important;
+  border-radius: 10px !important;
+}
+[data-baseweb="tag"] span {
+  color: inherit !important;
+}
+[data-baseweb="tag"] svg {
+  fill: #cde7ff !important;
+}
+
+[data-testid="stMetricValue"] {
+  color: var(--pc-accent);
+  font-weight: 800;
+}
+[data-testid="stMetricDelta"] {
+  color: var(--pc-accent-2);
+}
+
+@media (max-width: 1180px) {
+  .block-container { max-width: 100%; padding-top: 1rem; }
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _default_date_range() -> tuple[date, date]:
+    today = date.today()
+    if today < DEFAULT_DATE_START:
+        return (today, today)
+    return (DEFAULT_DATE_START, today)
+
+# Asegura que los archivos críticos locales estén sincronizados antes de usarlos.
+TOPS_OUTPUT_FILE = TOPS_EXCEL_PATH
+TOPS_FALLBACK_FILE = TOPS_EXCEL_FALLBACK
+ensure_local_panamacompra_db()
+LOCAL_FICHAS_CTNI = ensure_drive_fichas_ctni()
+LOCAL_CRITERIOS_TECNICOS = ensure_drive_criterios_tecnicos()
+LOCAL_OFERENTES_CATALOGOS = ensure_drive_oferentes_catalogos()
+ensure_drive_tops_excel(TOPS_OUTPUT_FILE)
+
+
+def _tops_cache_signature() -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+    for path in (TOPS_OUTPUT_FILE, TOPS_FALLBACK_FILE):
+        if not path:
+            continue
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        signature.append((str(path), int(stat.st_mtime_ns), stat.st_size))
+    return tuple(signature)
+
+
+
+
+def _format_currency(value: str | float | None) -> str:
+    try:
+        return f"${float(value):,.2f}"
+    except Exception:
+        return str(value) if value not in (None, "", "None") else "-"
+
+
+def _safe_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        if isinstance(value, str) and not value.strip():
+            return 0
+        if isinstance(value, str):
+            return int(float(value.replace(",", "")))
+        return int(float(value))
+    except Exception:
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        if isinstance(value, str) and not value.strip():
+            return 0.0
+        if isinstance(value, str):
+            return float(value.replace(",", ""))
+        return float(value)
+    except Exception:
+        return 0.0
+
+def _render_summary_table(rows: list[tuple[str, str]]) -> None:
+    if not rows:
+        st.info("Sin datos de resumen.")
+        return
+    df = pd.DataFrame(rows, columns=["Metrica", "Valor"])
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+def _render_precomputed_summary(summary: dict[str, Any]) -> None:
+    if not summary:
+        st.info("El archivo precalculado no contiene metadatos de resumen.")
+        return
+
+    def _fmt_range(start_key: str, end_key: str) -> str:
+        start_val = summary.get(start_key) or "-"
+        end_val = summary.get(end_key) or "-"
+        return f"{start_val} - {end_val}"
+
+    rows = [
+        ("Periodo", summary.get("period_label") or summary.get("Periodo") or summary.get("period_id", "-")),
+        ("Rango configurado", _fmt_range("fecha_inicio", "fecha_fin")),
+        ("Rango con datos", _fmt_range("fecha_min_data", "fecha_max_data")),
+        ("Total adjudicaciones", f"{_safe_int(summary.get('total_actos')):,}"),
+        ("Monto total adjudicado", _format_currency(summary.get("total_monto"))),
+        ("Actos con ficha", f"{_safe_int(summary.get('actos_con_ficha')):,}"),
+        ("Monto con ficha", _format_currency(summary.get("monto_con_ficha"))),
+        ("Actos sin ficha", f"{_safe_int(summary.get('actos_sin_ficha')):,}"),
+        ("Monto sin ficha", _format_currency(summary.get("monto_sin_ficha"))),
+        ("Actos CT sin RS", f"{_safe_int(summary.get('actos_ct_sin_rs')):,}"),
+        ("Monto CT sin RS", _format_currency(summary.get("monto_ct_sin_rs"))),
+        ("Proveedores distintos", f"{_safe_int(summary.get('proveedores_distintos')):,}"),
+        ("Entidades distintas", f"{_safe_int(summary.get('entidades_distintas')):,}"),
+        ("Fichas distintas", f"{_safe_int(summary.get('fichas_distintas')):,}"),
+        (
+            "Promedio de participantes",
+            f"{_safe_float(summary.get('participantes_promedio')):,.2f}",
+        ),
+        ("Base utilizada", summary.get("db_path") or "-"),
+        ("Archivo origen", summary.get("archivo") or summary.get("archivo_local") or "-"),
+    ]
+    _render_summary_table(rows)
+
+
+def _legacy_metadata_to_row(metadata: dict[str, Any]) -> dict[str, Any]:
+    if not metadata:
+        return {}
+    row = {
+        "period_id": metadata.get("period_id", "global"),
+        "period_label": metadata.get("period_label", metadata.get("label", "Todo el periodo")),
+        "fecha_inicio": metadata.get("fecha_inicio", metadata.get("fecha_min", "")),
+        "fecha_fin": metadata.get("fecha_fin", metadata.get("fecha_max", "")),
+        "fecha_min_data": metadata.get("fecha_min", ""),
+        "fecha_max_data": metadata.get("fecha_max", ""),
+        "total_actos": _safe_int(metadata.get("total_adjudicaciones")),
+        "total_monto": _safe_float(metadata.get("total_monto")),
+        "actos_con_ficha": _safe_int(metadata.get("actos_con_ficha")),
+        "actos_sin_ficha": _safe_int(metadata.get("actos_sin_ficha")),
+        "monto_con_ficha": _safe_float(metadata.get("monto_con_ficha")),
+        "monto_sin_ficha": _safe_float(metadata.get("monto_sin_ficha")),
+        "actos_ct_sin_rs": _safe_int(metadata.get("actos_ct_sin_rs")),
+        "monto_ct_sin_rs": _safe_float(metadata.get("monto_ct_sin_rs")),
+        "proveedores_distintos": _safe_int(metadata.get("proveedores_distintos")),
+        "entidades_distintas": _safe_int(metadata.get("entidades_distintas")),
+        "fichas_distintas": _safe_int(metadata.get("fichas_distintas")),
+        "participantes_promedio": _safe_float(metadata.get("participantes_promedio")),
+        "generated_at": metadata.get("generated_at", metadata.get("generated")),
+        "db_path": metadata.get("db_path", ""),
+        "fichas_path": metadata.get("fichas_path", ""),
+        "criterios_path": metadata.get("criterios_path", ""),
+        "oferentes_path": metadata.get("oferentes_path", ""),
+        "archivo": metadata.get("archivo", ""),
+        "has_data": _safe_int(metadata.get("total_adjudicaciones")) > 0,
+    }
+    return row
+
+
+def _format_period_option(record: dict[str, Any]) -> str:
+    label = record.get("period_label") or record.get("Periodo") or record.get("period_id") or "Periodo"
+    start = record.get("fecha_inicio") or record.get("fecha_min_data") or "?"
+    end = record.get("fecha_fin") or record.get("fecha_max_data") or "?"
+    suffix = "" if record.get("has_data", True) else " - sin datos"
+    return f"{label} ({start} - {end}){suffix}"
+
+
+def _filter_precomputed_by_period(df: pd.DataFrame | None, period_id: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if "period_id" not in df.columns:
+        return df.copy()
+    return df[df["period_id"] == period_id].copy()
+
+def _render_runtime_summary(
+    filtered_df: pd.DataFrame,
+    start_ts: datetime,
+    end_ts: datetime,
+    supplier_meta: dict[str, dict[str, bool]],
+) -> None:
+    if filtered_df.empty:
+        st.info("No hay adjudicaciones en el rango seleccionado.")
+        return
+    mask_ct = filtered_df["tiene_ct"]
+    supplier_registro = filtered_df["supplier_key"].map(
+        lambda key: supplier_meta.get(key, {}).get("has_registro", False)
+    )
+    mask_ct_sin_rs = mask_ct & ~supplier_registro
+    fichas_distintas = (
+        filtered_df["ct_label"]
+        .replace("", pd.NA)
+        .dropna()
+        .nunique()
+    )
+    rows = [
+        ("Total adjudicaciones", f"{len(filtered_df):,}"),
+        ("Monto total adjudicado", _format_currency(filtered_df["precio_referencia"].sum())),
+        ("Actos con ficha", f"{int(mask_ct.sum()):,}"),
+        ("Actos sin ficha", f"{int(len(filtered_df) - mask_ct.sum()):,}"),
+        ("Actos CT sin RS", f"{int(mask_ct_sin_rs.sum()):,}"),
+        (
+            "Monto CT sin RS",
+            _format_currency(filtered_df.loc[mask_ct_sin_rs, "precio_referencia"].sum()),
+        ),
+        ("Proveedores distintos", f"{filtered_df['supplier_key'].nunique():,}"),
+        ("Fichas distintas", f"{fichas_distintas:,}"),
+        ("Rango aplicado", f"{start_ts.date()}  →  {end_ts.date()}"),
+    ]
+    _render_summary_table(rows)
+
+
+def _file_status(label: str, path: Path | None) -> dict[str, object]:
+    if not path:
+        return {"name": label, "ok": False, "detail": "Ruta no configurada."}
+    try_path = Path(path)
+    if not try_path.exists():
+        return {"name": label, "ok": False, "detail": f"No encontrado en {try_path}."}
+    size_kb = try_path.stat().st_size / 1024
+    return {"name": label, "ok": True, "detail": f"{try_path} ({size_kb:,.1f} KB)"}
+
+
+def _collect_data_health_status() -> list[dict[str, object]]:
+    statuses: list[dict[str, object]] = []
+    db_path = _preferred_db_path()
+    db_entry = _file_status("Base panamacompra.db", db_path)
+    if db_entry["ok"]:
+        try:
+            tables = list_sqlite_tables(str(db_path))
+            if "actos_publicos" in tables:
+                count = count_sqlite_rows(str(db_path), "actos_publicos")
+                db_entry["detail"] = f"{db_entry['detail']} · actos_publicos: {count:,} filas."
+            else:
+                db_entry["ok"] = False
+                db_entry["detail"] = f"{db_entry['detail']} · Tabla actos_publicos no encontrada."
+        except Exception as exc:  # pragma: no cover
+            db_entry["ok"] = False
+            db_entry["detail"] = f"No fue posible leer la base: {exc}"
+    statuses.append(db_entry)
+
+    for label, resolver in CORE_SOURCES[1:]:
+        try:
+            entry = _file_status(label, resolver())
+        except Exception as exc:
+            entry = {"name": label, "ok": False, "detail": f"Error al validar: {exc}"}
+        statuses.append(entry)
+    return statuses
+
+
+def _render_data_health_summary() -> bool:
+    statuses = _collect_data_health_status()
+    all_ready = all(entry.get("ok") for entry in statuses)
+    with st.expander("Estado de datos base", expanded=not all_ready):
+        for entry in statuses:
+            icon = "✅" if entry.get("ok") else "⚠️"
+            st.write(f"{icon} **{entry['name']}** — {entry['detail']}")
+    if not all_ready:
+        st.warning("Aún hay archivos sin sincronizar; verifica el panel anterior.")
+    return all_ready
+
+
+def _render_analysis_chatbot() -> None:
+    st.subheader("Asistente GPT para análisis")
+    api_key = (
+        os.getenv("OPENAI_API_KEY")
+        or st.secrets.get("openai_api_key")
+        or st.secrets.get("OPENAI_API_KEY")
+        or st.secrets.get("app", {}).get("OPENAI_API_KEY")
+    )
+    if not api_key:
+        st.info("Configura `openai_api_key` en secrets para usar el chat.")
+        return
+
+    # Evita lanzar el chat si aún no hay tablas cargadas
+    available_tables = list_tables()
+    if not available_tables:
+        st.info("Las tablas aún no están disponibles para el asistente (verifica la sincronización).")
+        return
+
+    history: list[dict[str, str]] = st.session_state.setdefault(CHAT_HISTORY_KEY, [])
+    for message in history:
+        st.chat_message(message["role"]).write(message["content"])
+
+    user_prompt = st.chat_input("Haz una pregunta sobre la base de actos y tablas relacionadas.")
+    if not user_prompt:
+        return
+
+    st.chat_message("user").write(user_prompt)
+    history.append({"role": "user", "content": user_prompt})
+
+    with st.spinner("Consultando..."):
+        summary, df, raw = answer_question(user_prompt, api_key)
+
+    st.chat_message("assistant").write(summary)
+    if df is not None and not df.empty:
+        st.dataframe(df.head(100), use_container_width=True)
+    with st.expander("Detalle de la respuesta del modelo"):
+        st.code(raw, language="markdown")
+
+    history.append({"role": "assistant", "content": summary})
+
+
+def _file_status(label: str, path_candidate: Path | str | None) -> dict[str, Any]:
+    if not path_candidate:
+        return {
+            "name": label,
+            "ok": False,
+            "detail": "Ruta no configurada",
+        }
+    path = Path(path_candidate)
+    if not path.exists():
+        return {
+            "name": label,
+            "ok": False,
+            "detail": f"{path} (no encontrado)",
+        }
+    size_kb = path.stat().st_size / 1024 if path.is_file() else 0
+    detail = f"{path} ({size_kb:,.1f} KB)" if size_kb else str(path)
+    return {
+        "name": label,
+        "ok": True,
+        "detail": detail,
+        "path": path,
+    }
+
+
+def _collect_data_source_statuses() -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for label, resolver in CORE_SOURCES:
+        try:
+            path_candidate = resolver()
+        except Exception:
+            path_candidate = None
+        if label.startswith("Base"):
+            status = _file_status(label, path_candidate)
+            if status.get("ok") and status.get("path"):
+                try:
+                    db_tables = list_sqlite_tables(str(status["path"]))
+                    if "actos_publicos" in db_tables:
+                        total_rows = count_sqlite_rows(str(status["path"]), "actos_publicos")
+                        status["detail"] = f"{status['path']} (actos_publicos: {total_rows:,} filas)"
+                    else:
+                        status["ok"] = False
+                        status["detail"] = f"{status['path']} (no se encontró la tabla actos_publicos)"
+                except Exception as exc:
+                    status["ok"] = False
+                    status["detail"] = f"Error al verificar la base: {exc}"
+        else:
+            status = _file_status(label, path_candidate)
+        statuses.append(status)
+    return statuses
+
+
+def _render_data_sources_status_panel() -> bool:
+    statuses = _collect_data_source_statuses()
+    all_ready = all(item.get("ok") for item in statuses)
+    with st.expander("Estado de datos base", expanded=not all_ready):
+        for item in statuses:
+            icon = "✅" if item.get("ok") else "⚠️"
+            st.write(f"{icon} **{item['name']}** — {item['detail']}")
+    return all_ready
+
+
+def _render_ct_without_reg_chart_section(
+    df: pd.DataFrame,
+    supplier_meta: dict[str, dict[str, bool]],
+    *,
+    show_controls: bool,
+    key_prefix: str,
+) -> None:
+    if df is None or df.empty or "fecha_referencia" not in df.columns:
+        st.info("No hay adjudicaciones disponibles para graficar actos con ficha sin registro sanitario.")
+        return
+
+    base_df = df.copy()
+    min_ts = base_df["fecha_referencia"].min()
+    max_ts = base_df["fecha_referencia"].max()
+    if pd.isna(min_ts) or pd.isna(max_ts):
+        st.info("No se detectaron fechas válidas para la gráfica.")
+        return
+
+    min_date = min_ts.date()
+    max_date = max_ts.date()
+    default_start = max(min_date, date(2025, 1, 1))
+    start_range = default_start
+    end_range = max_date
+    apply_date_filter = False
+
+    if show_controls:
+        date_input = st.date_input(
+            "Rango de adjudicación para la gráfica CT sin RS",
+            value=(default_start, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            key=f"{key_prefix}_ct_trend_range",
+        )
+        if isinstance(date_input, (tuple, list)) and len(date_input) == 2:
+            start_range, end_range = date_input
+            apply_date_filter = True
+        elif isinstance(date_input, date):
+            start_range = end_range = date_input
+            apply_date_filter = True
+    else:
+        st.caption("La gráfica usa el mismo rango de fechas seleccionado en los filtros superiores.")
+
+    if apply_date_filter and isinstance(start_range, date) and isinstance(end_range, date):
+        start_ts = datetime.combine(start_range, datetime.min.time())
+        end_ts = datetime.combine(end_range, datetime.max.time())
+        filtered_df = _filter_awards_by_range(
+            base_df,
+            start_ts.isoformat(),
+            end_ts.isoformat(),
+        )
+    else:
+        filtered_df = base_df
+
+    if filtered_df.empty:
+        st.info("En el rango seleccionado no se registran adjudicaciones.")
+        return
+
+    subset = filtered_df[
+        filtered_df["tiene_ct"]
+        & ~filtered_df["supplier_key"].map(lambda key: supplier_meta.get(key, {}).get("has_registro", False))
+    ].copy()
+    if subset.empty:
+        st.info("En el rango seleccionado no se registran actos con ficha técnica y sin registro sanitario.")
+        return
+
+    subset["fecha_dia"] = subset["fecha_referencia"].dt.floor("D")
+    trend_df = (
+        subset.groupby("fecha_dia", as_index=False)
+        .agg(
+            monto_total=("precio_referencia", "sum"),
+            actos=("supplier_key", "size"),
+        )
+        .sort_values("fecha_dia")
+    )
+    trend_df["fecha_dia"] = pd.to_datetime(trend_df["fecha_dia"])
+    trend_df["monto_promedio"] = trend_df["monto_total"].rolling(window=7, min_periods=1).mean()
+    trend_df["actos_promedio"] = trend_df["actos"].rolling(window=7, min_periods=1).mean()
+
+    base_chart = alt.Chart(trend_df).encode(
+        x=alt.X("fecha_dia:T", title="Fecha de adjudicación"),
+        tooltip=[
+            alt.Tooltip("fecha_dia:T", title="Fecha"),
+            alt.Tooltip("monto_total:Q", title="Monto total", format=",.2f"),
+            alt.Tooltip("monto_promedio:Q", title="Monto promedio (7d)", format=",.2f"),
+            alt.Tooltip("actos:Q", title="Actos"),
+            alt.Tooltip("actos_promedio:Q", title="Actos promedio (7d)", format=",.2f"),
+        ],
+    )
+    amount_area = base_chart.mark_area(color="#2a9d8f", opacity=0.35).encode(
+        y=alt.Y("monto_promedio:Q", title="Monto promedio (B/.)"),
+    )
+    count_line = base_chart.mark_line(color="#e76f51", opacity=0.9).encode(
+        y=alt.Y("actos_promedio:Q", title="Cantidad de actos (promedio)"),
+    )
+    ct_trend_chart = (
+        alt.layer(amount_area, count_line)
+        .resolve_scale(y="independent")
+        .properties(
+            height=320,
+            title="Evolución de actos con ficha técnica sin registro sanitario",
+        )
+    )
+    st.altair_chart(ct_trend_chart, use_container_width=True)
+
+def _apply_search_filter(df: pd.DataFrame, search_text: str) -> pd.DataFrame:
+    if not search_text:
+        return df
+    term = search_text.strip().lower()
+    if not term:
+        return df
+    mask = pd.Series(False, index=df.index)
+    for col in df.columns:
+        try:
+            series = df[col].astype(str).str.lower()
+        except Exception:
+            series = df[col].map(lambda v: str(v).lower() if pd.notna(v) else "")
+        mask |= series.str.contains(term, na=False)
+    return df[mask]
+
+@st.cache_data(ttl=300)
+def load_precomputed_top_tables(signature: tuple[tuple[str, int, int], ...]) -> dict[str, pd.DataFrame]:
+    """Carga los tops precomputados en Excel si estan disponibles."""
+    if not signature:
+        return {}
+
+    xls = None
+    selected_path: Path | None = None
+    for path_str, _, _ in signature:
+        path = Path(path_str)
+        try:
+            xls = pd.ExcelFile(path)
+            selected_path = path
+            break
+        except Exception:
+            continue
+    if xls is None or selected_path is None:
+        return {}
+
+    tables: dict[str, pd.DataFrame] = {}
+    for cfg in SUPPLIER_TOP_CONFIG:
+        sheet_name = sheet_name_for_top(cfg['key'])
+        if sheet_name not in xls.sheet_names:
+            continue
+        try:
+            tables[cfg['key']] = pd.read_excel(xls, sheet_name=sheet_name)
+        except Exception:
+            continue
+
+    if TOPS_METADATA_SHEET in xls.sheet_names:
+        try:
+            meta_df = pd.read_excel(xls, sheet_name=TOPS_METADATA_SHEET)
+            if not meta_df.empty and {"period_id", "period_label"}.issubset(meta_df.columns):
+                meta_copy = meta_df.copy()
+                meta_copy["archivo"] = str(selected_path)
+                tables["__metadata_table__"] = meta_copy
+                metadata: dict[str, str] = {}
+                for key in ("generated_at", "db_path", "fichas_path", "criterios_path", "oferentes_path"):
+                    if key in meta_copy.columns:
+                        series = meta_copy[key].dropna()
+                        if not series.empty:
+                            metadata[key] = str(series.iloc[0])
+                metadata["archivo"] = str(selected_path)
+                tables["__metadata__"] = metadata
+            elif not meta_df.empty and meta_df.shape[1] >= 2:
+                metadata = dict(zip(meta_df.iloc[:, 0], meta_df.iloc[:, 1]))
+                metadata.setdefault("archivo", str(selected_path))
+                tables["__metadata__"] = metadata
+        except Exception:
+            pass
+    return tables
+
+def _normalize_text(value: str | None) -> str:
+    if value is None:
+        return ""
+    normalized = unicodedata.normalize("NFKD", str(value))
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return normalized.strip()
+
+
+def _normalize_supplier_key(value: str | None) -> str:
+    base = _normalize_text(value).upper()
+    return re.sub(r"[^A-Z0-9]+", "", base)
+
+
+def _select_supplier_name(row: pd.Series) -> str:
+    for col in ("nombre_comercial", "razon_social"):
+        value = str(row.get(col) or "").strip()
+        if value:
+            return value
+    unidad = str(row.get("unidad_solic", "")).strip()
+    return unidad or "Proveedor sin nombre"
+
+
+def _detect_ct_flag(value: str | None) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = _normalize_text(text).lower()
+    if not normalized or "no detect" in normalized or normalized in {"no", "sin ficha", "sin dato"}:
+        return False
+    return bool(re.search(r"\d", text))
+
+
+def _extract_ficha_label(value: str | None) -> str:
+    if not _detect_ct_flag(value):
+        return "Sin ficha detectada"
+    text = str(value or "").strip()
+    text = text.replace("*", "")
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace(", ,", ",").strip(",; ")
+    return text or "Ficha detectada"
+
+
+def _normalize_ct_code(value: str | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+(\.0+)?", text):
+        try:
+            text = str(int(float(text)))
+        except Exception:
+            text = text.split(".", 1)[0]
+    return text
+
+
+def _normalize_ct_label(value: str | None) -> str:
+    if not value:
+        return ""
+    text = str(value).upper()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.replace("*", "")
+    text = re.sub(r"[^A-Z0-9/.-]", "", text)
+    return text.strip()
+
+
+def _extract_ct_candidates(value: str | None) -> list[str]:
+    tokens = re.findall(r"[A-Z0-9/.-]+", str(value or "").upper())
+    candidates: list[str] = []
+    for token in tokens:
+        normalized = _normalize_ct_label(token)
+        if normalized:
+            candidates.append(normalized)
+    return candidates
+
+
+def _match_known_ct_code(label: str, known_codes: set[str]) -> str:
+    candidates = _extract_ct_candidates(label)
+    for candidate in candidates:
+        if candidate in known_codes:
+            return candidate
+    return candidates[0] if candidates else ""
+
+
+def _last_non_empty(values: pd.Series) -> str:
+    for raw in reversed(values.tolist()):
+        text = str(raw or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _yes_no(value: bool | str | int) -> str:
+    return "Sí" if bool(value) else "No"
+
+
+@st.cache_data(ttl=600)
+def load_supplier_awards_df(db_path: str | None) -> pd.DataFrame | None:
+    if not db_path:
+        return None
+    db_path = str(db_path)
+    path = Path(db_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+
+    query = """
+        SELECT
+            razon_social,
+            nombre_comercial,
+            precio_referencia,
+            fecha_adjudicacion,
+            publicacion,
+            fecha_actualizacion,
+            ficha_detectada,
+            num_participantes,
+            estado
+        FROM actos_publicos
+        WHERE estado = 'Adjudicado'
+    """
+    try:
+        with _connect_sqlite(db_path) as conn:
+            df = pd.read_sql_query(query, conn)
+    except Exception:
+        return None
+
+    if df.empty:
+        return df
+
+    for col in ("fecha_adjudicacion", "publicacion", "fecha_actualizacion"):
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    df["fecha_referencia"] = (
+        df["fecha_adjudicacion"]
+        .combine_first(df["publicacion"])
+        .combine_first(df["fecha_actualizacion"])
+    )
+    df = df[df["fecha_referencia"].notna()].copy()
+    df["fecha_referencia"] = df["fecha_referencia"].dt.tz_localize(None)
+    df["precio_referencia"] = pd.to_numeric(df["precio_referencia"], errors="coerce").fillna(0.0)
+    df["num_participantes"] = (
+        pd.to_numeric(df["num_participantes"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    df["supplier_name"] = df.apply(_select_supplier_name, axis=1)
+    df["supplier_name"] = df["supplier_name"].astype(str).str.strip()
+    df = df[df["supplier_name"].astype(bool)]
+    df["supplier_key"] = df["supplier_name"].map(_normalize_supplier_key)
+    df = df[df["supplier_key"].astype(bool)].copy()
+    df["tiene_ct"] = df["ficha_detectada"].map(_detect_ct_flag)
+    df["ct_label"] = df["ficha_detectada"].map(_extract_ficha_label)
+    return df.reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600)
+def load_oferente_metadata(
+    file_path: Path | None,
+) -> tuple[dict[str, dict[str, bool]], dict[str, int], dict[str, str]]:
+    if not file_path:
+        return {}, {}, {}
+    path = Path(file_path)
+    if not path.exists():
+        return {}, {}, {}
+    try:
+        df = pd.read_excel(path)
+    except Exception:
+        return {}, {}, {}
+    df = _clean_drive_dataframe(df)
+    if df.empty:
+        return {}, {}, {}
+
+    normalized_cols = {
+        col: _normalize_text(col).lower()
+        for col in df.columns
+    }
+    name_col = next(
+        (col for col, norm in normalized_cols.items() if "oferente" in norm or "proveedor" in norm),
+        None,
+    )
+    reg_col = next(
+        (col for col, norm in normalized_cols.items() if "reg" in norm and "san" in norm),
+        None,
+    )
+    ficha_col = next(
+        (col for col, norm in normalized_cols.items() if "ficha" in norm and "ctni" in norm),
+        None,
+    )
+    crit_col = next(
+        (col for col, norm in normalized_cols.items() if "criterio" in norm),
+        None,
+    )
+    ct_name_col = next(
+        (col for col, norm in normalized_cols.items() if "nombre" in norm and "gener" in norm),
+        None,
+    )
+    if not name_col:
+        return {}, {}, {}
+
+    metadata: dict[str, dict[str, bool]] = {}
+    ct_suppliers: dict[str, set[str]] = defaultdict(set)
+    ct_name_lookup: dict[str, str] = {}
+    for _, row in df.iterrows():
+        supplier = str(row.get(name_col) or "").strip()
+        if not supplier:
+            continue
+        key = _normalize_supplier_key(supplier)
+        if not key:
+            continue
+        meta = metadata.setdefault(key, {"has_registro": False, "has_ct": False})
+        if reg_col:
+            reg_value = str(row.get(reg_col) or "").strip()
+            if reg_value:
+                meta["has_registro"] = True
+        norm_label = ""
+        if ficha_col:
+            ct_value = _normalize_ct_code(row.get(ficha_col))
+            norm_label = _normalize_ct_label(ct_value)
+        if not norm_label and crit_col:
+            crit_value = str(row.get(crit_col) or "").strip()
+            if crit_value:
+                norm_label = _normalize_ct_label(_extract_ficha_label(crit_value))
+        if norm_label:
+            meta["has_ct"] = True
+            meta.setdefault("ct_labels", set()).add(norm_label)
+            ct_suppliers[norm_label].add(key)
+            if ct_name_col:
+                label_name = str(row.get(ct_name_col) or "").strip()
+                if label_name:
+                    ct_name_lookup.setdefault(norm_label, label_name)
+
+    for meta in metadata.values():
+        if "ct_labels" in meta:
+            meta["ct_labels"] = tuple(sorted(meta["ct_labels"]))
+    ct_stats = {label: len(keys) for label, keys in ct_suppliers.items()}
+    return metadata, ct_stats, ct_name_lookup
+
+
+def _compute_supplier_ranking(
+    df: pd.DataFrame,
+    *,
+    require_ct: bool,
+    require_registro: bool | None,
+    metric: str,
+    metadata: dict[str, dict[str, bool]],
+    ct_stats: dict[str, int],
+) -> pd.DataFrame:
+    subset = df[df["tiene_ct"] == require_ct]
+    if subset.empty:
+        return pd.DataFrame()
+
+    if require_registro is not None:
+        subset = subset[
+            subset["supplier_key"].map(
+                lambda key: metadata.get(key, {}).get("has_registro", False)
+            )
+            == require_registro
+        ]
+    if subset.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        subset.sort_values("fecha_referencia")
+        .groupby(["supplier_key", "supplier_name"], as_index=False)
+        .agg(
+            actos=("supplier_key", "size"),
+            monto=("precio_referencia", "sum"),
+            participantes_prom=("num_participantes", "mean"),
+            participantes_max=("num_participantes", "max"),
+            ultima_ficha=("ct_label", _last_non_empty),
+        )
+    )
+    grouped["Monto adjudicado"] = grouped["monto"].round(2)
+    grouped["Actos ganados"] = grouped["actos"]
+    grouped["Participantes promedio"] = grouped["participantes_prom"].round(2)
+    grouped["Participantes máx."] = grouped["participantes_max"].fillna(0).astype(int)
+    grouped["Ficha / Criterio más reciente"] = grouped["ultima_ficha"].replace("", "Sin ficha registrada")
+    grouped["_has_registro"] = grouped["supplier_key"].map(
+        lambda key: metadata.get(key, {}).get("has_registro", False)
+    )
+    grouped["Precio promedio acto"] = (
+        grouped["Monto adjudicado"] / grouped["Actos ganados"].replace(0, pd.NA)
+    ).fillna(0).round(2)
+    if require_registro is not None:
+        grouped = grouped[grouped["_has_registro"] == require_registro]
+    if grouped.empty:
+        return pd.DataFrame()
+
+    grouped["Tiene CT"] = grouped["supplier_key"].map(lambda _: require_ct)
+    grouped["Tiene Registro Sanitario"] = grouped["_has_registro"]
+    known_ct_codes = set(ct_stats.keys())
+    grouped["_ct_code"] = grouped["Ficha / Criterio más reciente"].map(
+        lambda label: _match_known_ct_code(label, known_ct_codes)
+    )
+    grouped["Oferentes con esta ficha"] = grouped["_ct_code"].map(lambda code: ct_stats.get(code, 0))
+
+    if metric == "amount":
+        grouped = grouped.sort_values(
+            ["Monto adjudicado", "Actos ganados"],
+            ascending=[False, False],
+        )
+    else:
+        grouped = grouped.sort_values(
+            ["Actos ganados", "Monto adjudicado"],
+            ascending=[False, False],
+        )
+
+    grouped = grouped.copy()
+    grouped["Proveedor"] = grouped["supplier_name"]
+    grouped["Tiene CT"] = grouped["Tiene CT"].map(_yes_no)
+    grouped["Tiene Registro Sanitario"] = grouped["Tiene Registro Sanitario"].map(_yes_no)
+    grouped = grouped.drop(columns=["_has_registro", "_ct_code"])
+    display_cols = [
+        "Proveedor",
+        "Actos ganados",
+        "Monto adjudicado",
+        "Participantes promedio",
+        "Participantes máx.",
+        "Ficha / Criterio más reciente",
+        "Tiene CT",
+        "Tiene Registro Sanitario",
+    ]
+    if require_ct:
+        display_cols.insert(3, "Precio promedio acto")
+        display_cols.append("Oferentes con esta ficha")
+    return grouped[display_cols]
+
+@st.cache_data(ttl=3600)
+def load_ct_name_map(file_path: Path | None) -> dict[str, str]:
+    if not file_path:
+        return {}
+    path = Path(file_path)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_excel(path)
+    except Exception:
+        return {}
+    df = _clean_drive_dataframe(df)
+    if df.empty:
+        return {}
+
+    normalized_cols = {
+        col: _normalize_text(col).lower()
+        for col in df.columns
+    }
+    ficha_col = next(
+        (col for col, norm in normalized_cols.items() if "ficha" in norm and "ctni" in norm),
+        None,
+    )
+    nombre_col = next(
+        (col for col, norm in normalized_cols.items() if "nombre" in norm and "gener" in norm),
+        None,
+    )
+    if not ficha_col or not nombre_col:
+        return {}
+
+    name_map: dict[str, str] = {}
+    for _, row in df.iterrows():
+        criterio = _normalize_ct_code(row.get(ficha_col))
+        nombre = str(row.get(nombre_col) or "").strip()
+        norm = _normalize_ct_label(criterio)
+        if norm and nombre:
+            name_map.setdefault(norm, nombre)
+    return name_map
+
+
+@st.cache_data(ttl=300)
+def _filter_awards_by_range(
+    df: pd.DataFrame,
+    start_iso: str,
+    end_iso: str,
+) -> pd.DataFrame:
+    start = pd.to_datetime(start_iso)
+    end = pd.to_datetime(end_iso)
+    mask = (df["fecha_referencia"] >= start) & (df["fecha_referencia"] <= end)
+    return df.loc[mask].copy()
+
+
+def _compute_ct_ranking(
+    df: pd.DataFrame,
+    *,
+    require_registro: bool | None,
+    metric: str,
+    metadata: dict[str, dict[str, bool]],
+    ct_stats: dict[str, int],
+    ct_names: dict[str, str],
+) -> pd.DataFrame:
+    subset = df[df["tiene_ct"]]
+    subset = subset[subset["ct_label"].astype(str).str.strip().astype(bool)]
+    if subset.empty:
+        return pd.DataFrame()
+
+    if require_registro is not None:
+        subset = subset[
+            subset["supplier_key"].map(
+                lambda key: metadata.get(key, {}).get("has_registro", False)
+            )
+            == require_registro
+        ]
+    if subset.empty:
+        return pd.DataFrame()
+
+    known_codes = set(ct_stats.keys()) | set(ct_names.keys())
+    rows: list[dict[str, Any]] = []
+    for label, group in subset.groupby("ct_label"):
+        norm_label = _match_known_ct_code(label, known_codes)
+        display_label = norm_label or label
+        total_actos = len(group.index)
+        total_monto = group["precio_referencia"].sum()
+        avg_price = (total_monto / total_actos) if total_actos else 0.0
+        participantes_prom = group["num_participantes"].mean()
+        participantes_max = group["num_participantes"].max()
+        supplier_breakdown = (
+            group.groupby("supplier_name", as_index=False)
+            .agg(
+                actos=("supplier_key", "size"),
+                monto=("precio_referencia", "sum"),
+            )
+            .sort_values(["monto", "actos"], ascending=[False, False])
+        )
+        top_amount = supplier_breakdown.nlargest(3, ["monto", "actos"])
+        top_amount_str = ", ".join(
+            f"{row.supplier_name} (${row.monto:,.0f})" for _, row in top_amount.iterrows()
+        )
+        top_actos = supplier_breakdown.nlargest(3, ["actos", "monto"])
+        top_actos_str = ", ".join(
+            f"{row.supplier_name} ({int(row.actos)} actos)" for _, row in top_actos.iterrows()
+        )
+        rows.append(
+            {
+                "Ficha / Criterio": display_label,
+                "Nombre de la ficha": ct_names.get(norm_label, ""),
+                "Actos ganados": total_actos,
+                "Monto adjudicado": round(total_monto, 2),
+                "Precio promedio acto": round(avg_price, 2),
+                "Participantes promedio": round(participantes_prom or 0, 2),
+                "Participantes máx.": int(participantes_max or 0),
+                "Oferentes en catálogo": ct_stats.get(norm_label, 0),
+                "Top 3 por monto": top_amount_str or "Sin datos",
+                "Top 3 por actos": top_actos_str or "Sin datos",
+            }
+        )
+
+    ranking_df = pd.DataFrame(rows)
+    if ranking_df.empty:
+        return ranking_df
+
+    if metric == "amount":
+        ranking_df = ranking_df.sort_values(
+            ["Monto adjudicado", "Actos ganados"], ascending=[False, False]
+        )
+    else:
+        ranking_df = ranking_df.sort_values(
+            ["Actos ganados", "Monto adjudicado"], ascending=[False, False]
+        )
+    return ranking_df
+
+
+def render_precomputed_top_panel(precomputed: dict[str, pd.DataFrame]) -> bool:
+    """Muestra los tops precomputados si existen."""
+    available = [cfg for cfg in SUPPLIER_TOP_CONFIG if cfg["key"] in precomputed]
+    if not available:
+        return False
+
+    metadata = precomputed.get("__metadata__", {})
+    metadata_table = precomputed.get("__metadata_table__")
+    st.markdown("### Tops precomputados de adjudicaciones")
+
+    period_records: list[dict[str, Any]] = []
+    if isinstance(metadata_table, pd.DataFrame) and not metadata_table.empty:
+        for _, row in metadata_table.iterrows():
+            record = {col: row[col] for col in metadata_table.columns}
+            record["period_id"] = str(record.get("period_id") or f"period_{len(period_records)}")
+            record["has_data"] = bool(record.get("has_data", True))
+            period_records.append(record)
+    elif metadata:
+        legacy_row = _legacy_metadata_to_row(metadata)
+        if legacy_row:
+            period_records.append(legacy_row)
+
+    if not period_records:
+        period_records.append({"period_id": "global", "period_label": "Todo el periodo", "has_data": False})
+
+    period_lookup = {rec["period_id"]: rec for rec in period_records}
+    options = [rec["period_id"] for rec in period_records]
+    default_period_id = next((rec["period_id"] for rec in period_records if rec.get("has_data")), options[0])
+    default_index = options.index(default_period_id)
+    selected_period_id = st.selectbox(
+        "Periodo precalculado",
+        options=options,
+        format_func=lambda pid: _format_period_option(period_lookup[pid]),
+        index=default_index,
+        key="pc_precomputed_period",
+    )
+    selected_summary = period_lookup[selected_period_id]
+
+    generated_at = metadata.get("generated_at") or selected_summary.get("generated_at") or "sin fecha"
+    origen = metadata.get("db_path") or selected_summary.get("db_path") or "panamacompra.db"
+    archivo = metadata.get("archivo") or selected_summary.get("archivo")
+    extra = f" - Archivo: {archivo}" if archivo else ""
+    st.caption(f"Generado: {generated_at} - Fuente: {origen}{extra}")
+
+    filtered_tables: dict[str, pd.DataFrame] = {}
+    max_rows = 0
+    for cfg in available:
+        df_period = _filter_precomputed_by_period(precomputed.get(cfg["key"]), selected_period_id)
+        filtered_tables[cfg["key"]] = df_period
+        max_rows = max(max_rows, len(df_period))
+
+    with st.expander("Resumen del periodo seleccionado", expanded=False):
+        _render_precomputed_summary(selected_summary)
+
+    if max_rows <= 0:
+        st.info("No se encontraron filas precalculadas para el periodo seleccionado.")
+        return True
+
+    slider_min = max(1, min(5, max_rows))
+    slider_value = min(SUPPLIER_TOP_DEFAULT_ROWS, max_rows)
+    top_n = st.slider(
+        "Numero maximo de filas por listado",
+        min_value=slider_min,
+        max_value=max_rows,
+        value=slider_value,
+        key="precomputed_top_rows",
+    )
+
+    tabs = st.tabs([cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG])
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
+        with tab:
+            df_period = filtered_tables.get(cfg["key"])
+            if df_period is None or df_period.empty:
+                st.info("Sin datos precalculados para este ranking en el periodo elegido.")
+                continue
+            search_value = st.text_input(
+                "Buscar en este top",
+                key=f"precomputed_search_{cfg['key']}",
+                placeholder="Proveedor, ficha, entidad, etc.",
+            )
+            df_filtered = _apply_search_filter(df_period, search_value)
+            if df_filtered.empty:
+                st.info("Sin filas que coincidan con el criterio de busqueda.")
+                continue
+            st.caption(cfg["title"])
+            display_df = df_filtered.drop(columns=["period_id", "fecha_inicio", "fecha_fin"], errors="ignore")
+            st.dataframe(
+                display_df.head(top_n),
+                hide_index=True,
+                use_container_width=True,
+            )
+    return True
+
+def render_supplier_top_panel() -> None:
+    _render_analysis_chatbot()
+    tops_signature = _tops_cache_signature()
+    fresh_tables = load_precomputed_top_tables(tops_signature)
+    if fresh_tables:
+        st.session_state["precomputed_top_tables"] = fresh_tables
+    precomputed_tables = fresh_tables or st.session_state.get("precomputed_top_tables", {})
+
+    precomputed_rendered = render_precomputed_top_panel(precomputed_tables)
+
+    db_path = _preferred_db_path()
+    awards_df = load_supplier_awards_df(str(db_path) if db_path else None)
+    if awards_df is None or awards_df.empty:
+        st.info(
+            "Aún no hay adjudicaciones sincronizadas en `panamacompra.db` para mostrar el top de proveedores."
+        )
+        if precomputed_rendered:
+            st.info("No se pudo generar la gráfica CT sin RS porque la base local está vacía.")
+        return
+
+    if precomputed_rendered:
+        supplier_meta, _, _ = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+        _render_ct_without_reg_chart_section(
+            awards_df,
+            supplier_meta,
+            show_controls=True,
+            key_prefix="precomputed_ct_trend",
+        )
+        return
+
+    st.warning(
+        "No se encontraron tops precomputados en data/tops ni en outputs/tops. "
+        "Mostrando un cálculo en vivo temporal mientras ejecutas scripts/genera_tops_panamacompra.py "
+        "o scripts/build_panamacompra_aggregates.py para la próxima sesión."
+    )
+
+    supplier_meta, ct_stats, ct_names_oferentes = load_oferente_metadata(LOCAL_OFERENTES_CATALOGOS)
+    ct_names_fichas = load_ct_name_map(LOCAL_FICHAS_CTNI)
+    ct_names = ct_names_oferentes.copy()
+    ct_names.update(ct_names_fichas)
+    min_date = awards_df["fecha_referencia"].min().date()
+    max_date = awards_df["fecha_referencia"].max().date()
+    default_start = max(min_date, max_date - timedelta(days=90))
+
+    st.markdown("### 🏆 Tops de proveedores adjudicados")
+    st.caption(
+        "Explora rápidamente qué proveedores dominan las adjudicaciones, separados por si cuentan o no con ficha técnica."
+    )
+    date_input = st.date_input(
+        "Rango de adjudicación",
+        value=(default_start, max_date),
+        min_value=min_date,
+        max_value=max_date,
+        key="supplier_top_date_range",
+    )
+    if isinstance(date_input, (list, tuple)) and len(date_input) == 2:
+        start_date, end_date = date_input
+    else:
+        start_date = end_date = date_input
+
+    if isinstance(start_date, date) and isinstance(end_date, date):
+        start_ts = datetime.combine(start_date, datetime.min.time())
+        end_ts = datetime.combine(end_date, datetime.max.time())
+    else:
+        start_ts = awards_df["fecha_referencia"].min()
+        end_ts = awards_df["fecha_referencia"].max()
+
+    filtered_df = _filter_awards_by_range(
+        awards_df,
+        start_ts.isoformat(),
+        end_ts.isoformat(),
+    )
+    if filtered_df.empty:
+        st.warning("No se registran adjudicaciones en el rango seleccionado.")
+        return
+
+    top_n = st.slider(
+        "Numero maximo de filas por listado",
+        min_value=5,
+        max_value=100,
+        value=min(SUPPLIER_TOP_DEFAULT_ROWS, 100),
+        step=1,
+        key="supplier_top_rows",
+    )
+    st.caption(f"El rango seleccionado contiene {len(filtered_df)} adjudicaciones únicas.")
+
+    tab_labels = [SUMMARY_TAB_LABEL] + [cfg["tab_label"] for cfg in SUPPLIER_TOP_CONFIG]
+    tabs = st.tabs(tab_labels)
+
+    with tabs[0]:
+        _render_runtime_summary(filtered_df, start_ts, end_ts, supplier_meta)
+
+    column_config = {
+        "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f", help="Suma de precio de referencia adjudicado"),
+        "Actos ganados": st.column_config.NumberColumn(format="%d"),
+        "Precio promedio acto": st.column_config.NumberColumn(
+            format="$%0.2f",
+            help="Monto promedio adjudicado por acto",
+        ),
+        "Participantes promedio": st.column_config.NumberColumn(format="%.2f", help="Promedio de participantes reportados"),
+        "Participantes máx.": st.column_config.NumberColumn(format="%d"),
+        "Ficha / Criterio más reciente": st.column_config.TextColumn(help="Última referencia detectada en el bot"),
+        "Tiene CT": st.column_config.TextColumn(),
+        "Tiene Registro Sanitario": st.column_config.TextColumn(),
+        "Oferentes con esta ficha": st.column_config.NumberColumn(
+            format="%d",
+            help="Cantidad de oferentes que en catálogo listan la misma ficha",
+        ),
+    }
+    ct_column_config = {
+        "Nombre de la ficha": st.column_config.TextColumn(),
+        "Monto adjudicado": st.column_config.NumberColumn(format="$%0.2f"),
+        "Actos ganados": st.column_config.NumberColumn(format="%d"),
+        "Precio promedio acto": st.column_config.NumberColumn(format="$%0.2f"),
+        "Participantes promedio": st.column_config.NumberColumn(format="%.2f"),
+        "Participantes máx.": st.column_config.NumberColumn(format="%d"),
+        "Oferentes en catálogo": st.column_config.NumberColumn(format="%d"),
+        "Top 3 por monto": st.column_config.TextColumn(help="Empresas con mayor monto adjudicado"),
+        "Top 3 por actos": st.column_config.TextColumn(help="Empresas con más actos adjudicados"),
+        "oferentes_disponibles_por_CT": st.column_config.NumberColumn(
+            format="%d",
+            help="Cantidad de oferentes con certificado vigente en catálogo para esta ficha.",
+        ),
+        "dias_promedio_pub_a_adj_por_CT": st.column_config.NumberColumn(
+            format="%.2f",
+            help="Promedio de días entre publicación y adjudicación de actos con esta ficha.",
+        ),
+    }
+
+    for cfg, tab in zip(SUPPLIER_TOP_CONFIG, tabs):
+        with tab:
+            if cfg.get("mode") == "ct":
+                ranking = _compute_ct_ranking(
+                    filtered_df,
+                    require_registro=cfg.get("require_registro"),
+                    metric=cfg["metric"],
+                    metadata=supplier_meta,
+                    ct_stats=ct_stats,
+                    ct_names=ct_names,
+                )
+                current_config = ct_column_config
+            else:
+                ranking = _compute_supplier_ranking(
+                    filtered_df,
+                    require_ct=cfg["require_ct"],
+                    require_registro=cfg.get("require_registro"),
+                    metric=cfg["metric"],
+                    metadata=supplier_meta,
+                    ct_stats=ct_stats,
+                )
+                current_config = column_config
+            if ranking.empty:
+                st.info("Sin adjudicaciones disponibles para este subgrupo en el rango seleccionado.")
+                continue
+
+            search_value = st.text_input(
+                "Buscar en este top",
+                key=f"runtime_search_{cfg['key']}",
+                placeholder="Proveedor, ficha, país, etc.",
+            )
+            ranking = _apply_search_filter(ranking, search_value)
+            display_df = ranking.head(top_n)
+
+            st.caption(cfg["title"])
+            st.dataframe(
+                display_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config=current_config,
+            )
+
+    _render_ct_without_reg_chart_section(
+        filtered_df,
+        supplier_meta,
+        show_controls=False,
+        key_prefix="runtime_ct_trend",
+    )
+
+    ct_without_reg = filtered_df[
+        filtered_df["tiene_ct"]
+        & ~filtered_df["supplier_key"].map(lambda key: supplier_meta.get(key, {}).get("has_registro", False))
+    ].copy()
+    if not ct_without_reg.empty:
+        ct_without_reg["fecha_dia"] = ct_without_reg["fecha_referencia"].dt.floor("D")
+        trend_df = (
+            ct_without_reg.groupby("fecha_dia", as_index=False)
+            .agg(
+                monto_total=("precio_referencia", "sum"),
+                actos=("supplier_key", "size"),
+            )
+            .sort_values("fecha_dia")
+        )
+        trend_df["fecha_dia"] = pd.to_datetime(trend_df["fecha_dia"])
+
+        base_chart = alt.Chart(trend_df).encode(
+            x=alt.X("fecha_dia:T", title="Fecha de adjudicación"),
+            tooltip=[
+                alt.Tooltip("fecha_dia:T", title="Fecha"),
+                alt.Tooltip("monto_total:Q", title="Monto total", format=",.2f"),
+                alt.Tooltip("actos:Q", title="Actos"),
+            ],
+        )
+        amount_area = base_chart.mark_area(color="#2a9d8f", opacity=0.35).encode(
+            y=alt.Y("monto_total:Q", title="Monto total (B/.)"),
+        )
+        count_line = base_chart.mark_line(color="#e76f51", opacity=0.9).encode(
+            y=alt.Y("actos:Q", title="Cantidad de actos"),
+        )
+        ct_trend_chart = (
+            alt.layer(amount_area, count_line)
+            .resolve_scale(y="independent")
+            .properties(
+                height=320,
+                title="Evolución de actos con ficha técnica sin registro sanitario",
+            )
+        )
+        st.altair_chart(ct_trend_chart, use_container_width=True)
+    else:
+        st.info("En el rango seleccionado no se registran actos con ficha y sin registro sanitario.")
 
 def _require_authentication() -> None:
     status = st.session_state.get("authentication_status")
@@ -68,7 +1696,7 @@ HEADER_ALIASES = {
     "status": {"status", "estado"},
 }
 
-FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
+FALLBACK_DB_PATH = Path(r"C:\Users\rodri\GEAPP\panamacompra.db")
 
 
 def _candidate_db_paths() -> list[Path]:
@@ -122,12 +1750,595 @@ def count_sqlite_rows(db_path: str, table_name: str) -> int:
 
 
 @st.cache_data(ttl=300)
-def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFrame:
+def describe_sqlite_table(db_path: str, table_name: str) -> list[tuple[str, str]]:
+    identifier = _quote_identifier(table_name)
+    with _connect_sqlite(db_path) as conn:
+        cur = conn.execute(f"PRAGMA table_info({identifier})")
+        rows = cur.fetchall()
+    return [(row[1], row[2]) for row in rows]
+
+
+@st.cache_data(ttl=300)
+def load_sqlite_preview(
+    db_path: str,
+    table_name: str,
+    limit: int,
+    search_text: str | None = None,
+) -> pd.DataFrame:
     identifier = _quote_identifier(table_name)
     limit = max(1, int(limit))
-    query = f"SELECT * FROM {identifier} LIMIT {limit}"
+    params: list[Any] = []
+    base_query = f"SELECT * FROM {identifier}"
+
+    cleaned_search = (search_text or "").strip()
+    if cleaned_search:
+        columns = describe_sqlite_table(db_path, table_name)
+        if columns:
+            normalized = cleaned_search.lower()
+            pattern_raw = f"%{cleaned_search}%"
+            pattern_lower = f"%{normalized}%"
+            like_clauses: list[str] = []
+            for col_name, col_type in columns:
+                norm_type = (col_type or "").lower()
+                identifier_col = _quote_identifier(col_name)
+                if not norm_type:
+                    like_clauses.append(f"{identifier_col} LIKE ?")
+                    params.append(pattern_raw)
+                elif any(token in norm_type for token in ("char", "text", "clob", "string")):
+                    like_clauses.append(f"LOWER({identifier_col}) LIKE ?")
+                    params.append(pattern_lower)
+                elif any(token in norm_type for token in ("int", "dec", "num", "real", "double", "float")):
+                    like_clauses.append(f"CAST({identifier_col} AS TEXT) LIKE ?")
+                    params.append(pattern_raw)
+            if like_clauses:
+                where_clause = " OR ".join(like_clauses)
+                base_query += f" WHERE {where_clause}"
+
+    base_query += " LIMIT ?"
+    params.append(limit)
+
     with _connect_sqlite(db_path) as conn:
-        return pd.read_sql_query(query, conn)
+        return pd.read_sql_query(base_query, conn, params=tuple(params))
+
+
+@st.cache_data(ttl=300)
+def load_excel_file(file_path: str) -> pd.DataFrame:
+    return pd.read_excel(file_path)
+
+
+def _verify_analysis_requirements() -> list[dict[str, str | bool]]:
+    checks: list[dict[str, str | bool]] = []
+
+    db_path = _preferred_db_path()
+    db_ok = False
+    db_detail = "Ruta no configurada."
+    if db_path:
+        if db_path.exists():
+            try:
+                tables = list_sqlite_tables(str(db_path))
+                if "actos_publicos" in tables:
+                    db_ok = True
+                    db_detail = f"{db_path} (tablas: {len(tables)})"
+                else:
+                    db_detail = f"No se encontró la tabla actos_publicos en {db_path}."
+            except Exception as exc:
+                db_detail = f"Error al leer la base: {exc}"
+        else:
+            db_detail = f"No existe el archivo {db_path}."
+    checks.append(
+        {"label": "Base panamacompra.db", "ok": db_ok, "detail": db_detail}
+    )
+
+    def _file_check(label: str, path: Path | None) -> dict[str, str | bool]:
+        if not path:
+            return {"label": label, "ok": False, "detail": "No se configuró la ruta."}
+        path = Path(path)
+        if not path.exists():
+            return {"label": label, "ok": False, "detail": f"No existe {path}."}
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return {"label": label, "ok": False, "detail": f"No se pudo leer: {exc}"}
+        detail = f"{path} ({size / 1024:.1f} KB)"
+        return {"label": label, "ok": size > 0, "detail": detail}
+
+    checks.append(_file_check("Fichas CTNI", LOCAL_FICHAS_CTNI))
+    checks.append(_file_check("Criterios técnicos", LOCAL_CRITERIOS_TECNICOS))
+    checks.append(_file_check("Oferentes y catálogos", LOCAL_OFERENTES_CATALOGOS))
+    return checks
+
+
+@st.cache_data(ttl=1800)
+def load_analysis_chat_dataframes(
+    db_path: Path | None,
+    fichas_path: Path | None,
+    criterios_path: Path | None,
+    oferentes_path: Path | None,
+) -> dict[str, pd.DataFrame]:
+    actos_df = load_supplier_awards_df(str(db_path) if db_path else None)
+    if actos_df is None:
+        actos_df = pd.DataFrame()
+
+    def _try_read_excel(path: Path | None) -> pd.DataFrame:
+        if not path:
+            return pd.DataFrame()
+        path = Path(path)
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            df_local = pd.read_excel(path)
+        except Exception:
+            return pd.DataFrame()
+        return _clean_drive_dataframe(df_local)
+
+    fichas_df = _try_read_excel(fichas_path)
+    criterios_df = _try_read_excel(criterios_path)
+    oferentes_df = _try_read_excel(oferentes_path)
+    return {
+        "actos": actos_df,
+        "fichas": fichas_df,
+        "criterios": criterios_df,
+        "oferentes": oferentes_df,
+    }
+
+
+def _filter_df_for_terms(
+    df: pd.DataFrame,
+    terms: list[str],
+    *,
+    limit: int = 10,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    display_cols = list(df.columns[: min(8, len(df.columns))])
+    work_df = df.copy()
+    if not terms:
+        return work_df[display_cols].head(limit)
+    mask = pd.Series(False, index=work_df.index)
+    lowered_terms = [term.lower() for term in terms if term]
+    for col in work_df.columns:
+        try:
+            series = work_df[col].astype(str).str.lower()
+        except Exception:
+            series = work_df[col].map(lambda v: str(v).lower() if pd.notna(v) else "")
+        for term in lowered_terms:
+            mask = mask | series.str.contains(term, na=False)
+    filtered = work_df[mask]
+    if filtered.empty:
+        return filtered
+    return filtered[display_cols].head(limit)
+
+
+def _build_schema_context(dataframes: dict[str, pd.DataFrame]) -> str:
+    parts: list[str] = []
+    for name, df in dataframes.items():
+        if df is None or df.empty:
+            continue
+        dtypes = ", ".join(f"{col} ({str(dtype)})" for col, dtype in df.dtypes.items())
+        sample = df.sample(min(3, len(df)), random_state=42)[df.columns[:8]]
+        sample_text = sample.to_string(index=False)
+        parts.append(f"Tabla {name}:\nColumnas y tipos: {dtypes}\nMuestras:\n{sample_text}")
+    context = "\n\n".join(parts)
+    return context[-6000:] if len(context) > 6000 else context
+
+
+def _request_analysis_plan(question: str, schema_context: str, api_key: str) -> dict[str, Any]:
+    if OpenAI is None:
+        return {"tool": "none", "reason": "El paquete openai no está disponible en este entorno."}
+    client = OpenAI(api_key=api_key)
+    system_prompt = (
+        "Eres un analista que genera planes JSON para responder preguntas sobre tablas. "
+        "Debes devolver exclusivamente JSON válido con el formato:\n"
+        "{tool: 'sql'|'pandas'|'semantic'|'none', query: '...', dataframe: 'actos', "
+        "filters:[{column:'', operator:'contains|equals|gt|lt', value:''}], columns:['col'], limit:int, reason:''}\n"
+        "Usa tool='semantic' para búsquedas por texto general, 'pandas' para filtros simples por columnas "
+        "y 'sql' solo cuando necesites agrupar en SQLite. Si no puedes resolverlo, usa tool='none' y explica en reason."
+    )
+    user_prompt = (
+        f"Esquema de datos:\n{schema_context}\n\n"
+        f"Pregunta del usuario:\n{question}\n\n"
+        "Responde solo con un objeto JSON válido."
+    )
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_output_tokens=400,
+    )
+    raw_text = (response.output_text or "").strip()
+    if raw_text.startswith("```"):
+        segments = raw_text.split("```")
+        if len(segments) >= 2:
+            raw_text = segments[1].strip()
+    if raw_text.lower().startswith("json"):
+        raw_text = raw_text[4:].strip()
+    try:
+        plan = json.loads(raw_text)
+    except json.JSONDecodeError:
+        plan = {"tool": "none", "reason": f"No se pudo interpretar el plan: {raw_text}"}
+    return plan
+
+
+def _apply_plan_filters(df: pd.DataFrame, filters: list[dict[str, Any]]) -> pd.DataFrame:
+    if df is None or df.empty or not filters:
+        return df
+    mask = pd.Series(True, index=df.index)
+    for rule in filters:
+        col = rule.get("column")
+        if not col or col not in df.columns:
+            continue
+        op = (rule.get("operator") or "contains").lower()
+        value = rule.get("value")
+        series = df[col]
+        if op == "contains":
+            if value is None:
+                continue
+            series = series.astype(str).str.lower()
+            mask = mask & series.str.contains(str(value).lower(), na=False)
+        elif op == "equals":
+            mask = mask & (series == value)
+        elif op == "gt":
+            mask = mask & (pd.to_numeric(series, errors="coerce") > float(value))
+        elif op == "lt":
+            mask = mask & (pd.to_numeric(series, errors="coerce") < float(value))
+    return df[mask]
+
+
+def _execute_analysis_plan(
+    plan: dict[str, Any],
+    dataframes: dict[str, pd.DataFrame],
+    db_path: Path | None,
+) -> tuple[pd.DataFrame | None, str]:
+    tool = plan.get("tool")
+    limit = int(plan.get("limit") or 200)
+    if limit <= 0 or limit > 200:
+        limit = 200
+
+    if tool == "sql":
+        query = (plan.get("query") or "").strip()
+        if not query.lower().startswith("select"):
+            return None, "Solo se permiten consultas SELECT."
+        if "limit" not in query.lower():
+            query = f"{query.rstrip(';')} LIMIT {limit}"
+        if not db_path or not db_path.exists():
+            return None, "La base panamacompra.db no está disponible para ejecutar SQL."
+        with sqlite3.connect(db_path) as conn:
+            try:
+                df = pd.read_sql_query(query, conn)
+            except Exception as exc:
+                return None, f"Error al ejecutar SQL: {exc}"
+        return df, ""
+
+    if tool == "pandas":
+        df_name = plan.get("dataframe")
+        df = dataframes.get(df_name)
+        if df is None or df.empty:
+            return None, f"No hay datos cargados para {df_name}."
+        filtered = _apply_plan_filters(df, plan.get("filters", []))
+        columns = plan.get("columns")
+        if columns:
+            valid_cols = [col for col in columns if col in filtered.columns]
+            if valid_cols:
+                filtered = filtered[valid_cols]
+        return filtered.head(limit), ""
+
+    if tool == "semantic":
+        df_name = plan.get("dataframe")
+        df = dataframes.get(df_name)
+        if df is None or df.empty:
+            return None, f"No hay datos cargados para {df_name}."
+        terms = plan.get("terms") or re.findall(r"\w{3,}", plan.get("query") or "")
+        result = _filter_df_for_terms(df, terms, limit=limit)
+        return result, ""
+
+    reason = plan.get("reason") or "El plan no especificó una herramienta válida."
+    return None, reason
+
+
+def _summarize_plan_answer(
+    question: str,
+    plan: dict[str, Any],
+    result_df: pd.DataFrame | None,
+    api_key: str,
+) -> str:
+    if OpenAI is None:
+        return "El paquete openai no está disponible en este entorno."
+    preview = "Sin resultados."
+    if result_df is not None and not result_df.empty:
+        preview = result_df.to_markdown(index=False)
+    plan_text = json.dumps(plan, ensure_ascii=False)
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {
+                "role": "system",
+                "content": "Eres un analista que responde basándote en resultados tabulares locales.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Pregunta original: {question}\n"
+                    f"Plan ejecutado: {plan_text}\n"
+                    f"Resultados (máx 200 filas):\n{preview}\n"
+                    "Redacta una respuesta en español, cita cifras relevantes y aclara si se truncaron filas."
+                ),
+            },
+        ],
+        max_output_tokens=500,
+    )
+    return response.output_text
+
+
+def _build_chat_context(question: str, dataframes: dict[str, pd.DataFrame]) -> str:
+	terms = [tok.lower() for tok in re.findall(r"\w{3,}", question or "")]
+	context_parts: list[str] = []
+	for name, df in dataframes.items():
+		if df is None or df.empty:
+			continue
+		context_parts.append(
+			f"Tabla {name}: {len(df)} filas, columnas principales: {', '.join(df.columns[:5])}"
+		)
+		snippet = _filter_df_for_terms(df, terms, limit=8)
+		if snippet.empty:
+			snippet = df.head(5)[df.columns[:8]]
+		snippet_text = snippet.to_string(index=False)
+		context_parts.append(f"Ejemplos en {name}:\n{snippet_text}")
+	context_text = "\n\n".join(context_parts)
+	return context_text[-4000:] if len(context_text) > 4000 else context_text
+
+
+
+
+def _collect_core_source_statuses() -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for label, resolver in CORE_SOURCES:
+        try:
+            path_value = resolver() if callable(resolver) else resolver
+        except Exception as exc:  # pragma: no cover
+            statuses.append(
+                {"name": label, "ok": False, "detail": f"Error al resolver ruta: {exc}"}
+            )
+            continue
+        if not path_value:
+            statuses.append({"name": label, "ok": False, "detail": "Ruta no configurada"})
+            continue
+        path = Path(path_value)
+        if not path.exists():
+            statuses.append({"name": label, "ok": False, "detail": f"No se encontró: {path}"})
+            continue
+        detail = f"{path} ({path.stat().st_size / 1024:.1f} KB)"
+        ok = True
+        if label == "Base panamacompra.db":
+            try:
+                tables = list_sqlite_tables(str(path))
+                if "actos_publicos" not in tables:
+                    ok = False
+                    detail = f"{detail} — falta la tabla actos_publicos"
+                else:
+                    rows = count_sqlite_rows(str(path), "actos_publicos")
+                    detail = f"{detail} — actos_publicos: {rows:,} filas"
+            except Exception as exc:
+                ok = False
+                detail = f"Error al leer: {exc}"
+        statuses.append({"name": label, "ok": ok, "detail": detail})
+    return statuses
+
+
+def _render_data_readiness_panel() -> bool:
+    statuses = _collect_core_source_statuses()
+    all_ready = all(item["ok"] for item in statuses) if statuses else True
+    with st.expander("Estado de datos base", expanded=not all_ready):
+        for item in statuses:
+            icon = "✅" if item["ok"] else "⚠️"
+            st.write(f"{icon} **{item['name']}** — {item['detail']}")
+    return all_ready
+
+
+def _collect_data_health_statuses() -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for label, resolver in CORE_SOURCES:
+        raw_path = resolver()
+        status = {"name": label, "ok": False, "detail": ""}
+        path_obj: Path | None = None
+        if raw_path:
+            path_obj = Path(raw_path)
+        if not path_obj:
+            status["detail"] = "Ruta no configurada"
+            statuses.append(status)
+            continue
+        if not path_obj.exists():
+            status["detail"] = f"{path_obj} no existe"
+            statuses.append(status)
+            continue
+        detail = f"{path_obj} ({path_obj.stat().st_size / 1024:.1f} KB)"
+        status["ok"] = True
+        status["detail"] = detail
+        if label == "Base panamacompra.db":
+            try:
+                tables = list_sqlite_tables(str(path_obj))
+                if "actos_publicos" in tables:
+                    total_rows = count_sqlite_rows(str(path_obj), "actos_publicos")
+                    status["detail"] += f" - actos_publicos: {total_rows:,} filas"
+                else:
+                    status["ok"] = False
+                    status["detail"] += " - tabla actos_publicos no encontrada"
+            except Exception as exc:
+                status["ok"] = False
+                status["detail"] = f"Error al leer la base: {exc}"
+        statuses.append(status)
+    return statuses
+
+
+def _render_data_health_summary() -> bool:
+    statuses = _collect_data_health_statuses()
+    all_ok = all(item["ok"] for item in statuses)
+    with st.expander("Estado de datos base", expanded=not all_ok):
+        for item in statuses:
+            icon = "✅" if item["ok"] else "⚠️"
+            st.write(f"{icon} **{item['name']}** — {item['detail']}")
+    return all_ok
+
+
+def _filter_dataframe(
+    df: pd.DataFrame,
+    search_text: str | None,
+    date_range: tuple[date, date] | None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    filtered = df
+    if search_text:
+        needle = str(search_text).strip().lower()
+        if needle:
+            mask = pd.Series(False, index=filtered.index)
+            for col in filtered.columns:
+                series = filtered[col]
+                try:
+                    text_values = series.astype(str).str.lower()
+                except Exception:
+                    text_values = series.map(
+                        lambda v: str(v).lower() if pd.notna(v) else ""
+                    )
+                mask = mask | text_values.str.contains(needle, na=False)
+            filtered = filtered[mask]
+
+    if date_range:
+        if isinstance(date_range, date):
+            date_range = (date_range, date_range)
+        if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+            start, end = date_range
+        if isinstance(start, date) and isinstance(end, date):
+            start_dt = datetime.combine(start, datetime.min.time())
+            end_dt = datetime.combine(end, datetime.max.time())
+            date_masks: list[pd.Series] = []
+            for col in filtered.columns:
+                series = filtered[col]
+                dt_series = None
+
+                if pd.api.types.is_datetime64_any_dtype(series):
+                    dt_series = series
+                else:
+                    col_name = str(col).lower()
+                    if any(token in col_name for token in DATE_COLUMN_KEYWORDS):
+                        dt_series = pd.to_datetime(series, errors="coerce")
+
+                if dt_series is None:
+                    continue
+                date_masks.append(dt_series.between(start_dt, end_dt, inclusive="both"))
+
+            if date_masks:
+                combined = date_masks[0]
+                for extra in date_masks[1:]:
+                    combined = combined | extra
+                filtered = filtered[combined.fillna(False)]
+
+    return filtered
+
+
+@st.cache_data(ttl=300)
+def _gather_data_status(
+    db_path: Path | None,
+    fichas_path: Path | None,
+    criterios_path: Path | None,
+    oferentes_path: Path | None,
+) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+
+    if db_path and db_path.exists():
+        try:
+            total = count_sqlite_rows(str(db_path), "actos_publicos")
+            ok = total > 0
+            statuses.append(
+                {
+                    "label": "Base panamacompra.db",
+                    "ok": ok,
+                    "detail": f"{total:,} filas en actos_publicos" if ok else "Sin filas visibles en actos_publicos",
+                }
+            )
+        except Exception as exc:  # pragma: no cover
+            statuses.append(
+                {
+                    "label": "Base panamacompra.db",
+                    "ok": False,
+                    "detail": f"No se pudo leer: {exc}",
+                }
+            )
+    else:
+        statuses.append(
+            {
+                "label": "Base panamacompra.db",
+                "ok": False,
+                "detail": "Archivo no encontrado en la ruta configurada.",
+            }
+        )
+
+    def _check_excel(label: str, path_value: Path | None) -> None:
+        if not path_value:
+            statuses.append({"label": label, "ok": False, "detail": "Ruta no configurada."})
+            return
+        path_obj = Path(path_value)
+        if not path_obj.exists():
+            statuses.append({"label": label, "ok": False, "detail": "Archivo no encontrado."})
+            return
+        try:
+            df = pd.read_excel(path_obj, nrows=5)
+            has_rows = not df.empty
+        except Exception as exc:  # pragma: no cover
+            statuses.append({"label": label, "ok": False, "detail": f"No se pudo leer: {exc}"})
+            return
+        statuses.append(
+            {
+                "label": label,
+                "ok": has_rows,
+                "detail": "Datos detectados" if has_rows else "El archivo no tiene filas visibles.",
+            }
+        )
+
+    _check_excel("Fichas CTNI", fichas_path)
+    _check_excel("Criterios técnicos", criterios_path)
+    _check_excel("Oferentes y catálogos", oferentes_path)
+
+    return statuses
+
+
+def _clean_drive_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Remueve columnas auxiliares y filas de paginación de los Excel."""
+    if df is None or df.empty:
+        return df
+
+    cols_to_drop = [
+        col for col in df.columns if str(col).strip().lower().startswith("unnamed")
+    ]
+    if cols_to_drop:
+        df = df.drop(columns=cols_to_drop, errors="ignore")
+
+    def _looks_like_pagination(row: pd.Series) -> bool:
+        values: list[int] = []
+        for value in row:
+            if pd.isna(value):
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            if text.endswith("..."):
+                text = text.rstrip(".").strip()
+            if not text.isdigit():
+                return False
+            values.append(int(text))
+        if len(values) < 3:
+            return False
+        expected = list(range(values[0], values[0] + len(values)))
+        return values == expected
+
+    mask = df.apply(_looks_like_pagination, axis=1)
+    if mask.any():
+        df = df[~mask].reset_index(drop=True)
+
+    return df
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -873,6 +3084,7 @@ def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
     return parsed
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
+_apply_visual_theme()
 _require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
 
@@ -1222,7 +3434,7 @@ def render_df(
     metrics_defs = []
     metrics_defs.append({
         "key": "total",
-        "label": "Total de actos públicos",
+        "label": "Total de actos",
         "count": int(len(df_base)),
         "filter": None,
     })
@@ -1265,7 +3477,7 @@ def render_df(
 
     metrics_defs.append({
         "key": "top_unidades",
-        "label": "Top unidades solicitantes (próximamente)",
+        "label": "Top Recomendadas AI",
         "count": None,
         "filter": None,
         "placeholder": True,
@@ -1276,14 +3488,10 @@ def render_df(
         with metric_col:
             label = metric["label"]
             if metric.get("count") is not None:
-                label = f"{label}\n{metric['count']}"
-
-            prefix = "✅ " if active_metric == metric.get("filter") else ""
-            if metric["key"] == "total" and active_metric is None:
-                prefix = "✅ "
+                label = f"{label} ({metric['count']})"
 
             clicked = st.button(
-                prefix + label,
+                label,
                 key=keyp + f"metric_btn_{metric['key']}",
                 use_container_width=True,
             )
@@ -1406,8 +3614,9 @@ def render_panamacompra_db_panel() -> None:
     st.caption(f"Origen configurado: `{db_path}`")
     if not db_path.exists():
         st.warning(
-            "No pudimos abrir el archivo. Verifica que OneDrive est�� sincronizado "
-            "o define `FINAPP_DB_PATH` apuntando a una copia local."
+            "No pudimos abrir el archivo. Verifica que la ruta "
+            "`C:\\Users\\rodri\\GEAPP\\panamacompra.db` existe o define `FINAPP_DB_PATH` "
+            "apuntando a una copia local."
         )
         return
 
@@ -1431,24 +3640,6 @@ def render_panamacompra_db_panel() -> None:
         key="pc_db_table_selector",
     )
 
-    limit = st.slider(
-        "L��mite de filas a mostrar",
-        min_value=100,
-        max_value=5000,
-        value=1000,
-        step=100,
-        help="Ampl��a el l��mite si necesitas revisar m��s registros.",
-    )
-
-    try:
-        preview_df = load_sqlite_preview(db_path_str, selected_table, limit)
-    except sqlite3.OperationalError as exc:
-        st.error(f"No se pudo leer la tabla {selected_table}: {exc}")
-        return
-    except Exception as exc:
-        st.error(f"Error al consultar {selected_table}: {exc}")
-        return
-
     total_rows: int | None = None
     try:
         total_rows = count_sqlite_rows(db_path_str, selected_table)
@@ -1457,15 +3648,130 @@ def render_panamacompra_db_panel() -> None:
     except Exception:
         pass
 
-    if preview_df.empty:
-        st.info("La consulta no devolvi�� filas para la tabla seleccionada.")
-    else:
-        st.dataframe(preview_df, use_container_width=True, height=520)
+    search_text = st.text_input(
+        "Buscar en la tabla",
+        placeholder="Ingresa texto a buscar…",
+        key="pc_db_search",
+    )
+    date_range = st.date_input(
+        "Rango de fechas",
+        value=_default_date_range(),
+        min_value=DEFAULT_DATE_START,
+        max_value=date.today(),
+        key="pc_db_date_range",
+    )
 
-    caption = f"Mostrando hasta {limit} filas."
+    max_limit = total_rows if total_rows and total_rows > 0 else 5000
+    max_limit = max(1, max_limit)
+    min_limit = max(1, min(100, max_limit))
+    default_limit = max(min_limit, min(1000, max_limit))
+
+    limit = st.slider(
+        "Límite de filas a mostrar",
+        min_value=min_limit,
+        max_value=max_limit,
+        value=default_limit,
+        step=max(1, min(100, max_limit // 5)),
+        help="Amplía el límite si necesitas revisar más registros.",
+    )
+
+    try:
+        preview_df = load_sqlite_preview(
+            db_path_str,
+            selected_table,
+            limit,
+            search_text=search_text,
+        )
+    except sqlite3.OperationalError as exc:
+        st.error(f"No se pudo leer la tabla {selected_table}: {exc}")
+        return
+    except Exception as exc:
+        st.error(f"Error al consultar {selected_table}: {exc}")
+        return
+
+    filtered_df = _filter_dataframe(preview_df, search_text, date_range)
+
+    if filtered_df.empty:
+        st.info("No hay filas que coincidan con los filtros aplicados.")
+    else:
+        st.dataframe(filtered_df, use_container_width=True, height=520)
+
+    caption = f"Mostrando {len(filtered_df)} filas (tope configurado {limit})."
     if total_rows is not None:
         caption += f" Total en `{selected_table}`: {total_rows:,}."
     st.caption(caption)
+
+
+def render_drive_excel_panel(title: str, file_path: Path | None, key_prefix: str) -> None:
+    """Muestra una vista previa de un archivo Excel sincronizado desde Drive."""
+    st.divider()
+    st.subheader(title)
+
+    if not file_path:
+        st.info("No hay rutas configuradas para este archivo.")
+        return
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        st.warning(
+            "No pudimos abrir el archivo. Verifica que la sincronización desde Drive "
+            "esté funcionando o actualiza los secrets con el ID correcto."
+        )
+        return
+
+    try:
+        df = load_excel_file(str(file_path))
+    except Exception as exc:
+        st.error(f"No pudimos leer `{file_path.name}`: {exc}")
+        return
+
+    df = _clean_drive_dataframe(df)
+
+    total_rows = len(df.index)
+    if total_rows == 0:
+        st.info("El archivo no contiene datos visibles.")
+        return
+
+    search_text = st.text_input(
+        "Buscar en el archivo",
+        placeholder="Ingresa texto a buscar…",
+        key=f"{key_prefix}_search",
+    )
+
+    max_limit = total_rows if total_rows and total_rows > 0 else 5000
+    max_limit = max(1, max_limit)
+    min_limit = max(1, min(100, max_limit))
+    default_limit = max(min_limit, min(1000, max_limit))
+
+    slider_key = f"{key_prefix}_excel_limit"
+    if slider_key in st.session_state:
+        current_value = st.session_state[slider_key]
+        if current_value < min_limit or current_value > max_limit:
+            st.session_state[slider_key] = default_limit
+
+    if max_limit <= min_limit:
+        limit = max_limit
+    else:
+        step = max(1, min(100, max_limit // 5))
+        limit = st.slider(
+            "Límite de filas a mostrar",
+            min_value=min_limit,
+            max_value=max_limit,
+            value=default_limit,
+            step=step,
+            key=slider_key,
+        )
+
+    preview_df = df.head(limit)
+    filtered_df = _filter_dataframe(preview_df, search_text, None)
+
+    if filtered_df.empty:
+        st.info("No hay filas que coincidan con los filtros aplicados.")
+    else:
+        st.dataframe(filtered_df, use_container_width=True, height=520)
+    st.caption(
+        f"Mostrando {len(filtered_df)} filas (tope configurado {limit}). Total en el archivo: {total_rows:,}."
+    )
 
 # ---- UI: pestañas de categorías + desplegable de hojas ----
 pc_state_df = load_pc_state()
@@ -1505,4 +3811,32 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
-render_panamacompra_db_panel()
+analysis_expanded = st.session_state.get(ANALYSIS_PANEL_EXPANDED_KEY, False)
+with st.expander("Análisis de actos públicos", expanded=analysis_expanded):
+    st.session_state[ANALYSIS_PANEL_EXPANDED_KEY] = True
+    render_supplier_top_panel()
+
+
+db_panel_expanded = st.session_state.get(DB_PANEL_EXPANDED_KEY, False)
+with st.expander(
+    "Base de datos de actos publicos, fichas y oferentes",
+    expanded=db_panel_expanded,
+):
+    st.session_state[DB_PANEL_EXPANDED_KEY] = True
+    render_panamacompra_db_panel()
+    render_drive_excel_panel(
+        "Fichas tecnicas",
+        LOCAL_FICHAS_CTNI,
+        "fichas_ctni",
+    )
+    render_drive_excel_panel(
+        "Criterios tecnicos",
+        LOCAL_CRITERIOS_TECNICOS,
+        "criterios_tecnicos",
+    )
+    render_drive_excel_panel(
+        "Oferentes y Catalogos",
+        LOCAL_OFERENTES_CATALOGOS,
+        "oferentes_catalogos",
+    )
+

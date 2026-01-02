@@ -12,6 +12,111 @@ from __future__ import annotations
 import uuid, time
 import streamlit as st
 st.set_page_config(page_title="Finanzas Operativas", page_icon="📊", layout="wide")
+def _apply_visual_theme() -> None:
+    """Capa de estilos oscuros sin tocar la lógica ni el layout."""
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600&display=swap');
+
+:root {
+  --pc-bg: #0b1224;
+  --pc-surface: #0f172a;
+  --pc-card: rgba(255,255,255,0.04);
+  --pc-border: rgba(255,255,255,0.08);
+  --pc-accent: #22c55e;
+  --pc-accent-2: #0ea5e9;
+  --pc-text: #e7edf7;
+  --pc-muted: #9fb2c7;
+}
+
+.stApp {
+  background: radial-gradient(140% 120% at 18% 10%, #1c3d7133 0%, transparent 40%),
+              radial-gradient(120% 120% at 80% 0%, #0ea5e926 0%, transparent 45%),
+              linear-gradient(125deg, #0b1224 0%, #0c1a30 45%, #10223f 100%);
+  color: var(--pc-text);
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+}
+
+.block-container { padding-top: 1.25rem; max-width: 1280px; }
+h1, h2, h3, h4 { color: var(--pc-text); font-family: 'Space Grotesk','Manrope',sans-serif; letter-spacing: -0.015em; }
+label { color: #cdd6e5 !important; font-weight: 600; }
+[data-testid="stMarkdown"] a { color: var(--pc-accent-2); text-decoration: none; }
+[data-testid="stMarkdown"] a:hover { text-decoration: underline; }
+
+div.stButton>button,
+[data-testid="stForm"] button,
+[data-testid="stFormSubmitButton"] button {
+  background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent));
+  color: #f8fbff;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 12px;
+  padding: 0.5rem 0.9rem;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(14,165,233,0.18);
+}
+div.stButton>button:hover,
+[data-testid="stForm"] button:hover,
+[data-testid="stFormSubmitButton"] button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(34,197,94,0.28);
+}
+
+.stTabs [data-baseweb="tab"] { color: #c8d2e3; padding: 0.6rem 0.9rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px 10px 0 0; font-weight: 600; }
+.stTabs [data-baseweb="tab"][aria-selected="true"] { background: rgba(34,197,94,0.16); border-color: rgba(34,197,94,0.35); color: #f9fbff; }
+
+div[data-testid="stExpander"] { background: rgba(255,255,255,0.03); border: 1px solid var(--pc-border); border-radius: 14px; }
+div[data-testid="stExpander"] summary { color: var(--pc-text); font-weight: 700; }
+div[data-testid="stExpander"] > details { background: var(--pc-card); border-radius: 12px; overflow: hidden; border: 1px solid var(--pc-border); }
+div[data-testid="stExpander"] > details > summary { background: linear-gradient(120deg, rgba(14,165,233,0.12), rgba(34,197,94,0.10)); color: var(--pc-text); padding: 10px 14px; border-bottom: 1px solid var(--pc-border); }
+div[data-testid="stExpander"] > details[open] > summary { background: linear-gradient(120deg, rgba(14,165,233,0.16), rgba(34,197,94,0.14)); }
+div[data-testid="stExpander"] > details > div[role="group"] { background: #0c1528; padding: 12px 14px 16px; }
+
+[data-testid="stForm"], form { background: #0f172a !important; border: 1px solid var(--pc-border) !important; border-radius: 12px !important; box-shadow: 0 10px 28px rgba(0,0,0,0.18); }
+[data-testid="stForm"] > div { background: transparent !important; }
+
+.stTextInput>div>div>input, .stTextArea textarea, [data-baseweb="select"]>div {
+  background: #0f172a; color: var(--pc-text); border: 1px solid var(--pc-border); border-radius: 12px; box-shadow: inset 0 0 0 1px rgba(14,165,233,0.08);
+}
+input:not([type="checkbox"]):not([type="radio"]), textarea { background: #0f172a !important; color: var(--pc-text) !important; border: 1px solid var(--pc-border) !important; border-radius: 12px !important; }
+.stDateInput input { background: #0f172a !important; color: var(--pc-text) !important; border: 1px solid var(--pc-border) !important; }
+.stSlider [role="slider"] { background: linear-gradient(135deg, var(--pc-accent-2), var(--pc-accent)); box-shadow: 0 0 0 4px rgba(34,197,94,0.2); }
+.stSlider [data-baseweb="slider"]>div>div { background: rgba(255,255,255,0.08); height: 6px; }
+input::placeholder, textarea::placeholder { color: #8fa2bd; }
+
+[data-testid="stDataFrame"] { background: rgba(15,23,42,0.5); border: 1px solid var(--pc-border); border-radius: 12px; padding: 6px; }
+.dataframe thead tr { background: rgba(255,255,255,0.05); }
+.stDataFrame thead th { color: #e9effa; }
+.stDataFrame tbody td { color: #e4e9f3; }
+.stDataFrame tbody tr:nth-child(odd) { background: rgba(255,255,255,0.02); }
+.dataframe tbody tr:hover { background: rgba(14,165,233,0.08); }
+.stDataFrame table, .stDataFrame tbody tr, .stDataFrame tbody td { background: transparent !important; }
+[data-testid="stDataFrame"] .ag-theme-streamlit, [data-testid="stDataFrame"] .ag-root-wrapper, [data-testid="stDataFrame"] .ag-root-wrapper-body { background-color: rgba(15,23,42,0.6) !important; }
+[data-testid="stDataFrame"] .ag-root, [data-testid="stDataFrame"] .ag-body, [data-testid="stDataFrame"] .ag-body-viewport, [data-testid="stDataFrame"] .ag-center-cols-viewport, [data-testid="stDataFrame"] .ag-center-cols-container, [data-testid="stDataFrame"] .ag-center-cols-clipper, [data-testid="stDataFrame"] .ag-pinned-left-cols-container, [data-testid="stDataFrame"] .ag-pinned-right-cols-container, [data-testid="stDataFrame"] .ag-body-horizontal-scroll, [data-testid="stDataFrame"] .ag-body-vertical-scroll { background: rgba(15,23,42,0.55) !important; }
+[data-testid="stDataFrame"] .ag-center-cols-container .ag-row, [data-testid="stDataFrame"] .ag-pinned-left-cols-container .ag-row, [data-testid="stDataFrame"] .ag-pinned-right-cols-container .ag-row { background: transparent !important; }
+[data-testid="stDataFrame"] .ag-row:nth-child(odd) { background: rgba(255,255,255,0.02) !important; }
+[data-testid="stDataFrame"] .ag-row-hover { background: rgba(14,165,233,0.08) !important; }
+[data-testid="stDataFrame"] .ag-cell { background: transparent !important; color: #e6ebf7 !important; border-color: var(--pc-border) !important; }
+[data-testid="stDataFrame"] .ag-row-even .ag-cell { background: rgba(255,255,255,0.01) !important; }
+[data-testid="stDataFrame"] .ag-row-odd .ag-cell { background: rgba(255,255,255,0.02) !important; }
+[data-testid="stDataFrame"] .ag-ltr .ag-cell-focus, [data-testid="stDataFrame"] .ag-ltr .ag-cell-no-focus { border-color: rgba(34,197,94,0.35) !important; outline: none !important; }
+[data-testid="stDataFrame"] .ag-watermark { display: none !important; }
+
+[data-testid="stDataEditor"] { background: rgba(15,23,42,0.45); border: 1px solid var(--pc-border); border-radius: 12px; }
+[data-testid="stDataEditor"] table, [data-testid="stDataEditor"] tbody tr, [data-testid="stDataEditor"] tbody td { background: transparent !important; color: #e4e9f3; }
+[data-testid="stDataEditor"] tbody tr:nth-child(odd) { background: rgba(255,255,255,0.02) !important; }
+[data-testid="stDataEditor"] tbody tr:hover { background: rgba(14,165,233,0.08) !important; }
+
+.stAlert { border-radius: 12px; border: 1px solid var(--pc-border); }
+[data-testid="stMetricValue"] { color: var(--pc-accent); font-weight: 800; }
+[data-testid="stMetricDelta"] { color: var(--pc-accent-2); }
+
+@media (max-width: 1180px) { .block-container { max-width: 100%; padding-top: 1rem; } }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+_apply_visual_theme()
 import pandas as pd
 from datetime import date
 
@@ -696,6 +801,8 @@ if search_q.strip():
 # Reales (excluyen por cobrar / por pagar)
 df_ing_reales  = df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "No"].copy()
 df_gas_reales  = df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "No"].copy()
+if not df_gas_reales.empty and COL_CAT in df_gas_reales.columns:
+    df_gas_reales = df_gas_reales[df_gas_reales[COL_CAT].astype(str) != "Miscelaneos"].copy()
 
 # -------------------- KPIs principales --------------------
 ing_total = float(df_ing_reales[COL_MONTO].sum()) if COL_MONTO in df_ing_reales.columns else 0.0
@@ -952,7 +1059,7 @@ if ing_should_expand:
 with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     _prepare_entry_defaults("ing")
 
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
     with c1:
         empresa_ing = st.selectbox(
             "Empresa",
@@ -969,6 +1076,14 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             on_change=lambda: _mark_form_force_open("ing"),
         )
     with c3:
+        categoria_ing = st.selectbox(
+            "Categoria",
+            ["Proyectos", "Oficina"],
+            index=0,
+            key="ing_categoria_quick",
+            on_change=lambda: _mark_form_force_open("ing"),
+        )
+    with c4:
         monto_nuevo = st.number_input(
             "Monto",
             min_value=0.0,
@@ -976,7 +1091,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             key="ing_monto_quick",
             on_change=lambda: _mark_form_force_open("ing"),
         )
-    with c4:
+    with c5:
         por_cobrar_nuevo = st.selectbox(
             "Por_cobrar",
             ["No", "Sí"],
@@ -985,25 +1100,38 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             on_change=lambda: _mark_form_force_open("ing"),
         )
 
-    ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
-    client_options = _client_options_for_company(ing_company_code)
-    _ensure_client_selection("ing", client_options)
+    cliente_id = ""
+    cliente_nombre = ""
+    proyecto_id = ""
+    if categoria_ing == "Proyectos":
+        ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
+        client_options = _client_options_for_company(ing_company_code)
+        _ensure_client_selection("ing", client_options)
 
-    st.selectbox(
-        "Cliente",
-        client_options,
-        key="ing_cliente_raw",
-        on_change=lambda prefix="ing": _on_client_change(prefix, mark_open=True),
-    )
-    project_options = _build_project_options("ing")
-    if st.session_state.get("ing_proyecto_raw") not in project_options:
-        st.session_state["ing_proyecto_raw"] = project_options[0] if project_options else ""
-    st.selectbox(
-        "Proyecto",
-        project_options,
-        key="ing_proyecto_raw",
-        on_change=lambda prefix="ing": _on_project_change(prefix, mark_open=True),
-    )
+        st.selectbox(
+            "Cliente",
+            client_options,
+            key="ing_cliente_raw",
+            on_change=lambda prefix="ing": _on_client_change(prefix, mark_open=True),
+        )
+        project_options = _build_project_options("ing")
+        if st.session_state.get("ing_proyecto_raw") not in project_options:
+            st.session_state["ing_proyecto_raw"] = project_options[0] if project_options else ""
+        st.selectbox(
+            "Proyecto",
+            project_options,
+            key="ing_proyecto_raw",
+            on_change=lambda prefix="ing": _on_project_change(prefix, mark_open=True),
+        )
+        cliente_id = st.session_state.get("ing_cliente_id", "")
+        cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
+        proyecto_id = st.session_state.get("ing_proyecto_id", "")
+    else:
+        st.session_state["ing_cliente_id"] = ""
+        st.session_state["ing_cliente_nombre"] = ""
+        st.session_state["ing_proyecto_id"] = ""
+        st.session_state["ing_proyecto_raw"] = ""
+        st.session_state["ing_cliente_raw"] = ""
     desc_nueva = st.text_input(
         "Descripcion",
         key="ing_desc_quick",
@@ -1013,14 +1141,19 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
 
     if submitted_ing:
-        cliente_id = st.session_state.get("ing_cliente_id", "")
-        cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
-        proyecto_id = st.session_state.get("ing_proyecto_id", "")
-        linked_client_id = st.session_state.get("ing_proyecto_cliente_id")
-        linked_client_name = st.session_state.get("ing_proyecto_cliente_nombre")
-        if linked_client_id:
-            cliente_id = linked_client_id
-            cliente_nombre = linked_client_name or cliente_nombre
+        if categoria_ing == "Proyectos":
+            cliente_id = st.session_state.get("ing_cliente_id", "")
+            cliente_nombre = st.session_state.get("ing_cliente_nombre", "")
+            proyecto_id = st.session_state.get("ing_proyecto_id", "")
+            linked_client_id = st.session_state.get("ing_proyecto_cliente_id")
+            linked_client_name = st.session_state.get("ing_proyecto_cliente_nombre")
+            if linked_client_id:
+                cliente_id = linked_client_id
+                cliente_nombre = linked_client_name or cliente_nombre
+        else:
+            cliente_id = ""
+            cliente_nombre = ""
+            proyecto_id = ""
 
         hoy_ts = pd.Timestamp(_today())
         rid = uuid.uuid4().hex
@@ -1030,6 +1163,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             COL_ROWID: rid,
             COL_FECHA: _ts(fecha_nueva),
             COL_MONTO: float(monto_nuevo),
+            COL_CAT: categoria_ing,
             COL_PROY: (proyecto_id or "").strip(),
             COL_CLI_ID: (cliente_id or "").strip(),
             COL_CLI_NOM: (cliente_nombre or "").strip(),
@@ -1138,7 +1272,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     with g3:
         categoria_g = st.selectbox(
             "Categoria",
-            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina"],
+            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos"],
             index=0,
             key="gas_categoria_quick",
             on_change=lambda: _mark_form_force_open("gas"),
@@ -1240,7 +1374,7 @@ gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
     COL_CAT:     st.column_config.SelectboxColumn(
         COL_CAT,
-        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Comisiones"],
+        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos", "Comisiones"],
     ),
     COL_CONC:    st.column_config.TextColumn("Descripción"),
     COL_PROV:    st.column_config.TextColumn("Proveedor"),  # ← NUEVO
