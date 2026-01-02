@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
 def _require_authentication() -> None:
     status = st.session_state.get("authentication_status")
     if status is True:
@@ -356,101 +357,17 @@ def _render_quote_preview(
 """
 
 
-def _pdf_download_component(fragment_html: str, filename: str) -> str:
+def _print_script(fragment_html: str) -> str:
     payload = json.dumps(fragment_html)
-    filename_payload = json.dumps(filename)
     return f"""
-<style>
-  .pdf-actions {{
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-family: "Poppins", "Segoe UI", Arial, sans-serif;
-  }}
-  .pdf-actions button {{
-    background: #1f2f6e;
-    color: #ffffff;
-    border: none;
-    border-radius: 10px;
-    padding: 10px 16px;
-    font-size: 0.9rem;
-    cursor: pointer;
-  }}
-  .pdf-actions button:disabled {{
-    opacity: 0.6;
-    cursor: default;
-  }}
-  .pdf-status {{
-    font-size: 0.85rem;
-    color: #5a6a85;
-  }}
-  #pdf-root {{
-    position: fixed;
-    left: -10000px;
-    top: 0;
-  }}
-</style>
-<div class="pdf-actions">
-  <button id="download-btn">Descargar PDF</button>
-  <span class="pdf-status" id="pdf-status"></span>
-</div>
-<div id="pdf-root"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<div id="print-root"></div>
 <script>
   const html = {payload};
-  const filename = {filename_payload};
-  const root = document.getElementById('pdf-root');
-  const button = document.getElementById('download-btn');
-  const status = document.getElementById('pdf-status');
+  const root = document.getElementById('print-root');
   root.innerHTML = html;
-
-  async function generatePdf() {{
-    if (!window.html2canvas || !window.jspdf) {{
-      status.textContent = 'No se pudo cargar el generador PDF.';
-      return;
-    }}
-    button.disabled = true;
-    status.textContent = 'Generando PDF...';
-    const canvas = await html2canvas(root, {{
-      scale: 2,
-      useCORS: true,
-      backgroundColor: '#ffffff'
-    }});
-    const imgData = canvas.toDataURL('image/png');
-    const {{ jsPDF }} = window.jspdf;
-    const pdf = new jsPDF('p', 'mm', 'a4');
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const imgProps = pdf.getImageProperties(imgData);
-    const imgWidth = pageWidth;
-    const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
-
-    if (imgHeight <= pageHeight) {{
-      pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
-    }} else {{
-      let heightLeft = imgHeight;
-      let position = 0;
-      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-      heightLeft -= pageHeight;
-      while (heightLeft > 0) {{
-        position = heightLeft - imgHeight;
-        pdf.addPage();
-        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-        heightLeft -= pageHeight;
-      }}
-    }}
-    pdf.save(filename);
-    status.textContent = 'PDF listo.';
-    button.disabled = false;
-  }}
-
-  button.addEventListener('click', () => {{
-    generatePdf().catch(() => {{
-      status.textContent = 'Error al generar el PDF.';
-      button.disabled = false;
-    }});
-  }});
+  setTimeout(() => {{
+    window.print();
+  }}, 300);
 </script>
 """
 
@@ -566,17 +483,18 @@ with st.expander("Cotizacion - Privada", expanded=False):
             terms=terms,
             print_mode=False,
         )
-        pdf_html = _render_quote_preview(
-            template=TEMPLATES[company],
-            client_name=client_name,
-            client_address=client_address,
-            quote_number=quote_number,
-            quote_date=quote_date,
-            items=items_df,
-            tax_pct=tax_pct,
-            terms=terms,
-            print_mode=True,
-        )
-        filename = f"Cotizacion_{quote_number or 'cliente'}.pdf"
-        components.html(_pdf_download_component(pdf_html, filename), height=70)
+        if st.button("Imprimir (PDF)", use_container_width=True):
+            print_html = _render_quote_preview(
+                template=TEMPLATES[company],
+                client_name=client_name,
+                client_address=client_address,
+                quote_number=quote_number,
+                quote_date=quote_date,
+                items=items_df,
+                tax_pct=tax_pct,
+                terms=terms,
+                print_mode=True,
+            )
+            components.html(_print_script(print_html), height=1, scrolling=False)
+        st.caption("Para mantener el fondo, activa Background graphics al imprimir.")
         st.markdown(preview_html, unsafe_allow_html=True)
