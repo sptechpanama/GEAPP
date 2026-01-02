@@ -182,11 +182,8 @@ def _render_quote_preview(
     height: auto;
   }}
   .logo img {{
-    width: 130px;
+    width: 110px;
     height: auto;
-    background: #ffffff;
-    border-radius: 999px;
-    padding: 6px;
   }}
   .brand-meta {{
     text-align: left;
