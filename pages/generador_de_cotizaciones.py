@@ -9,26 +9,7 @@ import bcrypt
 import streamlit_authenticator as stauth
 
 
-def _require_authentication() -> None:
-    _rehydrate_authentication()
-    status = st.session_state.get("authentication_status")
-    if status is True:
-        return
-    if status is False:
-        st.error("Credenciales invalidas. Vuelve a la portada para iniciar sesion.")
-    else:
-        st.warning("Debes iniciar sesion para entrar.")
-    try:
-        st.switch_page("Inicio.py")
-    except Exception:
-        st.stop()
-    st.stop()
-
-
-def _rehydrate_authentication() -> None:
-    if st.session_state.get("authentication_status") is not None:
-        return
-
+def _build_authenticator() -> stauth.Authenticate:
     users = {
         "rsanchez": ("Rodrigo Sanchez", "Sptech-71"),
         "isanchez": ("Irvin Sanchez", "Sptech-71"),
@@ -42,18 +23,40 @@ def _rehydrate_authentication() -> None:
     for user, (name, plain) in users.items():
         credentials["usernames"][user] = {"name": name, "password": _hash(plain)}
 
-    authenticator = stauth.Authenticate(
+    return stauth.Authenticate(
         credentials,
         "finapp_auth",
         "finapp_key_123",
         30,
     )
 
-    try:
-        authenticator.login(" ", location="sidebar", key="auth_cotizaciones_silent")
-        st.sidebar.empty()
-    except Exception:
+
+def _require_authentication() -> None:
+    authenticator = _build_authenticator()
+    status = st.session_state.get("authentication_status")
+
+    if status is None:
+        try:
+            authenticator.login(" ", location="sidebar", key="auth_cotizaciones_silent")
+            st.sidebar.empty()
+        except Exception:
+            pass
+        status = st.session_state.get("authentication_status")
+
+    if status is not True:
+        st.subheader("Login")
+        try:
+            authenticator.login("Login", location="main", key="auth_cotizaciones_form")
+        except Exception:
+            pass
+        status = st.session_state.get("authentication_status")
+
+    if status is True:
+        authenticator.logout("Cerrar sesion", location="sidebar")
         return
+
+    st.info("Inicia sesion para continuar.")
+    st.stop()
 
 
 @st.cache_data(show_spinner=False)
