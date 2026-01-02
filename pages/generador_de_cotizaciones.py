@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
 def _require_authentication() -> None:
     status = st.session_state.get("authentication_status")
     if status is True:
@@ -110,7 +111,23 @@ def _render_quote_preview(
     extra_css = ""
     if print_mode:
         extra_css = """
-  @page { size: A4; margin: 12mm; }
+  @page { size: A4; margin: 10mm; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+  }
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .quote-page {
+    width: 210mm;
+    min-height: 297mm;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+  }
   @media print {
     .quote-page { box-shadow: none; border: none; }
   }
@@ -327,33 +344,17 @@ def _render_quote_preview(
 """
 
 
-def _render_print_document(fragment: str) -> str:
-    return (
-        "<!doctype html>"
-        "<html>"
-        "<head><meta charset='utf-8'></head>"
-        "<body style='margin:0;padding:0;background:#ffffff;'>"
-        f"{fragment}"
-        "</body>"
-        "</html>"
-    )
-
-
-def _print_script(doc_html: str) -> str:
-    payload = json.dumps(doc_html)
+def _print_script(fragment_html: str) -> str:
+    payload = json.dumps(fragment_html)
     return f"""
+<div id="print-root"></div>
 <script>
   const html = {payload};
-  const win = window.open('', '_blank');
-  if (win) {{
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
-    win.focus();
-    setTimeout(() => {{ win.print(); }}, 500);
-  }} else {{
-    alert('Permite ventanas emergentes para imprimir.');
-  }}
+  const root = document.getElementById('print-root');
+  root.innerHTML = html;
+  setTimeout(() => {{
+    window.print();
+  }}, 300);
 </script>
 """
 
@@ -481,6 +482,6 @@ with st.expander("Cotizacion - Privada", expanded=False):
                 terms=terms,
                 print_mode=True,
             )
-            components.html(_print_script(_render_print_document(print_html)), height=0)
-        st.caption("Si no se ven los fondos, habilita Background graphics en imprimir.")
+            components.html(_print_script(print_html), height=1, scrolling=False)
+        st.caption("Para mantener el fondo, activa Background graphics al imprimir.")
         st.markdown(preview_html, unsafe_allow_html=True)
