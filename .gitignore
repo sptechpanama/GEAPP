@@ -8,14 +8,6 @@ __pycache__/
 .streamlit/
 !.streamlit/config.toml      # permite config, pero no secrets
 .streamlit/secrets.toml      # NO subir
-panamacompra.db
-todas_las_fichas.xlsx
-oferentes_activos.xlsx
-fichas_ctni.xlsx
-criterios_tecnicos.xlsx
-oferentes_catalogos.xlsx
-data/
-outputs/
 
 # Claves/credenciales (variantes comunes)
 *service*account*.json
