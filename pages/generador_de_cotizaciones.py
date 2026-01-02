@@ -127,19 +127,6 @@ def _render_quote_preview(
     border: none;
     border-radius: 0;
     box-shadow: none;
-    padding-bottom: 55mm;
-  }
-  .items,
-  .totals,
-  .conditions {
-    break-inside: avoid;
-    page-break-inside: avoid;
-  }
-  .wave-bottom {
-    width: 320px;
-    height: 320px;
-    bottom: -240px;
-    left: -200px;
   }
   @media print {
     .quote-page { box-shadow: none; border: none; }
