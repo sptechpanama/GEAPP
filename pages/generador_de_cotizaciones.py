@@ -1,12 +1,10 @@
 import base64
 import html
-import json
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 def _require_authentication() -> None:
     status = st.session_state.get("authentication_status")
     if status is True:
@@ -55,7 +53,6 @@ def _render_quote_preview(
     items: pd.DataFrame,
     tax_pct: float,
     terms: dict,
-    print_mode: bool = False,
 ) -> str:
     logo_b64 = _load_logo_b64(template["logo_path"])
     logo_html = (
@@ -107,18 +104,8 @@ def _render_quote_preview(
     accent = template["accent"]
     accent_light = template["accent_light"]
 
-    extra_css = ""
-    if print_mode:
-        extra_css = """
-  @page { size: A4; margin: 12mm; }
-  @media print {
-    .quote-page { box-shadow: none; border: none; }
-  }
-"""
-
     return f"""
 <style>
-{extra_css}
   .quote-wrap {{
     width: 100%;
   }}
@@ -324,38 +311,10 @@ def _render_quote_preview(
 """
 
 
-def _render_print_document(fragment: str) -> str:
-    return (
-        "<!doctype html>"
-        "<html>"
-        "<head><meta charset='utf-8'></head>"
-        "<body style='margin:0;padding:0;background:#ffffff;'>"
-        f"{fragment}"
-        "</body>"
-        "</html>"
-    )
-
-
-def _print_script(doc_html: str) -> str:
-    payload = json.dumps(doc_html)
-    return f"""
-<script>
-  const html = {payload};
-  const win = window.open('', '_blank');
-  if (win) {{
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
-    win.focus();
-    setTimeout(() => {{ win.print(); }}, 500);
-  }} else {{
-    alert('Permite ventanas emergentes para imprimir.');
-  }}
-</script>
-"""
-
+BUILD_ID = "gen-2025-11-07-01"
 
 st.set_page_config(page_title="Generador de Cotizaciones", layout="wide")
+st.caption(f"Build: {BUILD_ID}")
 _require_authentication()
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -393,11 +352,6 @@ with st.expander("Cotizacion - Privada", expanded=False):
     with left:
         st.subheader("Datos generales")
         company = st.selectbox("Empresa", list(TEMPLATES.keys()))
-        logo_path = TEMPLATES[company]["logo_path"]
-        if not logo_path.exists():
-            st.warning(f"Logo no encontrado: {logo_path.name}")
-        else:
-            st.caption(f"Logo: {logo_path.name}")
         quote_number = st.text_input("Numero de cotizacion", value="COT-001")
         quote_date = st.date_input("Fecha", value=date.today())
 
@@ -464,20 +418,5 @@ with st.expander("Cotizacion - Privada", expanded=False):
             items=items_df,
             tax_pct=tax_pct,
             terms=terms,
-            print_mode=False,
         )
-        if st.button("Imprimir (PDF)", use_container_width=True):
-            print_html = _render_quote_preview(
-                template=TEMPLATES[company],
-                client_name=client_name,
-                client_address=client_address,
-                quote_number=quote_number,
-                quote_date=quote_date,
-                items=items_df,
-                tax_pct=tax_pct,
-                terms=terms,
-                print_mode=True,
-            )
-            components.html(_print_script(_render_print_document(print_html)), height=0)
-        st.caption("Si no se ven los fondos, habilita Background graphics en imprimir.")
         st.markdown(preview_html, unsafe_allow_html=True)
