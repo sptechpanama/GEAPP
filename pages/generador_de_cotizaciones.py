@@ -60,6 +60,8 @@ def _build_invoice_html(
     logo_b64 = branding.get("logo_b64", "")
     background_b64 = branding.get("background_b64", "")
     contacto_html = branding.get("contacto_html", "")
+    logo_box = int(branding.get("logo_box", 190))
+    logo_size = int(branding.get("logo_size", 180))
 
     subtotal = float(items['importe'].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
@@ -246,8 +248,8 @@ def _build_invoice_html(
   }}
 </style>
 <div class="quote-page" id="quote-root">
-  <div class="logo">
-    {"<img src='data:image/png;base64," + logo_b64 + "' alt='logo' />" if logo_b64 else ""}
+  <div class="logo" style="width:{logo_box}px;height:{logo_box}px;">
+    {"<img src='data:image/png;base64," + logo_b64 + "' alt='logo' style='width:" + str(logo_size) + "px;height:" + str(logo_size) + "px;' />" if logo_b64 else ""}
   </div>
   <div class="header-info">
     <div class="empresa">{html.escape(empresa)}</div>
@@ -365,11 +367,13 @@ COMPANIES = {
         "accent": "#0e4aa0",
         "logo_b64": _load_logo_b64(RS_LOGO_PATH, RS_LOGO_FALLBACK),
         "background_b64": BACKGROUND_B64,
+        "logo_box": 210,
+        "logo_size": 200,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
         PH Bonanza Plaza, Bella Vista<br>
         TELÉFONO: +507 68475616<br>
-        EMAIL: RODRIGOSJESUS@HOTMAIL.COM
+        EMAIL: rodrigojesus-@hotmail.com
         </div>""",
     },
     "RIR Medical": {
