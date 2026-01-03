@@ -77,6 +77,7 @@ COT_PREFIX = {
     "RS Engineering": "RS",
     "RIR Medical": "RIR",
 }
+DEFAULT_COT_DRIVE_FOLDER_ID = "0AOB-QlptrUHYUk9PVA"
 
 
 def _ensure_cotizaciones_sheet(client, sheet_id: str) -> None:
@@ -125,28 +126,41 @@ def _get_drive_client(creds):
     return build("drive", "v3", credentials=creds)
 
 
-def _find_or_create_folder(drive, name: str, parent_id: Optional[str] = None) -> str:
+def _find_or_create_folder(
+    drive,
+    name: str,
+    parent_id: Optional[str] = None,
+    drive_id: Optional[str] = None,
+) -> str:
     query = ["mimeType='application/vnd.google-apps.folder'", "trashed=false", f"name='{name}'"]
     if parent_id:
         query.append(f"'{parent_id}' in parents")
-    resp = drive.files().list(q=" and ".join(query), fields="files(id,name)").execute()
+    list_kwargs = {
+        "q": " and ".join(query),
+        "fields": "files(id,name)",
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
+    }
+    if drive_id:
+        list_kwargs["corpora"] = "drive"
+        list_kwargs["driveId"] = drive_id
+    resp = drive.files().list(**list_kwargs).execute()
     files = resp.get("files", [])
     if files:
         return files[0]["id"]
     metadata = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
     if parent_id:
         metadata["parents"] = [parent_id]
-    created = drive.files().create(body=metadata, fields="id").execute()
+    created = drive.files().create(body=metadata, fields="id", supportsAllDrives=True).execute()
     return created["id"]
 
 
 def _get_drive_folders(drive) -> tuple[str, Dict[str, str]]:
-    base_id = st.secrets.get("app", {}).get("DRIVE_COTIZACIONES_FOLDER_ID")
-    if not base_id:
-        base_id = _find_or_create_folder(drive, "GEAPP Cotizaciones")
+    base_id = st.secrets.get("app", {}).get("DRIVE_COTIZACIONES_FOLDER_ID") or DEFAULT_COT_DRIVE_FOLDER_ID
+    drive_id = base_id
     subfolders = {
-        "RS Engineering": _find_or_create_folder(drive, "RS", base_id),
-        "RIR Medical": _find_or_create_folder(drive, "RIR", base_id),
+        "RS Engineering": _find_or_create_folder(drive, "RS", base_id, drive_id=drive_id),
+        "RIR Medical": _find_or_create_folder(drive, "RIR", base_id, drive_id=drive_id),
     }
     return base_id, subfolders
 
@@ -160,13 +174,23 @@ def _upload_quote_html(
 ) -> dict:
     media = MediaIoBaseUpload(BytesIO(html_body.encode("utf-8")), mimetype="text/html", resumable=False)
     if existing_file_id:
-        return drive.files().update(fileId=existing_file_id, media_body=media, fields="id,name").execute()
+        return drive.files().update(
+            fileId=existing_file_id,
+            media_body=media,
+            fields="id,name",
+            supportsAllDrives=True,
+        ).execute()
     metadata = {"name": filename, "parents": [folder_id]}
-    return drive.files().create(body=metadata, media_body=media, fields="id,name").execute()
+    return drive.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id,name",
+        supportsAllDrives=True,
+    ).execute()
 
 
 def _download_drive_file(drive, file_id: str) -> bytes:
-    request = drive.files().get_media(fileId=file_id)
+    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
     fh = BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
@@ -939,7 +963,10 @@ with tab_historial:
                             write_worksheet(client, sheet_id, SHEET_NAME_COT, df_write)
                             if sel_row.get("drive_file_id") and creds is not None:
                                 drive = _get_drive_client(creds)
-                                drive.files().delete(fileId=sel_row["drive_file_id"]).execute()
+                                drive.files().delete(
+                                    fileId=sel_row["drive_file_id"],
+                                    supportsAllDrives=True,
+                                ).execute()
                             st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
                             st.success("Cotización eliminada.")
                             st.rerun()
