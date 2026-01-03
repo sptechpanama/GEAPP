@@ -122,23 +122,23 @@ def _build_invoice_html(
     top: 140px;
     left: 340px;
     width: 520px;
-    color: #f8fafc;
+    color: #6b7280;
     line-height: 1.35;
-    text-shadow: 0 1px 2px rgba(0,0,0,0.35);
   }}
   .header-info .empresa {{
     font-size: 28px;
     font-weight: 800;
+    color: #4b5563;
     margin: 0 0 8px 0;
   }}
   .header-info .datos {{
     font-size: 16px;
-    color: #f8fafc;
+    color: #6b7280;
   }}
   .header-info .meta {{
     margin-top: 10px;
     font-size: 16px;
-    color: #f8fafc;
+    color: #6b7280;
   }}
   .title {{
     position: absolute;
@@ -286,10 +286,25 @@ def _build_invoice_html(
 </div>
     """
 
-def _render_pdf_component(html_body: str, filename: str) -> None:
+def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 0.75) -> None:
     """Renderiza la vista previa y un botón JS para exportar a PDF usando html2canvas + jsPDF."""
+    preview_height = min(int(2000 * preview_scale + 220), 2400)
     component_html = f"""
-    <div id="invoice-container">{html_body}</div>
+    <style>
+      .preview-shell {{
+        width: 100%;
+        text-align: center;
+        overflow: auto;
+      }}
+      .preview-scale {{
+        display: inline-block;
+        transform: scale({preview_scale});
+        transform-origin: top center;
+      }}
+    </style>
+    <div class="preview-shell">
+      <div class="preview-scale">{html_body}</div>
+    </div>
     <div style="margin: 10px 0 16px 0;">
       <button id="btn-download" style="
         background: linear-gradient(135deg, #2563eb, #22c55e);
@@ -320,7 +335,7 @@ def _render_pdf_component(html_body: str, filename: str) -> None:
       }});
     </script>
     """
-    components.html(component_html, height=980, scrolling=True)
+    components.html(component_html, height=preview_height, scrolling=True)
 
 
 # ---- Configuración de empresas (membrete) ----
@@ -416,6 +431,13 @@ with st.expander("Cotización - Privada", expanded=False):
     )
 
     st.markdown("### Vista previa")
+    preview_scale = st.slider(
+        "Zoom de vista previa",
+        min_value=0.5,
+        max_value=1.1,
+        value=0.75,
+        step=0.05,
+    )
     condiciones = {
         "Vigencia": vigencia or "—",
         "Forma de pago": forma_pago or "—",
@@ -434,6 +456,10 @@ with st.expander("Cotización - Privada", expanded=False):
         condiciones=condiciones,
     )
 
-    _render_pdf_component(html_body, filename=f"{empresa.replace(' ', '_')}_{numero_cot}.pdf")
+    _render_pdf_component(
+        html_body,
+        filename=f"{empresa.replace(' ', '_')}_{numero_cot}.pdf",
+        preview_scale=preview_scale,
+    )
 
 
