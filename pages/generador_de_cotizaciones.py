@@ -2,13 +2,20 @@
 
 import base64
 import html
+import json
+import uuid
 import os
-from datetime import date
-from typing import Dict, List
+from datetime import date, datetime
+from io import BytesIO
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from gspread.exceptions import WorksheetNotFound
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from sheets import get_client, read_worksheet, write_worksheet
 from ui.theme import apply_global_theme
 
 st.set_page_config(page_title="Generador de cotizaciones", page_icon="🧾", layout="wide")
@@ -36,6 +43,146 @@ def _format_money(value: float) -> str:
     return f"${value:,.2f}"
 
 
+SHEET_NAME_COT = "cotizaciones"
+COT_COLUMNS = [
+    "id",
+    "numero_cotizacion",
+    "prefijo",
+    "secuencia",
+    "empresa",
+    "cliente_nombre",
+    "cliente_direccion",
+    "fecha_cotizacion",
+    "created_at",
+    "updated_at",
+    "moneda",
+    "subtotal",
+    "impuesto_pct",
+    "impuesto_monto",
+    "total",
+    "items_json",
+    "items_resumen",
+    "condiciones_json",
+    "vigencia",
+    "forma_pago",
+    "entrega",
+    "estado",
+    "notas",
+    "drive_file_id",
+    "drive_file_name",
+    "drive_file_url",
+    "drive_folder",
+]
+COT_PREFIX = {
+    "RS Engineering": "RS",
+    "RIR Medical": "RIR",
+}
+
+
+def _ensure_cotizaciones_sheet(client, sheet_id: str) -> None:
+    sh = client.open_by_key(sheet_id)
+    try:
+        sh.worksheet(SHEET_NAME_COT)
+        return
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title=SHEET_NAME_COT, rows=1000, cols=len(COT_COLUMNS))
+        ws.update("A1", [COT_COLUMNS])
+
+
+@st.cache_data(show_spinner=False)
+def _load_cotizaciones_cached(sheet_id: str, cache_token: str) -> pd.DataFrame:
+    client, _ = get_client()
+    _ensure_cotizaciones_sheet(client, sheet_id)
+    df = read_worksheet(client, sheet_id, SHEET_NAME_COT)
+    return df
+
+
+def _normalize_cotizaciones_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in COT_COLUMNS:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[COT_COLUMNS]
+    for col in ("subtotal", "impuesto_pct", "impuesto_monto", "total"):
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
+def _next_sequence(df: pd.DataFrame, prefijo: str) -> int:
+    if df.empty:
+        return 1
+    seq = pd.to_numeric(df.loc[df["prefijo"] == prefijo, "secuencia"], errors="coerce")
+    if seq.dropna().empty:
+        return 1
+    return int(seq.max()) + 1
+
+
+def _build_numero_cot(prefijo: str, secuencia: int) -> str:
+    return f"COT-{prefijo}-{secuencia:04d}"
+
+
+def _get_drive_client(creds):
+    return build("drive", "v3", credentials=creds)
+
+
+def _find_or_create_folder(drive, name: str, parent_id: Optional[str] = None) -> str:
+    query = ["mimeType='application/vnd.google-apps.folder'", "trashed=false", f"name='{name}'"]
+    if parent_id:
+        query.append(f"'{parent_id}' in parents")
+    resp = drive.files().list(q=" and ".join(query), fields="files(id,name)").execute()
+    files = resp.get("files", [])
+    if files:
+        return files[0]["id"]
+    metadata = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+    if parent_id:
+        metadata["parents"] = [parent_id]
+    created = drive.files().create(body=metadata, fields="id").execute()
+    return created["id"]
+
+
+def _get_drive_folders(drive) -> tuple[str, Dict[str, str]]:
+    base_id = st.secrets.get("app", {}).get("DRIVE_COTIZACIONES_FOLDER_ID")
+    if not base_id:
+        base_id = _find_or_create_folder(drive, "GEAPP Cotizaciones")
+    subfolders = {
+        "RS Engineering": _find_or_create_folder(drive, "RS", base_id),
+        "RIR Medical": _find_or_create_folder(drive, "RIR", base_id),
+    }
+    return base_id, subfolders
+
+
+def _upload_quote_html(
+    drive,
+    folder_id: str,
+    filename: str,
+    html_body: str,
+    existing_file_id: str | None = None,
+) -> dict:
+    media = MediaIoBaseUpload(BytesIO(html_body.encode("utf-8")), mimetype="text/html", resumable=False)
+    if existing_file_id:
+        return drive.files().update(fileId=existing_file_id, media_body=media, fields="id,name").execute()
+    metadata = {"name": filename, "parents": [folder_id]}
+    return drive.files().create(body=metadata, media_body=media, fields="id,name").execute()
+
+
+def _download_drive_file(drive, file_id: str) -> bytes:
+    request = drive.files().get_media(fileId=file_id)
+    fh = BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return fh.getvalue()
+
+
+def _items_resumen(items_df: pd.DataFrame) -> str:
+    if items_df.empty:
+        return ""
+    first = str(items_df.iloc[0].get("producto_servicio", "") or "").strip()
+    restantes = max(len(items_df) - 1, 0)
+    if restantes:
+        return f"{first} (+{restantes} más)"
+    return first
 def _build_items_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.copy()
     if "cantidad" in df.columns:
@@ -402,31 +549,129 @@ COMPANIES = {
     },
 }
 
+
 # ---- UI principal ----
 st.title("Generador de cotizaciones")
 
-with st.expander("Cotización - Panamá Compra", expanded=False):
+sheet_id = st.secrets.get("app", {}).get("SHEET_ID")
+sheet_error = None
+cot_df = pd.DataFrame(columns=COT_COLUMNS)
+client = None
+creds = None
+if sheet_id:
+    try:
+        client, creds = get_client()
+        if "cotizaciones_cache_token" not in st.session_state:
+            st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
+        token = st.session_state["cotizaciones_cache_token"]
+        cot_df = _normalize_cotizaciones_df(_load_cotizaciones_cached(sheet_id, token))
+    except Exception as exc:
+        sheet_error = str(exc)
+else:
+    sheet_error = "No hay SHEET_ID configurado en st.secrets['app']."
+
+EDIT_KEY = "cotizacion_edit"
+if EDIT_KEY not in st.session_state:
+    st.session_state[EDIT_KEY] = None
+
+items_state_key = "cotizacion_privada_items_data"
+
+
+def _apply_edit_state(row: dict) -> None:
+    st.session_state[EDIT_KEY] = row
+    st.session_state["cot_empresa"] = row.get("empresa") or "RS Engineering"
+    st.session_state["cot_cliente"] = row.get("cliente_nombre", "")
+    st.session_state["cot_direccion"] = row.get("cliente_direccion", "")
+    st.session_state["cot_numero"] = row.get("numero_cotizacion", "")
+
+    fecha_val = row.get("fecha_cotizacion") or ""
+    fecha_dt = None
+    if isinstance(fecha_val, str) and fecha_val:
+        try:
+            fecha_dt = datetime.fromisoformat(fecha_val).date()
+        except ValueError:
+            fecha_dt = None
+    st.session_state["cot_fecha"] = fecha_dt or date.today()
+
+    try:
+        items = json.loads(row.get("items_json") or "[]")
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        items = []
+    if not items:
+        items = [{"producto_servicio": "Producto o servicio", "cantidad": 1, "precio_unitario": 100.0}]
+    st.session_state[items_state_key] = items
+
+    try:
+        condiciones = json.loads(row.get("condiciones_json") or "{}")
+    except Exception:
+        condiciones = {}
+
+    st.session_state["cot_vigencia"] = condiciones.get("Vigencia") or row.get("vigencia") or "15 días"
+    st.session_state["cot_forma_pago"] = condiciones.get("Forma de pago") or row.get("forma_pago") or "Transferencia bancaria"
+    st.session_state["cot_entrega"] = condiciones.get("Entrega") or row.get("entrega") or "15 días hábiles"
+
+    impuesto_val = row.get("impuesto_pct")
+    try:
+        impuesto_val = float(impuesto_val)
+    except (TypeError, ValueError):
+        impuesto_val = 7.0
+    st.session_state["cot_impuesto"] = impuesto_val
+
+
+def _clear_edit_state() -> None:
+    st.session_state[EDIT_KEY] = None
+
+
+tab_panama, tab_privada, tab_historial = st.tabs(
+    ["Cotización - Panamá Compra", "Cotización - Privada", "Historial de cotizaciones"]
+)
+
+with tab_panama:
     st.info("Placeholder: sección pendiente para cotizaciones de Panamá Compra.")
 
+with tab_privada:
+    if sheet_error:
+        st.warning(sheet_error)
 
-with st.expander("Cotización - Privada", expanded=False):
+    edit_row = st.session_state.get(EDIT_KEY)
+    if edit_row:
+        st.info(f"Editando: {edit_row.get('numero_cotizacion', '')}")
+        if st.button("Cancelar edición"):
+            _clear_edit_state()
+            st.rerun()
+
+    if "cot_fecha" not in st.session_state:
+        st.session_state["cot_fecha"] = date.today()
+    if "cot_impuesto" not in st.session_state:
+        st.session_state["cot_impuesto"] = 7.0
+
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
     with col_a:
-        empresa = st.selectbox("Empresa", list(COMPANIES.keys()), index=0)
-        cliente = st.text_input("Nombre del cliente")
-        direccion = st.text_area("Dirección del cliente", height=70)
+        empresa = st.selectbox("Empresa", list(COMPANIES.keys()), key="cot_empresa")
+        cliente = st.text_input("Nombre del cliente", key="cot_cliente")
+        direccion = st.text_area("Dirección del cliente", height=70, key="cot_direccion")
     with col_b:
-        numero_cot = st.text_input("Número de cotización", value="COT-001")
-        fecha_cot = st.date_input("Fecha", value=date.today())
-        impuesto_pct = st.number_input("Impuesto (%)", min_value=0.0, max_value=25.0, value=7.0, step=0.5)
+        prefijo = COT_PREFIX.get(empresa, "GEN")
+        seq = _next_sequence(cot_df, prefijo)
+        numero_auto = _build_numero_cot(prefijo, seq)
+        if edit_row:
+            numero_auto = edit_row.get("numero_cotizacion") or numero_auto
+        if not edit_row:
+            if st.session_state.get("cot_numero_pref") != prefijo:
+                st.session_state["cot_numero"] = numero_auto
+                st.session_state["cot_numero_pref"] = prefijo
+        numero_cot = st.text_input("Número de cotización", key="cot_numero", disabled=True)
+        fecha_cot = st.date_input("Fecha", key="cot_fecha")
+        impuesto_pct = st.number_input("Impuesto (%)", min_value=0.0, max_value=25.0, step=0.5, key="cot_impuesto")
     with col_c:
-        vigencia = st.text_input("Vigencia de la oferta", value="15 días")
-        forma_pago = st.text_input("Forma de pago", value="Transferencia bancaria")
-        entrega = st.text_input("Entrega", value="15 días hábiles")
+        vigencia = st.text_input("Vigencia de la oferta", value="15 días", key="cot_vigencia")
+        forma_pago = st.text_input("Forma de pago", value="Transferencia bancaria", key="cot_forma_pago")
+        entrega = st.text_input("Entrega", value="15 días hábiles", key="cot_entrega")
 
     st.markdown("### Ítems de la cotización")
-    items_state_key = "cotizacion_privada_items_data"
     if items_state_key not in st.session_state:
         st.session_state[items_state_key] = [
             {"producto_servicio": "Producto o servicio", "cantidad": 1, "precio_unitario": 100.0},
@@ -452,13 +697,11 @@ with st.expander("Cotización - Privada", expanded=False):
         ["producto_servicio", "cantidad", "precio_unitario"]
     ].to_dict(orient="records")
     subtotal = float(items_df["importe"].sum())
-    impuesto_valor = subtotal * (impuesto_pct / 100.0)
+    impuesto_valor = subtotal * (float(impuesto_pct) / 100.0)
     total = subtotal + impuesto_valor
 
     st.markdown(
-        f"""
-        **Resumen:** Subtotal {_format_money(subtotal)} | Impuesto ({impuesto_pct:.2f}%) {_format_money(impuesto_valor)} | Total {_format_money(total)}
-        """
+        f"**Resumen:** Subtotal {_format_money(subtotal)} | Impuesto ({impuesto_pct:.2f}%) {_format_money(impuesto_valor)} | Total {_format_money(total)}"
     )
 
     st.markdown("### Vista previa")
@@ -493,4 +736,169 @@ with st.expander("Cotización - Privada", expanded=False):
         preview_scale=preview_scale,
     )
 
+    if st.button("Guardar cotización en Sheets/Drive"):
+        if sheet_error or not sheet_id:
+            st.error("No hay conexión a Google Sheets para guardar la cotización.")
+        else:
+            try:
+                if client is None or creds is None:
+                    client, creds = get_client()
+                _ensure_cotizaciones_sheet(client, sheet_id)
+                df_write = _normalize_cotizaciones_df(read_worksheet(client, sheet_id, SHEET_NAME_COT))
 
+                now = datetime.now().isoformat(timespec="seconds")
+                row_id = edit_row.get("id") if edit_row else uuid.uuid4().hex
+                created_at = edit_row.get("created_at") if edit_row else now
+
+                items_json = json.dumps(items_df.to_dict(orient="records"), ensure_ascii=False)
+                condiciones_json = json.dumps(condiciones, ensure_ascii=False)
+
+                drive_file_id = edit_row.get("drive_file_id") if edit_row else ""
+                drive_file_name = edit_row.get("drive_file_name") if edit_row else ""
+                drive_file_url = edit_row.get("drive_file_url") if edit_row else ""
+                drive_folder = edit_row.get("drive_folder") if edit_row else ""
+
+                if creds is not None:
+                    drive = _get_drive_client(creds)
+                    _, folders = _get_drive_folders(drive)
+                    folder_id = folders.get(empresa)
+                    if folder_id:
+                        filename = f"{numero_cot}.html"
+                        upload = _upload_quote_html(
+                            drive,
+                            folder_id,
+                            filename,
+                            html_body,
+                            existing_file_id=drive_file_id or None,
+                        )
+                        drive_file_id = upload.get("id", drive_file_id)
+                        drive_file_name = upload.get("name", filename)
+                        drive_folder = folder_id
+                        if drive_file_id:
+                            drive_file_url = f"https://drive.google.com/file/d/{drive_file_id}/view"
+
+                row = {
+                    "id": row_id,
+                    "numero_cotizacion": numero_cot,
+                    "prefijo": prefijo,
+                    "secuencia": seq,
+                    "empresa": empresa,
+                    "cliente_nombre": cliente,
+                    "cliente_direccion": direccion,
+                    "fecha_cotizacion": fecha_cot.isoformat(),
+                    "created_at": created_at,
+                    "updated_at": now,
+                    "moneda": "USD",
+                    "subtotal": subtotal,
+                    "impuesto_pct": impuesto_pct,
+                    "impuesto_monto": impuesto_valor,
+                    "total": total,
+                    "items_json": items_json,
+                    "items_resumen": _items_resumen(items_df),
+                    "condiciones_json": condiciones_json,
+                    "vigencia": vigencia,
+                    "forma_pago": forma_pago,
+                    "entrega": entrega,
+                    "estado": edit_row.get("estado", "vigente") if edit_row else "vigente",
+                    "notas": edit_row.get("notas", "") if edit_row else "",
+                    "drive_file_id": drive_file_id,
+                    "drive_file_name": drive_file_name,
+                    "drive_file_url": drive_file_url,
+                    "drive_folder": drive_folder,
+                }
+
+                if edit_row and row_id in df_write["id"].values:
+                    idx = df_write.index[df_write["id"] == row_id][0]
+                    for col in COT_COLUMNS:
+                        df_write.at[idx, col] = row.get(col, "")
+                else:
+                    df_write = pd.concat([df_write, pd.DataFrame([row])], ignore_index=True)
+
+                write_worksheet(client, sheet_id, SHEET_NAME_COT, df_write)
+                st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
+                _clear_edit_state()
+                st.success("Cotización guardada correctamente.")
+            except Exception as exc:
+                st.error(f"No se pudo guardar la cotización: {exc}")
+
+with tab_historial:
+    if sheet_error:
+        st.warning(sheet_error)
+    else:
+        if cot_df.empty:
+            st.info("Aún no hay cotizaciones registradas.")
+        else:
+            display_cols = [
+                "numero_cotizacion",
+                "empresa",
+                "fecha_cotizacion",
+                "cliente_nombre",
+                "total",
+                "estado",
+            ]
+            st.dataframe(cot_df[display_cols], use_container_width=True)
+
+            opciones = cot_df["id"].tolist()
+            def _label(opt):
+                row = cot_df[cot_df["id"] == opt].iloc[0]
+                return f"{row.get('numero_cotizacion', '')} · {row.get('cliente_nombre', '')}"
+
+            selected_id = st.selectbox("Selecciona una cotización", opciones, format_func=_label)
+            sel_row = cot_df[cot_df["id"] == selected_id].iloc[0].to_dict()
+
+            st.markdown("#### Detalle")
+            st.write(
+                {
+                    "Número": sel_row.get("numero_cotizacion"),
+                    "Empresa": sel_row.get("empresa"),
+                    "Cliente": sel_row.get("cliente_nombre"),
+                    "Fecha": sel_row.get("fecha_cotizacion"),
+                    "Total": sel_row.get("total"),
+                }
+            )
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                if st.button("Cargar en formulario"):
+                    _apply_edit_state(sel_row)
+                    st.success("Cotización cargada en el formulario de edición.")
+            with col_b:
+                delete_key = f"delete_{selected_id}"
+                if st.button("Eliminar"):
+                    st.session_state[delete_key] = True
+                if st.session_state.get(delete_key):
+                    if st.button("Confirmar eliminación"):
+                        try:
+                            if client is None:
+                                client, creds = get_client()
+                            df_write = cot_df[cot_df["id"] != selected_id].copy()
+                            write_worksheet(client, sheet_id, SHEET_NAME_COT, df_write)
+                            if sel_row.get("drive_file_id") and creds is not None:
+                                drive = _get_drive_client(creds)
+                                drive.files().delete(fileId=sel_row["drive_file_id"]).execute()
+                            st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
+                            st.success("Cotización eliminada.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"No se pudo eliminar: {exc}")
+            with col_c:
+                download_key = f"download_{selected_id}"
+                if sel_row.get("drive_file_id"):
+                    if st.button("Preparar descarga"):
+                        try:
+                            if creds is None:
+                                client, creds = get_client()
+                            drive = _get_drive_client(creds)
+                            file_bytes = _download_drive_file(drive, sel_row["drive_file_id"])
+                            st.session_state[download_key] = file_bytes
+                        except Exception as exc:
+                            st.error(f"No se pudo descargar: {exc}")
+                    if st.session_state.get(download_key):
+                        st.download_button(
+                            "Descargar archivo",
+                            data=st.session_state[download_key],
+                            file_name=sel_row.get("drive_file_name") or f"{sel_row.get('numero_cotizacion')}.html",
+                            mime="text/html",
+                        )
+                if sel_row.get("drive_file_url"):
+                    st.link_button("Abrir en Drive", sel_row["drive_file_url"])
