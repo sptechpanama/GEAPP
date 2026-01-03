@@ -60,8 +60,14 @@ def _build_invoice_html(
     logo_b64 = branding.get("logo_b64", "")
     background_b64 = branding.get("background_b64", "")
     contacto_html = branding.get("contacto_html", "")
-    logo_box = int(branding.get("logo_box", 190))
-    logo_size = int(branding.get("logo_size", 180))
+    logo_scale = float(branding.get("logo_scale", 1.0))
+    logo_box = int(branding.get("logo_box", 190) * logo_scale)
+    logo_size = int(branding.get("logo_size", 180) * logo_scale)
+    logo_left = int(branding.get("logo_left", 120))
+    logo_top = int(branding.get("logo_top", 120))
+    header_left = int(branding.get("header_left", logo_left + logo_box + 30))
+    header_top = int(branding.get("header_top", 140))
+    header_width = int(branding.get("header_width", 520))
 
     subtotal = float(items['importe'].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
@@ -248,10 +254,10 @@ def _build_invoice_html(
   }}
 </style>
 <div class="quote-page" id="quote-root">
-  <div class="logo" style="width:{logo_box}px;height:{logo_box}px;">
+  <div class="logo" style="left:{logo_left}px;top:{logo_top}px;width:{logo_box}px;height:{logo_box}px;">
     {"<img src='data:image/png;base64," + logo_b64 + "' alt='logo' style='width:" + str(logo_size) + "px;height:" + str(logo_size) + "px;' />" if logo_b64 else ""}
   </div>
-  <div class="header-info">
+  <div class="header-info" style="left:{header_left}px;top:{header_top}px;width:{header_width}px;">
     <div class="empresa">{html.escape(empresa)}</div>
     <div class="datos">{contacto_html}</div>
   </div>
@@ -367,8 +373,9 @@ COMPANIES = {
         "accent": "#0e4aa0",
         "logo_b64": _load_logo_b64(RS_LOGO_PATH, RS_LOGO_FALLBACK),
         "background_b64": BACKGROUND_B64,
-        "logo_box": 210,
-        "logo_size": 200,
+        "logo_box": 190,
+        "logo_size": 180,
+        "logo_scale": 1.5,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
         PH Bonanza Plaza, Bella Vista<br>
@@ -381,7 +388,15 @@ COMPANIES = {
         "accent": "#22c55e",
         "logo_b64": _load_logo_b64(RIR_LOGO_PATH, RIR_LOGO_FALLBACK),
         "background_b64": BACKGROUND_B64,
-        "contacto_html": "",
+        "logo_box": 190,
+        "logo_size": 180,
+        "logo_scale": 1.5,
+        "contacto_html": """<div style='text-align:left; line-height:1.35;'>
+        RUC: 155750585-2-2024 DV40<br>
+        PH Bonanza Plaza, Bella Vista<br>
+        TELÉFONO: +507 68475616<br>
+        Email: info@rirmedical.com
+        </div>""",
     },
 }
 
