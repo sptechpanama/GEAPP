@@ -135,11 +135,6 @@ def _build_invoice_html(
     font-size: 16px;
     color: #6b7280;
   }}
-  .header-info .meta {{
-    margin-top: 10px;
-    font-size: 16px;
-    color: #6b7280;
-  }}
   .title {{
     position: absolute;
     top: 380px;
@@ -147,9 +142,17 @@ def _build_invoice_html(
     font-size: 40px;
     font-weight: 800;
   }}
+  .title-meta {{
+    position: absolute;
+    top: 440px;
+    left: 120px;
+    font-size: 16px;
+    color: #6b7280;
+    line-height: 1.4;
+  }}
   .columns {{
     position: absolute;
-    top: 480px;
+    top: 520px;
     left: 120px;
     right: 120px;
     display: grid;
@@ -165,6 +168,12 @@ def _build_invoice_html(
   }}
   .columns .block div {{
     margin: 0 0 6px 0;
+    color: #1f2f46;
+  }}
+  .columns .emisor-name {{
+    margin-bottom: 6px;
+  }}
+  .columns .contacto {{
     color: #1f2f46;
   }}
   .table-wrap {{
@@ -243,9 +252,9 @@ def _build_invoice_html(
   <div class="header-info">
     <div class="empresa">{html.escape(empresa)}</div>
     <div class="datos">{contacto_html}</div>
-    <div class="meta">N.º cotización: <strong>{html.escape(numero)}</strong><br>Fecha: {fecha_cot.strftime('%Y-%m-%d')}</div>
   </div>
   <div class="title">Cotización</div>
+  <div class="title-meta">N.º cotización: <strong>{html.escape(numero)}</strong><br>Fecha: {fecha_cot.strftime('%Y-%m-%d')}</div>
   <div class="columns">
     <div class="block">
       <h4>Datos del Cliente</h4>
@@ -254,8 +263,8 @@ def _build_invoice_html(
     </div>
     <div class="block">
       <h4>Datos del Emisor</h4>
-      <div>{html.escape(empresa)}</div>
-      {"<div>" + contacto_html + "</div>" if contacto_html else ""}
+      <div class="emisor-name">{html.escape(empresa)}</div>
+      {"<div class=\"contacto\">" + contacto_html + "</div>" if contacto_html else ""}
     </div>
   </div>
   <div class="table-wrap">
@@ -293,7 +302,8 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
     <style>
       .preview-shell {{
         width: 100%;
-        text-align: center;
+        display: flex;
+        justify-content: center;
         overflow: auto;
       }}
       .preview-scale {{
@@ -435,7 +445,7 @@ with st.expander("Cotización - Privada", expanded=False):
         "Zoom de vista previa",
         min_value=0.5,
         max_value=1.1,
-        value=0.75,
+        value=0.7,
         step=0.05,
     )
     condiciones = {
