@@ -58,8 +58,8 @@ def _build_invoice_html(
     condiciones: Dict[str, str],
 ) -> str:
     logo_b64 = branding.get("logo_b64", "")
-    color = branding.get("color", "#1e3a8a")
-    acento = branding.get("accent", "#0ea5e9")
+    color = branding.get("color", "#0f2b63")
+    acento = branding.get("accent", "#0c5fb8")
     contacto_html = branding.get("contacto_html", "")
 
     subtotal = float(items["importe"].sum())
@@ -95,54 +95,59 @@ def _build_invoice_html(
   .quote-wrapper {{
     width: 820px;
     margin: 0 auto 24px auto;
-    background: linear-gradient(135deg, #f7f9fd 0%, #eef3ff 100%);
-    padding: 30px 34px 38px 34px;
+    background: #f9fbff;
+    padding: 26px 34px 46px 34px;
     border-radius: 18px;
-    border: 1px solid #e1e6f0;
+    border: 1px solid #dfe6f2;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
     color: #0f172a;
     font-family: 'Manrope', system-ui, -apple-system, sans-serif;
     position: relative;
     overflow: hidden;
-    min-height: 1060px;
+    min-height: 1080px;
   }}
   .quote-wrapper::before {{
     content: "";
     position: absolute;
-    top: -80px; right: -90px;
-    width: 260px; height: 260px;
-    background: radial-gradient(65% 65% at 60% 45%, #dce8ff 0%, #b3ccff 45%, #8eaee8 70%, transparent 100%);
-    opacity: 0.85;
-    border-radius: 50%;
+    top: -120px; left: -120px;
+    width: 1100px; height: 340px;
+    background: radial-gradient(180% 120% at 50% 0%, #0c5fb8 0%, #0b3a7a 40%, #0a1f4a 70%, transparent 90%);
+    opacity: 0.96;
+    border-radius: 50% 50% 42% 42%;
     z-index: 0;
   }}
   .quote-wrapper::after {{
     content: "";
     position: absolute;
-    left: -110px; bottom: -120px;
-    width: 260px; height: 260px;
-    background: radial-gradient(75% 75% at 40% 60%, #233a78 0%, #1e3266 60%, transparent 100%);
-    opacity: 0.72;
-    border-radius: 50%;
+    left: -140px; bottom: -140px;
+    width: 1080px; height: 320px;
+    background: radial-gradient(180% 140% at 30% 70%, #0b3a7a 0%, #0a1f4a 55%, transparent 90%);
+    opacity: 0.9;
+    border-radius: 48% 48% 50% 50%;
     z-index: 0;
   }}
   .quote-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; position: relative; z-index: 2; }}
-  .quote-header .brand h1 {{ margin: 0; font-size: 26px; letter-spacing: -0.02em; color: #183158; }}
-  .quote-meta {{ margin-top: 6px; color: #374151; font-size: 13px; }}
-  .quote-logo img {{ max-height: 86px; object-fit: contain; }}
+  .quote-header .brand h1 {{ margin: 0; font-size: 26px; letter-spacing: -0.02em; color: #0c2349; }}
+  .quote-meta {{ margin-top: 6px; color: #1f2f4a; font-size: 13px; }}
+  .quote-logo img {{ max-height: 108px; object-fit: contain; background: rgba(255,255,255,0.9); border-radius: 50%; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }}
   .contact-card {{
-    margin-top: 12px;
-    background: rgba(255,255,255,0.92);
-    border: 1px solid #dbe3f2;
+    margin-top: 10px;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #d7e0f0;
     padding: 10px 12px;
     border-radius: 10px;
     font-size: 12px;
-    color: #111827;
-    max-width: 250px;
-    box-shadow: 0 12px 24px rgba(0,0,0,0.05);
+    color: #0c1f3c;
+    max-width: 270px;
+    box-shadow: 0 10px 22px rgba(0,0,0,0.06);
+    line-height: 1.45;
   }}
-  .quote-dates {{ background: {color}08; border: 1px solid {color}25; padding: 10px 14px; border-radius: 12px; color: #0f172a; position: relative; z-index: 2; }}
+  .quote-dates {{ background: rgba(255,255,255,0.94); border: 1px solid #dbe3f2; padding: 10px 14px; border-radius: 12px; color: #0f172a; position: relative; z-index: 2; }}
+  .title-main {{ margin: 26px 0 10px 0; font-size: 32px; color: #0c2349; font-weight: 800; position: relative; z-index: 2; }}
+  .columns-info {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; position: relative; z-index: 2; margin-top: 6px; margin-bottom: 10px; }}
+  .info-block h4 {{ margin: 0 0 6px 0; color: #0c2349; font-size: 15px; }}
+  .info-block div {{ margin: 0; color: #1f2f4a; font-size: 13px; line-height: 1.45; }}
   table.items {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
   table.items th {{ text-align: left; padding: 10px 8px; background: #19356c; color: #f4f7fd; font-size: 13px; border-bottom: 1px solid #cbd5e1; }}
   table.items td {{ padding: 10px 8px; border-bottom: 1px solid #d9e2f1; font-size: 13px; }}
@@ -166,6 +171,21 @@ def _build_invoice_html(
     </div>
     <div class="quote-logo">
       {"<img src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
+    </div>
+  </div>
+
+  <div class="title-main">Cotización</div>
+
+  <div class="columns-info">
+    <div class="info-block">
+      <h4>Datos del Cliente</h4>
+      <div>{html.escape(cliente or "—")}</div>
+      <div>{html.escape(direccion or "—")}</div>
+    </div>
+    <div class="info-block">
+      <h4>Datos del Emisor</h4>
+      <div>{html.escape(empresa)}</div>
+      {"<div>" + contacto_html + "</div>" if contacto_html else ""}
     </div>
   </div>
 
