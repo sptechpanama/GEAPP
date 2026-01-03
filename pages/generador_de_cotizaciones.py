@@ -545,12 +545,12 @@ COMPANIES = {
         "logo_box_height": 440,
         "logo_width": 420,
         "logo_height": 420,
-        "logo_left": 60,
+        "logo_left": 20,
         "logo_top": 80,
-        "header_left": 520,
+        "header_left": 470,
         "header_top": 80,
         "header_height": 440,
-        "content_offset_y": 90,
+        "content_offset_y": 130,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
         PH Bonanza Plaza, Bella Vista<br>
