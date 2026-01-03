@@ -547,7 +547,7 @@ COMPANIES = {
         "logo_height": 420,
         "logo_left": 20,
         "logo_top": 80,
-        "header_left": 470,
+        "header_left": 430,
         "header_top": 80,
         "header_height": 440,
         "content_offset_y": 130,
