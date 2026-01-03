@@ -473,7 +473,11 @@ def _build_invoice_html(
 
 def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 0.75) -> None:
     """Renderiza la vista previa y un botón JS para exportar a PDF usando html2canvas + jsPDF."""
-    preview_height = min(int(2000 * preview_scale + 220), 2400)
+    base_width = 1414
+    base_height = 2000
+    scaled_width = int(base_width * preview_scale)
+    scaled_height = int(base_height * preview_scale)
+    preview_height = min(int(scaled_height + 220), 2400)
     component_html = f"""
     <style>
       html, body {{
@@ -490,8 +494,13 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
       }}
       .preview-scale {{
         display: inline-block;
+        width: {scaled_width}px;
+        height: {scaled_height}px;
+        overflow: hidden;
+      }}
+      .preview-scale .quote-page {{
         transform: scale({preview_scale});
-        transform-origin: top center;
+        transform-origin: top left;
       }}
     </style>
     <div class="preview-shell">
