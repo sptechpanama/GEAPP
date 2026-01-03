@@ -107,30 +107,16 @@ def _build_invoice_html(
     overflow: hidden;
     min-height: 1080px;
   }}
-.band-top {{
+  /* Bandas reemplazadas por un fondo de imagen */
+  .band-top {{
     position: relative;
-    padding: 34px 0 30px 0;
+    padding: 0;
     overflow: hidden;
-    height: 260px;
+    height: 280px;
+    background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center top / cover no-repeat;
   }}
-  .band-top::before {{
-    content: "";
-    position: absolute;
-    top: -260px; left: -240px;
-    width: 1580px; height: 560px;
-    background: radial-gradient(180% 160% at 50% 20%, #0b5fb8 0%, #0a3f81 45%, #08234f 75%, transparent 92%);
-    opacity: 0.99;
-    border-radius: 54% 54% 50% 50%;
-    z-index: 0;
-  }}
-  .band-bottom {{
-    position: absolute;
-    left: -320px; right: -320px; bottom: -240px;
-    height: 420px;
-    background: radial-gradient(180% 140% at 50% 10%, #0a3f81 0%, #0a1f4a 60%, transparent 96%);
-    border-radius: 60% 60% 64% 64%;
-    z-index: 0;
-  }}
+  .band-top::before {{ content: ""; }}
+  .band-bottom {{ content: ""; }}
   .band-content {{
     position: relative;
     z-index: 2;
