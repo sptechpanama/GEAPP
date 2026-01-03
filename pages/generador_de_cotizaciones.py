@@ -217,6 +217,7 @@ def _build_invoice_html(
     header_left = int(branding.get("header_left", logo_left + logo_box_width + 30))
     header_top = int(branding.get("header_top", 140))
     header_width = int(branding.get("header_width", 520))
+    header_height = int(branding.get("header_height", logo_box_height))
 
     subtotal = float(items['importe'].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
@@ -281,6 +282,9 @@ def _build_invoice_html(
     width: 520px;
     color: #6b7280;
     line-height: 1.35;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
   }}
   .header-info .empresa {{
     font-size: 28px;
@@ -406,7 +410,7 @@ def _build_invoice_html(
   <div class="logo" style="left:{logo_left}px;top:{logo_top}px;width:{logo_box_width}px;height:{logo_box_height}px;">
     {"<img src='data:image/png;base64," + logo_b64 + "' alt='logo' style='width:" + str(logo_width) + "px;height:" + str(logo_height) + "px;' />" if logo_b64 else ""}
   </div>
-  <div class="header-info" style="left:{header_left}px;top:{header_top}px;width:{header_width}px;">
+  <div class="header-info" style="left:{header_left}px;top:{header_top}px;width:{header_width}px;height:{header_height}px;">
     <div class="empresa">{html.escape(empresa)}</div>
     <div class="datos">{contacto_html}</div>
   </div>
@@ -522,14 +526,15 @@ COMPANIES = {
         "accent": "#0e4aa0",
         "logo_b64": _load_logo_b64(RS_LOGO_PATH, RS_LOGO_FALLBACK),
         "background_b64": BACKGROUND_B64,
-        "logo_box_width": 220,
-        "logo_box_height": 220,
-        "logo_width": 210,
-        "logo_height": 210,
+        "logo_box_width": 440,
+        "logo_box_height": 440,
+        "logo_width": 420,
+        "logo_height": 420,
         "logo_left": 120,
-        "logo_top": 90,
-        "header_left": 370,
-        "header_top": 90,
+        "logo_top": 120,
+        "header_left": 590,
+        "header_top": 120,
+        "header_height": 440,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
         PH Bonanza Plaza, Bella Vista<br>
@@ -547,9 +552,10 @@ COMPANIES = {
         "logo_width": 310,
         "logo_height": 166,
         "logo_left": 120,
-        "logo_top": 80,
+        "logo_top": 100,
         "header_left": 470,
-        "header_top": 90,
+        "header_top": 100,
+        "header_height": 170,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         RUC: 155750585-2-2024 DV40<br>
         PH Bonanza Plaza, Bella Vista<br>
