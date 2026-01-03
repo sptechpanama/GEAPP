@@ -93,64 +93,66 @@ def _build_invoice_html(
     return f"""
 <style>
   .quote-wrapper {{
-    width: 900px;
+    width: 820px;
     margin: 0 auto 24px auto;
-    background: linear-gradient(135deg, #f5f7fb 0%, #eef4ff 100%);
-    padding: 30px 34px 50px 34px;
+    background: linear-gradient(135deg, #f7f9fd 0%, #eef3ff 100%);
+    padding: 30px 34px 38px 34px;
     border-radius: 18px;
-    border: 1px solid #e2e8f0;
+    border: 1px solid #e1e6f0;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
     color: #0f172a;
     font-family: 'Manrope', system-ui, -apple-system, sans-serif;
     position: relative;
     overflow: hidden;
+    min-height: 1060px;
   }}
   .quote-wrapper::before {{
     content: "";
     position: absolute;
-    top: -120px; right: -160px;
-    width: 420px; height: 420px;
-    background: radial-gradient(70% 70% at 60% 40%, #d7e6ff 0%, #b7d1ff 40%, #8fb1f0 70%, transparent 100%);
-    opacity: 0.9;
+    top: -80px; right: -90px;
+    width: 260px; height: 260px;
+    background: radial-gradient(65% 65% at 60% 45%, #dce8ff 0%, #b3ccff 45%, #8eaee8 70%, transparent 100%);
+    opacity: 0.85;
     border-radius: 50%;
     z-index: 0;
   }}
   .quote-wrapper::after {{
     content: "";
     position: absolute;
-    left: -120px; bottom: -140px;
-    width: 320px; height: 320px;
-    background: radial-gradient(75% 75% at 40% 60%, #233a78 0%, #1c2f62 60%, transparent 100%);
-    opacity: 0.8;
+    left: -110px; bottom: -120px;
+    width: 260px; height: 260px;
+    background: radial-gradient(75% 75% at 40% 60%, #233a78 0%, #1e3266 60%, transparent 100%);
+    opacity: 0.72;
     border-radius: 50%;
     z-index: 0;
   }}
-  .quote-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }}
-  .quote-header .brand h1 {{ margin: 0; font-size: 28px; letter-spacing: -0.02em; color: #0f172a; }}
-  .quote-meta {{ margin-top: 6px; color: #475569; font-size: 13px; }}
-  .quote-logo img {{ max-height: 86px; object-fit: contain; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.08)); }}
-  .quote-dates {{ background: {color}10; border: 1px solid {color}26; padding: 10px 14px; border-radius: 12px; color: #0f172a; }}
-  .issuer-box {{
-    background: rgba(255,255,255,0.88);
-    border: 1px solid #e2e8f0;
-    padding: 14px 16px;
-    border-radius: 14px;
+  .quote-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; position: relative; z-index: 2; }}
+  .quote-header .brand h1 {{ margin: 0; font-size: 26px; letter-spacing: -0.02em; color: #183158; }}
+  .quote-meta {{ margin-top: 6px; color: #374151; font-size: 13px; }}
+  .quote-logo img {{ max-height: 86px; object-fit: contain; }}
+  .contact-card {{
+    margin-top: 12px;
+    background: rgba(255,255,255,0.92);
+    border: 1px solid #dbe3f2;
+    padding: 10px 12px;
+    border-radius: 10px;
     font-size: 12px;
-    color: #0f172a;
-    box-shadow: 0 14px 30px rgba(0,0,0,0.06);
-    max-width: 240px;
+    color: #111827;
+    max-width: 250px;
+    box-shadow: 0 12px 24px rgba(0,0,0,0.05);
   }}
+  .quote-dates {{ background: {color}08; border: 1px solid {color}25; padding: 10px 14px; border-radius: 12px; color: #0f172a; position: relative; z-index: 2; }}
   table.items {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-  table.items th {{ text-align: left; padding: 10px 8px; background: {color}12; color: #0f172a; font-size: 13px; border-bottom: 1px solid #cbd5e1; }}
-  table.items td {{ padding: 10px 8px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }}
+  table.items th {{ text-align: left; padding: 10px 8px; background: #19356c; color: #f4f7fd; font-size: 13px; border-bottom: 1px solid #cbd5e1; }}
+  table.items td {{ padding: 10px 8px; border-bottom: 1px solid #d9e2f1; font-size: 13px; }}
   table.items td.num {{ text-align: right; white-space: nowrap; }}
   .totals {{ margin-top: 18px; width: 320px; margin-left: auto; font-size: 14px; color: #0f172a; }}
   .totals div {{ display: flex; justify-content: space-between; padding: 6px 0; }}
-  .totals div.total {{ font-weight: 800; font-size: 16px; color: {color}; }}
-  .condiciones {{ margin-top: 18px; padding: 14px 16px; border: 1px dashed {color}; border-radius: 12px; background: #fff; }}
-  .condiciones h4 {{ margin: 0 0 6px 0; color: #0f172a; }}
-  .condiciones ul {{ margin: 0; padding-left: 18px; color: #1f2937; }}
+  .totals div.total {{ font-weight: 800; font-size: 16px; color: #183158; }}
+  .condiciones {{ margin-top: 18px; padding: 12px 14px 14px 14px; border: 1px dotted #1e3a8a; border-radius: 10px; background: rgba(255,255,255,0.88); max-width: 760px; }}
+  .condiciones h4 {{ margin: 0 0 6px 0; color: #183158; font-weight: 700; }}
+  .condiciones ul {{ margin: 0; padding-left: 16px; color: #1f2937; line-height: 1.55; }}
 </style>
 <div class="quote-wrapper" id="quote-root">
   <div class="quote-header">
@@ -160,13 +162,12 @@ def _build_invoice_html(
         <div>N.º cotización: <strong>{html.escape(numero)}</strong></div>
         <div>Fecha: {fecha_cot.strftime("%d-%m-%Y")}</div>
       </div>
+      {"<div class='contact-card'>" + contacto_html + "</div>" if contacto_html else ""}
     </div>
     <div class="quote-logo">
       {"<img src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     </div>
   </div>
-
-  {"<div class='issuer-box'>" + contacto_html + "</div>" if contacto_html else ""}
 
   <div class="quote-dates">
     <div><strong>Cliente:</strong> {html.escape(cliente or "—")}</div>
