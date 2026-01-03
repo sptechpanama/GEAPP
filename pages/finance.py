@@ -11,7 +11,9 @@
 from __future__ import annotations
 import uuid, time
 import streamlit as st
+from ui.theme import apply_global_theme
 st.set_page_config(page_title="Finanzas Operativas", page_icon="📊", layout="wide")
+apply_global_theme()
 import pandas as pd
 from datetime import date
 
