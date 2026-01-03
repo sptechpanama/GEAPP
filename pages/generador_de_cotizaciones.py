@@ -661,6 +661,7 @@ else:
 EDIT_KEY = "cotizacion_edit"
 if EDIT_KEY not in st.session_state:
     st.session_state[EDIT_KEY] = None
+PENDING_EDIT_KEY = "cotizacion_pending_edit_id"
 
 items_state_key = "cotizacion_privada_items_data"
 
@@ -722,6 +723,12 @@ with tab_panama:
 with tab_privada:
     if sheet_error:
         st.warning(sheet_error)
+
+    pending_id = st.session_state.pop(PENDING_EDIT_KEY, None)
+    if pending_id and not cot_df.empty:
+        row_match = cot_df[cot_df["id"] == pending_id]
+        if not row_match.empty:
+            _apply_edit_state(row_match.iloc[0].to_dict())
 
     edit_row = st.session_state.get(EDIT_KEY)
     if edit_row:
@@ -948,8 +955,9 @@ with tab_historial:
             col_a, col_b, col_c = st.columns(3)
             with col_a:
                 if st.button("Cargar en formulario"):
-                    _apply_edit_state(sel_row)
+                    st.session_state[PENDING_EDIT_KEY] = selected_id
                     st.success("Cotización cargada en el formulario de edición.")
+                    st.rerun()
             with col_b:
                 delete_key = f"delete_{selected_id}"
                 if st.button("Eliminar"):
