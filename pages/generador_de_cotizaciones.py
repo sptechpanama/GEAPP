@@ -50,6 +50,7 @@ COT_COLUMNS = [
     "prefijo",
     "secuencia",
     "empresa",
+    "tipo_cotizacion",
     "cliente_nombre",
     "cliente_direccion",
     "fecha_cotizacion",
@@ -713,7 +714,7 @@ def _clear_edit_state() -> None:
     st.session_state[EDIT_KEY] = None
 
 
-TAB_OPTIONS = ["Cotización - Panamá Compra", "Cotización - Privada", "Historial de cotizaciones"]
+TAB_OPTIONS = ["Cotización - Panamá Compra", "Cotizacion - Estandar", "Historial de cotizaciones"]
 if "cotizaciones_tab" not in st.session_state:
     st.session_state["cotizaciones_tab"] = TAB_OPTIONS[0]
 
@@ -727,7 +728,7 @@ active_tab = st.segmented_control(
 if active_tab == "Cotización - Panamá Compra":
     st.info("Placeholder: sección pendiente para cotizaciones de Panamá Compra.")
 
-if active_tab == "Cotización - Privada":
+if active_tab == "Cotizacion - Estandar":
     if sheet_error:
         st.warning(sheet_error)
 
@@ -859,6 +860,11 @@ if active_tab == "Cotización - Privada":
                 drive_file_name = edit_row.get("drive_file_name") if edit_row else ""
                 drive_file_url = edit_row.get("drive_file_url") if edit_row else ""
                 drive_folder = edit_row.get("drive_folder") if edit_row else ""
+                tipo_cotizacion = (
+                    edit_row.get("tipo_cotizacion")
+                    if edit_row and edit_row.get("tipo_cotizacion")
+                    else ("Estandar" if active_tab == "Cotizacion - Estandar" else "Panama Compra")
+                )
 
                 if creds is not None:
                     drive = _get_drive_client(creds)
@@ -885,6 +891,7 @@ if active_tab == "Cotización - Privada":
                     "prefijo": prefijo,
                     "secuencia": seq,
                     "empresa": empresa,
+                    "tipo_cotizacion": tipo_cotizacion,
                     "cliente_nombre": cliente,
                     "cliente_direccion": direccion,
                     "fecha_cotizacion": fecha_cot.isoformat(),
@@ -963,7 +970,11 @@ if active_tab == "Historial de cotizaciones":
             with col_a:
                 if st.button("Cargar en formulario"):
                     st.session_state[PENDING_EDIT_KEY] = selected_id
-                    st.session_state["cotizaciones_tab"] = "Cotización - Privada"
+                    tipo = sel_row.get("tipo_cotizacion")
+                    target_tab = (
+                        "Cotización - Panamá Compra" if tipo == "Panama Compra" else "Cotizacion - Estandar"
+                    )
+                    st.session_state["cotizaciones_tab"] = target_tab
                     st.success("Cotización cargada en el formulario de edición.")
                     st.rerun()
             with col_b:
