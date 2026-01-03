@@ -218,6 +218,21 @@ def _build_invoice_html(
     header_top = int(branding.get("header_top", 140))
     header_width = int(branding.get("header_width", 520))
     header_height = int(branding.get("header_height", logo_box_height))
+    content_offset_x = int(branding.get("content_offset_x", 0))
+    content_offset_y = int(branding.get("content_offset_y", 0))
+
+    title_top = 380 + content_offset_y
+    title_left = 120 + content_offset_x
+    title_meta_top = 440 + content_offset_y
+    title_meta_left = 120 + content_offset_x
+    columns_top = 520 + content_offset_y
+    columns_left = 120 + content_offset_x
+    table_top = 720 + content_offset_y
+    table_left = 120 + content_offset_x
+    totals_top = 1180 + content_offset_y
+    totals_right = 160 - content_offset_x
+    conditions_top = 1340 + content_offset_y
+    conditions_left = 120 + content_offset_x
 
     subtotal = float(items['importe'].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
@@ -414,9 +429,9 @@ def _build_invoice_html(
     <div class="empresa">{html.escape(empresa)}</div>
     <div class="datos">{contacto_html}</div>
   </div>
-  <div class="title">Cotización</div>
-  <div class="title-meta">N.º cotización: <strong>{html.escape(numero)}</strong><br>Fecha: {fecha_cot.strftime('%Y-%m-%d')}</div>
-  <div class="columns">
+  <div class="title" style="top:{title_top}px;left:{title_left}px;">Cotización</div>
+  <div class="title-meta" style="top:{title_meta_top}px;left:{title_meta_left}px;">N.º cotización: <strong>{html.escape(numero)}</strong><br>Fecha: {fecha_cot.strftime('%Y-%m-%d')}</div>
+  <div class="columns" style="top:{columns_top}px;left:{columns_left}px;">
     <div class="block">
       <h4>Datos del Cliente</h4>
       <div>{html.escape(cliente or '-')}</div>
@@ -428,7 +443,7 @@ def _build_invoice_html(
       {"<div class=\"contacto\">" + contacto_html + "</div>" if contacto_html else ""}
     </div>
   </div>
-  <div class="table-wrap">
+  <div class="table-wrap" style="top:{table_top}px;left:{table_left}px;">
     <table class="items">
       <thead>
         <tr>
@@ -442,12 +457,12 @@ def _build_invoice_html(
       </tbody>
     </table>
   </div>
-  <div class="totals">
+  <div class="totals" style="top:{totals_top}px;right:{totals_right}px;">
     <div><span>Subtotal</span><span>{_format_money(subtotal)}</span></div>
     <div><span>Impuestos ({impuesto_pct:.2f}%)</span><span>{_format_money(impuesto)}</span></div>
     <div class="total"><span>TOTAL</span><span>{_format_money(total)}</span></div>
   </div>
-  <div class="conditions">
+  <div class="conditions" style="top:{conditions_top}px;left:{conditions_left}px;">
     <h4>CONDICIONES</h4>
     <ul>
       {condiciones_html}
@@ -530,11 +545,12 @@ COMPANIES = {
         "logo_box_height": 440,
         "logo_width": 420,
         "logo_height": 420,
-        "logo_left": 120,
-        "logo_top": 120,
-        "header_left": 590,
-        "header_top": 120,
+        "logo_left": 60,
+        "logo_top": 80,
+        "header_left": 520,
+        "header_top": 80,
         "header_height": 440,
+        "content_offset_y": 90,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
         PH Bonanza Plaza, Bella Vista<br>
@@ -551,9 +567,9 @@ COMPANIES = {
         "logo_box_height": 170,
         "logo_width": 310,
         "logo_height": 166,
-        "logo_left": 120,
+        "logo_left": 90,
         "logo_top": 100,
-        "header_left": 470,
+        "header_left": 430,
         "header_top": 100,
         "header_height": 170,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
