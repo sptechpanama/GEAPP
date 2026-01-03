@@ -715,7 +715,9 @@ def _clear_edit_state() -> None:
 
 
 TAB_OPTIONS = ["Cotización - Panamá Compra", "Cotizacion - Estandar", "Historial de cotizaciones"]
-if "cotizaciones_tab" not in st.session_state:
+if st.session_state.get("cotizaciones_tab") == "Cotización - Privada":
+    st.session_state["cotizaciones_tab"] = "Cotizacion - Estandar"
+if st.session_state.get("cotizaciones_tab") not in TAB_OPTIONS:
     st.session_state["cotizaciones_tab"] = TAB_OPTIONS[0]
 
 active_tab = st.segmented_control(
