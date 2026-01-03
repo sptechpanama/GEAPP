@@ -505,19 +505,28 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
       btn?.addEventListener("click", () => {{
         const root = document.getElementById("quote-root");
         if (!root) return;
-        html2canvas(root, {{ scale: 2, useCORS: true }}).then(canvas => {{
-          const imgData = canvas.toDataURL("image/png");
-          const pdf = new jspdf.jsPDF("p", "pt", "a4");
-          const pageWidth = pdf.internal.pageSize.getWidth();
-          const pageHeight = pdf.internal.pageSize.getHeight();
-          const ratio = Math.min(pageWidth / canvas.width, pageHeight / canvas.height);
-          const imgWidth = canvas.width * ratio;
-          const imgHeight = canvas.height * ratio;
-          const marginX = (pageWidth - imgWidth) / 2;
-          const marginY = 24;
-          pdf.addImage(imgData, "PNG", marginX, marginY, imgWidth, imgHeight);
-          pdf.save("{filename}");
-        }});
+
+        const render = () => {{
+          html2canvas(root, {{ scale: 2, useCORS: true, backgroundColor: "#ffffff" }}).then(canvas => {{
+            const imgData = canvas.toDataURL("image/png");
+            const pdf = new jspdf.jsPDF("p", "pt", "a4");
+            const pageWidth = pdf.internal.pageSize.getWidth();
+            const pageHeight = pdf.internal.pageSize.getHeight();
+            const ratio = Math.min(pageWidth / canvas.width, pageHeight / canvas.height);
+            const imgWidth = canvas.width * ratio;
+            const imgHeight = canvas.height * ratio;
+            const marginX = (pageWidth - imgWidth) / 2;
+            const marginY = (pageHeight - imgHeight) / 2;
+            pdf.addImage(imgData, "PNG", marginX, marginY, imgWidth, imgHeight);
+            pdf.save("{filename}");
+          }});
+        }};
+
+        if (document.fonts && document.fonts.ready) {{
+          document.fonts.ready.then(render);
+        }} else {{
+          render();
+        }}
       }});
     </script>
     """
