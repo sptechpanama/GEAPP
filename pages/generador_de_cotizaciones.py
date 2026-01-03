@@ -16,6 +16,7 @@ from gspread.exceptions import WorksheetNotFound
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from sheets import get_client, read_worksheet, write_worksheet
+from entities import client_selector
 from ui.theme import apply_global_theme
 
 st.set_page_config(page_title="Generador de cotizaciones", page_icon="🧾", layout="wide")
@@ -760,6 +761,13 @@ if active_tab == "Cotizacion - Estandar":
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
     with col_a:
         empresa = st.selectbox("Empresa", list(COMPANIES.keys()), key="cot_empresa")
+        if sheet_error or not sheet_id or client is None:
+            st.caption("Catálogo de clientes no disponible.")
+        else:
+            cliente_id, cliente_nombre = client_selector(client, sheet_id, key="cot_catalogo")
+            if cliente_nombre:
+                st.session_state["cot_cliente"] = cliente_nombre
+                st.session_state["cot_cliente_id"] = cliente_id
         cliente = st.text_input("Nombre del cliente", key="cot_cliente")
         direccion = st.text_area("Dirección del cliente", height=70, key="cot_direccion")
     with col_b:
