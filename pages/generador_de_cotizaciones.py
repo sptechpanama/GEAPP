@@ -663,6 +663,7 @@ EDIT_KEY = "cotizacion_edit"
 if EDIT_KEY not in st.session_state:
     st.session_state[EDIT_KEY] = None
 PENDING_EDIT_KEY = "cotizacion_pending_edit_id"
+PENDING_TAB_KEY = "cotizacion_pending_tab"
 
 items_state_key = "cotizacion_privada_items_data"
 
@@ -715,6 +716,9 @@ def _clear_edit_state() -> None:
 
 
 TAB_OPTIONS = ["Cotización - Panamá Compra", "Cotizacion - Estandar", "Historial de cotizaciones"]
+pending_tab = st.session_state.pop(PENDING_TAB_KEY, None)
+if pending_tab in TAB_OPTIONS:
+    st.session_state["cotizaciones_tab"] = pending_tab
 if st.session_state.get("cotizaciones_tab") == "Cotización - Privada":
     st.session_state["cotizaciones_tab"] = "Cotizacion - Estandar"
 if st.session_state.get("cotizaciones_tab") not in TAB_OPTIONS:
@@ -976,7 +980,7 @@ if active_tab == "Historial de cotizaciones":
                     target_tab = (
                         "Cotización - Panamá Compra" if tipo == "Panama Compra" else "Cotizacion - Estandar"
                     )
-                    st.session_state["cotizaciones_tab"] = target_tab
+                    st.session_state[PENDING_TAB_KEY] = target_tab
                     st.success("Cotización cargada en el formulario de edición.")
                     st.rerun()
             with col_b:
