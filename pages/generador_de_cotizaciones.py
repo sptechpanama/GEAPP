@@ -20,12 +20,16 @@ if st.session_state.get("authentication_status") is not True:
 
 
 # ---- Helpers ----
-def _load_logo_b64(path: str) -> str:
-    try:
-        with open(path, "rb") as fh:
-            return base64.b64encode(fh.read()).decode()
-    except Exception:
-        return ""
+def _load_logo_b64(*paths: str) -> str:
+    for path in paths:
+        if not path:
+            continue
+        try:
+            with open(path, "rb") as fh:
+                return base64.b64encode(fh.read()).decode()
+        except Exception:
+            continue
+    return ""
 
 
 def _format_money(value: float) -> str:
@@ -56,6 +60,7 @@ def _build_invoice_html(
     logo_b64 = branding.get("logo_b64", "")
     color = branding.get("color", "#1e3a8a")
     acento = branding.get("accent", "#0ea5e9")
+    contacto_html = branding.get("contacto_html", "")
 
     subtotal = float(items["importe"].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
@@ -90,22 +95,52 @@ def _build_invoice_html(
   .quote-wrapper {{
     width: 900px;
     margin: 0 auto 24px auto;
-    background: radial-gradient(140% 120% at 20% 10%, {color}14 0%, transparent 40%),
-                radial-gradient(130% 120% at 80% -10%, {acento}1c 0%, transparent 45%),
-                linear-gradient(135deg, #f8fbff 0%, #eef2ff 100%);
-    padding: 28px 32px 36px 32px;
+    background: linear-gradient(135deg, #f5f7fb 0%, #eef4ff 100%);
+    padding: 30px 34px 50px 34px;
     border-radius: 18px;
     border: 1px solid #e2e8f0;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
     color: #0f172a;
     font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+    position: relative;
+    overflow: hidden;
+  }}
+  .quote-wrapper::before {{
+    content: "";
+    position: absolute;
+    top: -120px; right: -160px;
+    width: 420px; height: 420px;
+    background: radial-gradient(70% 70% at 60% 40%, #d7e6ff 0%, #b7d1ff 40%, #8fb1f0 70%, transparent 100%);
+    opacity: 0.9;
+    border-radius: 50%;
+    z-index: 0;
+  }}
+  .quote-wrapper::after {{
+    content: "";
+    position: absolute;
+    left: -120px; bottom: -140px;
+    width: 320px; height: 320px;
+    background: radial-gradient(75% 75% at 40% 60%, #233a78 0%, #1c2f62 60%, transparent 100%);
+    opacity: 0.8;
+    border-radius: 50%;
+    z-index: 0;
   }}
   .quote-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }}
   .quote-header .brand h1 {{ margin: 0; font-size: 28px; letter-spacing: -0.02em; color: #0f172a; }}
   .quote-meta {{ margin-top: 6px; color: #475569; font-size: 13px; }}
-  .quote-logo img {{ max-height: 70px; object-fit: contain; }}
-  .quote-dates {{ background: {color}0d; border: 1px solid {color}33; padding: 10px 14px; border-radius: 12px; color: #0f172a; }}
+  .quote-logo img {{ max-height: 86px; object-fit: contain; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.08)); }}
+  .quote-dates {{ background: {color}10; border: 1px solid {color}26; padding: 10px 14px; border-radius: 12px; color: #0f172a; }}
+  .issuer-box {{
+    background: rgba(255,255,255,0.88);
+    border: 1px solid #e2e8f0;
+    padding: 14px 16px;
+    border-radius: 14px;
+    font-size: 12px;
+    color: #0f172a;
+    box-shadow: 0 14px 30px rgba(0,0,0,0.06);
+    max-width: 240px;
+  }}
   table.items {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
   table.items th {{ text-align: left; padding: 10px 8px; background: {color}12; color: #0f172a; font-size: 13px; border-bottom: 1px solid #cbd5e1; }}
   table.items td {{ padding: 10px 8px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }}
@@ -130,6 +165,8 @@ def _build_invoice_html(
       {"<img src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     </div>
   </div>
+
+  {"<div class='issuer-box'>" + contacto_html + "</div>" if contacto_html else ""}
 
   <div class="quote-dates">
     <div><strong>Cliente:</strong> {html.escape(cliente or "—")}</div>
@@ -207,16 +244,25 @@ def _render_pdf_component(html_body: str, filename: str) -> None:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(os.path.dirname(BASE_DIR), "assets")
 
+# Prefer paths proporcionados, luego assets de respaldo
+RS_LOGO_PATH = r"C:\Users\rodri\GEAPP\Logo RS Engineering.png"
 COMPANIES = {
     "RS Engineering": {
         "color": "#0f172a",
-        "accent": "#0ea5e9",
-        "logo_b64": _load_logo_b64(os.path.join(ASSETS_DIR, "rs.png.png")),
+        "accent": "#0e4aa0",
+        "logo_b64": _load_logo_b64(RS_LOGO_PATH, os.path.join(ASSETS_DIR, "rs.png.png")),
+        "contacto_html": """<div style='text-align:left; line-height:1.35;'>
+        R.U.C. 9-740-624 / DV: 80<br>
+        PH Bonanza plaza, Bella vista<br>
+        TELÉFONO: +507 68475616<br>
+        EMAIL: RODRIGOSJESUS@HOTMAIL.COM
+        </div>""",
     },
     "RIR Medical": {
         "color": "#1d4ed8",
         "accent": "#22c55e",
         "logo_b64": _load_logo_b64(os.path.join(ASSETS_DIR, "rir.png.png")),
+        "contacto_html": "",
     },
 }
 
