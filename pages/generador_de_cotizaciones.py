@@ -58,11 +58,10 @@ def _build_invoice_html(
     condiciones: Dict[str, str],
 ) -> str:
     logo_b64 = branding.get("logo_b64", "")
-    color = branding.get("color", "#0f2b63")
-    acento = branding.get("accent", "#0c5fb8")
+    background_b64 = branding.get("background_b64", "")
     contacto_html = branding.get("contacto_html", "")
 
-    subtotal = float(items["importe"].sum())
+    subtotal = float(items['importe'].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
     total = subtotal + impuesto
 
@@ -71,187 +70,221 @@ def _build_invoice_html(
         rows.append(
             f"""
             <tr>
-                <td>{html.escape(str(row.get('producto_servicio', '') or ''))}</td>
-                <td class="num">{row.get('cantidad', 0):,.2f}</td>
-                <td class="num">{_format_money(row.get('precio_unitario', 0))}</td>
-                <td class="num">{_format_money(row.get('importe', 0))}</td>
+              <td>{html.escape(str(row.get('producto_servicio', '') or ''))}</td>
+              <td class="num">{row.get('cantidad', 0):,.0f}</td>
+              <td class="num">{_format_money(row.get('importe', 0))}</td>
             </tr>
             """
         )
 
-    sample_rows = "".join(rows) or """
+    sample_rows = ''.join(rows) or """
         <tr>
-            <td colspan="4" style="text-align:center;color:#64748b;">Agrega Ítems para ver el desglose.</td>
+            <td colspan="3" style="text-align:center;color:#64748b;">Agrega ítems para ver el desglose.</td>
         </tr>
     """
 
-    condiciones_html = "".join(
+    condiciones_html = ''.join(
         f"<li><strong>{html.escape(label)}:</strong> {html.escape(text)}</li>"
         for label, text in condiciones.items()
     )
 
     return f"""
 <style>
-  .quote-wrapper {{
-    width: 820px;
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Manrope:wght@400;600;700;800&display=swap');
+  .quote-page {{
+    position: relative;
+    width: 1414px;
+    height: 2000px;
     margin: 0 auto 24px auto;
-    background: #ffffff;
-    padding: 0 34px 46px 34px;
-    border-radius: 18px;
-    border: 1px solid #dfe6f2;
+    background: url('data:image/png;base64,{background_b64}') center top / cover no-repeat;
+    font-family: 'Manrope', 'Inter', 'Segoe UI', sans-serif;
+    color: #0c2349;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
-    color: #0f172a;
-    font-family: 'Manrope', system-ui, -apple-system, sans-serif;
-    position: relative;
-    overflow: hidden;
-    min-height: 1080px;
   }}
-  .band-top {{
-    position: relative;
-    padding: 0;
-    overflow: hidden;
-    height: 280px;
-    background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center top / cover no-repeat;
-  }}
-  .band-top::before {{ content: ""; }}
-  .band-bottom {{
-    height: 200px;
-    background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center bottom / cover no-repeat;
-    margin-top: 32px;
-  }}
-  .header-wrap {{
+  .logo {{
     position: absolute;
-    top: 22px; left: 26px; right: 26px;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    z-index: 2;
-    color: #ffffff;
-  }}
-  .header-text {{
-    max-width: 360px;
-    line-height: 1.4;
-    font-size: 12px;
-  }}
-  .header-text .company-name {{
-    font-size: 19px;
-    font-weight: 800;
-    margin: 0 0 6px 0;
-    color: #ffffff;
-  }}
-  .header-text .meta {{ margin-bottom: 6px; }}
-  .header-text a {{ color: #ffffff; text-decoration: underline; }}
-  .header-logo {{
-    background: #fff;
-    border: 1px solid #d9e2f1;
-    border-radius: 50%;
-    padding: 12px;
-    box-shadow: 0 8px 20px rgba(0,0,0,0.12);
-    width: 140px;
-    height: 140px;
+    top: 120px;
+    left: 120px;
+    width: 190px;
+    height: 190px;
     display: flex;
     align-items: center;
     justify-content: center;
   }}
-  .header-logo img {{ max-height: 110px; object-fit: contain; }}
-
-  .title-main {{ margin: 18px 0 12px 0; font-size: 36px; color: #0c2349; font-weight: 800; position: relative; z-index: 2; }}
-  .columns-info {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; position: relative; z-index: 2; margin-top: 6px; margin-bottom: 10px; }}
-  .info-block h4 {{ margin: 0 0 6px 0; color: #0c2349; font-size: 15px; }}
-  .info-block div {{ margin: 0; color: #1f2f4a; font-size: 13px; line-height: 1.45; }}
-
-  .quote-dates {{ background: rgba(255,255,255,0.94); border: 1px solid #dbe3f2; padding: 10px 14px; border-radius: 12px; color: #0f172a; position: relative; z-index: 2; margin-top: 10px; }}
-
-  table.items {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+  .logo img {{
+    width: 180px;
+    height: 180px;
+    object-fit: contain;
+  }}
+  .header-info {{
+    position: absolute;
+    top: 140px;
+    left: 340px;
+    width: 520px;
+    color: #f8fafc;
+    line-height: 1.35;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.35);
+  }}
+  .header-info .empresa {{
+    font-size: 28px;
+    font-weight: 800;
+    margin: 0 0 8px 0;
+  }}
+  .header-info .datos {{
+    font-size: 16px;
+    color: #f8fafc;
+  }}
+  .header-info .meta {{
+    margin-top: 10px;
+    font-size: 16px;
+    color: #f8fafc;
+  }}
+  .title {{
+    position: absolute;
+    top: 380px;
+    left: 120px;
+    font-size: 40px;
+    font-weight: 800;
+  }}
+  .columns {{
+    position: absolute;
+    top: 480px;
+    left: 120px;
+    right: 120px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 70px;
+    font-size: 16px;
+    line-height: 1.45;
+  }}
+  .columns h4 {{
+    margin: 0 0 10px 0;
+    font-size: 17px;
+    color: #0c2349;
+  }}
+  .columns .block div {{
+    margin: 0 0 6px 0;
+    color: #1f2f46;
+  }}
+  .table-wrap {{
+    position: absolute;
+    top: 720px;
+    left: 120px;
+    width: 1174px;
+  }}
+  table.items {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 15px;
+    color: #0c2349;
+  }}
   table.items th {{
+    background: #1c336a;
+    color: #ffffff;
+    padding: 12px 10px;
     text-align: left;
-    padding: 10px 8px;
-    background: #19356c;
-    color: #f4f7fd;
-    font-size: 13px;
-    border: 1px solid #c5d1e3;
+    border: 2px solid #1c336a;
+    font-weight: 700;
   }}
   table.items td {{
-    padding: 10px 8px;
     border: 1px solid #d9e2f1;
-    font-size: 13px;
+    padding: 12px 10px;
+    vertical-align: top;
   }}
-  table.items td.num {{ text-align: right; white-space: nowrap; }}
-  .totals {{ margin-top: 18px; width: 320px; margin-left: auto; font-size: 14px; color: #0f172a; }}
-  .totals div {{ display: flex; justify-content: space-between; padding: 6px 0; }}
-  .totals div.total {{ font-weight: 800; font-size: 16px; color: #183158; }}
-  .condiciones {{ margin-top: 22px; padding: 12px 14px 14px 14px; border: 1px dotted #1e3a8a; border-radius: 10px; background: rgba(255,255,255,0.88); max-width: 760px; position: relative; z-index: 2; }}
-  .condiciones h4 {{ margin: 0 0 8px 0; color: #183158; font-weight: 700; font-size: 14px; }}
-  .condiciones ul {{ margin: 0; padding-left: 16px; color: #183158; line-height: 1.5; font-size: 13px; }}
+  table.items td.num {{
+    text-align: center;
+    white-space: nowrap;
+  }}
+  .totals {{
+    position: absolute;
+    top: 1180px;
+    right: 160px;
+    width: 320px;
+    font-size: 16px;
+    line-height: 1.6;
+  }}
+  .totals div {{
+    display: flex;
+    justify-content: space-between;
+  }}
+  .totals .total {{
+    font-weight: 800;
+    font-size: 20px;
+  }}
+  .conditions {{
+    position: absolute;
+    top: 1340px;
+    left: 120px;
+    width: 1174px;
+    font-size: 15px;
+    line-height: 1.45;
+    color: #0c2349;
+  }}
+  .conditions h4 {{
+    margin: 0 0 12px 0;
+    font-size: 16px;
+    font-weight: 800;
+  }}
+  .conditions ul {{
+    margin: 0;
+    padding-left: 18px;
+    list-style: none;
+  }}
+  .conditions li::before {{
+    content: "• ";
+    color: #0c2349;
+  }}
 </style>
-<div class="quote-wrapper" id="quote-root">
-  <div class="band-top">
-    <div class="header-wrap">
-      <div class="header-card">
-        <div class="company-name">{html.escape(empresa)}</div>
-        <div class="meta">
-          N.º cotización: <strong>{html.escape(numero)}</strong><br>
-          Fecha: {fecha_cot.strftime("%d-%m-%Y")}
-        </div>
-        {"<div class='contact-block'>" + contacto_html + "</div>" if contacto_html else ""}
-      </div>
-      <div class="header-logo">
-        {"<img src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
-      </div>
-    </div>
+<div class="quote-page" id="quote-root">
+  <div class="logo">
+    {"<img src='data:image/png;base64," + logo_b64 + "' alt='logo' />" if logo_b64 else ""}
   </div>
-
-  <div class="title-main">Cotización</div>
-
-  <div class="columns-info">
-    <div class="info-block">
+  <div class="header-info">
+    <div class="empresa">{html.escape(empresa)}</div>
+    <div class="datos">{contacto_html}</div>
+    <div class="meta">N.º cotización: <strong>{html.escape(numero)}</strong><br>Fecha: {fecha_cot.strftime('%Y-%m-%d')}</div>
+  </div>
+  <div class="title">Cotización</div>
+  <div class="columns">
+    <div class="block">
       <h4>Datos del Cliente</h4>
-      <div>{html.escape(cliente or "—")}</div>
-      <div>{html.escape(direccion or "—")}</div>
+      <div>{html.escape(cliente or '-')}</div>
+      <div>{html.escape(direccion or '-')}</div>
     </div>
-    <div class="info-block">
+    <div class="block">
       <h4>Datos del Emisor</h4>
       <div>{html.escape(empresa)}</div>
       {"<div>" + contacto_html + "</div>" if contacto_html else ""}
     </div>
   </div>
-
-  <div class="quote-dates">
-    <div><strong>Cliente:</strong> {html.escape(cliente or "—")}</div>
-    <div><strong>Dirección:</strong> {html.escape(direccion or "—")}</div>
+  <div class="table-wrap">
+    <table class="items">
+      <thead>
+        <tr>
+          <th>Producto</th>
+          <th style="width:140px;">Cantidad</th>
+          <th style="width:200px;">Precio</th>
+        </tr>
+      </thead>
+      <tbody>
+        {sample_rows}
+      </tbody>
+    </table>
   </div>
-
-  <table class="items">
-    <thead>
-      <tr>
-        <th>Producto / Servicio</th>
-        <th>Cantidad</th>
-        <th>Precio unitario</th>
-        <th>Importe</th>
-      </tr>
-    </thead>
-    <tbody>
-      {sample_rows}
-    </tbody>
-  </table>
-
   <div class="totals">
     <div><span>Subtotal</span><span>{_format_money(subtotal)}</span></div>
-    <div><span>Impuesto ({impuesto_pct:.2f}%)</span><span>{_format_money(impuesto)}</span></div>
-    <div class="total"><span>Total</span><span>{_format_money(total)}</span></div>
+    <div><span>Impuestos ({impuesto_pct:.2f}%)</span><span>{_format_money(impuesto)}</span></div>
+    <div class="total"><span>TOTAL</span><span>{_format_money(total)}</span></div>
   </div>
-
-  <div class="condiciones">
-    <h4>Condiciones</h4>
+  <div class="conditions">
+    <h4>CONDICIONES</h4>
     <ul>
       {condiciones_html}
     </ul>
   </div>
-  <div class="band-bottom"></div>
 </div>
     """
-
 
 def _render_pdf_component(html_body: str, filename: str) -> None:
     """Renderiza la vista previa y un botón JS para exportar a PDF usando html2canvas + jsPDF."""
@@ -299,14 +332,17 @@ RS_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RS Engineering.png")
 RIR_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RIR Medical.png")
 RS_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rs.png.png")
 RIR_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rir.png.png")
+BACKGROUND_PATH = os.path.join(ASSETS_DIR, "Fondo.png")
+BACKGROUND_B64 = _load_logo_b64(BACKGROUND_PATH)
 COMPANIES = {
     "RS Engineering": {
         "color": "#0f172a",
         "accent": "#0e4aa0",
         "logo_b64": _load_logo_b64(RS_LOGO_PATH, RS_LOGO_FALLBACK),
+        "background_b64": BACKGROUND_B64,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
-        PH Bonanza plaza, Bella vista<br>
+        PH Bonanza Plaza, Bella Vista<br>
         TELÉFONO: +507 68475616<br>
         EMAIL: RODRIGOSJESUS@HOTMAIL.COM
         </div>""",
@@ -315,6 +351,7 @@ COMPANIES = {
         "color": "#1d4ed8",
         "accent": "#22c55e",
         "logo_b64": _load_logo_b64(RIR_LOGO_PATH, RIR_LOGO_FALLBACK),
+        "background_b64": BACKGROUND_B64,
         "contacto_html": "",
     },
 }
@@ -322,11 +359,11 @@ COMPANIES = {
 # ---- UI principal ----
 st.title("Generador de cotizaciones")
 
-with st.expander("Cotizacion - Panama Compra", expanded=False):
+with st.expander("Cotización - Panamá Compra", expanded=False):
     st.info("Placeholder: sección pendiente para cotizaciones de Panamá Compra.")
 
 
-with st.expander("Cotizacion - Privada", expanded=False):
+with st.expander("Cotización - Privada", expanded=False):
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
     with col_a:
@@ -398,6 +435,5 @@ with st.expander("Cotizacion - Privada", expanded=False):
     )
 
     _render_pdf_component(html_body, filename=f"{empresa.replace(' ', '_')}_{numero_cot}.pdf")
-
 
 
