@@ -95,8 +95,8 @@ def _build_invoice_html(
   .quote-wrapper {{
     width: 820px;
     margin: 0 auto 24px auto;
-    background: #f9fbff;
-    padding: 26px 34px 46px 34px;
+    background: #ffffff;
+    padding: 0 34px 46px 34px;
     border-radius: 18px;
     border: 1px solid #dfe6f2;
     -webkit-print-color-adjust: exact;
@@ -107,30 +107,41 @@ def _build_invoice_html(
     overflow: hidden;
     min-height: 1080px;
   }}
-  .quote-wrapper::before {{
+.band-top {{
+    position: relative;
+    padding: 34px 0 30px 0;
+    overflow: hidden;
+    height: 260px;
+  }}
+  .band-top::before {{
     content: "";
     position: absolute;
-    top: -120px; left: -120px;
-    width: 1100px; height: 340px;
-    background: radial-gradient(180% 120% at 50% 0%, #0c5fb8 0%, #0b3a7a 40%, #0a1f4a 70%, transparent 90%);
-    opacity: 0.96;
-    border-radius: 50% 50% 42% 42%;
+    top: -260px; left: -240px;
+    width: 1580px; height: 560px;
+    background: radial-gradient(180% 160% at 50% 20%, #0b5fb8 0%, #0a3f81 45%, #08234f 75%, transparent 92%);
+    opacity: 0.99;
+    border-radius: 54% 54% 50% 50%;
     z-index: 0;
   }}
-  .quote-wrapper::after {{
-    content: "";
+  .band-bottom {{
     position: absolute;
-    left: -140px; bottom: -140px;
-    width: 1080px; height: 320px;
-    background: radial-gradient(180% 140% at 30% 70%, #0b3a7a 0%, #0a1f4a 55%, transparent 90%);
-    opacity: 0.9;
-    border-radius: 48% 48% 50% 50%;
+    left: -320px; right: -320px; bottom: -240px;
+    height: 420px;
+    background: radial-gradient(180% 140% at 50% 10%, #0a3f81 0%, #0a1f4a 60%, transparent 96%);
+    border-radius: 60% 60% 64% 64%;
     z-index: 0;
   }}
-  .quote-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; position: relative; z-index: 2; }}
-  .quote-header .brand h1 {{ margin: 0; font-size: 26px; letter-spacing: -0.02em; color: #0c2349; }}
-  .quote-meta {{ margin-top: 6px; color: #1f2f4a; font-size: 13px; }}
-  .quote-logo img {{ max-height: 108px; object-fit: contain; background: rgba(255,255,255,0.9); border-radius: 50%; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }}
+  .band-content {{
+    position: relative;
+    z-index: 2;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 6px 4px 0 4px;
+    color: #eaf2fb;
+  }}
+  .band-left h1 {{ margin: 0; font-size: 26px; letter-spacing: -0.02em; color: #eaf2fb; }}
+  .band-left .meta {{ margin-top: 6px; color: #d6e7ff; font-size: 13px; }}
   .contact-card {{
     margin-top: 10px;
     background: rgba(255,255,255,0.96);
@@ -143,11 +154,15 @@ def _build_invoice_html(
     box-shadow: 0 10px 22px rgba(0,0,0,0.06);
     line-height: 1.45;
   }}
-  .quote-dates {{ background: rgba(255,255,255,0.94); border: 1px solid #dbe3f2; padding: 10px 14px; border-radius: 12px; color: #0f172a; position: relative; z-index: 2; }}
-  .title-main {{ margin: 26px 0 10px 0; font-size: 32px; color: #0c2349; font-weight: 800; position: relative; z-index: 2; }}
+  .quote-logo img {{ max-height: 120px; object-fit: contain; background: rgba(255,255,255,0.9); border-radius: 50%; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }}
+
+  .title-main {{ margin: 20px 0 12px 0; font-size: 32px; color: #0c2349; font-weight: 800; position: relative; z-index: 2; }}
   .columns-info {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; position: relative; z-index: 2; margin-top: 6px; margin-bottom: 10px; }}
   .info-block h4 {{ margin: 0 0 6px 0; color: #0c2349; font-size: 15px; }}
   .info-block div {{ margin: 0; color: #1f2f4a; font-size: 13px; line-height: 1.45; }}
+
+  .quote-dates {{ background: rgba(255,255,255,0.94); border: 1px solid #dbe3f2; padding: 10px 14px; border-radius: 12px; color: #0f172a; position: relative; z-index: 2; margin-top: 10px; }}
+
   table.items {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
   table.items th {{ text-align: left; padding: 10px 8px; background: #19356c; color: #f4f7fd; font-size: 13px; border-bottom: 1px solid #cbd5e1; }}
   table.items td {{ padding: 10px 8px; border-bottom: 1px solid #d9e2f1; font-size: 13px; }}
@@ -155,22 +170,24 @@ def _build_invoice_html(
   .totals {{ margin-top: 18px; width: 320px; margin-left: auto; font-size: 14px; color: #0f172a; }}
   .totals div {{ display: flex; justify-content: space-between; padding: 6px 0; }}
   .totals div.total {{ font-weight: 800; font-size: 16px; color: #183158; }}
-  .condiciones {{ margin-top: 18px; padding: 12px 14px 14px 14px; border: 1px dotted #1e3a8a; border-radius: 10px; background: rgba(255,255,255,0.88); max-width: 760px; }}
+  .condiciones {{ margin-top: 18px; padding: 12px 14px 14px 14px; border: 1px dotted #1e3a8a; border-radius: 10px; background: rgba(255,255,255,0.88); max-width: 760px; position: relative; z-index: 2; }}
   .condiciones h4 {{ margin: 0 0 6px 0; color: #183158; font-weight: 700; }}
   .condiciones ul {{ margin: 0; padding-left: 16px; color: #1f2937; line-height: 1.55; }}
 </style>
 <div class="quote-wrapper" id="quote-root">
-  <div class="quote-header">
-    <div class="brand">
-      <h1>{html.escape(empresa)}</h1>
-      <div class="quote-meta">
-        <div>N.º cotización: <strong>{html.escape(numero)}</strong></div>
-        <div>Fecha: {fecha_cot.strftime("%d-%m-%Y")}</div>
+  <div class="band-top">
+    <div class="band-content">
+      <div class="band-left">
+        <h1>{html.escape(empresa)}</h1>
+        <div class="meta">
+          <div>N.º cotización: <strong>{html.escape(numero)}</strong></div>
+          <div>Fecha: {fecha_cot.strftime("%d-%m-%Y")}</div>
+        </div>
+        {"<div class='contact-card'>" + contacto_html + "</div>" if contacto_html else ""}
       </div>
-      {"<div class='contact-card'>" + contacto_html + "</div>" if contacto_html else ""}
-    </div>
-    <div class="quote-logo">
-      {"<img src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
+      <div class="quote-logo">
+        {"<img src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
+      </div>
     </div>
   </div>
 
@@ -266,12 +283,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(os.path.dirname(BASE_DIR), "assets")
 
 # Prefer paths proporcionados, luego assets de respaldo
-RS_LOGO_PATH = r"C:\Users\rodri\GEAPP\Logo RS Engineering.png"
+RS_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RS Engineering.png")
+RIR_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RIR Medical.png")
+RS_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rs.png.png")
+RIR_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rir.png.png")
 COMPANIES = {
     "RS Engineering": {
         "color": "#0f172a",
         "accent": "#0e4aa0",
-        "logo_b64": _load_logo_b64(RS_LOGO_PATH, os.path.join(ASSETS_DIR, "rs.png.png")),
+        "logo_b64": _load_logo_b64(RS_LOGO_PATH, RS_LOGO_FALLBACK),
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
         PH Bonanza plaza, Bella vista<br>
@@ -282,7 +302,7 @@ COMPANIES = {
     "RIR Medical": {
         "color": "#1d4ed8",
         "accent": "#22c55e",
-        "logo_b64": _load_logo_b64(os.path.join(ASSETS_DIR, "rir.png.png")),
+        "logo_b64": _load_logo_b64(RIR_LOGO_PATH, RIR_LOGO_FALLBACK),
         "contacto_html": "",
     },
 }
