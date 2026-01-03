@@ -713,14 +713,21 @@ def _clear_edit_state() -> None:
     st.session_state[EDIT_KEY] = None
 
 
-tab_panama, tab_privada, tab_historial = st.tabs(
-    ["Cotización - Panamá Compra", "Cotización - Privada", "Historial de cotizaciones"]
+TAB_OPTIONS = ["Cotización - Panamá Compra", "Cotización - Privada", "Historial de cotizaciones"]
+if "cotizaciones_tab" not in st.session_state:
+    st.session_state["cotizaciones_tab"] = TAB_OPTIONS[0]
+
+active_tab = st.segmented_control(
+    "Secciones",
+    TAB_OPTIONS,
+    key="cotizaciones_tab",
+    label_visibility="collapsed",
 )
 
-with tab_panama:
+if active_tab == "Cotización - Panamá Compra":
     st.info("Placeholder: sección pendiente para cotizaciones de Panamá Compra.")
 
-with tab_privada:
+if active_tab == "Cotización - Privada":
     if sheet_error:
         st.warning(sheet_error)
 
@@ -916,7 +923,7 @@ with tab_privada:
             except Exception as exc:
                 st.error(f"No se pudo guardar la cotización: {exc}")
 
-with tab_historial:
+if active_tab == "Historial de cotizaciones":
     if sheet_error:
         st.warning(sheet_error)
     else:
@@ -956,6 +963,7 @@ with tab_historial:
             with col_a:
                 if st.button("Cargar en formulario"):
                     st.session_state[PENDING_EDIT_KEY] = selected_id
+                    st.session_state["cotizaciones_tab"] = "Cotización - Privada"
                     st.success("Cotización cargada en el formulario de edición.")
                     st.rerun()
             with col_b:
