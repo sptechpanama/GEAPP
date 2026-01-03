@@ -550,7 +550,7 @@ COMPANIES = {
         "header_left": 430,
         "header_top": 80,
         "header_height": 440,
-        "content_offset_y": 130,
+        "content_offset_y": 200,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         R.U.C. 9-740-624 / DV: 80<br>
         PH Bonanza Plaza, Bella Vista<br>
@@ -572,6 +572,7 @@ COMPANIES = {
         "header_left": 430,
         "header_top": 100,
         "header_height": 170,
+        "content_offset_y": 160,
         "contacto_html": """<div style='text-align:left; line-height:1.35;'>
         RUC: 155750585-2-2024 DV40<br>
         PH Bonanza Plaza, Bella Vista<br>
