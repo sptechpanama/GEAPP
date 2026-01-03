@@ -112,11 +112,56 @@ def _build_invoice_html(
     position: relative;
     padding: 0;
     overflow: hidden;
-    height: 280px;
+    height: 300px;
     background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center top / cover no-repeat;
   }}
   .band-top::before {{ content: ""; }}
   .band-bottom {{ content: ""; }}
+  .header-wrap {{
+    position: absolute;
+    top: 22px; left: 26px; right: 26px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    z-index: 2;
+  }}
+  .header-card {{
+    background: #fff;
+    border: 1px solid #d9e2f1;
+    border-radius: 12px;
+    box-shadow: 0 10px 22px rgba(0,0,0,0.08);
+    padding: 12px 14px;
+    max-width: 340px;
+    color: #0c2349;
+    line-height: 1.35;
+  }}
+  .header-card .company-name {{
+    font-size: 18px;
+    font-weight: 800;
+    margin: 0 0 4px 0;
+    color: #0c2349;
+  }}
+  .header-card .meta {{
+    font-size: 12px;
+    margin-bottom: 6px;
+    color: #1f2f4a;
+  }}
+  .header-card .contact-block {{
+    font-size: 12px;
+    color: #1f2f4a;
+  }}
+  .header-logo {{
+    background: #fff;
+    border: 1px solid #d9e2f1;
+    border-radius: 50%;
+    padding: 10px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+    max-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }}
+  .header-logo img {{ max-height: 90px; object-fit: contain; }}
   .band-content {{
     position: relative;
     z-index: 2;
@@ -162,16 +207,16 @@ def _build_invoice_html(
 </style>
 <div class="quote-wrapper" id="quote-root">
   <div class="band-top">
-    <div class="band-content">
-      <div class="band-left">
-        <h1>{html.escape(empresa)}</h1>
+    <div class="header-wrap">
+      <div class="header-card">
+        <div class="company-name">{html.escape(empresa)}</div>
         <div class="meta">
-          <div>N.º cotización: <strong>{html.escape(numero)}</strong></div>
-          <div>Fecha: {fecha_cot.strftime("%d-%m-%Y")}</div>
+          N.º cotización: <strong>{html.escape(numero)}</strong><br>
+          Fecha: {fecha_cot.strftime("%d-%m-%Y")}
         </div>
-        {"<div class='contact-card'>" + contacto_html + "</div>" if contacto_html else ""}
+        {"<div class='contact-block'>" + contacto_html + "</div>" if contacto_html else ""}
       </div>
-      <div class="quote-logo">
+      <div class="header-logo">
         {"<img src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
       </div>
     </div>
