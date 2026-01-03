@@ -476,11 +476,17 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
     preview_height = min(int(2000 * preview_scale + 220), 2400)
     component_html = f"""
     <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
       .preview-shell {{
         width: 100%;
         display: flex;
         justify-content: center;
         overflow: auto;
+        background: #ffffff;
       }}
       .preview-scale {{
         display: inline-block;
@@ -491,6 +497,7 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
     <div class="preview-shell">
       <div class="preview-scale">{html_body}</div>
     </div>
+    <div id="pdf-clone-host" style="position: fixed; left: -100000px; top: 0;"></div>
     <div style="margin: 10px 0 16px 0;">
       <button id="btn-download" style="
         background: linear-gradient(135deg, #2563eb, #22c55e);
@@ -504,21 +511,27 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
       const btn = document.getElementById("btn-download");
       btn?.addEventListener("click", () => {{
         const root = document.getElementById("quote-root");
-        if (!root) return;
+        const host = document.getElementById("pdf-clone-host");
+        if (!root || !host) return;
+
+        const clone = root.cloneNode(true);
+        clone.removeAttribute("id");
+        clone.style.transform = "none";
+        clone.style.position = "relative";
+        clone.style.left = "0";
+        clone.style.top = "0";
+        host.innerHTML = "";
+        host.appendChild(clone);
 
         const render = () => {{
-          html2canvas(root, {{ scale: 2, useCORS: true, backgroundColor: "#ffffff" }}).then(canvas => {{
+          html2canvas(clone, {{ scale: 2, useCORS: true, backgroundColor: "#ffffff" }}).then(canvas => {{
             const imgData = canvas.toDataURL("image/png");
             const pdf = new jspdf.jsPDF("p", "pt", "a4");
             const pageWidth = pdf.internal.pageSize.getWidth();
             const pageHeight = pdf.internal.pageSize.getHeight();
-            const ratio = Math.min(pageWidth / canvas.width, pageHeight / canvas.height);
-            const imgWidth = canvas.width * ratio;
-            const imgHeight = canvas.height * ratio;
-            const marginX = (pageWidth - imgWidth) / 2;
-            const marginY = (pageHeight - imgHeight) / 2;
-            pdf.addImage(imgData, "PNG", marginX, marginY, imgWidth, imgHeight);
+            pdf.addImage(imgData, "PNG", 0, 0, pageWidth, pageHeight);
             pdf.save("{filename}");
+            host.innerHTML = "";
           }});
         }};
 
