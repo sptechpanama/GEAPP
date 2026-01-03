@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import html
@@ -112,11 +112,15 @@ def _build_invoice_html(
     position: relative;
     padding: 0;
     overflow: hidden;
-    height: 300px;
+    height: 320px;
     background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center top / cover no-repeat;
   }}
   .band-top::before {{ content: ""; }}
-  .band-bottom {{ content: ""; }}
+  .band-bottom {{
+    height: 260px;
+    background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center bottom / cover no-repeat;
+    margin-top: 40px;
+  }}
   .header-wrap {{
     position: absolute;
     top: 22px; left: 26px; right: 26px;
@@ -131,19 +135,19 @@ def _build_invoice_html(
     border-radius: 12px;
     box-shadow: 0 10px 22px rgba(0,0,0,0.08);
     padding: 12px 14px;
-    max-width: 340px;
+    max-width: 360px;
     color: #0c2349;
     line-height: 1.35;
   }}
   .header-card .company-name {{
-    font-size: 18px;
+    font-size: 19px;
     font-weight: 800;
     margin: 0 0 4px 0;
     color: #0c2349;
   }}
   .header-card .meta {{
     font-size: 12px;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
     color: #1f2f4a;
   }}
   .header-card .contact-block {{
@@ -161,7 +165,7 @@ def _build_invoice_html(
     align-items: center;
     justify-content: center;
   }}
-  .header-logo img {{ max-height: 90px; object-fit: contain; }}
+  .header-logo img {{ max-height: 92px; object-fit: contain; }}
   .band-content {{
     position: relative;
     z-index: 2;
@@ -195,8 +199,19 @@ def _build_invoice_html(
   .quote-dates {{ background: rgba(255,255,255,0.94); border: 1px solid #dbe3f2; padding: 10px 14px; border-radius: 12px; color: #0f172a; position: relative; z-index: 2; margin-top: 10px; }}
 
   table.items {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-  table.items th {{ text-align: left; padding: 10px 8px; background: #19356c; color: #f4f7fd; font-size: 13px; border-bottom: 1px solid #cbd5e1; }}
-  table.items td {{ padding: 10px 8px; border-bottom: 1px solid #d9e2f1; font-size: 13px; }}
+  table.items th {{
+    text-align: left;
+    padding: 10px 8px;
+    background: #19356c;
+    color: #f4f7fd;
+    font-size: 13px;
+    border: 1px solid #c5d1e3;
+  }}
+  table.items td {{
+    padding: 10px 8px;
+    border: 1px solid #d9e2f1;
+    font-size: 13px;
+  }}
   table.items td.num {{ text-align: right; white-space: nowrap; }}
   .totals {{ margin-top: 18px; width: 320px; margin-left: auto; font-size: 14px; color: #0f172a; }}
   .totals div {{ display: flex; justify-content: space-between; padding: 6px 0; }}
@@ -268,6 +283,7 @@ def _build_invoice_html(
       {condiciones_html}
     </ul>
   </div>
+  <div class="band-bottom"></div>
 </div>
     """
 
@@ -417,3 +433,6 @@ with st.expander("Cotizacion - Privada", expanded=False):
     )
 
     _render_pdf_component(html_body, filename=f"{empresa.replace(' ', '_')}_{numero_cot}.pdf")
+
+
+
