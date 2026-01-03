@@ -107,19 +107,18 @@ def _build_invoice_html(
     overflow: hidden;
     min-height: 1080px;
   }}
-  /* Bandas reemplazadas por un fondo de imagen */
   .band-top {{
     position: relative;
     padding: 0;
     overflow: hidden;
-    height: 320px;
+    height: 280px;
     background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center top / cover no-repeat;
   }}
   .band-top::before {{ content: ""; }}
   .band-bottom {{
-    height: 260px;
+    height: 200px;
     background: url('data:image/png;base64,{branding.get("fondo_b64", "")}') center bottom / cover no-repeat;
-    margin-top: 40px;
+    margin-top: 32px;
   }}
   .header-wrap {{
     position: absolute;
@@ -128,70 +127,36 @@ def _build_invoice_html(
     justify-content: space-between;
     align-items: flex-start;
     z-index: 2;
+    color: #ffffff;
   }}
-  .header-card {{
-    background: #fff;
-    border: 1px solid #d9e2f1;
-    border-radius: 12px;
-    box-shadow: 0 10px 22px rgba(0,0,0,0.08);
-    padding: 12px 14px;
+  .header-text {{
     max-width: 360px;
-    color: #0c2349;
-    line-height: 1.35;
+    line-height: 1.4;
+    font-size: 12px;
   }}
-  .header-card .company-name {{
+  .header-text .company-name {{
     font-size: 19px;
     font-weight: 800;
-    margin: 0 0 4px 0;
-    color: #0c2349;
+    margin: 0 0 6px 0;
+    color: #ffffff;
   }}
-  .header-card .meta {{
-    font-size: 12px;
-    margin-bottom: 8px;
-    color: #1f2f4a;
-  }}
-  .header-card .contact-block {{
-    font-size: 12px;
-    color: #1f2f4a;
-  }}
+  .header-text .meta {{ margin-bottom: 6px; }}
+  .header-text a {{ color: #ffffff; text-decoration: underline; }}
   .header-logo {{
     background: #fff;
     border: 1px solid #d9e2f1;
     border-radius: 50%;
-    padding: 10px;
-    box-shadow: 0 8px 20px rgba(0,0,0,0.08);
-    max-height: 120px;
+    padding: 12px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+    width: 140px;
+    height: 140px;
     display: flex;
     align-items: center;
     justify-content: center;
   }}
-  .header-logo img {{ max-height: 92px; object-fit: contain; }}
-  .band-content {{
-    position: relative;
-    z-index: 2;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    padding: 6px 4px 0 4px;
-    color: #eaf2fb;
-  }}
-  .band-left h1 {{ margin: 0; font-size: 26px; letter-spacing: -0.02em; color: #eaf2fb; }}
-  .band-left .meta {{ margin-top: 6px; color: #d6e7ff; font-size: 13px; }}
-  .contact-card {{
-    margin-top: 10px;
-    background: rgba(255,255,255,0.96);
-    border: 1px solid #d7e0f0;
-    padding: 10px 12px;
-    border-radius: 10px;
-    font-size: 12px;
-    color: #0c1f3c;
-    max-width: 270px;
-    box-shadow: 0 10px 22px rgba(0,0,0,0.06);
-    line-height: 1.45;
-  }}
-  .quote-logo img {{ max-height: 120px; object-fit: contain; background: rgba(255,255,255,0.9); border-radius: 50%; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }}
+  .header-logo img {{ max-height: 110px; object-fit: contain; }}
 
-  .title-main {{ margin: 20px 0 12px 0; font-size: 32px; color: #0c2349; font-weight: 800; position: relative; z-index: 2; }}
+  .title-main {{ margin: 18px 0 12px 0; font-size: 36px; color: #0c2349; font-weight: 800; position: relative; z-index: 2; }}
   .columns-info {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; position: relative; z-index: 2; margin-top: 6px; margin-bottom: 10px; }}
   .info-block h4 {{ margin: 0 0 6px 0; color: #0c2349; font-size: 15px; }}
   .info-block div {{ margin: 0; color: #1f2f4a; font-size: 13px; line-height: 1.45; }}
@@ -216,9 +181,9 @@ def _build_invoice_html(
   .totals {{ margin-top: 18px; width: 320px; margin-left: auto; font-size: 14px; color: #0f172a; }}
   .totals div {{ display: flex; justify-content: space-between; padding: 6px 0; }}
   .totals div.total {{ font-weight: 800; font-size: 16px; color: #183158; }}
-  .condiciones {{ margin-top: 18px; padding: 12px 14px 14px 14px; border: 1px dotted #1e3a8a; border-radius: 10px; background: rgba(255,255,255,0.88); max-width: 760px; position: relative; z-index: 2; }}
-  .condiciones h4 {{ margin: 0 0 6px 0; color: #183158; font-weight: 700; }}
-  .condiciones ul {{ margin: 0; padding-left: 16px; color: #1f2937; line-height: 1.55; }}
+  .condiciones {{ margin-top: 22px; padding: 12px 14px 14px 14px; border: 1px dotted #1e3a8a; border-radius: 10px; background: rgba(255,255,255,0.88); max-width: 760px; position: relative; z-index: 2; }}
+  .condiciones h4 {{ margin: 0 0 8px 0; color: #183158; font-weight: 700; font-size: 14px; }}
+  .condiciones ul {{ margin: 0; padding-left: 16px; color: #183158; line-height: 1.5; font-size: 13px; }}
 </style>
 <div class="quote-wrapper" id="quote-root">
   <div class="band-top">
