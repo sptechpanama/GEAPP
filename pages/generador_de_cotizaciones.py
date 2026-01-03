@@ -476,11 +476,11 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
     preview_height = min(int(2000 * preview_scale + 220), 2400)
     component_html = f"""
     <style>
-      html, body {
+      html, body {{
         margin: 0;
         padding: 0;
         background: #ffffff;
-      }
+      }}
       .preview-shell {{
         width: 100%;
         display: flex;
