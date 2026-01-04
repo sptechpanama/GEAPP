@@ -16,7 +16,7 @@ from gspread.exceptions import WorksheetNotFound
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from sheets import get_client, read_worksheet, write_worksheet
-from entities import client_selector
+from entities import client_selector, _load_clients, WS_CLIENTES
 from ui.theme import apply_global_theme
 
 st.set_page_config(page_title="Generador de cotizaciones", page_icon="🧾", layout="wide")
@@ -64,6 +64,7 @@ COT_COLUMNS = [
     "total",
     "items_json",
     "items_resumen",
+    "detalles_extra",
     "condiciones_json",
     "vigencia",
     "forma_pago",
@@ -80,6 +81,12 @@ COT_PREFIX = {
     "RIR Medical": "RIR",
 }
 DEFAULT_COT_DRIVE_FOLDER_ID = "0AOB-QlptrUHYUk9PVA"
+CLIENT_COLUMNS = ["RowID", "ClienteID", "ClienteNombre", "Empresa"]
+CLIENT_EMPRESA_MAP = {
+    "RS Engineering": "RS-SP",
+    "RIR Medical": "RIR",
+}
+CLIENT_EMPRESA_OPTIONS = ["RS-SP", "RIR"]
 
 
 def _ensure_cotizaciones_sheet(client, sheet_id: str) -> None:
@@ -90,6 +97,16 @@ def _ensure_cotizaciones_sheet(client, sheet_id: str) -> None:
     except WorksheetNotFound:
         ws = sh.add_worksheet(title=SHEET_NAME_COT, rows=1000, cols=len(COT_COLUMNS))
         ws.update("A1", [COT_COLUMNS])
+
+
+def _ensure_clientes_sheet(client, sheet_id: str) -> None:
+    sh = client.open_by_key(sheet_id)
+    try:
+        sh.worksheet(WS_CLIENTES)
+        return
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title=WS_CLIENTES, rows=1000, cols=len(CLIENT_COLUMNS))
+        ws.update("A1", [CLIENT_COLUMNS])
 
 
 @st.cache_data(show_spinner=False)
@@ -111,6 +128,15 @@ def _normalize_cotizaciones_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _normalize_clientes_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in CLIENT_COLUMNS:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[CLIENT_COLUMNS]
+    return out
+
+
 def _next_sequence(df: pd.DataFrame, prefijo: str) -> int:
     if df.empty:
         return 1
@@ -122,6 +148,37 @@ def _next_sequence(df: pd.DataFrame, prefijo: str) -> int:
 
 def _build_numero_cot(prefijo: str, secuencia: int) -> str:
     return f"COT-{prefijo}-{secuencia:04d}"
+
+
+def _create_cliente_in_sheet(
+    client,
+    sheet_id: str,
+    nombre: str,
+    empresa_codigo: str,
+) -> tuple[str, bool]:
+    _ensure_clientes_sheet(client, sheet_id)
+    dfc = _normalize_clientes_df(read_worksheet(client, sheet_id, WS_CLIENTES))
+    nombre_clean = nombre.strip()
+    empresa_clean = empresa_codigo.strip()
+    if not nombre_clean:
+        raise ValueError("Debes indicar el nombre del cliente.")
+    dup_mask = (
+        dfc["ClienteNombre"].astype(str).str.strip().str.lower() == nombre_clean.lower()
+    ) & (dfc["Empresa"].astype(str).str.strip().str.upper() == empresa_clean.upper())
+    if not dfc.empty and dup_mask.any():
+        row = dfc[dup_mask].iloc[0]
+        return str(row.get("ClienteID", "")).strip(), False
+    new_id = f"C-{uuid.uuid4().hex[:8].upper()}"
+    new_row = {
+        "RowID": uuid.uuid4().hex,
+        "ClienteID": new_id,
+        "ClienteNombre": nombre_clean,
+        "Empresa": empresa_clean,
+    }
+    dfc = pd.concat([dfc, pd.DataFrame([new_row])], ignore_index=True)
+    write_worksheet(client, sheet_id, WS_CLIENTES, dfc)
+    _load_clients.clear()
+    return new_id, True
 
 
 def _get_drive_client(creds):
@@ -226,6 +283,7 @@ def _build_invoice_html(
     fecha_cot: date,
     cliente: str,
     direccion: str,
+    detalles_extra: str,
     items: pd.DataFrame,
     impuesto_pct: float,
     condiciones: Dict[str, str],
@@ -255,6 +313,8 @@ def _build_invoice_html(
     columns_left = 120 + content_offset_x
     table_top = 720 + content_offset_y
     table_left = 120 + content_offset_x
+    extra_top = 1040 + content_offset_y
+    extra_left = 120 + content_offset_x
     totals_top = 1180 + content_offset_y
     totals_right = 160 - content_offset_x
     conditions_top = 1340 + content_offset_y
@@ -286,6 +346,20 @@ def _build_invoice_html(
         f"<li><strong>{html.escape(label)}:</strong> {html.escape(text)}</li>"
         for label, text in condiciones.items()
     )
+    extra_text = (detalles_extra or "").strip()
+    extra_html = ""
+    if extra_text:
+        extra_html = (
+            "<div class=\"extra-details\" style=\"top:"
+            + str(extra_top)
+            + "px;left:"
+            + str(extra_left)
+            + "px;\">"
+            + "<h4>Detalles adicionales</h4>"
+            + "<div class=\"extra-body\">"
+            + html.escape(extra_text).replace("\n", "<br>")
+            + "</div></div>"
+        )
 
     return f"""
 <style>
@@ -383,6 +457,19 @@ def _build_invoice_html(
     top: 720px;
     left: 120px;
     width: 1174px;
+  }}
+  .extra-details {{
+    position: absolute;
+    width: 1174px;
+    font-size: 15px;
+    line-height: 1.5;
+    color: #1f2f46;
+  }}
+  .extra-details h4 {{
+    margin: 0 0 10px 0;
+    font-size: 16px;
+    font-weight: 800;
+    color: #0c2349;
   }}
   table.items {{
     width: 100%;
@@ -483,6 +570,7 @@ def _build_invoice_html(
       </tbody>
     </table>
   </div>
+  {extra_html}
   <div class="totals" style="top:{totals_top}px;right:{totals_right}px;">
     <div><span>Subtotal</span><span>{_format_money(subtotal)}</span></div>
     <div><span>Impuestos ({impuesto_pct:.2f}%)</span><span>{_format_money(impuesto)}</span></div>
@@ -674,6 +762,7 @@ def _apply_edit_state(row: dict) -> None:
     st.session_state["cot_empresa"] = row.get("empresa") or "RS Engineering"
     st.session_state["cot_cliente"] = row.get("cliente_nombre", "")
     st.session_state["cot_direccion"] = row.get("cliente_direccion", "")
+    st.session_state["cot_detalles_extra"] = row.get("detalles_extra", "")
     st.session_state["cot_numero"] = row.get("numero_cotizacion", "")
 
     fecha_val = row.get("fecha_cotizacion") or ""
@@ -756,6 +845,8 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_fecha"] = date.today()
     if "cot_impuesto" not in st.session_state:
         st.session_state["cot_impuesto"] = 7.0
+    if "cot_detalles_extra" not in st.session_state:
+        st.session_state["cot_detalles_extra"] = ""
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
@@ -770,6 +861,45 @@ if active_tab == "Cotizacion - Estandar":
                 st.session_state["cot_cliente_id"] = cliente_id
         cliente = st.text_input("Nombre del cliente", key="cot_cliente")
         direccion = st.text_area("Dirección del cliente", height=70, key="cot_direccion")
+
+        if not sheet_error and sheet_id and client is not None:
+            with st.expander("Cliente no registrado? Agregar al catalogo", expanded=False):
+                default_emp = CLIENT_EMPRESA_MAP.get(empresa, CLIENT_EMPRESA_OPTIONS[0])
+                try:
+                    default_idx = CLIENT_EMPRESA_OPTIONS.index(default_emp)
+                except ValueError:
+                    default_idx = 0
+                nuevo_nombre = st.text_input(
+                    "Nombre del nuevo cliente",
+                    value=cliente or "",
+                    key="cot_cliente_nuevo",
+                )
+                nuevo_emp = st.selectbox(
+                    "Empresa (cliente)",
+                    CLIENT_EMPRESA_OPTIONS,
+                    index=default_idx,
+                    key="cot_cliente_empresa",
+                )
+                if st.button("Guardar cliente", key="cot_cliente_guardar"):
+                    if not nuevo_nombre.strip():
+                        st.warning("Debes indicar el nombre del cliente.")
+                    else:
+                        try:
+                            nuevo_id, created = _create_cliente_in_sheet(
+                                client,
+                                sheet_id,
+                                nuevo_nombre,
+                                nuevo_emp,
+                            )
+                            st.session_state["cot_cliente"] = nuevo_nombre.strip()
+                            st.session_state["cot_cliente_id"] = nuevo_id
+                            if created:
+                                st.toast(f"Cliente creado: {nuevo_id}")
+                            else:
+                                st.toast("El cliente ya existia en el catalogo.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"No se pudo crear el cliente: {exc}")
     with col_b:
         prefijo = COT_PREFIX.get(empresa, "GEN")
         seq = _next_sequence(cot_df, prefijo)
@@ -820,6 +950,12 @@ if active_tab == "Cotizacion - Estandar":
     st.markdown(
         f"**Resumen:** Subtotal {_format_money(subtotal)} | Impuesto ({impuesto_pct:.2f}%) {_format_money(impuesto_valor)} | Total {_format_money(total)}"
     )
+    detalles_extra = st.text_area(
+        "Detalles adicionales",
+        height=90,
+        key="cot_detalles_extra",
+        placeholder="Agrega notas adicionales para la cotizacion.",
+    )
 
     st.markdown("### Vista previa")
     preview_scale = st.slider(
@@ -842,6 +978,7 @@ if active_tab == "Cotizacion - Estandar":
         fecha_cot=fecha_cot,
         cliente=cliente,
         direccion=direccion,
+        detalles_extra=detalles_extra,
         items=items_df,
         impuesto_pct=impuesto_pct,
         condiciones=condiciones,
@@ -918,6 +1055,7 @@ if active_tab == "Cotizacion - Estandar":
                     "total": total,
                     "items_json": items_json,
                     "items_resumen": _items_resumen(items_df),
+                    "detalles_extra": detalles_extra,
                     "condiciones_json": condiciones_json,
                     "vigencia": vigencia,
                     "forma_pago": forma_pago,
