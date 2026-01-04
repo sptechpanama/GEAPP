@@ -5,6 +5,7 @@ import html
 import json
 import uuid
 import os
+import math
 from datetime import date, datetime
 from io import BytesIO
 from typing import Dict, List, Optional
@@ -77,12 +78,16 @@ COT_COLUMNS = [
     "vigencia",
     "forma_pago",
     "entrega",
+    "lugar_entrega",
     "estado",
     "notas",
     "drive_file_id",
     "drive_file_name",
     "drive_file_url",
     "drive_folder",
+    "presupuesto_drive_file_id",
+    "presupuesto_drive_file_name",
+    "presupuesto_drive_file_url",
 ]
 COT_PREFIX = {
     "RS Engineering": "RS",
@@ -333,40 +338,58 @@ def _build_invoice_html(
     columns_left = 120 + content_offset_x
     table_top = 720 + content_offset_y
     table_left = 120 + content_offset_x
-    extra_top = 1040 + content_offset_y
-    extra_left = 120 + content_offset_x
-    totals_top = 1180 + content_offset_y
     totals_right = 160 - content_offset_x
-    conditions_top = 1340 + content_offset_y
     conditions_left = 120 + content_offset_x
+    extra_left = 120 + content_offset_x
 
-    subtotal = float(items['importe'].sum())
+    subtotal = float(items["importe"].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
     total = subtotal + impuesto
 
     rows: List[str] = []
+    row_height_base = 44
+    line_height = 18
+    table_rows_height = 0
     for _, row in items.iterrows():
+        producto_text = str(row.get("producto_servicio", "") or "")
+        line_count = max(1, math.ceil(len(producto_text) / 60))
+        table_rows_height += row_height_base + (line_count - 1) * line_height
         rows.append(
             f"""
             <tr>
-              <td>{html.escape(str(row.get('producto_servicio', '') or ''))}</td>
-              <td class="num">{row.get('cantidad', 0):,.0f}</td>
-              <td class="num">{_format_money(row.get('importe', 0))}</td>
+              <td>{html.escape(producto_text)}</td>
+              <td class=\"num\">{row.get('cantidad', 0):,.0f}</td>
+              <td class=\"num\">{_format_money(row.get('precio_unitario', 0))}</td>
+              <td class=\"num\">{_format_money(row.get('importe', 0))}</td>
             </tr>
             """
         )
 
-    sample_rows = ''.join(rows) or """
+    if not rows:
+        table_rows_height = row_height_base
+
+    table_height = 46 + table_rows_height
+    totals_top = table_top + table_height + 40
+
+    extra_text = (detalles_extra or "").strip()
+    extra_lines = 0
+    if extra_text:
+        for line in extra_text.splitlines() or [""]:
+            extra_lines += max(1, math.ceil(len(line) / 90))
+    extra_height = extra_lines * 20 + 30 if extra_text else 0
+    extra_top = totals_top + 120
+    conditions_top = extra_top + extra_height + 30 if extra_text else totals_top + 120
+
+    sample_rows = "".join(rows) or """
         <tr>
-            <td colspan="3" style="text-align:center;color:#64748b;">Agrega ítems para ver el desglose.</td>
+            <td colspan=\"4\" style=\"text-align:center;color:#64748b;\">Agrega items para ver el desglose.</td>
         </tr>
     """
 
-    condiciones_html = ''.join(
+    condiciones_html = "".join(
         f"<li><strong>{html.escape(label)}:</strong> {html.escape(text)}</li>"
         for label, text in condiciones.items()
     )
-    extra_text = (detalles_extra or "").strip()
     extra_html = ""
     if extra_text:
         extra_html = (
@@ -380,7 +403,6 @@ def _build_invoice_html(
             + html.escape(extra_text).replace("\n", "<br>")
             + "</div></div>"
         )
-
     return f"""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Manrope:wght@400;600;700;800&display=swap');
@@ -581,8 +603,9 @@ def _build_invoice_html(
       <thead>
         <tr>
           <th>Producto</th>
-          <th style="width:140px;">Cantidad</th>
-          <th style="width:200px;">Precio</th>
+          <th style="width:120px;">Cantidad</th>
+          <th style="width:180px;">Precio unitario</th>
+          <th style="width:180px;">Importe</th>
         </tr>
       </thead>
       <tbody>
@@ -590,12 +613,12 @@ def _build_invoice_html(
       </tbody>
     </table>
   </div>
-  {extra_html}
   <div class="totals" style="top:{totals_top}px;right:{totals_right}px;">
     <div><span>Subtotal</span><span>{_format_money(subtotal)}</span></div>
     <div><span>Impuestos ({impuesto_pct:.2f}%)</span><span>{_format_money(impuesto)}</span></div>
     <div class="total"><span>TOTAL</span><span>{_format_money(total)}</span></div>
   </div>
+  {extra_html}
   <div class="conditions" style="top:{conditions_top}px;left:{conditions_left}px;">
     <h4>CONDICIONES</h4>
     <ul>
@@ -604,6 +627,84 @@ def _build_invoice_html(
   </div>
 </div>
     """
+
+
+def _build_budget_html(
+    empresa: str,
+    numero: str,
+    fecha_cot: date,
+    presupuesto_df: pd.DataFrame,
+    costo_interno: float,
+    factor_ganancia: float,
+    precio_cotizar: float,
+    ganancia: float,
+    tiempo_inversion: float,
+    tiempo_cobro: float,
+) -> str:
+    rows = []
+    for _, row in presupuesto_df.iterrows():
+        rows.append(
+            f"""
+            <tr>
+              <td>{html.escape(str(row.get('producto_servicio', '') or ''))}</td>
+              <td style="text-align:center;">{row.get('cantidad', 0):,.0f}</td>
+              <td style="text-align:right;">{_format_money(row.get('precio_unitario', 0))}</td>
+              <td style="text-align:right;">{_format_money(row.get('importe', 0))}</td>
+            </tr>
+            """
+        )
+    if not rows:
+        rows.append(
+            "<tr><td colspan=\"4\" style=\"text-align:center;color:#64748b;\">Sin items de presupuesto.</td></tr>"
+        )
+    tiempo_total = tiempo_inversion + tiempo_cobro
+    tiempo_meses = tiempo_total / 30 if tiempo_total else 0.0
+
+    return f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Presupuesto {numero}</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 32px; color: #0f172a; }}
+  h1 {{ font-size: 22px; margin: 0 0 8px 0; }}
+  h2 {{ font-size: 16px; margin: 24px 0 10px 0; }}
+  .meta {{ color: #475569; font-size: 13px; margin-bottom: 16px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  th, td {{ border: 1px solid #cbd5f5; padding: 8px; vertical-align: top; }}
+  th {{ background: #1c336a; color: #ffffff; text-align: left; }}
+  .summary {{ margin-top: 18px; font-size: 14px; }}
+  .summary div {{ display: flex; justify-content: space-between; margin-bottom: 6px; }}
+  .summary .total {{ font-weight: 700; font-size: 15px; }}
+</style>
+</head>
+<body>
+  <h1>Presupuesto interno</h1>
+  <div class="meta">Cotizacion: {html.escape(numero)} | Empresa: {html.escape(empresa)} | Fecha: {fecha_cot.strftime('%Y-%m-%d')}</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Producto / Servicio</th>
+        <th style="width:120px;">Cantidad</th>
+        <th style="width:160px;">Precio unitario</th>
+        <th style="width:160px;">Subtotal</th>
+      </tr>
+    </thead>
+    <tbody>
+      {''.join(rows)}
+    </tbody>
+  </table>
+  <div class="summary">
+    <div><span>Costo interno</span><span>{_format_money(costo_interno)}</span></div>
+    <div><span>Factor de ganancia</span><span>{factor_ganancia:.2f}</span></div>
+    <div><span>Precio a cotizar</span><span>{_format_money(precio_cotizar)}</span></div>
+    <div><span>Ganancia</span><span>{_format_money(ganancia)}</span></div>
+    <div><span>Tiempo recuperacion</span><span>{tiempo_total:.0f} dias (~{tiempo_meses:.1f} meses)</span></div>
+  </div>
+</body>
+</html>
+"""
 
 def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 0.75) -> None:
     """Renderiza la vista previa y un botón JS para exportar a PDF usando html2canvas + jsPDF."""
@@ -845,6 +946,7 @@ def _apply_edit_state(row: dict) -> None:
     st.session_state["cot_vigencia"] = condiciones.get("Vigencia") or row.get("vigencia") or "15 días"
     st.session_state["cot_forma_pago"] = condiciones.get("Forma de pago") or row.get("forma_pago") or "Transferencia bancaria"
     st.session_state["cot_entrega"] = condiciones.get("Entrega") or row.get("entrega") or "15 días hábiles"
+    st.session_state["cot_lugar_entrega"] = (condiciones.get("Lugar de entrega") or row.get("lugar_entrega") or "")
 
     impuesto_val = row.get("impuesto_pct")
     try:
@@ -900,6 +1002,8 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_impuesto"] = 7.0
     if "cot_detalles_extra" not in st.session_state:
         st.session_state["cot_detalles_extra"] = ""
+    if "cot_lugar_entrega" not in st.session_state:
+        st.session_state["cot_lugar_entrega"] = ""
     if "cot_presupuesto_factor" not in st.session_state:
         st.session_state["cot_presupuesto_factor"] = 1.3
     if "cot_presupuesto_t_inversion" not in st.session_state:
@@ -976,6 +1080,7 @@ if active_tab == "Cotizacion - Estandar":
         vigencia = st.text_input("Vigencia de la oferta", value="15 días", key="cot_vigencia")
         forma_pago = st.text_input("Forma de pago", value="Transferencia bancaria", key="cot_forma_pago")
         entrega = st.text_input("Entrega", value="15 días hábiles", key="cot_entrega")
+        lugar_entrega = st.text_input("Lugar de entrega", key="cot_lugar_entrega")
 
     st.markdown("### Ítems de la cotización")
     if items_state_key not in st.session_state:
@@ -983,8 +1088,9 @@ if active_tab == "Cotizacion - Estandar":
             {"producto_servicio": "Producto o servicio", "cantidad": 1, "precio_unitario": 100.0},
         ]
 
+    items_display_df = _build_items_dataframe(pd.DataFrame(st.session_state[items_state_key]))
     items_raw = st.data_editor(
-        pd.DataFrame(st.session_state[items_state_key]),
+        items_display_df,
         num_rows="dynamic",
         use_container_width=True,
         key="cotizacion_privada_items",
@@ -994,7 +1100,11 @@ if active_tab == "Cotizacion - Estandar":
             "precio_unitario": st.column_config.NumberColumn(
                 "Precio unitario", min_value=0.0, step=10.0, format="$%0.2f", required=True
             ),
+            "importe": st.column_config.NumberColumn(
+                "Subtotal", format="$%0.2f", disabled=True
+            ),
         },
+        disabled=["importe"],
         hide_index=True,
     )
 
@@ -1023,8 +1133,9 @@ if active_tab == "Cotizacion - Estandar":
             {"producto_servicio": "Detalle", "cantidad": 1, "precio_unitario": 0.0},
         ]
 
+    presupuesto_display_df = _build_items_dataframe(pd.DataFrame(st.session_state[presupuesto_state_key]))
     presupuesto_raw = st.data_editor(
-        pd.DataFrame(st.session_state[presupuesto_state_key]),
+        presupuesto_display_df,
         num_rows="dynamic",
         use_container_width=True,
         key="cotizacion_presupuesto_items",
@@ -1034,7 +1145,11 @@ if active_tab == "Cotizacion - Estandar":
             "precio_unitario": st.column_config.NumberColumn(
                 "Precio unitario", min_value=0.0, step=10.0, format="$%0.2f", required=True
             ),
+            "importe": st.column_config.NumberColumn(
+                "Subtotal", format="$%0.2f", disabled=True
+            ),
         },
+        disabled=["importe"],
         hide_index=True,
     )
 
@@ -1070,12 +1185,13 @@ if active_tab == "Cotizacion - Estandar":
     precio_cotizar = costo_interno * factor_ganancia
     ganancia = precio_cotizar - costo_interno
     tiempo_recuperacion = tiempo_inversion + tiempo_cobro
+    tiempo_recuperacion_meses = tiempo_recuperacion / 30 if tiempo_recuperacion else 0.0
 
     st.markdown(
         f"**Resumen presupuesto:** Costo interno {_format_money(costo_interno)} | "
         f"Precio a cotizar {_format_money(precio_cotizar)} | "
         f"Ganancia {_format_money(ganancia)} | "
-        f"Tiempo recuperacion {tiempo_recuperacion:.0f} dias"
+        f"Tiempo recuperacion {tiempo_recuperacion:.0f} dias (~{tiempo_recuperacion_meses:.1f} meses)"
     )
 
     st.markdown("### Vista previa")
@@ -1087,9 +1203,10 @@ if active_tab == "Cotizacion - Estandar":
         step=0.05,
     )
     condiciones = {
-        "Vigencia": vigencia or "—",
-        "Forma de pago": forma_pago or "—",
-        "Entrega": entrega or "—",
+        "Vigencia": vigencia or "-",
+        "Forma de pago": forma_pago or "-",
+        "Entrega": entrega or "-",
+        "Lugar de entrega": lugar_entrega or "-",
     }
 
     html_body = _build_invoice_html(
@@ -1125,9 +1242,13 @@ if active_tab == "Cotizacion - Estandar":
                 row_id = edit_row.get("id") if edit_row else uuid.uuid4().hex
                 created_at = edit_row.get("created_at") if edit_row else now
 
-                items_json = json.dumps(items_df.to_dict(orient="records"), ensure_ascii=False)
+                items_json = json.dumps(
+                    items_df[["producto_servicio", "cantidad", "precio_unitario"]].to_dict(orient="records"),
+                    ensure_ascii=False,
+                )
                 presupuesto_items_json = json.dumps(
-                    presupuesto_df.to_dict(orient="records"), ensure_ascii=False
+                    presupuesto_df[["producto_servicio", "cantidad", "precio_unitario"]].to_dict(orient="records"),
+                    ensure_ascii=False,
                 )
                 condiciones_json = json.dumps(condiciones, ensure_ascii=False)
 
@@ -1135,6 +1256,9 @@ if active_tab == "Cotizacion - Estandar":
                 drive_file_name = edit_row.get("drive_file_name") if edit_row else ""
                 drive_file_url = edit_row.get("drive_file_url") if edit_row else ""
                 drive_folder = edit_row.get("drive_folder") if edit_row else ""
+                presupuesto_drive_file_id = edit_row.get("presupuesto_drive_file_id") if edit_row else ""
+                presupuesto_drive_file_name = edit_row.get("presupuesto_drive_file_name") if edit_row else ""
+                presupuesto_drive_file_url = edit_row.get("presupuesto_drive_file_url") if edit_row else ""
                 tipo_cotizacion = (
                     edit_row.get("tipo_cotizacion")
                     if edit_row and edit_row.get("tipo_cotizacion")
@@ -1159,6 +1283,32 @@ if active_tab == "Cotizacion - Estandar":
                         drive_folder = folder_id
                         if drive_file_id:
                             drive_file_url = f"https://drive.google.com/file/d/{drive_file_id}/view"
+                        presupuesto_html = _build_budget_html(
+                            empresa=empresa,
+                            numero=numero_cot,
+                            fecha_cot=fecha_cot,
+                            presupuesto_df=presupuesto_df,
+                            costo_interno=costo_interno,
+                            factor_ganancia=factor_ganancia,
+                            precio_cotizar=precio_cotizar,
+                            ganancia=ganancia,
+                            tiempo_inversion=tiempo_inversion,
+                            tiempo_cobro=tiempo_cobro,
+                        )
+                        presupuesto_filename = f"Presupuesto_{numero_cot}.html"
+                        presupuesto_upload = _upload_quote_html(
+                            drive,
+                            folder_id,
+                            presupuesto_filename,
+                            presupuesto_html,
+                            existing_file_id=presupuesto_drive_file_id or None,
+                        )
+                        presupuesto_drive_file_id = presupuesto_upload.get("id", presupuesto_drive_file_id)
+                        presupuesto_drive_file_name = presupuesto_upload.get("name", presupuesto_filename)
+                        if presupuesto_drive_file_id:
+                            presupuesto_drive_file_url = (
+                                f"https://drive.google.com/file/d/{presupuesto_drive_file_id}/view"
+                            )
 
                 row = {
                     "id": row_id,
@@ -1192,12 +1342,16 @@ if active_tab == "Cotizacion - Estandar":
                     "vigencia": vigencia,
                     "forma_pago": forma_pago,
                     "entrega": entrega,
+                    "lugar_entrega": lugar_entrega,
                     "estado": edit_row.get("estado", "vigente") if edit_row else "vigente",
                     "notas": edit_row.get("notas", "") if edit_row else "",
                     "drive_file_id": drive_file_id,
                     "drive_file_name": drive_file_name,
                     "drive_file_url": drive_file_url,
                     "drive_folder": drive_folder,
+                    "presupuesto_drive_file_id": presupuesto_drive_file_id,
+                    "presupuesto_drive_file_name": presupuesto_drive_file_name,
+                    "presupuesto_drive_file_url": presupuesto_drive_file_url,
                 }
 
                 if edit_row and row_id in df_write["id"].values:
@@ -1293,11 +1447,12 @@ if active_tab == "Historial de cotizaciones":
                     pres_t_rec = float(sel_row.get("presupuesto_t_recuperacion") or 0)
                 except (TypeError, ValueError):
                     pres_t_rec = 0.0
+                pres_t_rec_meses = pres_t_rec / 30 if pres_t_rec else 0.0
                 st.markdown(
                     f"**Resumen presupuesto:** Costo interno {_format_money(pres_subtotal)} | "
                     f"Factor {pres_factor:.2f} | Precio a cotizar {_format_money(pres_precio)} | "
                     f"Ganancia {_format_money(pres_ganancia)} | "
-                    f"Tiempo recuperacion {pres_t_rec:.0f} dias"
+                    f"Tiempo recuperacion {pres_t_rec:.0f} dias (~{pres_t_rec_meses:.1f} meses)"
                 )
 
             col_a, col_b, col_c = st.columns(3)
