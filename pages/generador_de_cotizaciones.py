@@ -65,6 +65,14 @@ COT_COLUMNS = [
     "items_json",
     "items_resumen",
     "detalles_extra",
+    "presupuesto_items_json",
+    "presupuesto_subtotal",
+    "presupuesto_factor_ganancia",
+    "presupuesto_precio_cotizar",
+    "presupuesto_ganancia",
+    "presupuesto_t_inversion_presentacion",
+    "presupuesto_t_presentacion_cobro",
+    "presupuesto_t_recuperacion",
     "condiciones_json",
     "vigencia",
     "forma_pago",
@@ -123,7 +131,19 @@ def _normalize_cotizaciones_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             out[col] = ""
     out = out[COT_COLUMNS]
-    for col in ("subtotal", "impuesto_pct", "impuesto_monto", "total"):
+    for col in (
+        "subtotal",
+        "impuesto_pct",
+        "impuesto_monto",
+        "total",
+        "presupuesto_subtotal",
+        "presupuesto_factor_ganancia",
+        "presupuesto_precio_cotizar",
+        "presupuesto_ganancia",
+        "presupuesto_t_inversion_presentacion",
+        "presupuesto_t_presentacion_cobro",
+        "presupuesto_t_recuperacion",
+    ):
         out[col] = pd.to_numeric(out[col], errors="coerce")
     return out
 
@@ -755,6 +775,7 @@ PENDING_EDIT_KEY = "cotizacion_pending_edit_id"
 PENDING_TAB_KEY = "cotizacion_pending_tab"
 
 items_state_key = "cotizacion_privada_items_data"
+presupuesto_state_key = "cotizacion_presupuesto_items_data"
 
 
 def _apply_edit_state(row: dict) -> None:
@@ -783,6 +804,38 @@ def _apply_edit_state(row: dict) -> None:
     if not items:
         items = [{"producto_servicio": "Producto o servicio", "cantidad": 1, "precio_unitario": 100.0}]
     st.session_state[items_state_key] = items
+    try:
+        presupuesto_items = json.loads(row.get("presupuesto_items_json") or "[]")
+        if not isinstance(presupuesto_items, list):
+            presupuesto_items = []
+    except Exception:
+        presupuesto_items = []
+    if not presupuesto_items:
+        presupuesto_items = [
+            {"producto_servicio": "Detalle", "cantidad": 1, "precio_unitario": 0.0}
+        ]
+    st.session_state[presupuesto_state_key] = presupuesto_items
+
+    factor_val = row.get("presupuesto_factor_ganancia")
+    try:
+        factor_val = float(factor_val)
+    except (TypeError, ValueError):
+        factor_val = 1.3
+    st.session_state["cot_presupuesto_factor"] = factor_val
+
+    t_inv = row.get("presupuesto_t_inversion_presentacion")
+    try:
+        t_inv = float(t_inv)
+    except (TypeError, ValueError):
+        t_inv = 0.0
+    st.session_state["cot_presupuesto_t_inversion"] = t_inv
+
+    t_cobro = row.get("presupuesto_t_presentacion_cobro")
+    try:
+        t_cobro = float(t_cobro)
+    except (TypeError, ValueError):
+        t_cobro = 0.0
+    st.session_state["cot_presupuesto_t_cobro"] = t_cobro
 
     try:
         condiciones = json.loads(row.get("condiciones_json") or "{}")
@@ -847,6 +900,12 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_impuesto"] = 7.0
     if "cot_detalles_extra" not in st.session_state:
         st.session_state["cot_detalles_extra"] = ""
+    if "cot_presupuesto_factor" not in st.session_state:
+        st.session_state["cot_presupuesto_factor"] = 1.3
+    if "cot_presupuesto_t_inversion" not in st.session_state:
+        st.session_state["cot_presupuesto_t_inversion"] = 0.0
+    if "cot_presupuesto_t_cobro" not in st.session_state:
+        st.session_state["cot_presupuesto_t_cobro"] = 0.0
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
@@ -957,6 +1016,68 @@ if active_tab == "Cotizacion - Estandar":
         placeholder="Agrega notas adicionales para la cotizacion.",
     )
 
+
+    st.markdown("### Presupuesto interno")
+    if presupuesto_state_key not in st.session_state:
+        st.session_state[presupuesto_state_key] = [
+            {"producto_servicio": "Detalle", "cantidad": 1, "precio_unitario": 0.0},
+        ]
+
+    presupuesto_raw = st.data_editor(
+        pd.DataFrame(st.session_state[presupuesto_state_key]),
+        num_rows="dynamic",
+        use_container_width=True,
+        key="cotizacion_presupuesto_items",
+        column_config={
+            "producto_servicio": st.column_config.TextColumn("Producto / Servicio", width="large", required=True),
+            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, required=True),
+            "precio_unitario": st.column_config.NumberColumn(
+                "Precio unitario", min_value=0.0, step=10.0, format="$%0.2f", required=True
+            ),
+        },
+        hide_index=True,
+    )
+
+    presupuesto_df = _build_items_dataframe(pd.DataFrame(presupuesto_raw))
+    st.session_state[presupuesto_state_key] = presupuesto_df[
+        ["producto_servicio", "cantidad", "precio_unitario"]
+    ].to_dict(orient="records")
+
+    costo_interno = float(presupuesto_df["importe"].sum())
+    col_p1, col_p2, col_p3 = st.columns([1, 1, 1])
+    with col_p1:
+        factor_ganancia = st.number_input(
+            "Factor de ganancia",
+            min_value=0.0,
+            step=0.05,
+            key="cot_presupuesto_factor",
+        )
+    with col_p2:
+        tiempo_inversion = st.number_input(
+            "Tiempo desde inversion a presentacion (dias)",
+            min_value=0.0,
+            step=1.0,
+            key="cot_presupuesto_t_inversion",
+        )
+    with col_p3:
+        tiempo_cobro = st.number_input(
+            "Tiempo desde presentacion a cobro (dias)",
+            min_value=0.0,
+            step=1.0,
+            key="cot_presupuesto_t_cobro",
+        )
+
+    precio_cotizar = costo_interno * factor_ganancia
+    ganancia = precio_cotizar - costo_interno
+    tiempo_recuperacion = tiempo_inversion + tiempo_cobro
+
+    st.markdown(
+        f"**Resumen presupuesto:** Costo interno {_format_money(costo_interno)} | "
+        f"Precio a cotizar {_format_money(precio_cotizar)} | "
+        f"Ganancia {_format_money(ganancia)} | "
+        f"Tiempo recuperacion {tiempo_recuperacion:.0f} dias"
+    )
+
     st.markdown("### Vista previa")
     preview_scale = st.slider(
         "Zoom de vista previa",
@@ -1005,6 +1126,9 @@ if active_tab == "Cotizacion - Estandar":
                 created_at = edit_row.get("created_at") if edit_row else now
 
                 items_json = json.dumps(items_df.to_dict(orient="records"), ensure_ascii=False)
+                presupuesto_items_json = json.dumps(
+                    presupuesto_df.to_dict(orient="records"), ensure_ascii=False
+                )
                 condiciones_json = json.dumps(condiciones, ensure_ascii=False)
 
                 drive_file_id = edit_row.get("drive_file_id") if edit_row else ""
@@ -1056,6 +1180,14 @@ if active_tab == "Cotizacion - Estandar":
                     "items_json": items_json,
                     "items_resumen": _items_resumen(items_df),
                     "detalles_extra": detalles_extra,
+                    "presupuesto_items_json": presupuesto_items_json,
+                    "presupuesto_subtotal": costo_interno,
+                    "presupuesto_factor_ganancia": factor_ganancia,
+                    "presupuesto_precio_cotizar": precio_cotizar,
+                    "presupuesto_ganancia": ganancia,
+                    "presupuesto_t_inversion_presentacion": tiempo_inversion,
+                    "presupuesto_t_presentacion_cobro": tiempo_cobro,
+                    "presupuesto_t_recuperacion": tiempo_recuperacion,
                     "condiciones_json": condiciones_json,
                     "vigencia": vigencia,
                     "forma_pago": forma_pago,
@@ -1117,6 +1249,56 @@ if active_tab == "Historial de cotizaciones":
                     "Total": sel_row.get("total"),
                 }
             )
+            detalles_hist = str(sel_row.get("detalles_extra") or "").strip()
+            if detalles_hist:
+                st.text_area(
+                    "Detalles adicionales",
+                    value=detalles_hist,
+                    height=90,
+                    disabled=True,
+                )
+
+            presupuesto_items = []
+            try:
+                presupuesto_items = json.loads(sel_row.get("presupuesto_items_json") or "[]")
+                if not isinstance(presupuesto_items, list):
+                    presupuesto_items = []
+            except Exception:
+                presupuesto_items = []
+            if presupuesto_items:
+                st.markdown("#### Presupuesto interno")
+                pres_df = _build_items_dataframe(pd.DataFrame(presupuesto_items))
+                st.dataframe(
+                    pres_df[["producto_servicio", "cantidad", "precio_unitario", "importe"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                try:
+                    pres_subtotal = float(sel_row.get("presupuesto_subtotal") or 0)
+                except (TypeError, ValueError):
+                    pres_subtotal = 0.0
+                try:
+                    pres_factor = float(sel_row.get("presupuesto_factor_ganancia") or 0)
+                except (TypeError, ValueError):
+                    pres_factor = 0.0
+                try:
+                    pres_precio = float(sel_row.get("presupuesto_precio_cotizar") or 0)
+                except (TypeError, ValueError):
+                    pres_precio = 0.0
+                try:
+                    pres_ganancia = float(sel_row.get("presupuesto_ganancia") or 0)
+                except (TypeError, ValueError):
+                    pres_ganancia = 0.0
+                try:
+                    pres_t_rec = float(sel_row.get("presupuesto_t_recuperacion") or 0)
+                except (TypeError, ValueError):
+                    pres_t_rec = 0.0
+                st.markdown(
+                    f"**Resumen presupuesto:** Costo interno {_format_money(pres_subtotal)} | "
+                    f"Factor {pres_factor:.2f} | Precio a cotizar {_format_money(pres_precio)} | "
+                    f"Ganancia {_format_money(pres_ganancia)} | "
+                    f"Tiempo recuperacion {pres_t_rec:.0f} dias"
+                )
 
             col_a, col_b, col_c = st.columns(3)
             with col_a:
