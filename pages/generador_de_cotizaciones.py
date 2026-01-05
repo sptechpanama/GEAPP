@@ -874,6 +874,7 @@ if EDIT_KEY not in st.session_state:
     st.session_state[EDIT_KEY] = None
 PENDING_EDIT_KEY = "cotizacion_pending_edit_id"
 PENDING_TAB_KEY = "cotizacion_pending_tab"
+PENDING_DUPLICATE_KEY = "cotizacion_pending_duplicate_id"
 
 items_state_key = "cotizacion_privada_items_data"
 presupuesto_state_key = "cotizacion_presupuesto_items_data"
@@ -960,6 +961,17 @@ def _clear_edit_state() -> None:
     st.session_state[EDIT_KEY] = None
 
 
+def _apply_duplicate_state(row: dict, cotizaciones_df: pd.DataFrame) -> None:
+    _apply_edit_state(row)
+    _clear_edit_state()
+    empresa_sel = st.session_state.get("cot_empresa") or row.get("empresa") or "RS Engineering"
+    prefijo = COT_PREFIX.get(empresa_sel, "GEN")
+    seq = _next_sequence(cotizaciones_df, prefijo)
+    numero_auto = _build_numero_cot(prefijo, seq)
+    st.session_state["cot_numero"] = numero_auto
+    st.session_state["cot_numero_pref"] = prefijo
+
+
 TAB_OPTIONS = ["Cotización - Panamá Compra", "Cotizacion - Estandar", "Historial de cotizaciones"]
 pending_tab = st.session_state.pop(PENDING_TAB_KEY, None)
 if pending_tab in TAB_OPTIONS:
@@ -983,8 +995,13 @@ if active_tab == "Cotizacion - Estandar":
     if sheet_error:
         st.warning(sheet_error)
 
+    pending_dup = st.session_state.pop(PENDING_DUPLICATE_KEY, None)
     pending_id = st.session_state.pop(PENDING_EDIT_KEY, None)
-    if pending_id and not cot_df.empty:
+    if pending_dup and not cot_df.empty:
+        row_match = cot_df[cot_df["id"] == pending_dup]
+        if not row_match.empty:
+            _apply_duplicate_state(row_match.iloc[0].to_dict(), cot_df)
+    elif pending_id and not cot_df.empty:
         row_match = cot_df[cot_df["id"] == pending_id]
         if not row_match.empty:
             _apply_edit_state(row_match.iloc[0].to_dict())
@@ -1455,23 +1472,33 @@ if active_tab == "Historial de cotizaciones":
                     f"Tiempo recuperacion {pres_t_rec:.0f} dias (~{pres_t_rec_meses:.1f} meses)"
                 )
 
-            col_a, col_b, col_c = st.columns(3)
+            col_a, col_b, col_c, col_d = st.columns(4)
             with col_a:
                 if st.button("Cargar en formulario"):
                     st.session_state[PENDING_EDIT_KEY] = selected_id
                     tipo = sel_row.get("tipo_cotizacion")
                     target_tab = (
-                        "Cotización - Panamá Compra" if tipo == "Panama Compra" else "Cotizacion - Estandar"
+                        "Cotizaci?n - Panam? Compra" if tipo == "Panama Compra" else "Cotizacion - Estandar"
                     )
                     st.session_state[PENDING_TAB_KEY] = target_tab
-                    st.success("Cotización cargada en el formulario de edición.")
+                    st.success("Cotizaci?n cargada en el formulario de edici?n.")
                     st.rerun()
             with col_b:
+                if st.button("Duplicar"):
+                    st.session_state[PENDING_DUPLICATE_KEY] = selected_id
+                    tipo = sel_row.get("tipo_cotizacion")
+                    target_tab = (
+                        "Cotizaci?n - Panam? Compra" if tipo == "Panama Compra" else "Cotizacion - Estandar"
+                    )
+                    st.session_state[PENDING_TAB_KEY] = target_tab
+                    st.success("Cotizaci?n duplicada en el formulario.")
+                    st.rerun()
+            with col_c:
                 delete_key = f"delete_{selected_id}"
                 if st.button("Eliminar"):
                     st.session_state[delete_key] = True
                 if st.session_state.get(delete_key):
-                    if st.button("Confirmar eliminación"):
+                    if st.button("Confirmar eliminaci?n"):
                         try:
                             if client is None:
                                 client, creds = get_client()
@@ -1484,11 +1511,11 @@ if active_tab == "Historial de cotizaciones":
                                     supportsAllDrives=True,
                                 ).execute()
                             st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
-                            st.success("Cotización eliminada.")
+                            st.success("Cotizaci?n eliminada.")
                             st.rerun()
                         except Exception as exc:
                             st.error(f"No se pudo eliminar: {exc}")
-            with col_c:
+            with col_d:
                 download_key = f"download_{selected_id}"
                 if sel_row.get("drive_file_id"):
                     if st.button("Preparar descarga"):
@@ -1509,3 +1536,5 @@ if active_tab == "Historial de cotizaciones":
                         )
                 if sel_row.get("drive_file_url"):
                     st.link_button("Abrir en Drive", sel_row["drive_file_url"])
+                if sel_row.get("presupuesto_drive_file_url"):
+                    st.link_button("Abrir presupuesto", sel_row["presupuesto_drive_file_url"])
