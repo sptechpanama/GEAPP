@@ -55,6 +55,8 @@ COT_COLUMNS = [
     "tipo_cotizacion",
     "cliente_nombre",
     "cliente_direccion",
+    "cliente_ruc",
+    "cliente_dv",
     "fecha_cotizacion",
     "created_at",
     "updated_at",
@@ -71,6 +73,10 @@ COT_COLUMNS = [
     "presupuesto_factor_ganancia",
     "presupuesto_precio_cotizar",
     "presupuesto_ganancia",
+    "presupuesto_financiamiento_tipo",
+    "presupuesto_financiamiento_interes_pct",
+    "presupuesto_costo_financiamiento",
+    "presupuesto_ganancia_neta",
     "presupuesto_t_inversion_presentacion",
     "presupuesto_t_presentacion_cobro",
     "presupuesto_t_recuperacion",
@@ -145,6 +151,9 @@ def _normalize_cotizaciones_df(df: pd.DataFrame) -> pd.DataFrame:
         "presupuesto_factor_ganancia",
         "presupuesto_precio_cotizar",
         "presupuesto_ganancia",
+        "presupuesto_financiamiento_interes_pct",
+        "presupuesto_costo_financiamiento",
+        "presupuesto_ganancia_neta",
         "presupuesto_t_inversion_presentacion",
         "presupuesto_t_presentacion_cobro",
         "presupuesto_t_recuperacion",
@@ -308,6 +317,8 @@ def _build_invoice_html(
     fecha_cot: date,
     cliente: str,
     direccion: str,
+    cliente_ruc: str,
+    cliente_dv: str,
     detalles_extra: str,
     items: pd.DataFrame,
     impuesto_pct: float,
@@ -345,6 +356,11 @@ def _build_invoice_html(
     subtotal = float(items["importe"].sum())
     impuesto = subtotal * (impuesto_pct / 100.0)
     total = subtotal + impuesto
+    cliente_ruc_text = ""
+    if (cliente_ruc or "").strip() or (cliente_dv or "").strip():
+        cliente_ruc_text = f"RUC: {cliente_ruc or '-'} DV: {cliente_dv or '-'}"
+    else:
+        cliente_ruc_text = "-"
 
     rows: List[str] = []
     row_height_base = 44
@@ -591,6 +607,7 @@ def _build_invoice_html(
       <h4>Datos del Cliente</h4>
       <div>{html.escape(cliente or '-')}</div>
       <div>{html.escape(direccion or '-')}</div>
+      <div>{html.escape(cliente_ruc_text)}</div>
     </div>
     <div class="block">
       <h4>Datos del Emisor</h4>
@@ -638,6 +655,10 @@ def _build_budget_html(
     factor_ganancia: float,
     precio_cotizar: float,
     ganancia: float,
+    financiamiento_tipo: str,
+    financiamiento_interes_pct: float,
+    costo_financiamiento: float,
+    ganancia_neta: float,
     tiempo_inversion: float,
     tiempo_cobro: float,
 ) -> str:
@@ -700,6 +721,9 @@ def _build_budget_html(
     <div><span>Factor de ganancia</span><span>{factor_ganancia:.2f}</span></div>
     <div><span>Precio a cotizar</span><span>{_format_money(precio_cotizar)}</span></div>
     <div><span>Ganancia</span><span>{_format_money(ganancia)}</span></div>
+    <div><span>Financiamiento</span><span>{html.escape(financiamiento_tipo)} ({financiamiento_interes_pct:.2f}% mensual)</span></div>
+    <div><span>Costo financiamiento</span><span>{_format_money(costo_financiamiento)}</span></div>
+    <div><span>Ganancia neta</span><span>{_format_money(ganancia_neta)}</span></div>
     <div><span>Tiempo recuperacion</span><span>{tiempo_total:.0f} dias (~{tiempo_meses:.1f} meses)</span></div>
   </div>
 </body>
@@ -885,6 +909,8 @@ def _apply_edit_state(row: dict) -> None:
     st.session_state["cot_empresa"] = row.get("empresa") or "RS Engineering"
     st.session_state["cot_cliente"] = row.get("cliente_nombre", "")
     st.session_state["cot_direccion"] = row.get("cliente_direccion", "")
+    st.session_state["cot_cliente_ruc"] = row.get("cliente_ruc", "")
+    st.session_state["cot_cliente_dv"] = row.get("cliente_dv", "")
     st.session_state["cot_detalles_extra"] = row.get("detalles_extra", "")
     st.session_state["cot_numero"] = row.get("numero_cotizacion", "")
 
@@ -938,6 +964,17 @@ def _apply_edit_state(row: dict) -> None:
     except (TypeError, ValueError):
         t_cobro = 0.0
     st.session_state["cot_presupuesto_t_cobro"] = t_cobro
+
+    fin_tipo = row.get("presupuesto_financiamiento_tipo") or "Dinero propio"
+    if fin_tipo not in ("Dinero propio", "Prestamo"):
+        fin_tipo = "Dinero propio"
+    st.session_state["cot_presupuesto_fin_tipo"] = fin_tipo
+    fin_interes = row.get("presupuesto_financiamiento_interes_pct")
+    try:
+        fin_interes = float(fin_interes)
+    except (TypeError, ValueError):
+        fin_interes = 2.5
+    st.session_state["cot_presupuesto_fin_interes"] = fin_interes
 
     try:
         condiciones = json.loads(row.get("condiciones_json") or "{}")
@@ -1021,12 +1058,20 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_detalles_extra"] = ""
     if "cot_lugar_entrega" not in st.session_state:
         st.session_state["cot_lugar_entrega"] = ""
+    if "cot_cliente_ruc" not in st.session_state:
+        st.session_state["cot_cliente_ruc"] = ""
+    if "cot_cliente_dv" not in st.session_state:
+        st.session_state["cot_cliente_dv"] = ""
     if "cot_presupuesto_factor" not in st.session_state:
         st.session_state["cot_presupuesto_factor"] = 1.3
     if "cot_presupuesto_t_inversion" not in st.session_state:
         st.session_state["cot_presupuesto_t_inversion"] = 0.0
     if "cot_presupuesto_t_cobro" not in st.session_state:
         st.session_state["cot_presupuesto_t_cobro"] = 0.0
+    if "cot_presupuesto_fin_tipo" not in st.session_state:
+        st.session_state["cot_presupuesto_fin_tipo"] = "Dinero propio"
+    if "cot_presupuesto_fin_interes" not in st.session_state:
+        st.session_state["cot_presupuesto_fin_interes"] = 2.5
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
@@ -1041,6 +1086,11 @@ if active_tab == "Cotizacion - Estandar":
                 st.session_state["cot_cliente_id"] = cliente_id
         cliente = st.text_input("Nombre del cliente", key="cot_cliente")
         direccion = st.text_area("Dirección del cliente", height=70, key="cot_direccion")
+        col_ruc, col_dv = st.columns([2, 1])
+        with col_ruc:
+            cliente_ruc = st.text_input("RUC del cliente", key="cot_cliente_ruc")
+        with col_dv:
+            cliente_dv = st.text_input("DV", key="cot_cliente_dv")
 
         if not sheet_error and sheet_id and client is not None:
             with st.expander("Cliente no registrado? Agregar al catalogo", expanded=False):
@@ -1199,15 +1249,36 @@ if active_tab == "Cotizacion - Estandar":
             key="cot_presupuesto_t_cobro",
         )
 
+    col_f1, col_f2 = st.columns([1, 1])
+    with col_f1:
+        financiamiento_tipo = st.selectbox(
+            "Financiamiento",
+            ["Dinero propio", "Prestamo"],
+            key="cot_presupuesto_fin_tipo",
+        )
+    with col_f2:
+        financiamiento_interes_pct = st.number_input(
+            "Interes mensual (%)",
+            min_value=0.0,
+            step=0.1,
+            key="cot_presupuesto_fin_interes",
+        )
+
     precio_cotizar = costo_interno * factor_ganancia
     ganancia = precio_cotizar - costo_interno
     tiempo_recuperacion = tiempo_inversion + tiempo_cobro
     tiempo_recuperacion_meses = tiempo_recuperacion / 30 if tiempo_recuperacion else 0.0
+    costo_financiamiento = 0.0
+    if financiamiento_tipo == "Prestamo":
+        costo_financiamiento = costo_interno * (financiamiento_interes_pct / 100.0) * tiempo_recuperacion_meses
+    ganancia_neta = ganancia - costo_financiamiento
 
     st.markdown(
         f"**Resumen presupuesto:** Costo interno {_format_money(costo_interno)} | "
         f"Precio a cotizar {_format_money(precio_cotizar)} | "
         f"Ganancia {_format_money(ganancia)} | "
+        f"Costo financiamiento {_format_money(costo_financiamiento)} | "
+        f"Ganancia neta {_format_money(ganancia_neta)} | "
         f"Tiempo recuperacion {tiempo_recuperacion:.0f} dias (~{tiempo_recuperacion_meses:.1f} meses)"
     )
 
@@ -1233,6 +1304,8 @@ if active_tab == "Cotizacion - Estandar":
         fecha_cot=fecha_cot,
         cliente=cliente,
         direccion=direccion,
+        cliente_ruc=cliente_ruc,
+        cliente_dv=cliente_dv,
         detalles_extra=detalles_extra,
         items=items_df,
         impuesto_pct=impuesto_pct,
@@ -1309,6 +1382,10 @@ if active_tab == "Cotizacion - Estandar":
                             factor_ganancia=factor_ganancia,
                             precio_cotizar=precio_cotizar,
                             ganancia=ganancia,
+                            financiamiento_tipo=financiamiento_tipo,
+                            financiamiento_interes_pct=financiamiento_interes_pct,
+                            costo_financiamiento=costo_financiamiento,
+                            ganancia_neta=ganancia_neta,
                             tiempo_inversion=tiempo_inversion,
                             tiempo_cobro=tiempo_cobro,
                         )
@@ -1336,6 +1413,8 @@ if active_tab == "Cotizacion - Estandar":
                     "tipo_cotizacion": tipo_cotizacion,
                     "cliente_nombre": cliente,
                     "cliente_direccion": direccion,
+                    "cliente_ruc": cliente_ruc,
+                    "cliente_dv": cliente_dv,
                     "fecha_cotizacion": fecha_cot.isoformat(),
                     "created_at": created_at,
                     "updated_at": now,
@@ -1352,6 +1431,10 @@ if active_tab == "Cotizacion - Estandar":
                     "presupuesto_factor_ganancia": factor_ganancia,
                     "presupuesto_precio_cotizar": precio_cotizar,
                     "presupuesto_ganancia": ganancia,
+                    "presupuesto_financiamiento_tipo": financiamiento_tipo,
+                    "presupuesto_financiamiento_interes_pct": financiamiento_interes_pct,
+                    "presupuesto_costo_financiamiento": costo_financiamiento,
+                    "presupuesto_ganancia_neta": ganancia_neta,
                     "presupuesto_t_inversion_presentacion": tiempo_inversion,
                     "presupuesto_t_presentacion_cobro": tiempo_cobro,
                     "presupuesto_t_recuperacion": tiempo_recuperacion,
@@ -1416,6 +1499,8 @@ if active_tab == "Historial de cotizaciones":
                     "Número": sel_row.get("numero_cotizacion"),
                     "Empresa": sel_row.get("empresa"),
                     "Cliente": sel_row.get("cliente_nombre"),
+                    "RUC": sel_row.get("cliente_ruc"),
+                    "DV": sel_row.get("cliente_dv"),
                     "Fecha": sel_row.get("fecha_cotizacion"),
                     "Total": sel_row.get("total"),
                 }
@@ -1460,6 +1545,19 @@ if active_tab == "Historial de cotizaciones":
                     pres_ganancia = float(sel_row.get("presupuesto_ganancia") or 0)
                 except (TypeError, ValueError):
                     pres_ganancia = 0.0
+                pres_fin_tipo = sel_row.get("presupuesto_financiamiento_tipo") or "Dinero propio"
+                try:
+                    pres_fin_interes = float(sel_row.get("presupuesto_financiamiento_interes_pct") or 0)
+                except (TypeError, ValueError):
+                    pres_fin_interes = 0.0
+                try:
+                    pres_costo_fin = float(sel_row.get("presupuesto_costo_financiamiento") or 0)
+                except (TypeError, ValueError):
+                    pres_costo_fin = 0.0
+                try:
+                    pres_ganancia_neta = float(sel_row.get("presupuesto_ganancia_neta") or 0)
+                except (TypeError, ValueError):
+                    pres_ganancia_neta = 0.0
                 try:
                     pres_t_rec = float(sel_row.get("presupuesto_t_recuperacion") or 0)
                 except (TypeError, ValueError):
@@ -1469,6 +1567,9 @@ if active_tab == "Historial de cotizaciones":
                     f"**Resumen presupuesto:** Costo interno {_format_money(pres_subtotal)} | "
                     f"Factor {pres_factor:.2f} | Precio a cotizar {_format_money(pres_precio)} | "
                     f"Ganancia {_format_money(pres_ganancia)} | "
+                    f"Financiamiento {pres_fin_tipo} ({pres_fin_interes:.2f}% mensual) | "
+                    f"Costo financiamiento {_format_money(pres_costo_fin)} | "
+                    f"Ganancia neta {_format_money(pres_ganancia_neta)} | "
                     f"Tiempo recuperacion {pres_t_rec:.0f} dias (~{pres_t_rec_meses:.1f} meses)"
                 )
 
