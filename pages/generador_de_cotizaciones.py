@@ -403,7 +403,16 @@ def _build_invoice_html(
     conditions_height = 40 + conditions_lines * 20
     signature_height = 160
     signature_top = conditions_top + conditions_height + 30
-    page_height = max(2000, signature_top + signature_height + 120)
+    base_page_height = 2000
+    bottom_margin = 260
+    page_index = int(signature_top // base_page_height)
+    page_limit = (page_index + 1) * base_page_height
+    if signature_top + signature_height + bottom_margin > page_limit:
+        signature_top = (page_index + 1) * base_page_height + 140
+        page_index += 1
+    content_bottom = signature_top + signature_height + bottom_margin
+    page_count = max(1, math.ceil(content_bottom / base_page_height))
+    page_height = page_count * base_page_height
 
     signature_img = ""
     if firma_b64:
@@ -417,10 +426,45 @@ def _build_invoice_html(
         + str(conditions_left)
         + "px;\">"
         + signature_img
-        + "<div class=\"signature-name\">Rodrigo S&aacute;nchez P.</div>"
-        + "<div class=\"signature-id\">C&eacute;dula: 9-740-624</div>"
+        + "<div class=\"signature-name\">Rodrigo S&amp;aacute;nchez P.</div>"
+        + "<div class=\"signature-id\">C&amp;eacute;dula: 9-740-624</div>"
         + "</div>"
     )
+    header_repeats = ""
+    if page_count > 1:
+        for page in range(1, page_count):
+            offset = page * base_page_height
+            header_repeats += (
+                "  <div class=\"logo page-header\" style=\"left:"
+                + str(logo_left)
+                + "px;top:"
+                + str(logo_top + offset)
+                + "px;width:"
+                + str(logo_box_width)
+                + "px;height:"
+                + str(logo_box_height)
+                + "px;\">\n"
+                + ("    <img src='data:image/png;base64,"
+                   + logo_b64
+                   + "' alt='logo' style='width:"
+                   + str(logo_width)
+                   + "px;height:"
+                   + str(logo_height)
+                   + "px;' />\n" if logo_b64 else "")
+                + "  </div>\n"
+                + "  <div class=\"header-info page-header\" style=\"left:"
+                + str(header_left)
+                + "px;top:"
+                + str(header_top + offset)
+                + "px;width:"
+                + str(header_width)
+                + "px;height:"
+                + str(header_height)
+                + "px;\">\n"
+                + "    <div class=\"empresa\">" + html.escape(empresa) + "</div>\n"
+                + "    <div class=\"datos\">" + contacto_html + "</div>\n"
+                + "  </div>\n"
+            )
 
     sample_rows = "".join(rows) or """
         <tr>
@@ -454,7 +498,7 @@ def _build_invoice_html(
     height: {page_height}px;
     min-height: 2000px;
     margin: 0 auto 24px auto;
-    background: #ffffff url('data:image/png;base64,{background_b64}') top center / 100% 2000px no-repeat;
+    background: #ffffff url('data:image/png;base64,{background_b64}') top center / 100% 2000px repeat-y;
     font-family: 'Manrope', 'Inter', 'Segoe UI', sans-serif;
     color: #0c2349;
     -webkit-print-color-adjust: exact;
@@ -644,6 +688,7 @@ def _build_invoice_html(
   <div class="logo" style="left:{logo_left}px;top:{logo_top}px;width:{logo_box_width}px;height:{logo_box_height}px;">
     {"<img src='data:image/png;base64," + logo_b64 + "' alt='logo' style='width:" + str(logo_width) + "px;height:" + str(logo_height) + "px;' />" if logo_b64 else ""}
   </div>
+  {header_repeats}
   <div class="header-info" style="left:{header_left}px;top:{header_top}px;width:{header_width}px;height:{header_height}px;">
     <div class="empresa">{html.escape(empresa)}</div>
     <div class="datos">{contacto_html}</div>
