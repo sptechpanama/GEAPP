@@ -319,6 +319,7 @@ def _build_invoice_html(
     direccion: str,
     cliente_ruc: str,
     cliente_dv: str,
+    firma_b64: str,
     detalles_extra: str,
     items: pd.DataFrame,
     impuesto_pct: float,
@@ -395,6 +396,31 @@ def _build_invoice_html(
     extra_height = extra_lines * 20 + 30 if extra_text else 0
     extra_top = totals_top + 120
     conditions_top = extra_top + extra_height + 30 if extra_text else totals_top + 120
+    conditions_lines = 0
+    for label, text in condiciones.items():
+        combined = f"{label}: {text}"
+        conditions_lines += max(1, math.ceil(len(combined) / 90))
+    conditions_height = 40 + conditions_lines * 20
+    signature_height = 160
+    signature_top = conditions_top + conditions_height + 30
+    page_height = max(2000, signature_top + signature_height + 120)
+
+    signature_img = ""
+    if firma_b64:
+        signature_img = (
+            "<img src='data:image/png;base64," + firma_b64 + "' alt='firma' />"
+        )
+    signature_html = (
+        "<div class=\"signature\" style=\"top:"
+        + str(signature_top)
+        + "px;left:"
+        + str(conditions_left)
+        + "px;\">"
+        + signature_img
+        + "<div class=\"signature-name\">Rodrigo S&aacute;nchez P.</div>"
+        + "<div class=\"signature-id\">C&eacute;dula: 9-740-624</div>"
+        + "</div>"
+    )
 
     sample_rows = "".join(rows) or """
         <tr>
@@ -425,9 +451,10 @@ def _build_invoice_html(
   .quote-page {{
     position: relative;
     width: 1414px;
-    height: 2000px;
+    height: {page_height}px;
+    min-height: 2000px;
     margin: 0 auto 24px auto;
-    background: url('data:image/png;base64,{background_b64}') center top / cover no-repeat;
+    background: #ffffff url('data:image/png;base64,{background_b64}') top center / 100% 2000px no-repeat;
     font-family: 'Manrope', 'Inter', 'Segoe UI', sans-serif;
     color: #0c2349;
     -webkit-print-color-adjust: exact;
@@ -591,6 +618,27 @@ def _build_invoice_html(
     content: "• ";
     color: #0c2349;
   }}
+
+  .signature {
+    position: absolute;
+    width: 420px;
+    font-size: 15px;
+    line-height: 1.4;
+    color: #0c2349;
+  }
+  .signature img {
+    width: 220px;
+    height: auto;
+    display: block;
+  }
+  .signature-name {
+    margin-top: 10px;
+    font-weight: 700;
+  }
+  .signature-id {
+    color: #4b5563;
+    font-size: 14px;
+  }
 </style>
 <div class="quote-page" id="quote-root">
   <div class="logo" style="left:{logo_left}px;top:{logo_top}px;width:{logo_box_width}px;height:{logo_box_height}px;">
@@ -642,6 +690,7 @@ def _build_invoice_html(
       {condiciones_html}
     </ul>
   </div>
+  {signature_html}
 </div>
     """
 
@@ -732,11 +781,7 @@ def _build_budget_html(
 
 def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 0.75) -> None:
     """Renderiza la vista previa y un botón JS para exportar a PDF usando html2canvas + jsPDF."""
-    base_width = 1414
-    base_height = 2000
-    scaled_width = int(base_width * preview_scale)
-    scaled_height = int(base_height * preview_scale)
-    preview_height = min(int(scaled_height + 220), 2400)
+    preview_height = 3200
     component_html = f"""
     <style>
       html, body {{
@@ -753,8 +798,6 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
       }}
       .preview-scale {{
         display: inline-block;
-        width: {scaled_width}px;
-        height: {scaled_height}px;
         overflow: hidden;
       }}
       .preview-scale .quote-page {{
@@ -776,6 +819,15 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script>
+      const previewScale = {preview_scale};
+      const previewWrapper = document.querySelector(".preview-scale");
+      const previewQuote = document.querySelector(".preview-scale .quote-page");
+      const syncPreviewSize = () => {{
+        if (!previewWrapper || !previewQuote) return;
+        previewWrapper.style.width = (previewQuote.offsetWidth * previewScale) + "px";
+        previewWrapper.style.height = (previewQuote.offsetHeight * previewScale) + "px";
+      }};
+      window.requestAnimationFrame(syncPreviewSize);
       const btn = document.getElementById("btn-download");
       btn?.addEventListener("click", () => {{
         const root = document.getElementById("quote-root");
@@ -797,7 +849,20 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
             const pdf = new jspdf.jsPDF("p", "pt", "a4");
             const pageWidth = pdf.internal.pageSize.getWidth();
             const pageHeight = pdf.internal.pageSize.getHeight();
-            pdf.addImage(imgData, "PNG", 0, 0, pageWidth, pageHeight);
+            const imgWidth = pageWidth;
+            const imgHeight = canvas.height * (pageWidth / canvas.width);
+            let heightLeft = imgHeight;
+            let position = 0;
+
+            pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+            heightLeft -= pageHeight;
+
+            while (heightLeft > 0) {{
+              position -= pageHeight;
+              pdf.addPage();
+              pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+              heightLeft -= pageHeight;
+            }}
             pdf.save("{filename}");
             host.innerHTML = "";
           }});
@@ -824,7 +889,9 @@ RIR_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RIR Medical.png")
 RS_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rs.png.png")
 RIR_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rir.png.png")
 BACKGROUND_PATH = os.path.join(ASSETS_DIR, "Fondo.png")
+FIRMA_PATH = os.path.join(ASSETS_DIR, "firma.png")
 BACKGROUND_B64 = _load_logo_b64(BACKGROUND_PATH)
+FIRMA_B64 = _load_logo_b64(FIRMA_PATH)
 COMPANIES = {
     "RS Engineering": {
         "color": "#0f172a",
@@ -1306,6 +1373,7 @@ if active_tab == "Cotizacion - Estandar":
         direccion=direccion,
         cliente_ruc=cliente_ruc,
         cliente_dv=cliente_dv,
+        firma_b64=FIRMA_B64,
         detalles_extra=detalles_extra,
         items=items_df,
         impuesto_pct=impuesto_pct,
