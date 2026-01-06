@@ -403,16 +403,31 @@ def _build_invoice_html(
     conditions_height = 40 + conditions_lines * 20
     signature_height = 160
     signature_top = conditions_top + conditions_height + 30
+
     base_page_height = 2000
+    header_clearance = max(logo_top + logo_box_height, header_top + header_height) + 40
+    page_gap = header_clearance
     bottom_margin = 260
     page_index = int(signature_top // base_page_height)
     page_limit = (page_index + 1) * base_page_height
     if signature_top + signature_height + bottom_margin > page_limit:
-        signature_top = (page_index + 1) * base_page_height + 140
+        signature_top = (page_index + 1) * base_page_height
         page_index += 1
     content_bottom = signature_top + signature_height + bottom_margin
     page_count = max(1, math.ceil(content_bottom / base_page_height))
-    page_height = page_count * base_page_height
+    page_height = page_count * base_page_height + (page_count - 1) * page_gap
+
+    def _apply_page_gap(value: float) -> float:
+        return value + int(value // base_page_height) * page_gap
+
+    title_top = _apply_page_gap(title_top)
+    title_meta_top = _apply_page_gap(title_meta_top)
+    columns_top = _apply_page_gap(columns_top)
+    table_top = _apply_page_gap(table_top)
+    totals_top = _apply_page_gap(totals_top)
+    extra_top = _apply_page_gap(extra_top)
+    conditions_top = _apply_page_gap(conditions_top)
+    signature_top = _apply_page_gap(signature_top)
 
     signature_img = ""
     if firma_b64:
@@ -433,7 +448,8 @@ def _build_invoice_html(
     header_repeats = ""
     if page_count > 1:
         for page in range(1, page_count):
-            offset = page * base_page_height
+            page_stride = base_page_height + page_gap
+            offset = page * page_stride
             header_repeats += (
                 "  <div class=\"logo page-header\" style=\"left:"
                 + str(logo_left)
