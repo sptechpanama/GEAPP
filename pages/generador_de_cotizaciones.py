@@ -407,7 +407,7 @@ def _build_invoice_html(
     base_page_height = 2000
     header_clearance = max(logo_top + logo_box_height, header_top + header_height) + 40
     content_top_offset = header_clearance
-    bottom_margin = 260
+    bottom_margin = 360
     block_bottom = signature_top + signature_height
     page_index = int(block_bottom // base_page_height)
     page_limit = (page_index + 1) * base_page_height
