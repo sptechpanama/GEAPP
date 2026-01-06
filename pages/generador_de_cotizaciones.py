@@ -619,26 +619,26 @@ def _build_invoice_html(
     color: #0c2349;
   }}
 
-  .signature {
+  .signature {{
     position: absolute;
     width: 420px;
     font-size: 15px;
     line-height: 1.4;
     color: #0c2349;
-  }
-  .signature img {
+  }}
+  .signature img {{
     width: 220px;
     height: auto;
     display: block;
-  }
-  .signature-name {
+  }}
+  .signature-name {{
     margin-top: 10px;
     font-weight: 700;
-  }
-  .signature-id {
+  }}
+  .signature-id {{
     color: #4b5563;
     font-size: 14px;
-  }
+  }}
 </style>
 <div class="quote-page" id="quote-root">
   <div class="logo" style="left:{logo_left}px;top:{logo_top}px;width:{logo_box_width}px;height:{logo_box_height}px;">
