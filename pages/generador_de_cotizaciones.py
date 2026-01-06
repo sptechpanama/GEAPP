@@ -321,6 +321,7 @@ def _build_invoice_html(
     cliente_dv: str,
     firma_b64: str,
     detalles_extra: str,
+    layout_extra_space: int,
     items: pd.DataFrame,
     impuesto_pct: float,
     condiciones: Dict[str, str],
@@ -395,7 +396,7 @@ def _build_invoice_html(
             extra_lines += max(1, math.ceil(len(line) / 90))
     extra_height = extra_lines * 20 + 30 if extra_text else 0
     extra_top = totals_top + 120
-    conditions_top = extra_top + extra_height + 30 if extra_text else totals_top + 120
+    conditions_top = (extra_top + extra_height + 30 if extra_text else totals_top + 120) + layout_extra_space
     conditions_lines = 0
     for label, text in condiciones.items():
         combined = f"{label}: {text}"
@@ -1203,6 +1204,8 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_presupuesto_fin_tipo"] = "Dinero propio"
     if "cot_presupuesto_fin_interes" not in st.session_state:
         st.session_state["cot_presupuesto_fin_interes"] = 2.5
+    if "cot_layout_extra_space" not in st.session_state:
+        st.session_state["cot_layout_extra_space"] = 0
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
@@ -1414,6 +1417,7 @@ if active_tab == "Cotizacion - Estandar":
     )
 
     st.markdown("### Vista previa")
+    extra_space = st.slider("Espacio vertical extra", min_value=0, max_value=600, value=st.session_state.get("cot_layout_extra_space", 0), step=10, key="cot_layout_extra_space")
     preview_scale = st.slider(
         "Zoom de vista previa",
         min_value=0.5,
@@ -1439,6 +1443,7 @@ if active_tab == "Cotizacion - Estandar":
         cliente_dv=cliente_dv,
         firma_b64=FIRMA_B64,
         detalles_extra=detalles_extra,
+        layout_extra_space=extra_space,
         items=items_df,
         impuesto_pct=impuesto_pct,
         condiciones=condiciones,
