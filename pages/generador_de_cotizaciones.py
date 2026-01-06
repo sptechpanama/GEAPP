@@ -401,19 +401,21 @@ def _build_invoice_html(
         combined = f"{label}: {text}"
         conditions_lines += max(1, math.ceil(len(combined) / 90))
     conditions_height = 40 + conditions_lines * 20
-    signature_height = 220
+    signature_height = 200
     signature_top = conditions_top + conditions_height + 30
 
     base_page_height = 2000
     header_clearance = max(logo_top + logo_box_height, header_top + header_height) + 40
     content_top_offset = header_clearance
     bottom_margin = 260
-    page_index = int(signature_top // base_page_height)
+    block_bottom = signature_top + signature_height
+    page_index = int(block_bottom // base_page_height)
     page_limit = (page_index + 1) * base_page_height
-    if signature_top + signature_height + bottom_margin > page_limit:
-        signature_top = (page_index + 1) * base_page_height
-        page_index += 1
-    content_bottom = signature_top + signature_height + bottom_margin
+    if block_bottom + bottom_margin > page_limit:
+        conditions_top = (page_index + 1) * base_page_height
+        signature_top = conditions_top + conditions_height + 30
+        block_bottom = signature_top + signature_height
+    content_bottom = block_bottom + bottom_margin
     page_count = max(1, math.ceil(content_bottom / base_page_height))
     page_height = page_count * base_page_height
 
@@ -430,16 +432,21 @@ def _build_invoice_html(
     totals_top = _apply_page_offset(totals_top)
     extra_top = _apply_page_offset(extra_top)
     conditions_top = _apply_page_offset(conditions_top)
+    signature_top = _apply_page_offset(signature_top)
     signature_img = ""
     if firma_b64:
         signature_img = (
             "<img src='data:image/png;base64," + firma_b64 + "' alt='firma' />"
         )
     signature_html = (
-        "<div class=\"signature\">"
+        "<div class=\"signature\" style=\"top:"
+        + str(signature_top)
+        + "px;left:"
+        + str(conditions_left)
+        + "px;\">"
         + signature_img
-        + "<div class=\"signature-name\">Rodrigo S&amp;aacute;nchez P.</div>"
-        + "<div class=\"signature-id\">C&amp;eacute;dula: 9-740-624</div>"
+        + "<div class=\"signature-name\">Rodrigo S&aacute;nchez P.</div>"
+        + "<div class=\"signature-id\">C&eacute;dula: 9-740-624</div>"
         + "</div>"
     )
     header_repeats = ""
@@ -656,33 +663,27 @@ def _build_invoice_html(
     top: 1340px;
     left: 120px;
     width: 1174px;
-    display: grid;
-    grid-template-columns: 1fr 360px;
-    gap: 40px;
     font-size: 15px;
     line-height: 1.45;
     color: #0c2349;
   }}
-  .conditions .cond-block {{
-    display: flex;
-    flex-direction: column;
+  .signature {{
+    position: absolute;
+    width: 420px;
+    font-size: 15px;
+    line-height: 1.4;
+    color: #0c2349;
   }}
-  .conditions .signature {{
-    position: relative;
-    top: 0;
-    left: 0;
-    align-self: center;
-  }}
-  .conditions .signature img {{
-    width: 220px;
+  .signature img {{
+    width: 180px;
     height: auto;
     display: block;
   }}
-  .conditions .signature-name {{
+  .signature-name {{
     margin-top: 10px;
     font-weight: 700;
   }}
-  .conditions .signature-id {{
+  .signature-id {{
     color: #4b5563;
     font-size: 14px;
   }}
@@ -748,14 +749,12 @@ def _build_invoice_html(
   </div>
   {extra_html}
   <div class="conditions" style="top:{conditions_top}px;left:{conditions_left}px;">
-    <div class="cond-block">
-      <h4>CONDICIONES</h4>
-      <ul>
-        {condiciones_html}
-      </ul>
-    </div>
-    {signature_html}
+    <h4>CONDICIONES</h4>
+    <ul>
+      {condiciones_html}
+    </ul>
   </div>
+  {signature_html}
 </div>
     """
 
@@ -1114,7 +1113,7 @@ def _apply_edit_state(row: dict) -> None:
         condiciones = {}
 
     st.session_state["cot_vigencia"] = condiciones.get("Vigencia") or row.get("vigencia") or "15 días"
-    st.session_state["cot_forma_pago"] = condiciones.get("Condicion de pago") or row.get("forma_pago") or "Cr?dito"
+    st.session_state["cot_forma_pago"] = condiciones.get("Condicion de pago") or row.get("forma_pago") or "Credito"
     st.session_state["cot_entrega"] = condiciones.get("Entrega") or row.get("entrega") or "15 días hábiles"
     st.session_state["cot_lugar_entrega"] = (condiciones.get("Lugar de entrega") or row.get("lugar_entrega") or "")
 
@@ -1277,7 +1276,7 @@ if active_tab == "Cotizacion - Estandar":
         impuesto_pct = st.number_input("Impuesto (%)", min_value=0.0, max_value=25.0, step=0.5, key="cot_impuesto")
     with col_c:
         vigencia = st.text_input("Vigencia de la oferta", value="15 días", key="cot_vigencia")
-        forma_pago = st.selectbox("Condicion de pago", ["Cr?dito", "Contado"], index=0, key="cot_forma_pago")
+        forma_pago = st.selectbox("Condicion de pago", ["Credito", "Contado"], index=0, key="cot_forma_pago")
         entrega = st.text_input("Entrega", value="15 días hábiles", key="cot_entrega")
         lugar_entrega = st.text_input("Lugar de entrega", key="cot_lugar_entrega")
 
