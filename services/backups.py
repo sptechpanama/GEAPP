@@ -1,6 +1,7 @@
 # services/backups.py
 from __future__ import annotations
 from dataclasses import dataclass
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, List
 from zoneinfo import ZoneInfo
@@ -97,6 +98,24 @@ def _list_backups(drive, folder_id: str) -> List[BackupInfo]:
             break
     return out
 
+def _is_not_found_error(exc: HttpError) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status == 404:
+        return True
+    content = getattr(exc, "content", b"") or b""
+    if content:
+        try:
+            payload = json.loads(content.decode("utf-8"))
+            err = payload.get("error", {})
+            if err.get("status") == "NOT_FOUND":
+                return True
+            for item in err.get("errors", []):
+                if item.get("reason") == "notFound":
+                    return True
+        except Exception:
+            pass
+    return "notfound" in str(exc).lower()
+
 def _delete_excess(drive, backups: List[BackupInfo], keep_last: int) -> int:
     removed = 0
     for b in backups[keep_last:]:
@@ -107,6 +126,8 @@ def _delete_excess(drive, backups: List[BackupInfo], keep_last: int) -> int:
             ).execute()
             removed += 1
         except HttpError as exc:
+            if _is_not_found_error(exc):
+                continue
             _notify("warning", f"No se pudo eliminar el respaldo '{b.name}': {exc}")
     return removed
 
