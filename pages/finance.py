@@ -2,7 +2,6 @@
 # finance.py
 # Finanzas operativas (Ingresos / Gastos)
 # - Borrado real en Sheets
-# - Comisiones 8% automáticas al cobrarse ingresos
 # - Gastos con Cliente/Proyecto (cuando Categoría=Proyectos)
 # - Ingresos: ocultar "Concepto" en la tabla (queda solo "Descripcion")
 # - Catálogo: Un único expander para crear Clientes y Proyectos (ID auto)
@@ -986,6 +985,13 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             key="ing_porcob_quick",
             on_change=lambda: _mark_form_force_open("ing"),
         )
+    categoria_ing = st.selectbox(
+        "Categoria",
+        ["Proyectos", "Oficina", "Miscelaneos"],
+        index=0,
+        key="ing_categoria_quick",
+        on_change=lambda: _mark_form_force_open("ing"),
+    )
 
     ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
     client_options = _client_options_for_company(ing_company_code)
@@ -1041,7 +1047,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             COL_POR_COB: por_cobrar_nuevo,
             COL_COB: cobrado,
             COL_FCOBRO: fecha_cobro,
-            COL_CAT: "",
+            COL_CAT: categoria_ing,
             COL_ESC: "Real",
             COL_USER: _current_user(),
         }
@@ -1057,9 +1063,17 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
 st.markdown("### Ingresos (tabla)")
 ing_cols_view = [c for c in df_ing_f.columns if c not in (COL_ROWID, COL_ESC, COL_CONC)] + [COL_ROWID]
+ing_cat_options = ["", "Proyectos", "Oficina", "Miscelaneos"]
+if COL_CAT in df_ing_f.columns:
+    existing_cats = [
+        c for c in df_ing_f[COL_CAT].fillna("").astype(str).str.strip().unique() if c
+    ]
+    for cat in existing_cats:
+        if cat not in ing_cat_options:
+            ing_cat_options.append(cat)
 ing_colcfg = {
     COL_POR_COB: st.column_config.SelectboxColumn(COL_POR_COB, options=["No","Sí"]),
-    COL_CAT:     st.column_config.TextColumn(COL_CAT),
+    COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=ing_cat_options),
     # COL_CONC oculto en la vista
     COL_DESC:    st.column_config.TextColumn(COL_DESC),
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
@@ -1140,7 +1154,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     with g3:
         categoria_g = st.selectbox(
             "Categoria",
-            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina"],
+            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos"],
             index=0,
             key="gas_categoria_quick",
             on_change=lambda: _mark_form_force_open("gas"),
@@ -1242,7 +1256,7 @@ gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
     COL_CAT:     st.column_config.SelectboxColumn(
         COL_CAT,
-        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Comisiones"],
+        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos", "Comisiones"],
     ),
     COL_CONC:    st.column_config.TextColumn("Descripción"),
     COL_PROV:    st.column_config.TextColumn("Proveedor"),  # ← NUEVO
@@ -1302,74 +1316,6 @@ sync_cambios(
 )
 
 
-# ============================================================
-# COMISIONES 8% AUTOMÁTICAS (tras sincronizar cambios)
-# - Para cada ingreso con Por_cobrar == "No", si no existe un gasto
-#   con Ref RowID Ingreso = RowID del ingreso, se crea:
-#   Monto = 8% del ingreso, Categoria = "Comisiones", Por_pagar = "No".
-# ============================================================
-def _generar_comisiones_8(client, sheet_id):
-    base_ing = st.session_state.df_ing.copy()
-    base_gas = st.session_state.df_gas.copy()
-
-    if base_ing.empty:
-        return
-
-    # refs de comisiones ya creadas
-    existing_refs = set()
-    if (not base_gas.empty) and (COL_REF_RID in base_gas.columns):
-        existing_refs = set(base_gas[COL_REF_RID].fillna("").astype(str))
-
-    cobrados = base_ing[base_ing[COL_POR_COB].map(_si_no_norm) == "No"].copy()
-    if cobrados.empty:
-        return
-
-    nuevos = []
-    for _, r in cobrados.iterrows():
-        rid_ing = str(r.get(COL_ROWID, "")).strip()
-        if not rid_ing or rid_ing in existing_refs:
-            continue  # ya existe comisión o sin id
-
-        # 🔴 NUEVO: filtrar por empresa (solo RS-SP genera comisión)
-        if str(r.get(COL_EMP, "")).strip().upper() != "RS-SP":
-            continue
-
-        monto = float(r.get(COL_MONTO, 0.0))
-        if monto <= 0:
-            continue
-
-        fecha = r.get(COL_FCOBRO) if pd.notna(r.get(COL_FCOBRO)) else r.get(COL_FECHA)
-        nuevos.append({
-            COL_ROWID: uuid.uuid4().hex,
-            COL_FECHA: _ts(fecha),
-            COL_MONTO: round(monto * 0.08, 2),
-            COL_DESC: f"Comisión 8% de ingreso: {r.get(COL_DESC, '')}",
-            COL_CONC: f"Comisión 8% de {str(r.get(COL_DESC, '')).strip()}",
-            COL_CAT:  "Comisiones",
-            COL_EMP:  r.get(COL_EMP, EMPRESA_DEFAULT),
-            COL_POR_PAG: "No",  # gasto real al cobrarse
-            COL_PROY: r.get(COL_PROY, ""),
-            COL_CLI_ID: r.get(COL_CLI_ID, ""),
-            COL_CLI_NOM: r.get(COL_CLI_NOM, ""),
-            COL_REF_RID: rid_ing,
-            COL_USER: r.get(COL_USER, _current_user()),  # ← NUEVO
-
-        })
-
-    if nuevos:
-        base_gas = pd.concat([base_gas, pd.DataFrame(nuevos)], ignore_index=True)
-        base_gas = ensure_gastos_columns(base_gas)
-        write_worksheet(client, sheet_id, WS_GAS, base_gas)
-        st.session_state.df_gas = base_gas
-
-        # 👇 refrescar inmediatamente
-        st.cache_data.clear()
-        st.toast(f"Se generaron {len(nuevos)} comisiones (8%).")
-        st.rerun()
-
-
-# Ejecutar creación de comisiones (si aplica)
-_generar_comisiones_8(client, SHEET_ID)
 
 
 # ============================================================
