@@ -322,6 +322,7 @@ def _build_invoice_html(
     firma_b64: str,
     detalles_extra: str,
     layout_extra_space: int,
+    layout_spacers: Dict[str, int],
     items: pd.DataFrame,
     impuesto_pct: float,
     condiciones: Dict[str, str],
@@ -342,14 +343,23 @@ def _build_invoice_html(
     header_height = int(branding.get("header_height", logo_box_height))
     content_offset_x = int(branding.get("content_offset_x", 0))
     content_offset_y = int(branding.get("content_offset_y", 0))
+    layout_spacers = layout_spacers or {}
+    layout_global_offset = int(layout_spacers.get("global_offset", 0))
+    title_offset = int(layout_spacers.get("title_offset", 0))
+    space_after_title = int(layout_spacers.get("space_after_title", 0))
+    space_after_columns = int(layout_spacers.get("space_after_columns", 0))
+    space_after_table = int(layout_spacers.get("space_after_table", 0))
+    space_after_totals = int(layout_spacers.get("space_after_totals", 0))
+    space_after_extra = int(layout_spacers.get("space_after_extra", 0))
+    space_after_conditions = int(layout_spacers.get("space_after_conditions", 0))
 
-    title_top = 380 + content_offset_y
+    title_top = 380 + content_offset_y + layout_global_offset + title_offset
     title_left = 120 + content_offset_x
-    title_meta_top = 440 + content_offset_y
+    title_meta_top = 440 + content_offset_y + layout_global_offset + title_offset
     title_meta_left = 120 + content_offset_x
-    columns_top = 520 + content_offset_y
+    columns_top = 520 + content_offset_y + layout_global_offset + space_after_title
     columns_left = 120 + content_offset_x
-    table_top = 720 + content_offset_y
+    table_top = 720 + content_offset_y + layout_global_offset + space_after_title + space_after_columns
     table_left = 120 + content_offset_x
     totals_right = 160 - content_offset_x
     conditions_left = 120 + content_offset_x
@@ -387,7 +397,7 @@ def _build_invoice_html(
         table_rows_height = row_height_base
 
     table_height = 46 + table_rows_height
-    totals_top = table_top + table_height + 40
+    totals_top = table_top + table_height + 40 + space_after_table
 
     extra_text = (detalles_extra or "").strip()
     extra_lines = 0
@@ -395,15 +405,15 @@ def _build_invoice_html(
         for line in extra_text.splitlines() or [""]:
             extra_lines += max(1, math.ceil(len(line) / 90))
     extra_height = extra_lines * 20 + 30 if extra_text else 0
-    extra_top = totals_top + 120
-    conditions_top = (extra_top + extra_height + 30 if extra_text else totals_top + 120) + layout_extra_space
+    extra_top = totals_top + 120 + space_after_totals
+    conditions_top = (extra_top + extra_height + 30 if extra_text else totals_top + 120) + layout_extra_space + space_after_extra
     conditions_lines = 0
     for label, text in condiciones.items():
         combined = f"{label}: {text}"
         conditions_lines += max(1, math.ceil(len(combined) / 90))
     conditions_height = 40 + conditions_lines * 20
     signature_height = 200
-    signature_top = conditions_top + conditions_height + 30
+    signature_top = conditions_top + conditions_height + 30 + space_after_conditions
 
     base_page_height = 2000
     header_clearance = max(logo_top + logo_box_height, header_top + header_height) + 40
@@ -414,7 +424,7 @@ def _build_invoice_html(
     page_limit = (page_index + 1) * base_page_height
     if block_bottom + bottom_margin > page_limit:
         conditions_top = (page_index + 1) * base_page_height
-        signature_top = conditions_top + conditions_height + 30
+        signature_top = conditions_top + conditions_height + 30 + space_after_conditions
         block_bottom = signature_top + signature_height
     content_bottom = block_bottom + bottom_margin
     page_count = max(1, math.ceil(content_bottom / base_page_height))
@@ -844,7 +854,14 @@ def _build_budget_html(
 </html>
 """
 
-def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 0.75) -> None:
+def _render_pdf_component(
+    html_body: str,
+    filename: str,
+    preview_scale: float = 0.75,
+    pdf_max_pages: int = 2,
+    render_scale: float = 1.5,
+    jpeg_quality: float = 0.85,
+) -> None:
     """Renderiza la vista previa y un botón JS para exportar a PDF usando html2canvas + jsPDF."""
     preview_height = 3200
     component_html = f"""
@@ -885,6 +902,9 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script>
       const previewScale = {preview_scale};
+      const maxPages = {pdf_max_pages};
+      const renderScale = {render_scale};
+      const jpegQuality = {jpeg_quality};
       const previewWrapper = document.querySelector(".preview-scale");
       const previewQuote = document.querySelector(".preview-scale .quote-page");
       const syncPreviewSize = () => {{
@@ -910,7 +930,7 @@ def _render_pdf_component(html_body: str, filename: str, preview_scale: float = 
 
         const render = () => {{
           html2canvas(clone, {{ scale: 2, useCORS: true, backgroundColor: "#ffffff" }}).then(canvas => {{
-            const imgData = canvas.toDataURL("image/png");
+            const imgData = canvas.toDataURL("image/jpeg", jpegQuality);
             const pdf = new jspdf.jsPDF("p", "pt", "a4");
             const pageWidth = pdf.internal.pageSize.getWidth();
             const pageHeight = pdf.internal.pageSize.getHeight();
@@ -1206,6 +1226,21 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_presupuesto_fin_interes"] = 2.5
     if "cot_layout_extra_space" not in st.session_state:
         st.session_state["cot_layout_extra_space"] = 0
+    for key, default in {
+        "cot_layout_global_offset": 0,
+        "cot_layout_title_offset": 0,
+        "cot_layout_after_title": 0,
+        "cot_layout_after_columns": 0,
+        "cot_layout_after_table": 0,
+        "cot_layout_after_totals": 0,
+        "cot_layout_after_extra": 0,
+        "cot_layout_after_conditions": 0,
+        "cot_pdf_max_pages": 2,
+        "cot_pdf_quality": 0.85,
+        "cot_pdf_render_scale": 1.5,
+    }.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
@@ -1417,14 +1452,53 @@ if active_tab == "Cotizacion - Estandar":
     )
 
     st.markdown("### Vista previa")
-    extra_space = st.slider("Espacio vertical extra", min_value=0, max_value=600, value=st.session_state.get("cot_layout_extra_space", 0), step=10, key="cot_layout_extra_space")
-    preview_scale = st.slider(
-        "Zoom de vista previa",
+    with st.expander("Ajustes de diseno", expanded=False):
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            layout_global_offset = st.slider("Mover todo (px)", -200, 400, value=st.session_state.get("cot_layout_global_offset", 0), step=10, key="cot_layout_global_offset")
+            title_offset = st.slider("Ajuste titulo (px)", -120, 200, value=st.session_state.get("cot_layout_title_offset", 0), step=10, key="cot_layout_title_offset")
+            space_after_title = st.slider("Espacio despues del titulo (px)", -80, 240, value=st.session_state.get("cot_layout_after_title", 0), step=10, key="cot_layout_after_title")
+            space_after_columns = st.slider("Espacio despues de datos (px)", -80, 240, value=st.session_state.get("cot_layout_after_columns", 0), step=10, key="cot_layout_after_columns")
+        with col_b:
+            space_after_table = st.slider("Espacio despues de tabla (px)", -80, 240, value=st.session_state.get("cot_layout_after_table", 0), step=10, key="cot_layout_after_table")
+            space_after_totals = st.slider("Espacio despues de totales (px)", -80, 240, value=st.session_state.get("cot_layout_after_totals", 0), step=10, key="cot_layout_after_totals")
+            space_after_extra = st.slider("Espacio despues de detalles (px)", -80, 240, value=st.session_state.get("cot_layout_after_extra", 0), step=10, key="cot_layout_after_extra")
+            space_after_conditions = st.slider("Espacio despues de condiciones (px)", -80, 240, value=st.session_state.get("cot_layout_after_conditions", 0), step=10, key="cot_layout_after_conditions")
+        extra_space = st.slider("Empuje extra antes de condiciones (px)", min_value=-80, max_value=600, value=st.session_state.get("cot_layout_extra_space", 0), step=10, key="cot_layout_extra_space")
+        if st.button("Restablecer ajustes de diseno"):
+            for key in [
+                "cot_layout_global_offset",
+                "cot_layout_title_offset",
+                "cot_layout_after_title",
+                "cot_layout_after_columns",
+                "cot_layout_after_table",
+                "cot_layout_after_totals",
+                "cot_layout_after_extra",
+                "cot_layout_after_conditions",
+                "cot_layout_extra_space",
+            ]:
+                st.session_state[key] = 0
+            st.rerun()
+    with st.expander("Opciones PDF", expanded=False):
+        pdf_max_pages = st.slider("Max paginas PDF", 1, 2, value=st.session_state.get("cot_pdf_max_pages", 2), step=1, key="cot_pdf_max_pages")
+        pdf_quality = st.slider("Calidad PDF (liviano/alto)", 0.6, 0.95, value=st.session_state.get("cot_pdf_quality", 0.85), step=0.05, key="cot_pdf_quality")
+        render_scale = st.slider("Resolucion PDF", 1.0, 2.0, value=st.session_state.get("cot_pdf_render_scale", 1.5), step=0.1, key="cot_pdf_render_scale")
+    preview_scale = st.slider("Zoom de vista previa",
         min_value=0.5,
         max_value=1.1,
         value=0.7,
         step=0.05,
     )
+    layout_spacers = {
+        "global_offset": layout_global_offset,
+        "title_offset": title_offset,
+        "space_after_title": space_after_title,
+        "space_after_columns": space_after_columns,
+        "space_after_table": space_after_table,
+        "space_after_totals": space_after_totals,
+        "space_after_extra": space_after_extra,
+        "space_after_conditions": space_after_conditions,
+    }
     condiciones = {
         "Vigencia": vigencia or "-",
         "Condicion de pago": forma_pago or "-",
@@ -1444,6 +1518,7 @@ if active_tab == "Cotizacion - Estandar":
         firma_b64=FIRMA_B64,
         detalles_extra=detalles_extra,
         layout_extra_space=extra_space,
+        layout_spacers=layout_spacers,
         items=items_df,
         impuesto_pct=impuesto_pct,
         condiciones=condiciones,
@@ -1453,6 +1528,9 @@ if active_tab == "Cotizacion - Estandar":
         html_body,
         filename=f"{empresa.replace(' ', '_')}_{numero_cot}.pdf",
         preview_scale=preview_scale,
+        pdf_max_pages=pdf_max_pages,
+        render_scale=render_scale,
+        jpeg_quality=pdf_quality,
     )
 
     if st.button("Guardar cotización en Sheets/Drive"):
