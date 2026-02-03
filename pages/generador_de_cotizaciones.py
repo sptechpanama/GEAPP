@@ -128,7 +128,7 @@ MANUAL_HEADERS = [
 
 ORQUESTADOR_JOB_NAME = "cotizacion_panama"
 ORQUESTADOR_JOB_LABEL = "Cotizacion Panama Compra"
-ORQUESTADOR_JOB_PY = r"C:\Users\rodri\selenium_cotizacion\venv\Scripts\python.exe"
+ORQUESTADOR_JOB_PY = r"C:\Users\rodri\scrapers_repo\.venv\Scripts\python.exe"
 ORQUESTADOR_JOB_SCRIPT = r"C:\Users\rodri\selenium_cotizacion\cotizacion_worker.py"
 
 
