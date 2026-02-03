@@ -6,6 +6,7 @@ import json
 import uuid
 import os
 import math
+import time
 from datetime import date, datetime, timezone
 from io import BytesIO
 from typing import Dict, List, Optional
@@ -1475,6 +1476,8 @@ if active_tab == "Cotización - Panamá Compra":
                 st.caption(notes)
             if row.get("result_error"):
                 st.error(row["result_error"])
+            elif status in {"pending", "enqueued", "running"}:
+                st.caption("La cotización se está procesando. Puedes actualizar el estado.")
 
             file_id = (row.get("result_file_id") or "").strip()
             file_name = (row.get("result_file_name") or "cotizacion_panama.xlsx").strip()
@@ -1493,6 +1496,20 @@ if active_tab == "Cotización - Panamá Compra":
                         st.success("Cotización cargada para edición.")
                     except Exception as exc:
                         st.error(f"No se pudo cargar el archivo: {exc}")
+            elif status == "done":
+                st.warning("La solicitud terminó, pero aún no aparece el archivo. Actualiza el estado.")
+
+            if "pc_cot_auto_refresh" not in st.session_state:
+                st.session_state["pc_cot_auto_refresh"] = status in {"pending", "enqueued", "running"}
+            auto_refresh = st.checkbox(
+                "Actualizar automáticamente (cada 10s)",
+                key="pc_cot_auto_refresh",
+            )
+            if st.button("Actualizar estado", key="pc_cot_refresh"):
+                st.rerun()
+            if auto_refresh and status in {"pending", "enqueued", "running"}:
+                time.sleep(10)
+                st.rerun()
 
     if "pc_cot_items_df" in st.session_state:
         st.markdown("### Edición de cotización")
