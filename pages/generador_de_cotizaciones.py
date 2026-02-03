@@ -205,8 +205,24 @@ def _ensure_pc_config_job(client) -> None:
     sh = client.open_by_key(sheet_id)
     ws = sh.worksheet(PC_CONFIG_WORKSHEET)
     rows = ws.get_all_records() or []
-    for row in rows:
+    headers = [h.strip() for h in ws.row_values(1)]
+    header_map = {h.lower(): idx + 1 for idx, h in enumerate(headers)}
+    for idx, row in enumerate(rows, start=2):
         if str(row.get("name", "")).strip().lower() == ORQUESTADOR_JOB_NAME:
+            updates = {
+                "python": ORQUESTADOR_JOB_PY,
+                "script": ORQUESTADOR_JOB_SCRIPT,
+                "days": "",
+                "times": "",
+                "enabled": "si",
+            }
+            for key, value in updates.items():
+                col = header_map.get(key)
+                if not col:
+                    continue
+                current = str(row.get(key, "")).strip()
+                if current != value:
+                    ws.update_cell(idx, col, value)
             return
 
     row_data = {
