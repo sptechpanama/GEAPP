@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from openpyxl import load_workbook
 from gspread.exceptions import WorksheetNotFound
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -107,6 +108,29 @@ CLIENT_EMPRESA_MAP = {
 }
 CLIENT_EMPRESA_OPTIONS = ["RS-SP", "RIR"]
 
+PC_MANUAL_SHEET_ID_DEFAULT = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
+PC_MANUAL_WORKSHEET = "pc_manual"
+PC_CONFIG_WORKSHEET = "pc_config"
+PC_CONFIG_HEADERS = ["name", "python", "script", "days", "times", "enabled"]
+MANUAL_HEADERS = [
+    "id",
+    "job",
+    "requested_by",
+    "requested_at",
+    "status",
+    "notes",
+    "payload",
+    "result_file_id",
+    "result_file_url",
+    "result_file_name",
+    "result_error",
+]
+
+ORQUESTADOR_JOB_NAME = "cotizacion_panama"
+ORQUESTADOR_JOB_LABEL = "Cotizacion Panama Compra"
+ORQUESTADOR_JOB_PY = r"C:\Users\rodri\selenium_cotizacion\venv\Scripts\python.exe"
+ORQUESTADOR_JOB_SCRIPT = r"C:\Users\rodri\selenium_cotizacion\cotizacion_worker.py"
+
 
 def _ensure_cotizaciones_sheet(client, sheet_id: str) -> None:
     sh = client.open_by_key(sheet_id)
@@ -127,6 +151,210 @@ def _ensure_clientes_sheet(client, sheet_id: str) -> None:
         ws = sh.add_worksheet(title=WS_CLIENTES, rows=1000, cols=len(CLIENT_COLUMNS))
         ws.update("A1", [CLIENT_COLUMNS])
 
+
+def _pc_manual_sheet_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    if isinstance(app_cfg, dict):
+        return app_cfg.get("PC_MANUAL_SHEET_ID") or app_cfg.get("SHEET_ID") or PC_MANUAL_SHEET_ID_DEFAULT
+    return PC_MANUAL_SHEET_ID_DEFAULT
+
+
+def _pc_config_sheet_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    if isinstance(app_cfg, dict):
+        return (
+            app_cfg.get("PC_CONFIG_SHEET_ID")
+            or app_cfg.get("PC_MANUAL_SHEET_ID")
+            or app_cfg.get("SHEET_ID")
+            or PC_MANUAL_SHEET_ID_DEFAULT
+        )
+    return PC_MANUAL_SHEET_ID_DEFAULT
+
+
+def _current_user() -> str:
+    for key in ("username", "user", "email", "correo", "name", "nombre"):
+        value = st.session_state.get(key)
+        if value:
+            return str(value)
+    return "desconocido"
+
+
+def _ensure_headers(client, sheet_id: str, worksheet: str, headers: list[str]) -> None:
+    sh = client.open_by_key(sheet_id)
+    try:
+        ws = sh.worksheet(worksheet)
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title=worksheet, rows=200, cols=max(len(headers), 6))
+        ws.update("A1", [headers])
+        return
+
+    existing = [cell.strip() for cell in (ws.row_values(1) or [])]
+    if existing[: len(headers)] != headers:
+        ws.update(f"A1:{chr(64 + len(headers))}1", [headers])
+
+
+def _ensure_pc_config_job(client) -> None:
+    sheet_id = _pc_config_sheet_id()
+    _ensure_headers(client, sheet_id, PC_CONFIG_WORKSHEET, PC_CONFIG_HEADERS)
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(PC_CONFIG_WORKSHEET)
+    rows = ws.get_all_records() or []
+    for row in rows:
+        if str(row.get("name", "")).strip().lower() == ORQUESTADOR_JOB_NAME:
+            return
+
+    row_data = {
+        "name": ORQUESTADOR_JOB_NAME,
+        "python": ORQUESTADOR_JOB_PY,
+        "script": ORQUESTADOR_JOB_SCRIPT,
+        "days": "",
+        "times": "",
+        "enabled": "si",
+    }
+    row_values = [row_data.get(col, "") for col in PC_CONFIG_HEADERS]
+    ws.append_row(row_values, value_input_option="USER_ENTERED")
+
+
+def _append_manual_request(client, payload: dict) -> str:
+    sheet_id = _pc_manual_sheet_id()
+    _ensure_headers(client, sheet_id, PC_MANUAL_WORKSHEET, MANUAL_HEADERS)
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(PC_MANUAL_WORKSHEET)
+
+    request_id = uuid.uuid4().hex
+    row_data = {
+        "id": request_id,
+        "job": ORQUESTADOR_JOB_NAME,
+        "requested_by": _current_user(),
+        "requested_at": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "pending",
+        "notes": "",
+        "payload": json.dumps(payload, ensure_ascii=False),
+        "result_file_id": "",
+        "result_file_url": "",
+        "result_file_name": "",
+        "result_error": "",
+    }
+    row_values = [row_data.get(header, "") for header in MANUAL_HEADERS]
+    ws.append_row(row_values, value_input_option="USER_ENTERED")
+    return request_id
+
+
+def _fetch_manual_request(client, request_id: str) -> dict | None:
+    sheet_id = _pc_manual_sheet_id()
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(PC_MANUAL_WORKSHEET)
+    values = ws.get_all_values()
+    if not values:
+        return None
+    headers = [cell.strip() for cell in values[0]]
+    for row in values[1:]:
+        row_map = {headers[idx]: row[idx] if idx < len(row) else "" for idx in range(len(headers))}
+        if str(row_map.get("id", "")).strip() == request_id:
+            return row_map
+    return None
+
+
+def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool]:
+    wb = load_workbook(BytesIO(excel_bytes))
+    ws = wb["cotizacion"]
+    items = []
+    row = 23
+    while True:
+        desc = ws[f"C{row}"].value
+        unidad = ws[f"D{row}"].value
+        cantidad = ws[f"E{row}"].value
+        precio_unit = ws[f"F{row}"].value
+        precio_total = ws[f"G{row}"].value
+        if not any([desc, unidad, cantidad, precio_unit, precio_total]):
+            break
+        items.append(
+            {
+                "descripcion": desc or "",
+                "unidad": unidad or "",
+                "cantidad": float(cantidad) if cantidad not in (None, "") else 0.0,
+                "precio_unitario": float(precio_unit) if precio_unit not in (None, "") else 0.0,
+                "precio_total": float(precio_total) if precio_total not in (None, "") else 0.0,
+            }
+        )
+        row += 1
+    titulo = str(ws["C19"].value or "").strip()
+    itbms_row = 23 + len(items) + 1
+    itbms_val = ws[f"G{itbms_row}"].value
+    aplica_itbms = float(itbms_val or 0) > 0
+    return pd.DataFrame(items), titulo, aplica_itbms
+
+
+def _apply_excel_edits(
+    excel_bytes: bytes,
+    items_df: pd.DataFrame,
+    titulo: str,
+    aplica_itbms: bool,
+) -> bytes:
+    wb = load_workbook(BytesIO(excel_bytes))
+    ws = wb["cotizacion"]
+
+    def _count_excel_items() -> int:
+        row = 23
+        count = 0
+        while True:
+            cells = [
+                ws[f"C{row}"].value,
+                ws[f"D{row}"].value,
+                ws[f"E{row}"].value,
+                ws[f"F{row}"].value,
+                ws[f"G{row}"].value,
+            ]
+            if not any(cells):
+                break
+            count += 1
+            row += 1
+        return count
+    items = items_df.copy()
+    items["cantidad"] = pd.to_numeric(items.get("cantidad"), errors="coerce").fillna(0.0)
+    items["precio_unitario"] = pd.to_numeric(items.get("precio_unitario"), errors="coerce").fillna(0.0)
+    items["precio_total"] = items["cantidad"] * items["precio_unitario"]
+
+    start_row = 23
+    current_count = _count_excel_items()
+    new_count = len(items)
+    if new_count > current_count:
+        ws.insert_rows(start_row + current_count, new_count - current_count)
+    elif new_count < current_count and new_count > 0:
+        ws.delete_rows(start_row + new_count, current_count - new_count)
+    for idx, row in items.iterrows():
+        target_row = start_row + idx
+        ws[f"B{target_row}"] = idx + 1
+        ws[f"C{target_row}"] = row.get("descripcion", "")
+        ws[f"D{target_row}"] = row.get("unidad", "")
+        ws[f"E{target_row}"] = float(row.get("cantidad", 0.0))
+        ws[f"F{target_row}"] = float(row.get("precio_unitario", 0.0))
+        ws[f"G{target_row}"] = float(row.get("precio_total", 0.0))
+
+    if titulo:
+        ws["C19"] = titulo
+        ws["B21"] = titulo
+
+    subtotal = float(items["precio_total"].sum())
+    itbms = round(subtotal * 0.07, 2) if aplica_itbms else 0.0
+    total = round(subtotal + itbms, 2)
+    subtotal_row = start_row + len(items)
+    itbms_row = subtotal_row + 1
+    total_row = subtotal_row + 2
+    ws[f"G{subtotal_row}"] = subtotal
+    ws[f"G{itbms_row}"] = itbms
+    ws[f"G{total_row}"] = total
+
+    output = BytesIO()
+    wb.save(output)
+    wb.close()
+    return output.getvalue()
 
 @st.cache_data(show_spinner=False)
 def _load_cotizaciones_cached(sheet_id: str, cache_token: str) -> pd.DataFrame:
@@ -1178,7 +1406,173 @@ active_tab = st.segmented_control(
 )
 
 if active_tab == "Cotización - Panamá Compra":
-    st.info("Placeholder: sección pendiente para cotizaciones de Panamá Compra.")
+    st.subheader("Generar cotización desde Panamá Compra")
+    col_a, col_b, col_c = st.columns([2.2, 1, 1])
+    with col_a:
+        enlace_pc = st.text_input("Enlace de Panamá Compra", key="pc_cot_enlace")
+    with col_b:
+        precio_part = st.number_input(
+            "Precio de participación",
+            min_value=0.0,
+            step=10.0,
+            format="%0.2f",
+            key="pc_cot_precio",
+        )
+    with col_c:
+        empresa_sel = st.selectbox("Empresa", ["RS", "RIR"], key="pc_cot_empresa")
+
+    paga_itbms = st.checkbox("Aplica ITBMS (7%)", value=True, key="pc_cot_itbms")
+
+    if st.button("Generar cotización (Panamá Compra)"):
+        if not enlace_pc.strip():
+            st.warning("Debes pegar el enlace de Panamá Compra.")
+        else:
+            try:
+                client_manual, _ = get_client()
+                _ensure_pc_config_job(client_manual)
+                payload = {
+                    "enlace": enlace_pc.strip(),
+                    "precio_participacion": float(precio_part),
+                    "paga_itbms": bool(paga_itbms),
+                    "empresa": empresa_sel.strip().lower(),
+                }
+                request_id = _append_manual_request(client_manual, payload)
+                st.session_state["pc_cot_request_id"] = request_id
+                st.success("Solicitud enviada. El orquestador iniciará el proceso.")
+            except Exception as exc:
+                st.error(f"No se pudo enviar la solicitud: {exc}")
+
+    request_id = st.session_state.get("pc_cot_request_id")
+    if request_id:
+        try:
+            client_manual, creds_manual = get_client()
+            row = _fetch_manual_request(client_manual, request_id)
+        except Exception as exc:
+            row = None
+            st.error(f"No se pudo consultar el estado: {exc}")
+
+        if row:
+            status = (row.get("status") or "").strip().lower()
+            notes = (row.get("notes") or "").strip()
+            st.info(f"Estado actual: {status or 'pendiente'}")
+            if notes:
+                st.caption(notes)
+            if row.get("result_error"):
+                st.error(row["result_error"])
+
+            file_id = (row.get("result_file_id") or "").strip()
+            file_name = (row.get("result_file_name") or "cotizacion_panama.xlsx").strip()
+            if file_id:
+                if st.button("Cargar cotización generada"):
+                    try:
+                        drive = _get_drive_client(creds_manual)
+                        file_bytes = _download_drive_file(drive, file_id)
+                        items_df, titulo_excel, aplica_itbms = _extract_excel_items(file_bytes)
+                        st.session_state["pc_cot_excel_bytes"] = file_bytes
+                        st.session_state["pc_cot_items_df"] = items_df
+                        st.session_state["pc_cot_titulo"] = titulo_excel
+                        st.session_state["pc_cot_itbms"] = aplica_itbms
+                        st.session_state["pc_cot_file_id"] = file_id
+                        st.session_state["pc_cot_file_name"] = file_name
+                        st.success("Cotización cargada para edición.")
+                    except Exception as exc:
+                        st.error(f"No se pudo cargar el archivo: {exc}")
+
+    if "pc_cot_items_df" in st.session_state:
+        st.markdown("### Edición de cotización")
+        st.caption("Puedes agregar o eliminar filas desde la tabla.")
+        titulo_edit = st.text_input(
+            "Título (resumen)",
+            value=st.session_state.get("pc_cot_titulo", ""),
+            key="pc_cot_titulo_input",
+        )
+        itbms_edit = st.checkbox(
+            "Aplicar ITBMS (7%)",
+            value=bool(st.session_state.get("pc_cot_itbms", False)),
+            key="pc_cot_itbms_edit",
+        )
+        edited_df = st.data_editor(
+            st.session_state["pc_cot_items_df"],
+            num_rows="dynamic",
+            use_container_width=True,
+            key="pc_cot_items_editor",
+            column_config={
+                "descripcion": st.column_config.TextColumn("Descripción", width="large"),
+                "unidad": st.column_config.TextColumn("Unidad", width="small"),
+                "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0),
+                "precio_unitario": st.column_config.NumberColumn(
+                    "Precio unitario", min_value=0.0, step=0.01, format="$%0.2f"
+                ),
+                "precio_total": st.column_config.NumberColumn("Total", format="$%0.2f", disabled=True),
+            },
+            disabled=["precio_total"],
+            hide_index=True,
+        )
+        edited_df["cantidad"] = pd.to_numeric(edited_df.get("cantidad"), errors="coerce").fillna(0.0)
+        edited_df["precio_unitario"] = pd.to_numeric(edited_df.get("precio_unitario"), errors="coerce").fillna(0.0)
+        edited_df["precio_total"] = edited_df["cantidad"] * edited_df["precio_unitario"]
+        st.session_state["pc_cot_items_df"] = edited_df
+
+        if st.button("Guardar cambios y generar Excel"):
+            try:
+                items_to_save = edited_df.copy()
+                items_to_save["descripcion"] = items_to_save.get("descripcion", "").astype(str).str.strip()
+                items_to_save["unidad"] = items_to_save.get("unidad", "").astype(str).str.strip()
+                items_to_save["cantidad"] = pd.to_numeric(
+                    items_to_save.get("cantidad"), errors="coerce"
+                ).fillna(0.0)
+                items_to_save["precio_unitario"] = pd.to_numeric(
+                    items_to_save.get("precio_unitario"), errors="coerce"
+                ).fillna(0.0)
+                items_to_save["precio_total"] = (
+                    items_to_save["cantidad"] * items_to_save["precio_unitario"]
+                )
+                keep_mask = (
+                    items_to_save["descripcion"].astype(str).str.len().gt(0)
+                    | items_to_save["unidad"].astype(str).str.len().gt(0)
+                    | (items_to_save["cantidad"] != 0)
+                    | (items_to_save["precio_unitario"] != 0)
+                )
+                items_to_save = items_to_save[keep_mask].reset_index(drop=True)
+                if items_to_save.empty:
+                    st.warning("Agrega al menos un ítem para guardar la cotización.")
+                    st.stop()
+
+                excel_bytes = _apply_excel_edits(
+                    st.session_state["pc_cot_excel_bytes"],
+                    items_to_save,
+                    titulo_edit,
+                    itbms_edit,
+                )
+                st.session_state["pc_cot_excel_updated"] = excel_bytes
+                st.session_state["pc_cot_excel_bytes"] = excel_bytes
+                st.session_state["pc_cot_items_df"] = items_to_save
+                file_id = st.session_state.get("pc_cot_file_id")
+                if file_id:
+                    _, creds_manual = get_client()
+                    drive = _get_drive_client(creds_manual)
+                    media = MediaIoBaseUpload(
+                        BytesIO(excel_bytes),
+                        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        resumable=False,
+                    )
+                    drive.files().update(
+                        fileId=file_id,
+                        media_body=media,
+                        fields="id,name",
+                        supportsAllDrives=True,
+                    ).execute()
+                st.success("Cotización actualizada.")
+            except Exception as exc:
+                st.error(f"No se pudo guardar la edición: {exc}")
+
+        if st.session_state.get("pc_cot_excel_updated"):
+            st.download_button(
+                "Descargar Excel actualizado",
+                data=st.session_state["pc_cot_excel_updated"],
+                file_name=st.session_state.get("pc_cot_file_name") or "cotizacion_panama.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 if active_tab == "Cotizacion - Estandar":
     if sheet_error:
