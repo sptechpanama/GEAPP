@@ -1,6 +1,7 @@
 """Vista PanamáCompra para GE FinApp."""
 
 # pages/visualizador.py
+import os
 import re
 import sqlite3
 import time
@@ -10,6 +11,7 @@ import pandas as pd
 import uuid
 from datetime import date, timedelta, datetime, timezone
 from ui.theme import apply_global_theme
+from sqlalchemy import create_engine, text
 
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
@@ -97,12 +99,73 @@ def _preferred_db_path() -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _supabase_db_url() -> str:
+    try:
+        app_cfg = st.secrets["app"]
+    except Exception:
+        app_cfg = {}
+
+    candidates = [
+        app_cfg.get("SUPABASE_DB_URL"),
+        app_cfg.get("DATABASE_URL"),
+        os.environ.get("SUPABASE_DB_URL"),
+        os.environ.get("DATABASE_URL"),
+    ]
+    for raw in candidates:
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return ""
+
+
+def _active_db_backend() -> str:
+    return "postgres" if _supabase_db_url() else "sqlite"
+
+
+@st.cache_resource
+def _pg_engine(db_url: str):
+    return create_engine(db_url, pool_pre_ping=True)
+
+
 def _quote_identifier(identifier: str) -> str:
     return f"\"{identifier.replace('\"', '\"\"')}\""
 
 
 def _connect_sqlite(db_path: str):
     return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+
+@st.cache_data(ttl=300)
+def list_postgres_tables(db_url: str) -> list[str]:
+    engine = _pg_engine(db_url)
+    query = text(
+        "SELECT table_name "
+        "FROM information_schema.tables "
+        "WHERE table_schema = 'public' "
+        "ORDER BY table_name"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(query).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+@st.cache_data(ttl=300)
+def count_postgres_rows(db_url: str, table_name: str) -> int:
+    identifier = _quote_identifier(table_name)
+    query = text(f"SELECT COUNT(1) FROM {identifier}")
+    engine = _pg_engine(db_url)
+    with engine.connect() as conn:
+        row = conn.execute(query).first()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+@st.cache_data(ttl=300)
+def load_postgres_preview(db_url: str, table_name: str, limit: int) -> pd.DataFrame:
+    identifier = _quote_identifier(table_name)
+    limit = max(1, int(limit))
+    query = f"SELECT * FROM {identifier} LIMIT {limit}"
+    engine = _pg_engine(db_url)
+    with engine.connect() as conn:
+        return pd.read_sql_query(text(query), conn)
 
 
 @st.cache_data(ttl=300)
@@ -1430,35 +1493,48 @@ def render_df(
 
 
 def render_panamacompra_db_panel() -> None:
-    """Muestra una vista de las tablas disponibles en la base local panamacompra.db."""
+    """Muestra una vista de tablas desde SQLite local o Supabase."""
     st.divider()
     st.subheader("Base panamacompra.db")
 
-    db_path = _preferred_db_path()
-    if db_path is None:
-        st.info("No hay rutas configuradas para la base panamacompra.db.")
-        return
+    backend = _active_db_backend()
+    db_path_str = ""
+    db_url = ""
 
-    st.caption(f"Origen configurado: `{db_path}`")
-    if not db_path.exists():
-        st.warning(
-            "No pudimos abrir el archivo. Verifica que OneDrive est�� sincronizado "
-            "o define `FINAPP_DB_PATH` apuntando a una copia local."
-        )
-        return
+    if backend == "postgres":
+        db_url = _supabase_db_url()
+        st.caption("Origen configurado: `Supabase (PostgreSQL)`")
+        try:
+            db_tables = list_postgres_tables(db_url)
+        except Exception as exc:
+            st.error(f"No fue posible conectar a Supabase: {exc}")
+            return
+    else:
+        db_path = _preferred_db_path()
+        if db_path is None:
+            st.info("No hay rutas configuradas para la base panamacompra.db.")
+            return
 
-    db_path_str = str(db_path)
-    try:
-        db_tables = list_sqlite_tables(db_path_str)
-    except sqlite3.OperationalError as exc:
-        st.error(f"No fue posible conectar a la base: {exc}")
-        return
-    except Exception as exc:
-        st.error(f"No fue posible listar las tablas: {exc}")
-        return
+        st.caption(f"Origen configurado: `{db_path}`")
+        if not db_path.exists():
+            st.warning(
+                "No pudimos abrir el archivo local. "
+                "Si usas Streamlit Cloud, configura `SUPABASE_DB_URL` en secrets."
+            )
+            return
+
+        db_path_str = str(db_path)
+        try:
+            db_tables = list_sqlite_tables(db_path_str)
+        except sqlite3.OperationalError as exc:
+            st.error(f"No fue posible conectar a la base: {exc}")
+            return
+        except Exception as exc:
+            st.error(f"No fue posible listar las tablas: {exc}")
+            return
 
     if not db_tables:
-        st.info("La base panamacompra.db no contiene tablas visibles.")
+        st.info("No hay tablas visibles en la base configurada.")
         return
 
     selected_table = st.selectbox(
@@ -1468,16 +1544,19 @@ def render_panamacompra_db_panel() -> None:
     )
 
     limit = st.slider(
-        "L��mite de filas a mostrar",
+        "Limite de filas a mostrar",
         min_value=100,
         max_value=5000,
         value=1000,
         step=100,
-        help="Ampl��a el l��mite si necesitas revisar m��s registros.",
+        help="Amplia el limite si necesitas revisar mas registros.",
     )
 
     try:
-        preview_df = load_sqlite_preview(db_path_str, selected_table, limit)
+        if backend == "postgres":
+            preview_df = load_postgres_preview(db_url, selected_table, limit)
+        else:
+            preview_df = load_sqlite_preview(db_path_str, selected_table, limit)
     except sqlite3.OperationalError as exc:
         st.error(f"No se pudo leer la tabla {selected_table}: {exc}")
         return
@@ -1487,14 +1566,17 @@ def render_panamacompra_db_panel() -> None:
 
     total_rows: int | None = None
     try:
-        total_rows = count_sqlite_rows(db_path_str, selected_table)
+        if backend == "postgres":
+            total_rows = count_postgres_rows(db_url, selected_table)
+        else:
+            total_rows = count_sqlite_rows(db_path_str, selected_table)
     except sqlite3.OperationalError:
         pass
     except Exception:
         pass
 
     if preview_df.empty:
-        st.info("La consulta no devolvi�� filas para la tabla seleccionada.")
+        st.info("La consulta no devolvio filas para la tabla seleccionada.")
     else:
         st.dataframe(preview_df, use_container_width=True, height=520)
 
