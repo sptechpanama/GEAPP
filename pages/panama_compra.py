@@ -556,13 +556,65 @@ def _extract_sql_payload(raw_response: str) -> tuple[str, str]:
             if sql_value:
                 return sql_value, analysis_value
 
+    # Fallback: intenta extraer llaves "sql"/"analysis" aunque el JSON venga malformado.
+    sql_key_match = re.search(
+        r'"sql"\s*:\s*"((?:\\.|[^"\\])*)"',
+        text_value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if sql_key_match:
+        sql_raw = sql_key_match.group(1)
+        try:
+            sql_value = json.loads(f'"{sql_raw}"')
+        except Exception:
+            sql_value = (
+                sql_raw.replace('\\"', '"')
+                .replace("\\n", " ")
+                .replace("\\t", " ")
+            )
+
+        analysis_value = ""
+        analysis_key_match = re.search(
+            r'"analysis"\s*:\s*"((?:\\.|[^"\\])*)"',
+            text_value,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if analysis_key_match:
+            analysis_raw = analysis_key_match.group(1)
+            try:
+                analysis_value = json.loads(f'"{analysis_raw}"')
+            except Exception:
+                analysis_value = (
+                    analysis_raw.replace('\\"', '"')
+                    .replace("\\n", " ")
+                    .replace("\\t", " ")
+                )
+
+        sql_value = str(sql_value).strip()
+        if sql_value:
+            return sql_value, str(analysis_value).strip()
+
     sql_match = re.search(
         r"(WITH\s+.+?SELECT.+|SELECT.+)",
         text_value,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if sql_match:
-        return sql_match.group(1).strip(), ""
+        sql_value = sql_match.group(1).strip()
+        # Recorta basura JSON residual si viene pegada al SQL.
+        sql_value = re.sub(
+            r'"\s*,\s*"analysis"\s*:\s*.+$',
+            "",
+            sql_value,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        sql_value = (
+            sql_value.replace('\\"', '"')
+            .replace("\\n", " ")
+            .replace("\\t", " ")
+            .strip()
+        )
+        return sql_value, ""
     return "", ""
 
 
@@ -634,13 +686,35 @@ def _is_aggregate_sql(sql_text: str) -> bool:
 
 
 def _validate_and_prepare_sql(sql_text: str, allowed_tables: list[str]) -> str:
-    cleaned = _strip_code_fences(sql_text).strip().rstrip(";")
+    cleaned = _strip_code_fences(sql_text).strip()
+    cleaned = (
+        cleaned.replace('\\"', '"')
+        .replace("\\n", " ")
+        .replace("\\t", " ")
+        .strip()
+    )
     if not cleaned:
         raise ValueError("No se genero SQL.")
     if len(cleaned) > CHAT_SQL_MAX_CHARS:
         raise ValueError("SQL demasiado largo.")
+
     if ";" in cleaned:
-        raise ValueError("Solo se permite una consulta por mensaje.")
+        first_stmt, rest = cleaned.split(";", 1)
+        first_stmt = first_stmt.strip()
+        rest_strip = rest.strip()
+        if not first_stmt:
+            raise ValueError("No se encontro una consulta SQL valida.")
+        # Permite basura no-SQL despues del primer ';' (p.ej. campo analysis),
+        # pero bloquea si detecta una segunda sentencia SQL.
+        if rest_strip and re.search(
+            r"\b(select|with|insert|update|delete|drop|alter|truncate|create)\b",
+            rest_strip,
+            flags=re.IGNORECASE,
+        ):
+            raise ValueError("Solo se permite una consulta por mensaje.")
+        cleaned = first_stmt
+
+    cleaned = cleaned.rstrip(";").strip()
 
     lowered = cleaned.lower()
     if not (lowered.startswith("select") or lowered.startswith("with")):
