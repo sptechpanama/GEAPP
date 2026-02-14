@@ -508,17 +508,17 @@ def _find_reference_table_name(
     if not candidates:
         return ""
 
-    wanted = {c.strip().lower() for c in candidates if c and c.strip()}
-    if not wanted:
-        return ""
-
     if backend == "postgres":
         available = list_postgres_tables(db_url)
     else:
         available = list_sqlite_tables(db_path_str)
-    for table in available:
-        if str(table).strip().lower() in wanted:
-            return str(table)
+
+    # Respeta prioridad del caller: primer candidato existente gana.
+    available_map = {str(table).strip().lower(): str(table) for table in available}
+    for candidate in candidates:
+        key = str(candidate).strip().lower()
+        if key and key in available_map:
+            return available_map[key]
     return ""
 
 
