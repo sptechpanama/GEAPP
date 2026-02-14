@@ -979,6 +979,100 @@ def _prepare_sql_for_backend(backend: str, sql_text: str) -> str:
     return sql_text
 
 
+def _extract_year_from_prompt(prompt: str) -> int | None:
+    if not prompt:
+        return None
+    match = re.search(r"\b([12][09][0-9]{2})\b", prompt)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
+def _build_builtin_proponentes_sql(actos_table: str, year: int | None) -> str:
+    table_id = _quote_identifier(actos_table)
+    values_rows = []
+    for idx in range(1, 15):
+        values_rows.append(
+            f'(ap."Proponente {idx}", ap."Precio Proponente {idx}")'
+        )
+    values_sql = ",\n            ".join(values_rows)
+
+    year_filter = ""
+    if year is not None:
+        year_filter = (
+            " AND CAST(NULLIF(SUBSTRING(CAST(ap.\"fecha_adjudicacion\" AS TEXT) "
+            "FROM '[12][09][0-9]{2}'), '') AS INTEGER) = "
+            + str(int(year))
+        )
+
+    return f"""
+SELECT x.proponente,
+       COUNT(*) FILTER (WHERE x.monto > 0) AS num_licitaciones,
+       SUM(x.monto) AS total_ganado
+FROM (
+    SELECT vp.proponente,
+           CASE
+               WHEN (regexp_match(
+                    CAST(vp.precio AS TEXT),
+                    '-?[0-9]{{1,3}}(?:,[0-9]{{3}})*(?:\\.[0-9]+)?|-?[0-9]+(?:\\.[0-9]+)?'
+               ))[1] IS NOT NULL
+               THEN REPLACE(
+                    (regexp_match(
+                        CAST(vp.precio AS TEXT),
+                        '-?[0-9]{{1,3}}(?:,[0-9]{{3}})*(?:\\.[0-9]+)?|-?[0-9]+(?:\\.[0-9]+)?'
+                    ))[1],
+                    ',',
+                    ''
+               )::numeric
+               ELSE 0
+           END AS monto
+    FROM {table_id} ap
+    CROSS JOIN LATERAL (
+        VALUES
+            {values_sql}
+    ) AS vp(proponente, precio)
+    WHERE COALESCE(TRIM(CAST(vp.proponente AS TEXT)), '') <> ''
+    {year_filter}
+) x
+GROUP BY x.proponente
+ORDER BY total_ganado DESC, num_licitaciones DESC
+LIMIT 50
+""".strip()
+
+
+def _maybe_builtin_sql(prompt: str, backend: str, schema_map: dict[str, list[str]]) -> str:
+    if backend != "postgres":
+        return ""
+    raw_prompt = str(prompt or "")
+    lower_prompt = raw_prompt.lower()
+
+    looks_like_proponentes_ranking = (
+        ("proponent" in lower_prompt or "proveedor" in lower_prompt)
+        and ("licitac" in lower_prompt or "adjudic" in lower_prompt or "ganad" in lower_prompt)
+    )
+    if not looks_like_proponentes_ranking:
+        return ""
+
+    actos_table = ""
+    for table_name, cols in schema_map.items():
+        normalized = _normalize_sql_table_name(table_name)
+        has_core_cols = ("Proponente 1" in cols) and ("Precio Proponente 1" in cols)
+        if has_core_cols and (
+            normalized in {"actos_publicos", "actos", "panamacompra_actos"} or "acto" in normalized
+        ):
+            actos_table = table_name
+            break
+
+    if not actos_table:
+        return ""
+
+    year = _extract_year_from_prompt(raw_prompt)
+    return _build_builtin_proponentes_sql(actos_table, year)
+
+
 def _build_sql_retry_feedback(backend: str, sql_text: str, error: Exception) -> str:
     raw_error = str(error)
     compact_error = raw_error[:1400]
@@ -1214,46 +1308,68 @@ def render_panamacompra_ai_chat(
                 final_sql = ""
                 result_df = pd.DataFrame()
                 retry_feedback = ""
+                builtin_sql = _maybe_builtin_sql(
+                    prompt=prompt,
+                    backend=backend,
+                    schema_map=schema_map,
+                )
 
-                for _attempt in range(4):
-                    generated_sql, model_hint = _generate_sql_from_question(
-                        question=prompt,
-                        backend=backend,
-                        schema_map=schema_map,
-                        api_key=api_key,
-                        model=model_name,
-                        feedback=retry_feedback,
+                if builtin_sql:
+                    model_hint = (
+                        "Se uso una consulta optimizada interna para ranking de proponentes."
                     )
-                    try:
-                        candidate_sql = _validate_and_prepare_sql(
-                            generated_sql, list(schema_map.keys())
-                        )
-                    except ValueError as validation_exc:
-                        retry_feedback = (
-                            "El SQL fue invalido por validacion de seguridad/esquema. "
-                            f"Corrigelo. Detalle: {validation_exc}"
-                        )
-                        continue
-
+                    candidate_sql = _validate_and_prepare_sql(
+                        builtin_sql, list(schema_map.keys())
+                    )
                     candidate_sql_exec = _prepare_sql_for_backend(backend, candidate_sql)
-                    try:
-                        result_df = _run_chat_sql(
+                    result_df = _run_chat_sql(
+                        backend=backend,
+                        db_url=db_url,
+                        db_path=db_path,
+                        sql_text=candidate_sql_exec,
+                    )
+                    final_sql = candidate_sql_exec
+                    generated_sql = candidate_sql_exec
+                else:
+                    for _attempt in range(4):
+                        generated_sql, model_hint = _generate_sql_from_question(
+                            question=prompt,
                             backend=backend,
-                            db_url=db_url,
-                            db_path=db_path,
-                            sql_text=candidate_sql_exec,
+                            schema_map=schema_map,
+                            api_key=api_key,
+                            model=model_name,
+                            feedback=retry_feedback,
                         )
-                        final_sql = candidate_sql_exec
-                        generated_sql = candidate_sql_exec
-                        break
-                    except Exception as exec_exc:
-                        retry_feedback = _build_sql_retry_feedback(
-                            backend=backend,
-                            sql_text=candidate_sql_exec,
-                            error=exec_exc,
-                        )
-                        generated_sql = candidate_sql_exec
-                        continue
+                        try:
+                            candidate_sql = _validate_and_prepare_sql(
+                                generated_sql, list(schema_map.keys())
+                            )
+                        except ValueError as validation_exc:
+                            retry_feedback = (
+                                "El SQL fue invalido por validacion de seguridad/esquema. "
+                                f"Corrigelo. Detalle: {validation_exc}"
+                            )
+                            continue
+
+                        candidate_sql_exec = _prepare_sql_for_backend(backend, candidate_sql)
+                        try:
+                            result_df = _run_chat_sql(
+                                backend=backend,
+                                db_url=db_url,
+                                db_path=db_path,
+                                sql_text=candidate_sql_exec,
+                            )
+                            final_sql = candidate_sql_exec
+                            generated_sql = candidate_sql_exec
+                            break
+                        except Exception as exec_exc:
+                            retry_feedback = _build_sql_retry_feedback(
+                                backend=backend,
+                                sql_text=candidate_sql_exec,
+                                error=exec_exc,
+                            )
+                            generated_sql = candidate_sql_exec
+                            continue
 
                 if not final_sql:
                     raise ValueError(
