@@ -2,6 +2,7 @@
 
 # pages/visualizador.py
 import os
+import math
 import re
 import sqlite3
 import time
@@ -194,6 +195,216 @@ def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFra
     query = f"SELECT * FROM {identifier} LIMIT {limit}"
     with _connect_sqlite(db_path) as conn:
         return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=300)
+def list_sqlite_columns(db_path: str, table_name: str) -> list[str]:
+    identifier = _quote_identifier(table_name)
+    with _connect_sqlite(db_path) as conn:
+        cur = conn.execute(f"PRAGMA table_info({identifier})")
+        rows = cur.fetchall()
+    return [str(r[1]) for r in rows]
+
+
+@st.cache_data(ttl=300)
+def list_postgres_columns(db_url: str, table_name: str) -> list[str]:
+    engine = _pg_engine(db_url)
+    query = text(
+        "SELECT column_name "
+        "FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = :table_name "
+        "ORDER BY ordinal_position"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(query, {"table_name": table_name}).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def _split_search_terms(raw: str) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in re.split(r"[\s,;]+", raw) if part.strip()]
+
+
+def _build_sql_conditions(
+    *,
+    backend: str,
+    columns: list[str],
+    search_terms: list[str],
+    search_mode: str,
+    filters: list[dict[str, str]],
+    filters_mode: str,
+    combine_mode: str,
+):
+    """
+    Devuelve (where_sql, params) para SQLite y PostgreSQL.
+    En SQLite params es list; en PostgreSQL params es dict.
+    """
+    if backend == "postgres":
+        params: dict[str, object] = {}
+    else:
+        params: list[object] = []
+
+    def _add_param(value):
+        if backend == "postgres":
+            key = f"p{len(params)}"
+            params[key] = value
+            return f":{key}"
+        params.append(value)
+        return "?"
+
+    clauses: list[str] = []
+
+    # Buscador de texto multi-columna.
+    if search_terms and columns:
+        term_clauses: list[str] = []
+        for term in search_terms:
+            col_clauses: list[str] = []
+            for col in columns:
+                qcol = _quote_identifier(col)
+                if backend == "postgres":
+                    ph = _add_param(f"%{term}%")
+                    col_clauses.append(f"CAST({qcol} AS TEXT) ILIKE {ph}")
+                else:
+                    ph = _add_param(f"%{term.lower()}%")
+                    col_clauses.append(f"LOWER(CAST({qcol} AS TEXT)) LIKE {ph}")
+            if col_clauses:
+                term_clauses.append("(" + " OR ".join(col_clauses) + ")")
+        if term_clauses:
+            joiner = " AND " if search_mode == "AND" else " OR "
+            clauses.append("(" + joiner.join(term_clauses) + ")")
+
+    # Filtros manuales.
+    filter_clauses: list[str] = []
+    for f in filters:
+        col = f.get("column", "")
+        op = f.get("operator", "")
+        raw_val = (f.get("value", "") or "").strip()
+        if not col or not raw_val:
+            continue
+
+        qcol = _quote_identifier(col)
+        expr = f"CAST({qcol} AS TEXT)"
+        expr_lower = f"LOWER({expr})"
+        val_lower = raw_val.lower()
+
+        if op == "contiene":
+            if backend == "postgres":
+                ph = _add_param(f"%{raw_val}%")
+                filter_clauses.append(f"{expr} ILIKE {ph}")
+            else:
+                ph = _add_param(f"%{val_lower}%")
+                filter_clauses.append(f"{expr_lower} LIKE {ph}")
+        elif op == "igual":
+            ph = _add_param(val_lower if backend == "sqlite" else raw_val)
+            if backend == "postgres":
+                filter_clauses.append(f"{expr_lower} = LOWER({ph})")
+            else:
+                filter_clauses.append(f"{expr_lower} = {ph}")
+        elif op == "distinto":
+            ph = _add_param(val_lower if backend == "sqlite" else raw_val)
+            if backend == "postgres":
+                filter_clauses.append(f"{expr_lower} <> LOWER({ph})")
+            else:
+                filter_clauses.append(f"{expr_lower} <> {ph}")
+        elif op == "empieza con":
+            if backend == "postgres":
+                ph = _add_param(f"{raw_val}%")
+                filter_clauses.append(f"{expr} ILIKE {ph}")
+            else:
+                ph = _add_param(f"{val_lower}%")
+                filter_clauses.append(f"{expr_lower} LIKE {ph}")
+        elif op == "termina con":
+            if backend == "postgres":
+                ph = _add_param(f"%{raw_val}")
+                filter_clauses.append(f"{expr} ILIKE {ph}")
+            else:
+                ph = _add_param(f"%{val_lower}")
+                filter_clauses.append(f"{expr_lower} LIKE {ph}")
+
+    if filter_clauses:
+        joiner = " AND " if filters_mode == "AND" else " OR "
+        clauses.append("(" + joiner.join(filter_clauses) + ")")
+
+    if len(clauses) == 2:
+        joiner = " AND " if combine_mode == "AND" else " OR "
+        where_sql = "(" + clauses[0] + joiner + clauses[1] + ")"
+    elif clauses:
+        where_sql = clauses[0]
+    else:
+        where_sql = ""
+
+    return where_sql, params
+
+
+def query_sqlite_preview(
+    db_path: str,
+    table_name: str,
+    where_sql: str,
+    params: list[object],
+    limit: int,
+    offset: int,
+) -> pd.DataFrame:
+    identifier = _quote_identifier(table_name)
+    query = f"SELECT * FROM {identifier}"
+    if where_sql:
+        query += f" WHERE {where_sql}"
+    query += " LIMIT ? OFFSET ?"
+    final_params = list(params) + [int(limit), int(offset)]
+    with _connect_sqlite(db_path) as conn:
+        return pd.read_sql_query(query, conn, params=final_params)
+
+
+def count_sqlite_filtered_rows(
+    db_path: str,
+    table_name: str,
+    where_sql: str,
+    params: list[object],
+) -> int:
+    identifier = _quote_identifier(table_name)
+    query = f"SELECT COUNT(1) FROM {identifier}"
+    if where_sql:
+        query += f" WHERE {where_sql}"
+    with _connect_sqlite(db_path) as conn:
+        row = conn.execute(query, params).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def query_postgres_preview(
+    db_url: str,
+    table_name: str,
+    where_sql: str,
+    params: dict[str, object],
+    limit: int,
+    offset: int,
+) -> pd.DataFrame:
+    identifier = _quote_identifier(table_name)
+    query = f"SELECT * FROM {identifier}"
+    if where_sql:
+        query += f" WHERE {where_sql}"
+    query += " LIMIT :_limit OFFSET :_offset"
+    final_params = dict(params)
+    final_params["_limit"] = int(limit)
+    final_params["_offset"] = int(offset)
+    engine = _pg_engine(db_url)
+    with engine.connect() as conn:
+        return pd.read_sql_query(text(query), conn, params=final_params)
+
+
+def count_postgres_filtered_rows(
+    db_url: str,
+    table_name: str,
+    where_sql: str,
+    params: dict[str, object],
+) -> int:
+    identifier = _quote_identifier(table_name)
+    query = f"SELECT COUNT(1) FROM {identifier}"
+    if where_sql:
+        query += f" WHERE {where_sql}"
+    engine = _pg_engine(db_url)
+    with engine.connect() as conn:
+        row = conn.execute(text(query), params).first()
+    return int(row[0]) if row and row[0] is not None else 0
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -1543,47 +1754,166 @@ def render_panamacompra_db_panel() -> None:
         key="pc_db_table_selector",
     )
 
-    limit = st.slider(
-        "Limite de filas a mostrar",
+    try:
+        if backend == "postgres":
+            table_columns = list_postgres_columns(db_url, selected_table)
+        else:
+            table_columns = list_sqlite_columns(db_path_str, selected_table)
+    except Exception as exc:
+        st.error(f"No se pudieron listar columnas de {selected_table}: {exc}")
+        return
+
+    if not table_columns:
+        st.warning("La tabla seleccionada no tiene columnas visibles.")
+        return
+
+    st.caption(
+        "Nota: el limite es solo de visualizacion por pagina. "
+        "El motor consulta toda la tabla y filtra antes de traer resultados."
+    )
+
+    search_text = st.text_input(
+        "Buscador de texto (todas las columnas)",
+        key="pc_db_search_text",
+        placeholder="Ej: jeringa hospital enero",
+    )
+    search_mode = st.radio(
+        "Modo del buscador",
+        options=["OR", "AND"],
+        horizontal=True,
+        key="pc_db_search_mode",
+    )
+
+    num_filters = st.number_input(
+        "Cantidad de filtros",
+        min_value=0,
+        max_value=5,
+        value=0,
+        step=1,
+        key="pc_db_num_filters",
+    )
+    filters_mode = st.radio(
+        "Combinar filtros con",
+        options=["AND", "OR"],
+        horizontal=True,
+        key="pc_db_filters_mode",
+    )
+
+    filters: list[dict[str, str]] = []
+    operator_options = ["contiene", "igual", "distinto", "empieza con", "termina con"]
+    for idx in range(int(num_filters)):
+        c1, c2, c3 = st.columns([2.2, 1.2, 2.6])
+        filter_col = c1.selectbox(
+            f"Columna filtro {idx + 1}",
+            table_columns,
+            key=f"pc_db_filter_col_{idx}",
+            label_visibility="collapsed",
+        )
+        filter_op = c2.selectbox(
+            f"Operador filtro {idx + 1}",
+            operator_options,
+            key=f"pc_db_filter_op_{idx}",
+            label_visibility="collapsed",
+        )
+        filter_value = c3.text_input(
+            f"Valor filtro {idx + 1}",
+            key=f"pc_db_filter_value_{idx}",
+            label_visibility="collapsed",
+            placeholder="valor",
+        )
+        if filter_value.strip():
+            filters.append(
+                {
+                    "column": filter_col,
+                    "operator": filter_op,
+                    "value": filter_value.strip(),
+                }
+            )
+
+    combine_mode = st.radio(
+        "Combinar buscador + filtros con",
+        options=["AND", "OR"],
+        horizontal=True,
+        key="pc_db_combine_mode",
+    )
+
+    rows_per_page = st.slider(
+        "Filas por pagina",
         min_value=100,
         max_value=5000,
         value=1000,
         step=100,
-        help="Amplia el limite si necesitas revisar mas registros.",
+        help="Puedes recorrer todas las coincidencias usando paginacion.",
+    )
+
+    search_terms = _split_search_terms(search_text)
+    where_sql, query_params = _build_sql_conditions(
+        backend=backend,
+        columns=table_columns,
+        search_terms=search_terms,
+        search_mode=search_mode,
+        filters=filters,
+        filters_mode=filters_mode,
+        combine_mode=combine_mode,
     )
 
     try:
         if backend == "postgres":
-            preview_df = load_postgres_preview(db_url, selected_table, limit)
+            total_rows = count_postgres_filtered_rows(
+                db_url, selected_table, where_sql, query_params
+            )
         else:
-            preview_df = load_sqlite_preview(db_path_str, selected_table, limit)
-    except sqlite3.OperationalError as exc:
-        st.error(f"No se pudo leer la tabla {selected_table}: {exc}")
+            total_rows = count_sqlite_filtered_rows(
+                db_path_str, selected_table, where_sql, query_params
+            )
+    except Exception as exc:
+        st.error(f"No se pudo contar registros en {selected_table}: {exc}")
         return
+
+    total_pages = max(1, math.ceil(total_rows / max(1, rows_per_page)))
+    page_number = st.number_input(
+        "Pagina",
+        min_value=1,
+        max_value=total_pages,
+        value=1,
+        step=1,
+        key="pc_db_page_number",
+    )
+    offset = (int(page_number) - 1) * int(rows_per_page)
+
+    try:
+        if backend == "postgres":
+            preview_df = query_postgres_preview(
+                db_url,
+                selected_table,
+                where_sql,
+                query_params,
+                rows_per_page,
+                offset,
+            )
+        else:
+            preview_df = query_sqlite_preview(
+                db_path_str,
+                selected_table,
+                where_sql,
+                query_params,
+                rows_per_page,
+                offset,
+            )
     except Exception as exc:
         st.error(f"Error al consultar {selected_table}: {exc}")
         return
 
-    total_rows: int | None = None
-    try:
-        if backend == "postgres":
-            total_rows = count_postgres_rows(db_url, selected_table)
-        else:
-            total_rows = count_sqlite_rows(db_path_str, selected_table)
-    except sqlite3.OperationalError:
-        pass
-    except Exception:
-        pass
-
     if preview_df.empty:
-        st.info("La consulta no devolvio filas para la tabla seleccionada.")
+        st.info("No hay filas para los filtros actuales.")
     else:
         st.dataframe(preview_df, use_container_width=True, height=520)
 
-    caption = f"Mostrando hasta {limit} filas."
-    if total_rows is not None:
-        caption += f" Total en `{selected_table}`: {total_rows:,}."
-    st.caption(caption)
+    st.caption(
+        f"Coincidencias totales: {total_rows:,}. "
+        f"Pagina {int(page_number)} de {total_pages}. "
+        f"Mostrando hasta {rows_per_page} filas por pagina."
+    )
 
 # ---- UI: pestañas de categorías + desplegable de hojas ----
 pc_state_df = load_pc_state()
