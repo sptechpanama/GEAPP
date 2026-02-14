@@ -797,9 +797,193 @@ def _rewrite_postgres_year_extract(sql_text: str) -> str:
     return rewritten
 
 
+def _find_matching_paren(text_value: str, open_idx: int) -> int:
+    depth = 0
+    in_single = False
+    in_double = False
+    i = open_idx
+    while i < len(text_value):
+        ch = text_value[i]
+        nxt = text_value[i + 1] if i + 1 < len(text_value) else ""
+
+        if in_single:
+            if ch == "'" and nxt == "'":
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            if ch == '"' and nxt == '"':
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _split_sql_top_level_args(args_text: str) -> list[str]:
+    args: list[str] = []
+    depth = 0
+    in_single = False
+    in_double = False
+    start = 0
+    i = 0
+    while i < len(args_text):
+        ch = args_text[i]
+        nxt = args_text[i + 1] if i + 1 < len(args_text) else ""
+
+        if in_single:
+            if ch == "'" and nxt == "'":
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            if ch == '"' and nxt == '"':
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            args.append(args_text[start:i].strip())
+            start = i + 1
+        i += 1
+
+    tail = args_text[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _rewrite_postgres_numeric_nullif_cast(sql_text: str) -> str:
+    """
+    Convierte expresiones tipo NULLIF(expr,'')::numeric a un cast seguro:
+    CASE WHEN expr ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN expr::numeric ELSE 0 END
+    para evitar errores por texto sucio en montos.
+    """
+    if not sql_text:
+        return sql_text
+
+    pattern = re.compile(r"nullif\s*\(", flags=re.IGNORECASE)
+    out: list[str] = []
+    pos = 0
+
+    while True:
+        match = pattern.search(sql_text, pos)
+        if not match:
+            out.append(sql_text[pos:])
+            break
+
+        out.append(sql_text[pos : match.start()])
+        open_idx = match.end() - 1  # posicion del '(' de NULLIF
+        close_idx = _find_matching_paren(sql_text, open_idx)
+        if close_idx < 0:
+            out.append(sql_text[match.start() :])
+            break
+
+        cast_cursor = close_idx + 1
+        while cast_cursor < len(sql_text) and sql_text[cast_cursor].isspace():
+            cast_cursor += 1
+
+        if not sql_text.startswith("::", cast_cursor):
+            out.append(sql_text[match.start() : close_idx + 1])
+            pos = close_idx + 1
+            continue
+
+        type_cursor = cast_cursor + 2
+        while type_cursor < len(sql_text) and sql_text[type_cursor].isspace():
+            type_cursor += 1
+        type_start = type_cursor
+        while type_cursor < len(sql_text) and (
+            sql_text[type_cursor].isalnum() or sql_text[type_cursor] == "_"
+        ):
+            type_cursor += 1
+        cast_type = sql_text[type_start:type_cursor].lower()
+
+        if cast_type != "numeric":
+            out.append(sql_text[match.start() : type_cursor])
+            pos = type_cursor
+            continue
+
+        inner = sql_text[open_idx + 1 : close_idx]
+        args = _split_sql_top_level_args(inner)
+        if len(args) != 2:
+            out.append(sql_text[match.start() : type_cursor])
+            pos = type_cursor
+            continue
+
+        second_arg = args[1].replace(" ", "").lower()
+        if second_arg not in {"''", "e''"}:
+            out.append(sql_text[match.start() : type_cursor])
+            pos = type_cursor
+            continue
+
+        value_expr = args[0].strip()
+        # Extrae el primer numero valido (soporta miles con coma) y luego castea.
+        # Esto evita errores cuando quedan residuos tipo ".2525.00" o tokens sucios.
+        token_expr = (
+            "(regexp_match(CAST("
+            + value_expr
+            + " AS TEXT), "
+            + "'-?[0-9]{1,3}(?:,[0-9]{3})*(?:\\.[0-9]+)?|-?[0-9]+(?:\\.[0-9]+)?'))[1]"
+        )
+        safe_expr = (
+            "(CASE WHEN "
+            + token_expr
+            + " IS NOT NULL THEN REPLACE("
+            + token_expr
+            + ", ',', '')::numeric ELSE 0 END)"
+        )
+        out.append(safe_expr)
+        pos = type_cursor
+
+    return "".join(out)
+
+
 def _prepare_sql_for_backend(backend: str, sql_text: str) -> str:
     if backend == "postgres":
-        return _rewrite_postgres_year_extract(sql_text)
+        rewritten = _rewrite_postgres_year_extract(sql_text)
+        rewritten = _rewrite_postgres_numeric_nullif_cast(rewritten)
+        return rewritten
     return sql_text
 
 
