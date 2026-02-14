@@ -95,7 +95,6 @@ CHAT_FORBIDDEN_SQL_KEYWORDS = (
     "alter",
     "truncate",
     "create",
-    "replace",
     "grant",
     "revoke",
     "attach",
