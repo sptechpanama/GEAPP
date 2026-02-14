@@ -6,6 +6,7 @@ import math
 import re
 import sqlite3
 import time
+from io import BytesIO
 from pathlib import Path
 import streamlit as st
 import pandas as pd
@@ -13,9 +14,11 @@ import uuid
 from datetime import date, timedelta, datetime, timezone
 from ui.theme import apply_global_theme
 from sqlalchemy import create_engine, text
+from googleapiclient.http import MediaIoBaseDownload
 
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
+from services.auth_drive import get_drive_delegated
 
 apply_global_theme()
 
@@ -405,6 +408,116 @@ def count_postgres_filtered_rows(
     with engine.connect() as conn:
         row = conn.execute(text(query), params).first()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+@st.cache_data(ttl=600)
+def load_drive_excel(file_id: str) -> pd.DataFrame:
+    if not file_id:
+        return pd.DataFrame()
+    drive = get_drive_delegated()
+    if drive is None:
+        return pd.DataFrame()
+
+    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+    fh = BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    fh.seek(0)
+    return pd.read_excel(fh)
+
+
+def _filter_dataframe_text(df: pd.DataFrame, raw_search: str, mode: str) -> pd.DataFrame:
+    search_terms = _split_search_terms(raw_search)
+    if df.empty or not search_terms:
+        return df
+
+    normalized = df.fillna("").astype(str)
+    masks = []
+    for term in search_terms:
+        term_l = term.lower()
+        term_mask = normalized.apply(
+            lambda row: row.str.lower().str.contains(term_l, regex=False).any(),
+            axis=1,
+        )
+        masks.append(term_mask)
+
+    if not masks:
+        return df
+    if mode == "AND":
+        combined = masks[0]
+        for m in masks[1:]:
+            combined = combined & m
+    else:
+        combined = masks[0]
+        for m in masks[1:]:
+            combined = combined | m
+    return df.loc[combined].copy()
+
+
+def render_drive_reference_panel(
+    *,
+    title: str,
+    file_id: str,
+    key_prefix: str,
+) -> None:
+    st.subheader(title)
+    if not file_id:
+        st.info("No hay archivo configurado para este cuadro.")
+        return
+
+    try:
+        df = load_drive_excel(file_id)
+    except Exception as exc:
+        st.error(f"No se pudo cargar '{title}': {exc}")
+        return
+
+    if df.empty:
+        st.info("El archivo no tiene datos.")
+        return
+
+    search_text = st.text_input(
+        f"Buscar en {title}",
+        key=f"{key_prefix}_search",
+        placeholder="Palabras separadas por espacio, coma o punto y coma",
+    )
+    mode = st.radio(
+        "Modo de busqueda",
+        options=["OR", "AND"],
+        horizontal=True,
+        key=f"{key_prefix}_mode",
+    )
+
+    filtered = _filter_dataframe_text(df, search_text, mode)
+
+    page_size = st.slider(
+        "Filas por pagina",
+        min_value=50,
+        max_value=2000,
+        value=200,
+        step=50,
+        key=f"{key_prefix}_page_size",
+    )
+    total = len(filtered)
+    total_pages = max(1, math.ceil(total / max(1, page_size)))
+    page = st.number_input(
+        "Pagina",
+        min_value=1,
+        max_value=total_pages,
+        value=1,
+        step=1,
+        key=f"{key_prefix}_page",
+    )
+    start = (int(page) - 1) * int(page_size)
+    end = start + int(page_size)
+    page_df = filtered.iloc[start:end].copy()
+
+    st.dataframe(page_df, use_container_width=True, height=420)
+    st.caption(
+        f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
+        f"Mostrando hasta {page_size} filas."
+    )
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -1954,3 +2067,23 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
 render_panamacompra_db_panel()
+
+try:
+    _app_cfg = st.secrets.get("app", {})
+except Exception:
+    _app_cfg = {}
+
+fichas_file_id = _app_cfg.get("DRIVE_FICHAS_CTNI_FILE_ID") or _app_cfg.get("DRIVE_CRITERIOS_TECNICOS_FILE_ID")
+catalogos_file_id = _app_cfg.get("DRIVE_OFERENTES_CATALOGOS_FILE_ID")
+
+st.divider()
+render_drive_reference_panel(
+    title="Fichas tecnicas",
+    file_id=str(fichas_file_id or ""),
+    key_prefix="pc_fichas",
+)
+render_drive_reference_panel(
+    title="Oferentes y catalogos",
+    file_id=str(catalogos_file_id or ""),
+    key_prefix="pc_catalogos",
+)
