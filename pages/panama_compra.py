@@ -696,6 +696,30 @@ def _run_chat_sql(
         return pd.read_sql_query(sql_text, conn)
 
 
+def _build_sql_retry_feedback(backend: str, sql_text: str, error: Exception) -> str:
+    raw_error = str(error)
+    compact_error = raw_error[:1400]
+
+    cast_hint = ""
+    if backend == "postgres":
+        cast_hint = (
+            "Si usas SUM/AVG o aritmetica en columnas de precio/monto textuales, "
+            "convierte cada columna con: "
+            "COALESCE(NULLIF(regexp_replace(CAST(\"col\" AS TEXT), '[^0-9\\.-]', '', 'g'), '')::numeric, 0). "
+        )
+    else:
+        cast_hint = (
+            "Si usas SUM/AVG o aritmetica en columnas de precio/monto textuales, "
+            "convierte cada columna con CAST(REPLACE(REPLACE(CAST(\"col\" AS TEXT), ',', ''), 'B/.', '') AS REAL). "
+        )
+
+    return (
+        "El SQL anterior fallo al ejecutarse. Corrigelo y devuelve solo SQL valido. "
+        + cast_hint
+        + f"SQL previo: {sql_text}. Error BD: {compact_error}"
+    )
+
+
 def _format_fallback_answer(question: str, df: pd.DataFrame) -> str:
     if df.empty:
         return (
@@ -719,6 +743,17 @@ def _generate_sql_from_question(
     feedback: str = "",
 ) -> tuple[str, str]:
     sql_dialect = "PostgreSQL" if backend == "postgres" else "SQLite"
+    numeric_hint = ""
+    if backend == "postgres":
+        numeric_hint = (
+            "- Si haces sumas/promedios con columnas de monto/precio que puedan venir como texto, "
+            "usa COALESCE(NULLIF(regexp_replace(CAST(col AS TEXT), '[^0-9\\.-]', '', 'g'), '')::numeric, 0).\n"
+        )
+    else:
+        numeric_hint = (
+            "- Si haces sumas/promedios con columnas de monto/precio que puedan venir como texto, "
+            "usa CAST(REPLACE(REPLACE(CAST(col AS TEXT), ',', ''), 'B/.', '') AS REAL).\n"
+        )
     schema_lines = []
     for table_name, columns in schema_map.items():
         columns_list = ", ".join(columns[:80])
@@ -736,6 +771,7 @@ def _generate_sql_from_question(
         "- Si una columna tiene espacios o simbolos, encierrala en comillas dobles.\n"
         "- Si la pregunta no especifica tabla y habla de actos, usa actos_publicos.\n"
         "- Para busqueda de texto en PostgreSQL usa ILIKE.\n"
+        + numeric_hint
     )
     user_prompt = (
         f"Pregunta del usuario:\n{question}\n\n"
@@ -903,38 +939,53 @@ def render_panamacompra_ai_chat(
             try:
                 model_hint = ""
                 final_sql = ""
-                last_validation_error = ""
+                result_df = pd.DataFrame()
+                retry_feedback = ""
 
-                for _attempt in range(3):
+                for _attempt in range(4):
                     generated_sql, model_hint = _generate_sql_from_question(
                         question=prompt,
                         backend=backend,
                         schema_map=schema_map,
                         api_key=api_key,
                         model=model_name,
-                        feedback=last_validation_error,
+                        feedback=retry_feedback,
                     )
                     try:
-                        final_sql = _validate_and_prepare_sql(
+                        candidate_sql = _validate_and_prepare_sql(
                             generated_sql, list(schema_map.keys())
                         )
-                        break
                     except ValueError as validation_exc:
-                        last_validation_error = str(validation_exc)
+                        retry_feedback = (
+                            "El SQL fue invalido por validacion de seguridad/esquema. "
+                            f"Corrigelo. Detalle: {validation_exc}"
+                        )
+                        continue
+
+                    try:
+                        result_df = _run_chat_sql(
+                            backend=backend,
+                            db_url=db_url,
+                            db_path=db_path,
+                            sql_text=candidate_sql,
+                        )
+                        final_sql = candidate_sql
+                        generated_sql = candidate_sql
+                        break
+                    except Exception as exec_exc:
+                        retry_feedback = _build_sql_retry_feedback(
+                            backend=backend,
+                            sql_text=candidate_sql,
+                            error=exec_exc,
+                        )
+                        generated_sql = candidate_sql
                         continue
 
                 if not final_sql:
                     raise ValueError(
-                        last_validation_error
+                        retry_feedback
                         or "No fue posible generar una consulta SQL valida."
                     )
-
-                result_df = _run_chat_sql(
-                    backend=backend,
-                    db_url=db_url,
-                    db_path=db_path,
-                    sql_text=final_sql,
-                )
 
                 try:
                     answer_text = _summarize_results_with_openai(
