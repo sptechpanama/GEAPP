@@ -486,6 +486,12 @@ def render_pc_state_cards(
         unsafe_allow_html=True,
     )
     rows = pc_state_df.drop(columns=[col for col in pc_state_df.columns if col.startswith("__")]).copy()
+    if "job_name" in rows.columns:
+        rows["__job_key"] = rows["job_name"].astype(str).str.strip().str.lower()
+        allowed = {k.lower() for k in JOB_NAME_LABELS.keys()}
+        rows = rows[rows["__job_key"].isin(allowed)].copy()
+    if rows.empty:
+        return
 
     config_map = {}
     name_col = None
@@ -503,6 +509,64 @@ def render_pc_state_cards(
 
     buffer = st.session_state.setdefault("pc_config_buffer", {})
     missing_config_jobs: set[str] = set()
+
+    full_key = f"pc_manual_full_{suffix or 'main'}"
+    if st.button(
+        "▶ Ejecución manual completa (clrir → clv → rir1)",
+        key=full_key,
+        type="primary",
+        use_container_width=True,
+    ):
+        ok: list[str] = []
+        fail: list[str] = []
+        for job_key in JOB_NAME_ORDER:
+            label = JOB_NAME_LABELS.get(job_key, job_key)
+            if append_manual_request(job_key, label, "Ejecución manual completa"):
+                ok.append(label)
+            else:
+                fail.append(label)
+        st.session_state["pc_manual_full_feedback"] = {"ok": ok, "fail": fail}
+
+    feedback = st.session_state.pop("pc_manual_full_feedback", None)
+    if feedback:
+        if feedback.get("fail"):
+            st.error(
+                "No se pudieron encolar: "
+                + ", ".join(feedback["fail"])
+            )
+        else:
+            st.success("Ejecución manual completa encolada correctamente.")
+
+    if "__job_key" in rows.columns:
+        st.markdown("**Estado último por scraper**")
+        cols = st.columns(len(JOB_NAME_ORDER))
+        for col, job_key in zip(cols, JOB_NAME_ORDER):
+            row_match = rows[rows["__job_key"] == job_key]
+            row = row_match.iloc[0] if not row_match.empty else None
+            if row is not None:
+                status_key = str(row.get("status", "")).strip().lower()
+                icon, status_label = STATUS_BADGES.get(
+                    status_key, ("⚪", status_key.capitalize() or "Sin dato")
+                )
+                started_text = _format_pc_datetime(row.get("started_at"))
+                duration_text = _format_pc_duration(row)
+            else:
+                icon, status_label = ("⚪", "Sin dato")
+                started_text = "—"
+                duration_text = "—"
+            col.markdown(
+                f"""
+<div style="border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 12px;margin-top:6px;background-color:rgba(10,18,32,0.35);">
+  <div style="font-weight:600;font-size:0.86rem;color:#e6eaf2;">{JOB_NAME_LABELS.get(job_key, job_key)}</div>
+  <div style="font-size:0.78rem;color:#9aa0a6;margin-top:4px;">{icon} {status_label}</div>
+  <div style="font-size:0.74rem;color:#d6d8dc;margin-top:8px;line-height:1.35;">
+    <div>Hora: {started_text}</div>
+    <div>Duración: {duration_text}</div>
+  </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
     for start in range(0, len(rows), 3):
         chunk = rows.iloc[start : start + 3]
