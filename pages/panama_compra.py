@@ -885,10 +885,10 @@ def render_panamacompra_ai_chat(
 
     model_name = _openai_model_name()
     with st.chat_message("assistant"):
+        generated_sql = ""
         with st.spinner("Analizando consulta..."):
             try:
                 model_hint = ""
-                generated_sql = ""
                 final_sql = ""
                 last_validation_error = ""
 
@@ -960,7 +960,16 @@ def render_panamacompra_ai_chat(
             except Exception as exc:
                 error_msg = f"No pude procesar la consulta: {exc}"
                 st.error(error_msg)
-                history.append({"role": "assistant", "content": error_msg})
+                if generated_sql:
+                    st.caption("SQL propuesto (no ejecutado):")
+                    st.code(generated_sql, language="sql")
+                history.append(
+                    {
+                        "role": "assistant",
+                        "content": error_msg,
+                        "sql": generated_sql if generated_sql else None,
+                    }
+                )
 
     if len(history) > CHAT_HISTORY_LIMIT:
         st.session_state[chat_key] = history[-CHAT_HISTORY_LIMIT:]
