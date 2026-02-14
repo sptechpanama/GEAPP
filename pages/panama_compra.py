@@ -87,14 +87,6 @@ CHAT_MAX_DISPLAY_ROWS = 300
 CHAT_SUMMARY_SAMPLE_ROWS = 80
 CHAT_HISTORY_LIMIT = 12
 CHAT_SQL_MAX_CHARS = 12000
-CHAT_SUGGESTED_PROMPTS = [
-    "Top 10 proveedores por monto total adjudicado en 2025.",
-    "Top 10 entidades por monto total de precio_referencia en 2025.",
-    "Fichas tecnicas con mayor frecuencia de aparicion en actos_publicos.",
-    "Actos_publicos de mayor monto del ultimo mes, con entidad y fecha.",
-    "Proveedores con mas actos ganados y su monto acumulado.",
-    "Resumen mensual 2025: cantidad de actos y monto total de precio_referencia.",
-]
 CHAT_FORBIDDEN_SQL_KEYWORDS = (
     "insert",
     "update",
@@ -1179,24 +1171,13 @@ def render_panamacompra_ai_chat(
     st.caption("Tablas habilitadas: " + ", ".join([f"`{t}`" for t in schema_map.keys()]))
 
     chat_key = "pc_ai_multi_table_chat"
-    pending_key = "pc_ai_pending_prompt"
     history: list[dict] = st.session_state.setdefault(chat_key, [])
-    pending_prompt = str(st.session_state.pop(pending_key, "") or "").strip()
 
     clear_col, _ = st.columns([1, 4])
     with clear_col:
         if st.button("Limpiar chat", key="pc_ai_clear_chat"):
             st.session_state[chat_key] = []
             st.rerun()
-
-    st.caption("Preguntas sugeridas (clic para ejecutar):")
-    sug_cols = st.columns(2)
-    for idx, question in enumerate(CHAT_SUGGESTED_PROMPTS):
-        col = sug_cols[idx % 2]
-        with col:
-            if st.button(question, key=f"pc_ai_suggested_{idx}", use_container_width=True):
-                st.session_state[pending_key] = question
-                st.rerun()
 
     for item in history:
         with st.chat_message(item.get("role", "assistant")):
@@ -1217,8 +1198,6 @@ def render_panamacompra_ai_chat(
         "Ej: Cual proveedor suma mas monto adjudicado en 2025?",
         key="pc_ai_chat_prompt",
     )
-    if not prompt and pending_prompt:
-        prompt = pending_prompt
     if not prompt:
         return
 
