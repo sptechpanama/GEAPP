@@ -590,6 +590,28 @@ def _extract_sql_tables(sql_text: str) -> list[str]:
     return tables
 
 
+def _extract_cte_names(sql_text: str) -> set[str]:
+    """
+    Extrae nombres de CTEs para no confundirlos con tablas fisicas permitidas.
+    Ejemplo: WITH fecha_adjudicacion AS (...), top_proveedores AS (...)
+    """
+    lowered = sql_text.lower()
+    with_pos = lowered.find("with ")
+    if with_pos < 0:
+        return set()
+
+    # Tomamos una ventana amplia desde WITH para detectar alias CTE.
+    window = sql_text[with_pos : with_pos + 8000]
+    pattern = re.compile(
+        r"(?:^|\s|,)(\"?[a-zA-Z_][a-zA-Z0-9_]*\"?)\s+as\s*\(",
+        flags=re.IGNORECASE,
+    )
+    names: set[str] = set()
+    for match in pattern.finditer(window):
+        names.add(_normalize_sql_table_name(match.group(1)))
+    return names
+
+
 def _is_aggregate_sql(sql_text: str) -> bool:
     lowered = f" {sql_text.lower()} "
     return any(
@@ -620,7 +642,8 @@ def _validate_and_prepare_sql(sql_text: str, allowed_tables: list[str]) -> str:
         raise ValueError("La consulta no incluye tablas en FROM/JOIN.")
 
     allowed_norm = {_normalize_sql_table_name(t) for t in allowed_tables}
-    invalid = sorted({t for t in referenced_tables if t not in allowed_norm})
+    cte_names = _extract_cte_names(cleaned)
+    invalid = sorted({t for t in referenced_tables if t not in allowed_norm and t not in cte_names})
     if invalid:
         raise ValueError(
             "La consulta intenta usar tablas no permitidas: " + ", ".join(invalid)
@@ -680,6 +703,7 @@ def _generate_sql_from_question(
     schema_map: dict[str, list[str]],
     api_key: str,
     model: str,
+    feedback: str = "",
 ) -> tuple[str, str]:
     sql_dialect = "PostgreSQL" if backend == "postgres" else "SQLite"
     schema_lines = []
@@ -703,7 +727,12 @@ def _generate_sql_from_question(
     user_prompt = (
         f"Pregunta del usuario:\n{question}\n\n"
         f"Esquema disponible:\n{schema_text}\n\n"
-        "Devuelve un SQL correcto para responder la pregunta."
+        + (
+            f"Error del intento anterior (corrigelo): {feedback}\n\n"
+            if feedback
+            else ""
+        )
+        + "Devuelve un SQL correcto para responder la pregunta."
     )
 
     raw = _call_openai_chat(
@@ -858,14 +887,35 @@ def render_panamacompra_ai_chat(
     with st.chat_message("assistant"):
         with st.spinner("Analizando consulta..."):
             try:
-                generated_sql, model_hint = _generate_sql_from_question(
-                    question=prompt,
-                    backend=backend,
-                    schema_map=schema_map,
-                    api_key=api_key,
-                    model=model_name,
-                )
-                final_sql = _validate_and_prepare_sql(generated_sql, list(schema_map.keys()))
+                model_hint = ""
+                generated_sql = ""
+                final_sql = ""
+                last_validation_error = ""
+
+                for _attempt in range(3):
+                    generated_sql, model_hint = _generate_sql_from_question(
+                        question=prompt,
+                        backend=backend,
+                        schema_map=schema_map,
+                        api_key=api_key,
+                        model=model_name,
+                        feedback=last_validation_error,
+                    )
+                    try:
+                        final_sql = _validate_and_prepare_sql(
+                            generated_sql, list(schema_map.keys())
+                        )
+                        break
+                    except ValueError as validation_exc:
+                        last_validation_error = str(validation_exc)
+                        continue
+
+                if not final_sql:
+                    raise ValueError(
+                        last_validation_error
+                        or "No fue posible generar una consulta SQL valida."
+                    )
+
                 result_df = _run_chat_sql(
                     backend=backend,
                     db_url=db_url,
