@@ -537,6 +537,86 @@ def render_pc_state_cards(
         else:
             st.success("Ejecución manual completa encolada correctamente.")
 
+    if "__job_key" in rows.columns:
+        status_chunks: list[str] = []
+        latest_times: list[pd.Timestamp] = []
+        total_seconds = 0.0
+        seconds_count = 0
+        raw_statuses: list[str] = []
+
+        for job_key in JOB_NAME_ORDER:
+            row_match = rows[rows["__job_key"] == job_key]
+            row = row_match.iloc[0] if not row_match.empty else None
+            if row is not None:
+                status_key = str(row.get("status", "")).strip().lower()
+                icon, status_label = STATUS_BADGES.get(
+                    status_key, ("⚪", status_key.capitalize() or "Sin dato")
+                )
+                started_text = _format_pc_datetime(row.get("started_at"))
+                duration_text = _format_pc_duration(row)
+                raw_statuses.append(status_key)
+                try:
+                    ts = pd.to_datetime(row.get("started_at"), errors="coerce")
+                    if pd.notna(ts):
+                        latest_times.append(ts)
+                except Exception:
+                    pass
+                try:
+                    seconds = float(row.get("duration_seconds", 0) or 0)
+                    if seconds > 0:
+                        total_seconds += seconds
+                        seconds_count += 1
+                except Exception:
+                    pass
+            else:
+                icon, status_label = ("⚪", "Sin dato")
+                started_text = "—"
+                duration_text = "—"
+
+            status_chunks.append(
+                f"""
+<div style="display:inline-flex;flex-direction:column;gap:2px;padding:6px 10px;border-radius:8px;border:1px solid rgba(120,170,255,0.15);background:rgba(12,20,36,0.45);min-width:140px;">
+  <div style="font-weight:600;font-size:0.78rem;color:#dfe6f3;">{JOB_NAME_LABELS.get(job_key, job_key)}</div>
+  <div style="font-size:0.74rem;color:#9aa0a6;">{icon} {status_label}</div>
+  <div style="font-size:0.72rem;color:#c9d2e5;">Hora: {started_text}</div>
+  <div style="font-size:0.72rem;color:#c9d2e5;">Duración: {duration_text}</div>
+</div>
+"""
+            )
+
+        if any(s in ("failed", "error") for s in raw_statuses):
+            overall_icon, overall_label = ("🔴", "Error")
+        elif any(s == "running" for s in raw_statuses):
+            overall_icon, overall_label = ("🟡", "En curso")
+        elif raw_statuses and all(s == "success" for s in raw_statuses):
+            overall_icon, overall_label = ("🟢", "Éxito")
+        else:
+            overall_icon, overall_label = ("⚪", "Sin dato")
+
+        latest_text = "—"
+        if latest_times:
+            latest_text = latest_times[0].strftime("%d/%m %H:%M")
+            if len(latest_times) > 1:
+                latest_text = max(latest_times).strftime("%d/%m %H:%M")
+
+        total_text = "—"
+        if seconds_count:
+            total_text = f"{total_seconds:.0f} s"
+
+        st.markdown(
+            f"""
+<div style="margin:10px 0 12px 0;padding:10px 12px;border-radius:10px;background:rgba(16,26,44,0.5);border:1px solid rgba(120,170,255,0.15);">
+  <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;">
+    {''.join(status_chunks)}
+  </div>
+  <div style="margin-top:8px;font-size:0.78rem;color:#c9d2e5;">
+    Estado global: <strong>{overall_icon} {overall_label}</strong> · Última: {latest_text} · Duración total: {total_text}
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
     for start in range(0, len(rows), 3):
         chunk = rows.iloc[start : start + 3]
         cols = st.columns(len(chunk))
