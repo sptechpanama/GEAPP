@@ -696,6 +696,36 @@ def _run_chat_sql(
         return pd.read_sql_query(sql_text, conn)
 
 
+def _rewrite_postgres_year_extract(sql_text: str) -> str:
+    """
+    Reescribe EXTRACT(YEAR FROM <expr>) por una version robusta para columnas texto.
+    Evita errores como: extract(unknown, text) does not exist.
+    """
+    if not sql_text:
+        return sql_text
+
+    pattern = re.compile(
+        r"EXTRACT\s*\(\s*YEAR\s+FROM\s+([^)]+?)\s*\)",
+        flags=re.IGNORECASE,
+    )
+
+    def _replacement(match: re.Match) -> str:
+        expr = match.group(1).strip()
+        return (
+            "CAST(NULLIF(SUBSTRING(CAST("
+            + expr
+            + " AS TEXT) FROM '(19|20)[0-9]{2}'), '') AS INTEGER)"
+        )
+
+    return pattern.sub(_replacement, sql_text)
+
+
+def _prepare_sql_for_backend(backend: str, sql_text: str) -> str:
+    if backend == "postgres":
+        return _rewrite_postgres_year_extract(sql_text)
+    return sql_text
+
+
 def _build_sql_retry_feedback(backend: str, sql_text: str, error: Exception) -> str:
     raw_error = str(error)
     compact_error = raw_error[:1400]
@@ -771,6 +801,8 @@ def _generate_sql_from_question(
         "- Si una columna tiene espacios o simbolos, encierrala en comillas dobles.\n"
         "- Si la pregunta no especifica tabla y habla de actos, usa actos_publicos.\n"
         "- Para busqueda de texto en PostgreSQL usa ILIKE.\n"
+        "- Si filtras por anio y la fecha puede venir como texto, NO uses EXTRACT directo sobre texto. "
+        "Usa: CAST(NULLIF(SUBSTRING(CAST(col AS TEXT) FROM '(19|20)[0-9]{2}'), '') AS INTEGER).\n"
         + numeric_hint
     )
     user_prompt = (
@@ -962,23 +994,24 @@ def render_panamacompra_ai_chat(
                         )
                         continue
 
+                    candidate_sql_exec = _prepare_sql_for_backend(backend, candidate_sql)
                     try:
                         result_df = _run_chat_sql(
                             backend=backend,
                             db_url=db_url,
                             db_path=db_path,
-                            sql_text=candidate_sql,
+                            sql_text=candidate_sql_exec,
                         )
-                        final_sql = candidate_sql
-                        generated_sql = candidate_sql
+                        final_sql = candidate_sql_exec
+                        generated_sql = candidate_sql_exec
                         break
                     except Exception as exec_exc:
                         retry_feedback = _build_sql_retry_feedback(
                             backend=backend,
-                            sql_text=candidate_sql,
+                            sql_text=candidate_sql_exec,
                             error=exec_exc,
                         )
-                        generated_sql = candidate_sql
+                        generated_sql = candidate_sql_exec
                         continue
 
                 if not final_sql:
