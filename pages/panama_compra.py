@@ -788,10 +788,13 @@ def _rewrite_postgres_year_extract(sql_text: str) -> str:
         return (
             "CAST(NULLIF(SUBSTRING(CAST("
             + expr
-            + " AS TEXT) FROM '(19|20)[0-9]{2}'), '') AS INTEGER)"
+            + " AS TEXT) FROM '[12][09][0-9]{2}'), '') AS INTEGER)"
         )
 
-    return pattern.sub(_replacement, sql_text)
+    rewritten = pattern.sub(_replacement, sql_text)
+    # Evita el patron con grupo capturado que devuelve solo 19/20.
+    rewritten = rewritten.replace("(19|20)[0-9]{2}", "[12][09][0-9]{2}")
+    return rewritten
 
 
 def _prepare_sql_for_backend(backend: str, sql_text: str) -> str:
@@ -810,6 +813,7 @@ def _build_sql_retry_feedback(backend: str, sql_text: str, error: Exception) -> 
             "Si usas SUM/AVG o aritmetica en columnas de precio/monto textuales, "
             "convierte cada columna con: "
             "COALESCE(NULLIF(regexp_replace(CAST(\"col\" AS TEXT), '[^0-9\\.-]', '', 'g'), '')::numeric, 0). "
+            "Si filtras por anio en fecha textual, usa SUBSTRING con patron '[12][09][0-9]{2}' y luego CAST a INTEGER. "
         )
     else:
         cast_hint = (
@@ -876,7 +880,7 @@ def _generate_sql_from_question(
         "- Si la pregunta no especifica tabla y habla de actos, usa actos_publicos.\n"
         "- Para busqueda de texto en PostgreSQL usa ILIKE.\n"
         "- Si filtras por anio y la fecha puede venir como texto, NO uses EXTRACT directo sobre texto. "
-        "Usa: CAST(NULLIF(SUBSTRING(CAST(col AS TEXT) FROM '(19|20)[0-9]{2}'), '') AS INTEGER).\n"
+        "Usa: CAST(NULLIF(SUBSTRING(CAST(col AS TEXT) FROM '[12][09][0-9]{2}'), '') AS INTEGER).\n"
         + numeric_hint
     )
     user_prompt = (
