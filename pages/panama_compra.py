@@ -8,12 +8,14 @@ import sqlite3
 import time
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 import streamlit as st
 import pandas as pd
 import uuid
 from datetime import date, timedelta, datetime, timezone
 from ui.theme import apply_global_theme
 from sqlalchemy import create_engine, text
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 from core.config import DB_PATH
@@ -410,15 +412,56 @@ def count_postgres_filtered_rows(
     return int(row[0]) if row and row[0] is not None else 0
 
 
+def _normalize_drive_file_id(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        return value
+
+    parsed = urlparse(value)
+    qs = parse_qs(parsed.query)
+    if "id" in qs and qs["id"]:
+        return qs["id"][0]
+
+    # /file/d/<id>/view
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", parsed.path)
+    if match:
+        return match.group(1)
+    return value
+
+
 @st.cache_data(ttl=600)
 def load_drive_excel(file_id: str) -> pd.DataFrame:
-    if not file_id:
-        return pd.DataFrame()
-    drive = get_drive_delegated()
-    if drive is None:
+    fid = _normalize_drive_file_id(file_id)
+    if not fid:
         return pd.DataFrame()
 
-    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+    drive = get_drive_delegated()
+    if drive is None:
+        raise RuntimeError("No se pudo inicializar el cliente de Google Drive.")
+
+    try:
+        meta = drive.files().get(
+            fileId=fid,
+            fields="id,name,mimeType",
+            supportsAllDrives=True,
+        ).execute()
+    except HttpError as exc:
+        raise RuntimeError(
+            f"Archivo no encontrado o sin permisos en Drive. ID usado: {fid}. "
+            "Verifica el ID y comparte el archivo con la cuenta de servicio."
+        ) from exc
+
+    mime_type = str(meta.get("mimeType", ""))
+    if mime_type == "application/vnd.google-apps.spreadsheet":
+        request = drive.files().export_media(
+            fileId=fid,
+            mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        request = drive.files().get_media(fileId=fid, supportsAllDrives=True)
+
     fh = BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
@@ -433,27 +476,142 @@ def _filter_dataframe_text(df: pd.DataFrame, raw_search: str, mode: str) -> pd.D
     if df.empty or not search_terms:
         return df
 
-    normalized = df.fillna("").astype(str)
-    masks = []
+    lowered = df.fillna("").astype(str).apply(lambda s: s.str.lower())
+    masks: list[pd.Series] = []
+
     for term in search_terms:
         term_l = term.lower()
-        term_mask = normalized.apply(
-            lambda row: row.str.lower().str.contains(term_l, regex=False).any(),
-            axis=1,
-        )
+        term_mask = lowered.apply(
+            lambda col: col.str.contains(term_l, regex=False, na=False)
+        ).any(axis=1)
         masks.append(term_mask)
 
     if not masks:
         return df
-    if mode == "AND":
-        combined = masks[0]
-        for m in masks[1:]:
+
+    combined = masks[0]
+    for m in masks[1:]:
+        if mode == "AND":
             combined = combined & m
-    else:
-        combined = masks[0]
-        for m in masks[1:]:
+        else:
             combined = combined | m
     return df.loc[combined].copy()
+
+
+def _find_reference_table_name(
+    *,
+    backend: str,
+    db_url: str,
+    db_path_str: str,
+    candidates: list[str],
+) -> str:
+    if not candidates:
+        return ""
+
+    wanted = {c.strip().lower() for c in candidates if c and c.strip()}
+    if not wanted:
+        return ""
+
+    if backend == "postgres":
+        available = list_postgres_tables(db_url)
+    else:
+        available = list_sqlite_tables(db_path_str)
+    for table in available:
+        if str(table).strip().lower() in wanted:
+            return str(table)
+    return ""
+
+
+def render_db_reference_panel(
+    *,
+    title: str,
+    key_prefix: str,
+    backend: str,
+    db_url: str,
+    db_path_str: str,
+    table_name: str,
+) -> None:
+    st.subheader(title)
+    st.caption(f"Fuente: tabla `{table_name}` ({'Supabase' if backend == 'postgres' else 'SQLite'})")
+
+    try:
+        if backend == "postgres":
+            table_columns = list_postgres_columns(db_url, table_name)
+        else:
+            table_columns = list_sqlite_columns(db_path_str, table_name)
+    except Exception as exc:
+        st.error(f"No se pudieron listar columnas de {table_name}: {exc}")
+        return
+
+    search_text = st.text_input(
+        f"Buscar en {title}",
+        key=f"{key_prefix}_search",
+        placeholder="Palabras separadas por espacio, coma o punto y coma",
+    )
+    mode = st.radio(
+        "Modo de busqueda",
+        options=["OR", "AND"],
+        horizontal=True,
+        key=f"{key_prefix}_mode",
+    )
+    page_size = st.slider(
+        "Filas por pagina",
+        min_value=50,
+        max_value=5000,
+        value=300,
+        step=50,
+        key=f"{key_prefix}_page_size",
+    )
+
+    search_terms = _split_search_terms(search_text)
+    where_sql, query_params = _build_sql_conditions(
+        backend=backend,
+        columns=table_columns,
+        search_terms=search_terms,
+        search_mode=mode,
+        filters=[],
+        filters_mode="AND",
+        combine_mode="AND",
+    )
+
+    try:
+        if backend == "postgres":
+            total = count_postgres_filtered_rows(db_url, table_name, where_sql, query_params)
+        else:
+            total = count_sqlite_filtered_rows(db_path_str, table_name, where_sql, query_params)
+    except Exception as exc:
+        st.error(f"No se pudo contar registros de {table_name}: {exc}")
+        return
+
+    total_pages = max(1, math.ceil(total / max(1, page_size)))
+    page = st.number_input(
+        "Pagina",
+        min_value=1,
+        max_value=total_pages,
+        value=1,
+        step=1,
+        key=f"{key_prefix}_page",
+    )
+    offset = (int(page) - 1) * int(page_size)
+
+    try:
+        if backend == "postgres":
+            page_df = query_postgres_preview(
+                db_url, table_name, where_sql, query_params, int(page_size), int(offset)
+            )
+        else:
+            page_df = query_sqlite_preview(
+                db_path_str, table_name, where_sql, query_params, int(page_size), int(offset)
+            )
+    except Exception as exc:
+        st.error(f"No se pudo consultar {table_name}: {exc}")
+        return
+
+    st.dataframe(page_df, use_container_width=True, height=420)
+    st.caption(
+        f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
+        f"Mostrando hasta {page_size} filas."
+    )
 
 
 def render_drive_reference_panel(
@@ -476,6 +634,8 @@ def render_drive_reference_panel(
     if df.empty:
         st.info("El archivo no tiene datos.")
         return
+
+    st.caption("Fuente: archivo en Google Drive")
 
     search_text = st.text_input(
         f"Buscar en {title}",
@@ -2073,17 +2233,87 @@ try:
 except Exception:
     _app_cfg = {}
 
-fichas_file_id = _app_cfg.get("DRIVE_FICHAS_CTNI_FILE_ID") or _app_cfg.get("DRIVE_CRITERIOS_TECNICOS_FILE_ID")
-catalogos_file_id = _app_cfg.get("DRIVE_OFERENTES_CATALOGOS_FILE_ID")
+def _first_app_value(cfg: dict, keys: list[str]) -> str:
+    for k in keys:
+        value = cfg.get(k)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+fichas_file_id = _first_app_value(
+    _app_cfg,
+    [
+        "DRIVE_FICHAS_CTNI_FILE_ID",
+        "DRIVE_CRITERIOS_TECNICOS_FILE_ID",
+        "DRIVE_FICHAS_TECNICAS_FILE_ID",
+    ],
+)
+catalogos_file_id = _first_app_value(
+    _app_cfg,
+    [
+        "DRIVE_OFERENTES_CATALOGOS_FILE_ID",
+        "DRIVE_OFERENTES_CATALOGO_FILE_ID",
+        "DRIVE_OFERENTES_FILE_ID",
+    ],
+)
+
+backend_refs = _active_db_backend()
+db_url_refs = _supabase_db_url() if backend_refs == "postgres" else ""
+db_path_refs = ""
+if backend_refs != "postgres":
+    db_path_obj = _preferred_db_path()
+    if db_path_obj and db_path_obj.exists():
+        db_path_refs = str(db_path_obj)
+
+fichas_table = _first_app_value(
+    _app_cfg,
+    ["SUPABASE_FICHAS_TABLE", "FICHAS_TABLE_NAME"],
+) or _find_reference_table_name(
+    backend=backend_refs,
+    db_url=db_url_refs,
+    db_path_str=db_path_refs,
+    candidates=["fichas_tecnicas", "fichas_ctni", "criterios_tecnicos"],
+)
+catalogos_table = _first_app_value(
+    _app_cfg,
+    ["SUPABASE_CATALOGOS_TABLE", "CATALOGOS_TABLE_NAME"],
+) or _find_reference_table_name(
+    backend=backend_refs,
+    db_url=db_url_refs,
+    db_path_str=db_path_refs,
+    candidates=["oferentes_catalogos", "catalogos_oferentes", "oferentes"],
+)
 
 st.divider()
-render_drive_reference_panel(
-    title="Fichas tecnicas",
-    file_id=str(fichas_file_id or ""),
-    key_prefix="pc_fichas",
-)
-render_drive_reference_panel(
-    title="Oferentes y catalogos",
-    file_id=str(catalogos_file_id or ""),
-    key_prefix="pc_catalogos",
-)
+if fichas_table:
+    render_db_reference_panel(
+        title="Fichas tecnicas",
+        key_prefix="pc_fichas",
+        backend=backend_refs,
+        db_url=db_url_refs,
+        db_path_str=db_path_refs,
+        table_name=fichas_table,
+    )
+else:
+    render_drive_reference_panel(
+        title="Fichas tecnicas",
+        file_id=str(fichas_file_id or ""),
+        key_prefix="pc_fichas",
+    )
+
+if catalogos_table:
+    render_db_reference_panel(
+        title="Oferentes y catalogos",
+        key_prefix="pc_catalogos",
+        backend=backend_refs,
+        db_url=db_url_refs,
+        db_path_str=db_path_refs,
+        table_name=catalogos_table,
+    )
+else:
+    render_drive_reference_panel(
+        title="Oferentes y catalogos",
+        file_id=str(catalogos_file_id or ""),
+        key_prefix="pc_catalogos",
+    )
