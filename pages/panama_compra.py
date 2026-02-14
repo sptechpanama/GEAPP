@@ -621,6 +621,12 @@ def _normalize_sql_table_name(raw_table: str) -> str:
 
 
 def _extract_sql_tables(sql_text: str) -> list[str]:
+    non_table_tokens = {
+        "lateral",
+        "values",
+        "unnest",
+    }
+
     def _inside_extract_from(text: str, keyword_pos: int) -> bool:
         # Evita falso positivo en expresiones como EXTRACT(YEAR FROM "fecha_adjudicacion")
         prefix = text[:keyword_pos].lower()
@@ -641,7 +647,7 @@ def _extract_sql_tables(sql_text: str) -> list[str]:
             continue
 
         normalized = _normalize_sql_table_name(match.group(2))
-        if normalized:
+        if normalized and normalized not in non_table_tokens:
             tables.append(normalized)
     return tables
 
