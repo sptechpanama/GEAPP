@@ -447,15 +447,18 @@ def count_postgres_filtered_rows(
 
 
 def _openai_api_key() -> str:
+    candidates: list[str | None] = []
     try:
-        app_cfg = st.secrets["app"]
+        app_cfg = st.secrets.get("app", {})
+        candidates.append(app_cfg.get("OPENAI_API_KEY"))
     except Exception:
-        app_cfg = {}
+        pass
+    try:
+        candidates.append(st.secrets.get("OPENAI_API_KEY"))
+    except Exception:
+        pass
+    candidates.append(os.environ.get("OPENAI_API_KEY"))
 
-    candidates = [
-        app_cfg.get("OPENAI_API_KEY") if isinstance(app_cfg, dict) else None,
-        os.environ.get("OPENAI_API_KEY"),
-    ]
     for raw in candidates:
         if raw and str(raw).strip():
             return str(raw).strip()
@@ -463,16 +466,19 @@ def _openai_api_key() -> str:
 
 
 def _openai_model_name() -> str:
+    candidates: list[str | None] = []
     try:
-        app_cfg = st.secrets["app"]
+        app_cfg = st.secrets.get("app", {})
+        candidates.append(app_cfg.get("OPENAI_MODEL"))
+        candidates.append(app_cfg.get("OPENAI_CHAT_MODEL"))
     except Exception:
-        app_cfg = {}
+        pass
+    try:
+        candidates.append(st.secrets.get("OPENAI_MODEL"))
+    except Exception:
+        pass
+    candidates.append(os.environ.get("OPENAI_MODEL"))
 
-    candidates = [
-        app_cfg.get("OPENAI_MODEL") if isinstance(app_cfg, dict) else None,
-        app_cfg.get("OPENAI_CHAT_MODEL") if isinstance(app_cfg, dict) else None,
-        os.environ.get("OPENAI_MODEL"),
-    ]
     for raw in candidates:
         if raw and str(raw).strip():
             return str(raw).strip()
