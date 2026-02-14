@@ -578,13 +578,26 @@ def _normalize_sql_table_name(raw_table: str) -> str:
 
 
 def _extract_sql_tables(sql_text: str) -> list[str]:
+    def _inside_extract_from(text: str, keyword_pos: int) -> bool:
+        # Evita falso positivo en expresiones como EXTRACT(YEAR FROM "fecha_adjudicacion")
+        prefix = text[:keyword_pos].lower()
+        last_extract = prefix.rfind("extract(")
+        if last_extract < 0:
+            return False
+        last_close = prefix.rfind(")")
+        return last_extract > last_close
+
     pattern = re.compile(
-        r"\b(?:from|join)\s+((?:\"[^\"]+\"|[a-zA-Z0-9_]+)(?:\.(?:\"[^\"]+\"|[a-zA-Z0-9_]+))?)",
+        r"\b(from|join)\s+((?:\"[^\"]+\"|[a-zA-Z0-9_]+)(?:\.(?:\"[^\"]+\"|[a-zA-Z0-9_]+))?)",
         flags=re.IGNORECASE,
     )
     tables: list[str] = []
     for match in pattern.finditer(sql_text):
-        normalized = _normalize_sql_table_name(match.group(1))
+        keyword = str(match.group(1) or "").lower()
+        if keyword == "from" and _inside_extract_from(sql_text, match.start(1)):
+            continue
+
+        normalized = _normalize_sql_table_name(match.group(2))
         if normalized:
             tables.append(normalized)
     return tables
