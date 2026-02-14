@@ -3,6 +3,7 @@
 # pages/visualizador.py
 import os
 import math
+import json
 import re
 import sqlite3
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import streamlit as st
 import pandas as pd
+import requests
 import uuid
 from datetime import date, timedelta, datetime, timezone
 from ui.theme import apply_global_theme
@@ -80,6 +82,30 @@ HEADER_ALIASES = {
 }
 
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
+CHAT_MAX_RAW_ROWS = 2000
+CHAT_MAX_DISPLAY_ROWS = 300
+CHAT_SUMMARY_SAMPLE_ROWS = 80
+CHAT_HISTORY_LIMIT = 12
+CHAT_SQL_MAX_CHARS = 12000
+CHAT_FORBIDDEN_SQL_KEYWORDS = (
+    "insert",
+    "update",
+    "delete",
+    "drop",
+    "alter",
+    "truncate",
+    "create",
+    "replace",
+    "grant",
+    "revoke",
+    "attach",
+    "detach",
+    "vacuum",
+    "pragma",
+    "copy",
+    "execute",
+    "call",
+)
 
 
 def _candidate_db_paths() -> list[Path]:
@@ -410,6 +436,457 @@ def count_postgres_filtered_rows(
     with engine.connect() as conn:
         row = conn.execute(text(query), params).first()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+def _openai_api_key() -> str:
+    try:
+        app_cfg = st.secrets["app"]
+    except Exception:
+        app_cfg = {}
+
+    candidates = [
+        app_cfg.get("OPENAI_API_KEY") if isinstance(app_cfg, dict) else None,
+        os.environ.get("OPENAI_API_KEY"),
+    ]
+    for raw in candidates:
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return ""
+
+
+def _openai_model_name() -> str:
+    try:
+        app_cfg = st.secrets["app"]
+    except Exception:
+        app_cfg = {}
+
+    candidates = [
+        app_cfg.get("OPENAI_MODEL") if isinstance(app_cfg, dict) else None,
+        app_cfg.get("OPENAI_CHAT_MODEL") if isinstance(app_cfg, dict) else None,
+        os.environ.get("OPENAI_MODEL"),
+    ]
+    for raw in candidates:
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return "gpt-4o-mini"
+
+
+def _call_openai_chat(
+    *,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": messages,
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
+        },
+        timeout=90,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError("OpenAI no devolvio contenido.")
+    content = choices[0].get("message", {}).get("content", "")
+    if isinstance(content, list):
+        out = []
+        for item in content:
+            if isinstance(item, dict):
+                out.append(str(item.get("text", "")))
+            else:
+                out.append(str(item))
+        return "".join(out).strip()
+    return str(content).strip()
+
+
+def _strip_code_fences(value: str) -> str:
+    text_value = (value or "").strip()
+    if text_value.startswith("```"):
+        text_value = re.sub(r"^```[a-zA-Z]*\s*", "", text_value)
+        text_value = re.sub(r"\s*```$", "", text_value)
+    return text_value.strip()
+
+
+def _extract_sql_payload(raw_response: str) -> tuple[str, str]:
+    text_value = _strip_code_fences(raw_response)
+    if not text_value:
+        return "", ""
+
+    possible_json_blocks = [text_value]
+    possible_json_blocks.extend(re.findall(r"\{.*\}", text_value, flags=re.DOTALL))
+
+    for block in possible_json_blocks:
+        try:
+            parsed = json.loads(block)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            sql_value = str(parsed.get("sql") or parsed.get("query") or "").strip()
+            analysis_value = str(
+                parsed.get("analysis")
+                or parsed.get("brief")
+                or parsed.get("explanation")
+                or ""
+            ).strip()
+            if sql_value:
+                return sql_value, analysis_value
+
+    sql_match = re.search(
+        r"(WITH\s+.+?SELECT.+|SELECT.+)",
+        text_value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if sql_match:
+        return sql_match.group(1).strip(), ""
+    return "", ""
+
+
+def _normalize_sql_table_name(raw_table: str) -> str:
+    value = str(raw_table or "").strip()
+    if not value:
+        return ""
+    cleaned = value.replace('"', "")
+    parts = [p.strip() for p in cleaned.split(".") if p.strip()]
+    if not parts:
+        return ""
+    return parts[-1].lower()
+
+
+def _extract_sql_tables(sql_text: str) -> list[str]:
+    pattern = re.compile(
+        r"\b(?:from|join)\s+((?:\"[^\"]+\"|[a-zA-Z0-9_]+)(?:\.(?:\"[^\"]+\"|[a-zA-Z0-9_]+))?)",
+        flags=re.IGNORECASE,
+    )
+    tables: list[str] = []
+    for match in pattern.finditer(sql_text):
+        normalized = _normalize_sql_table_name(match.group(1))
+        if normalized:
+            tables.append(normalized)
+    return tables
+
+
+def _is_aggregate_sql(sql_text: str) -> bool:
+    lowered = f" {sql_text.lower()} "
+    return any(
+        marker in lowered
+        for marker in (" count(", " sum(", " avg(", " min(", " max(", " group by ", " having ")
+    )
+
+
+def _validate_and_prepare_sql(sql_text: str, allowed_tables: list[str]) -> str:
+    cleaned = _strip_code_fences(sql_text).strip().rstrip(";")
+    if not cleaned:
+        raise ValueError("No se genero SQL.")
+    if len(cleaned) > CHAT_SQL_MAX_CHARS:
+        raise ValueError("SQL demasiado largo.")
+    if ";" in cleaned:
+        raise ValueError("Solo se permite una consulta por mensaje.")
+
+    lowered = cleaned.lower()
+    if not (lowered.startswith("select") or lowered.startswith("with")):
+        raise ValueError("Solo se permiten consultas de lectura (SELECT).")
+
+    for keyword in CHAT_FORBIDDEN_SQL_KEYWORDS:
+        if re.search(rf"\b{re.escape(keyword)}\b", lowered):
+            raise ValueError(f"Consulta bloqueada por seguridad ({keyword}).")
+
+    referenced_tables = _extract_sql_tables(cleaned)
+    if not referenced_tables:
+        raise ValueError("La consulta no incluye tablas en FROM/JOIN.")
+
+    allowed_norm = {_normalize_sql_table_name(t) for t in allowed_tables}
+    invalid = sorted({t for t in referenced_tables if t not in allowed_norm})
+    if invalid:
+        raise ValueError(
+            "La consulta intenta usar tablas no permitidas: " + ", ".join(invalid)
+        )
+
+    if not _is_aggregate_sql(cleaned):
+        match = re.search(r"\blimit\s+(\d+)\b", cleaned, flags=re.IGNORECASE)
+        if match:
+            current = int(match.group(1))
+            if current > CHAT_MAX_RAW_ROWS:
+                cleaned = (
+                    cleaned[: match.start(1)]
+                    + str(CHAT_MAX_RAW_ROWS)
+                    + cleaned[match.end(1) :]
+                )
+        else:
+            cleaned = f"{cleaned} LIMIT {CHAT_MAX_RAW_ROWS}"
+
+    return cleaned
+
+
+def _run_chat_sql(
+    *,
+    backend: str,
+    db_url: str,
+    db_path: str,
+    sql_text: str,
+) -> pd.DataFrame:
+    if backend == "postgres":
+        engine = _pg_engine(db_url)
+        with engine.connect() as conn:
+            return pd.read_sql_query(text(sql_text), conn)
+
+    if not db_path:
+        raise RuntimeError("No hay base local disponible para ejecutar el chat.")
+    with _connect_sqlite(db_path) as conn:
+        return pd.read_sql_query(sql_text, conn)
+
+
+def _format_fallback_answer(question: str, df: pd.DataFrame) -> str:
+    if df.empty:
+        return (
+            "No se encontraron resultados para esa pregunta. "
+            "Prueba con otro rango de fechas o con terminos mas especificos."
+        )
+    cols = ", ".join([str(c) for c in df.columns[:6]])
+    return (
+        f"Se encontraron {len(df):,} filas para: '{question}'. "
+        f"Columnas principales: {cols}."
+    )
+
+
+def _generate_sql_from_question(
+    *,
+    question: str,
+    backend: str,
+    schema_map: dict[str, list[str]],
+    api_key: str,
+    model: str,
+) -> tuple[str, str]:
+    sql_dialect = "PostgreSQL" if backend == "postgres" else "SQLite"
+    schema_lines = []
+    for table_name, columns in schema_map.items():
+        columns_list = ", ".join(columns[:80])
+        schema_lines.append(f"- {table_name}: {columns_list}")
+    schema_text = "\n".join(schema_lines)
+
+    system_prompt = (
+        "Eres un asistente SQL para analisis de compras publicas. "
+        "Debes devolver SOLO JSON valido con dos llaves: "
+        '{"sql":"...","analysis":"..."}.\n'
+        "Reglas obligatorias:\n"
+        f"- Dialecto: {sql_dialect}.\n"
+        "- Solo SELECT (lectura). No uses UPDATE/DELETE/INSERT.\n"
+        "- Usa solo tablas del esquema entregado.\n"
+        "- Si una columna tiene espacios o simbolos, encierrala en comillas dobles.\n"
+        "- Si la pregunta no especifica tabla y habla de actos, usa actos_publicos.\n"
+        "- Para busqueda de texto en PostgreSQL usa ILIKE.\n"
+    )
+    user_prompt = (
+        f"Pregunta del usuario:\n{question}\n\n"
+        f"Esquema disponible:\n{schema_text}\n\n"
+        "Devuelve un SQL correcto para responder la pregunta."
+    )
+
+    raw = _call_openai_chat(
+        api_key=api_key,
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        max_tokens=700,
+    )
+    sql_text, analysis_text = _extract_sql_payload(raw)
+    if not sql_text:
+        raise ValueError("No se pudo extraer SQL de la respuesta del modelo.")
+    return sql_text, analysis_text
+
+
+def _summarize_results_with_openai(
+    *,
+    question: str,
+    sql_text: str,
+    df: pd.DataFrame,
+    api_key: str,
+    model: str,
+) -> str:
+    if df.empty:
+        return (
+            "No se encontraron filas para esa consulta. "
+            "Puedes probar ampliando rango de fecha o cambiando filtros."
+        )
+
+    sample_df = df.head(CHAT_SUMMARY_SAMPLE_ROWS).copy()
+    sample_json = sample_df.to_json(orient="records", force_ascii=False)
+    user_prompt = (
+        "Responde en espanol claro y breve.\n"
+        f"Pregunta: {question}\n"
+        f"SQL usado: {sql_text}\n"
+        f"Filas devueltas: {len(df)}\n"
+        f"Muestra JSON (hasta {CHAT_SUMMARY_SAMPLE_ROWS} filas): {sample_json}\n"
+        "Incluye hallazgo principal y, si aplica, recomendacion corta."
+    )
+
+    return _call_openai_chat(
+        api_key=api_key,
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "Eres un analista de datos de compras publicas.",
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
+        max_tokens=450,
+    )
+
+
+def render_panamacompra_ai_chat(
+    *,
+    backend: str,
+    db_url: str,
+    db_path: str,
+    allowed_tables: list[str],
+) -> None:
+    st.divider()
+    st.subheader("Asistente GPT multi-tabla")
+    st.caption(
+        "Pregunta en lenguaje natural y el asistente consultara SQL sobre las 3 tablas."
+    )
+
+    api_key = _openai_api_key()
+    if not api_key:
+        st.info("Configura OPENAI_API_KEY en secrets para habilitar este chat.")
+        return
+
+    dedup_tables: list[str] = []
+    for table in allowed_tables:
+        if table and table not in dedup_tables:
+            dedup_tables.append(table)
+    if not dedup_tables:
+        st.warning("No se detectaron tablas habilitadas para el chat.")
+        return
+
+    schema_map: dict[str, list[str]] = {}
+    for table in dedup_tables:
+        try:
+            if backend == "postgres":
+                cols = list_postgres_columns(db_url, table)
+            else:
+                cols = list_sqlite_columns(db_path, table)
+        except Exception:
+            cols = []
+        if cols:
+            schema_map[table] = cols
+
+    if not schema_map:
+        st.warning("No se pudieron leer columnas de las tablas para el chat.")
+        return
+
+    st.caption("Tablas habilitadas: " + ", ".join([f"`{t}`" for t in schema_map.keys()]))
+
+    chat_key = "pc_ai_multi_table_chat"
+    history: list[dict] = st.session_state.setdefault(chat_key, [])
+
+    clear_col, _ = st.columns([1, 4])
+    with clear_col:
+        if st.button("Limpiar chat", key="pc_ai_clear_chat"):
+            st.session_state[chat_key] = []
+            st.rerun()
+
+    for item in history:
+        with st.chat_message(item.get("role", "assistant")):
+            st.markdown(str(item.get("content", "")))
+            if item.get("sql"):
+                st.code(str(item["sql"]), language="sql")
+            if item.get("rows") is not None:
+                st.caption(f"Filas devueltas: {int(item['rows']):,}")
+            preview = item.get("preview")
+            if isinstance(preview, list) and preview:
+                st.dataframe(
+                    pd.DataFrame(preview),
+                    use_container_width=True,
+                    height=260,
+                )
+
+    prompt = st.chat_input(
+        "Ej: Cual proveedor suma mas monto adjudicado en 2025?",
+        key="pc_ai_chat_prompt",
+    )
+    if not prompt:
+        return
+
+    history.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    model_name = _openai_model_name()
+    with st.chat_message("assistant"):
+        with st.spinner("Analizando consulta..."):
+            try:
+                generated_sql, model_hint = _generate_sql_from_question(
+                    question=prompt,
+                    backend=backend,
+                    schema_map=schema_map,
+                    api_key=api_key,
+                    model=model_name,
+                )
+                final_sql = _validate_and_prepare_sql(generated_sql, list(schema_map.keys()))
+                result_df = _run_chat_sql(
+                    backend=backend,
+                    db_url=db_url,
+                    db_path=db_path,
+                    sql_text=final_sql,
+                )
+
+                try:
+                    answer_text = _summarize_results_with_openai(
+                        question=prompt,
+                        sql_text=final_sql,
+                        df=result_df,
+                        api_key=api_key,
+                        model=model_name,
+                    )
+                except Exception:
+                    answer_text = _format_fallback_answer(prompt, result_df)
+
+                if model_hint:
+                    st.caption(model_hint)
+                st.markdown(answer_text)
+                st.code(final_sql, language="sql")
+                st.caption(f"Filas devueltas: {len(result_df):,}")
+                if result_df.empty:
+                    st.info("La consulta no devolvio filas.")
+                else:
+                    st.dataframe(
+                        result_df.head(CHAT_MAX_DISPLAY_ROWS),
+                        use_container_width=True,
+                        height=320,
+                    )
+
+                history.append(
+                    {
+                        "role": "assistant",
+                        "content": answer_text,
+                        "sql": final_sql,
+                        "rows": int(len(result_df)),
+                        "preview": result_df.head(40).to_dict(orient="records"),
+                    }
+                )
+            except Exception as exc:
+                error_msg = f"No pude procesar la consulta: {exc}"
+                st.error(error_msg)
+                history.append({"role": "assistant", "content": error_msg})
+
+    if len(history) > CHAT_HISTORY_LIMIT:
+        st.session_state[chat_key] = history[-CHAT_HISTORY_LIMIT:]
 
 
 def _normalize_drive_file_id(raw: str) -> str:
@@ -2275,6 +2752,15 @@ fichas_table = _first_app_value(
     db_path_str=db_path_refs,
     candidates=["fichas_tecnicas", "fichas_ctni", "criterios_tecnicos"],
 )
+actos_table = _first_app_value(
+    _app_cfg,
+    ["SUPABASE_ACTOS_TABLE", "ACTOS_TABLE_NAME"],
+) or _find_reference_table_name(
+    backend=backend_refs,
+    db_url=db_url_refs,
+    db_path_str=db_path_refs,
+    candidates=["actos_publicos", "actos", "panamacompra_actos"],
+)
 catalogos_table = _first_app_value(
     _app_cfg,
     ["SUPABASE_CATALOGOS_TABLE", "CATALOGOS_TABLE_NAME"],
@@ -2317,3 +2803,10 @@ else:
         file_id=str(catalogos_file_id or ""),
         key_prefix="pc_catalogos",
     )
+
+render_panamacompra_ai_chat(
+    backend=backend_refs,
+    db_url=db_url_refs,
+    db_path=db_path_refs,
+    allowed_tables=[actos_table, fichas_table, catalogos_table],
+)
