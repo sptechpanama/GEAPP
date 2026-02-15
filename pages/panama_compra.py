@@ -2477,6 +2477,61 @@ def _parse_sheet_date_column(series: pd.Series) -> pd.Series:
 
     return parsed
 
+
+def _parse_money_value(value):
+    """Convierte textos de monto a float para visualización, sin tocar la data base."""
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    text = text.replace("B/.", "").replace("B/", "").replace("$", "")
+    text = re.sub(r"[^\d,.\-]", "", text)
+    if not text or text in {"-", ".", ",", "-.", "-,"}:
+        return None
+
+    comma_pos = text.rfind(",")
+    dot_pos = text.rfind(".")
+
+    # Si tiene ambos separadores, tomamos como decimal el ultimo que aparezca.
+    if comma_pos >= 0 and dot_pos >= 0:
+        if comma_pos > dot_pos:
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif comma_pos >= 0:
+        # Solo coma: decimal si termina en 1-2 digitos, si no miles.
+        if re.search(r",\d{1,2}$", text):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif dot_pos >= 0:
+        # Solo punto: si hay varios, asumimos que los anteriores son miles.
+        if text.count(".") > 1:
+            head, tail = text.rsplit(".", 1)
+            text = head.replace(".", "") + "." + tail
+        elif re.search(r"\.\d{3}$", text):
+            # Caso comun de miles: 10.000
+            text = text.replace(".", "")
+
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _coerce_money_series(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    parsed = series.map(_parse_money_value)
+    return pd.to_numeric(parsed, errors="coerce")
+
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 _require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
@@ -2931,7 +2986,9 @@ def render_df(
 
     for c in money_cols:
         if c in display_df.columns:
-            col_cfg[c] = st.column_config.NumberColumn(c, format="B/. %,.2f")
+            # Solo para visualizacion: no altera el df original ni la logica de filtros/calculos.
+            display_df[c] = _coerce_money_series(display_df[c])
+            col_cfg[c] = st.column_config.NumberColumn(c, format="$ %,.2f")
 
     link_col = next((c for c in display_df.columns if c.strip().lower() in {"enlace", "link", "url"}), None)
     if link_col:
