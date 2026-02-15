@@ -2532,6 +2532,15 @@ def _coerce_money_series(series: pd.Series) -> pd.Series:
     parsed = series.map(_parse_money_value)
     return pd.to_numeric(parsed, errors="coerce")
 
+
+def _format_money_series(series: pd.Series) -> pd.Series:
+    """
+    Formato visual fijo de moneda para tablas (sin afectar calculos/filtros).
+    Ej: $ 10,000.50
+    """
+    numeric = _coerce_money_series(series)
+    return numeric.map(lambda x: f"$ {x:,.2f}" if pd.notna(x) else "")
+
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 _require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
@@ -2987,8 +2996,8 @@ def render_df(
     for c in money_cols:
         if c in display_df.columns:
             # Solo para visualizacion: no altera el df original ni la logica de filtros/calculos.
-            display_df[c] = _coerce_money_series(display_df[c])
-            col_cfg[c] = st.column_config.NumberColumn(c, format="$ %,.2f")
+            display_df[c] = _format_money_series(display_df[c])
+            col_cfg[c] = st.column_config.TextColumn(c)
 
     link_col = next((c for c in display_df.columns if c.strip().lower() in {"enlace", "link", "url"}), None)
     if link_col:
