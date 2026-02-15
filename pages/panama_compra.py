@@ -1629,7 +1629,8 @@ def render_db_reference_panel(
         st.error(f"No se pudo consultar {table_name}: {exc}")
         return
 
-    st.dataframe(page_df, use_container_width=True, height=420)
+    page_view = _format_money_columns_for_display(page_df)
+    st.dataframe(page_view, use_container_width=True, height=420)
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
         f"Mostrando hasta {page_size} filas."
@@ -1695,7 +1696,8 @@ def render_drive_reference_panel(
     end = start + int(page_size)
     page_df = filtered.iloc[start:end].copy()
 
-    st.dataframe(page_df, use_container_width=True, height=420)
+    page_view = _format_money_columns_for_display(page_df)
+    st.dataframe(page_view, use_container_width=True, height=420)
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
         f"Mostrando hasta {page_size} filas."
@@ -2541,6 +2543,33 @@ def _format_money_series(series: pd.Series) -> pd.Series:
     numeric = _coerce_money_series(series)
     return numeric.map(lambda x: f"$ {x:,.2f}" if pd.notna(x) else "")
 
+
+def _is_money_column_name(column_name: str) -> bool:
+    name = str(column_name or "").strip().lower()
+    if not name:
+        return False
+    # Deteccion conservadora para no tocar columnas no monetarias.
+    money_tokens = (
+        "precio",
+        "monto",
+        "estimado",
+        "referencia",
+        "adjudic",
+        "importe",
+        "valor",
+    )
+    return any(token in name for token in money_tokens)
+
+
+def _format_money_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        if _is_money_column_name(col):
+            out[col] = _format_money_series(out[col])
+    return out
+
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 _require_authentication()
 st.title("📋 Visualizador de Actos Panamá Compra")
@@ -3268,7 +3297,8 @@ def render_panamacompra_db_panel() -> None:
     if preview_df.empty:
         st.info("No hay filas para los filtros actuales.")
     else:
-        st.dataframe(preview_df, use_container_width=True, height=520)
+        preview_view = _format_money_columns_for_display(preview_df)
+        st.dataframe(preview_view, use_container_width=True, height=520)
 
     st.caption(
         f"Coincidencias totales: {total_rows:,}. "
