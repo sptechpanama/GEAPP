@@ -3212,34 +3212,34 @@ if active_tab == "Historial de cotizaciones":
             desc_col = "descripcion_corta"
             missing_mask = cot_df[desc_col].fillna("").astype(str).str.strip().eq("")
             missing_count = int(missing_mask.sum())
-            col_miss_info, col_miss_btn = st.columns([2.2, 1])
-            with col_miss_info:
-                if missing_count:
-                    st.caption(f"Cotizaciones sin descripción corta: {missing_count}")
-            with col_miss_btn:
-                if missing_count and st.button("Generar descripciones faltantes (IA)"):
-                    try:
-                        if client is None:
-                            client, creds = get_client()
-                        df_write = cot_df.copy()
-                        pending_idx = df_write.index[
-                            df_write[desc_col].fillna("").astype(str).str.strip().eq("")
-                        ].tolist()
-                        total_pending = len(pending_idx)
-                        progress = st.progress(0.0, text="Generando descripciones...")
-                        for pos, idx in enumerate(pending_idx, start=1):
-                            row_data = df_write.loc[idx].to_dict()
-                            df_write.at[idx, desc_col] = _generate_description_for_row(row_data)
-                            progress.progress(
-                                pos / total_pending,
-                                text=f"Generando descripciones... {pos}/{total_pending}",
-                            )
-                        write_worksheet(client, sheet_id, SHEET_NAME_COT, _normalize_cotizaciones_df(df_write))
-                        st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
-                        st.success(f"Descripciones generadas: {total_pending}")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"No se pudieron generar descripciones: {exc}")
+            if missing_count:
+                st.caption(f"Cotizaciones sin descripción corta: {missing_count}")
+            auto_desc_key = "cot_hist_desc_autofill_once_done"
+            if missing_count and not st.session_state.get(auto_desc_key, False):
+                try:
+                    if client is None:
+                        client, creds = get_client()
+                    df_write = cot_df.copy()
+                    pending_idx = df_write.index[
+                        df_write[desc_col].fillna("").astype(str).str.strip().eq("")
+                    ].tolist()
+                    total_pending = len(pending_idx)
+                    progress = st.progress(0.0, text="Generando descripciones automáticamente...")
+                    for pos, idx in enumerate(pending_idx, start=1):
+                        row_data = df_write.loc[idx].to_dict()
+                        df_write.at[idx, desc_col] = _generate_description_for_row(row_data)
+                        progress.progress(
+                            pos / total_pending,
+                            text=f"Generando descripciones automáticamente... {pos}/{total_pending}",
+                        )
+                    write_worksheet(client, sheet_id, SHEET_NAME_COT, _normalize_cotizaciones_df(df_write))
+                    st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
+                    st.session_state[auto_desc_key] = True
+                    st.success(f"Descripciones generadas automáticamente: {total_pending}")
+                    st.rerun()
+                except Exception as exc:
+                    st.session_state[auto_desc_key] = True
+                    st.error(f"No se pudieron generar descripciones automáticamente: {exc}")
 
             search_text = st.text_input(
                 "Buscar cotizaciones",
