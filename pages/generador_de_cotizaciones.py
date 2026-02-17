@@ -11,7 +11,7 @@ import time
 from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -658,6 +658,47 @@ def _build_numero_cot(prefijo: str, secuencia: int) -> str:
     return f"COT-{prefijo}-{secuencia:04d}"
 
 
+def _company_full_from_short(short_name: str) -> str:
+    if str(short_name or "").strip().upper() == "RIR":
+        return "RIR Medical"
+    return "RS Engineering"
+
+
+def _pc_prefijo_from_short(short_name: str) -> str:
+    code = "RIR" if str(short_name or "").strip().upper() == "RIR" else "RS"
+    return f"{code}-PC"
+
+
+def _parse_manual_payload(raw_payload: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw_payload or "{}")
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {}
+
+
+def _build_standard_items_from_panama(raw_items_df: pd.DataFrame) -> pd.DataFrame:
+    src = raw_items_df.copy()
+    if "producto_servicio" not in src.columns:
+        src["producto_servicio"] = src.get("descripcion", "")
+    if "cantidad" not in src.columns:
+        src["cantidad"] = 0.0
+    if "precio_unitario" not in src.columns:
+        src["precio_unitario"] = 0.0
+    out = src[["producto_servicio", "cantidad", "precio_unitario"]].copy()
+    out["producto_servicio"] = out["producto_servicio"].fillna("").astype(str).str.strip()
+    out["cantidad"] = pd.to_numeric(out["cantidad"], errors="coerce").fillna(0.0)
+    out["precio_unitario"] = pd.to_numeric(out["precio_unitario"], errors="coerce").fillna(0.0)
+    out = out[
+        (out["producto_servicio"].str.len() > 0)
+        | (out["cantidad"] > 0)
+        | (out["precio_unitario"] > 0)
+    ].reset_index(drop=True)
+    return out
+
+
 def _create_cliente_in_sheet(
     client,
     sheet_id: str,
@@ -1081,6 +1122,253 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
     }
     wb.close()
     return out
+
+
+def _save_panama_quote_to_history(
+    *,
+    client,
+    creds,
+    sheet_id: str,
+    cot_df: pd.DataFrame,
+    manual_request_id: str,
+    empresa_short: str,
+    enlace_pc: str,
+    titulo_excel: str,
+    items_panama_df: pd.DataFrame,
+    paga_itbms: bool,
+    presupuesto_df: pd.DataFrame,
+    costo_interno: float,
+    factor_ganancia: float,
+    precio_cotizar: float,
+    ganancia: float,
+    financiamiento_tipo: str,
+    financiamiento_interes_pct: float,
+    costo_financiamiento: float,
+    ganancia_neta: float,
+    tiempo_inversion: float,
+    inversion_etapa_1: float,
+    tiempo_intermedio: float,
+    inversion_etapa_intermedia: float,
+    tiempo_cobro: float,
+    inversion_etapa_2: float,
+) -> dict[str, Any]:
+    _ensure_cotizaciones_sheet(client, sheet_id)
+    df_write = _normalize_cotizaciones_df(read_worksheet(client, sheet_id, SHEET_NAME_COT))
+    if df_write.empty and not cot_df.empty:
+        df_write = cot_df.copy()
+
+    row_id = f"pc_manual_{manual_request_id}"
+    now = datetime.now().isoformat(timespec="seconds")
+    existing_row = None
+    if not df_write.empty and row_id in df_write["id"].astype(str).values:
+        existing_row = df_write[df_write["id"].astype(str) == row_id].iloc[0].to_dict()
+
+    empresa = _company_full_from_short(empresa_short)
+    prefijo = existing_row.get("prefijo") if existing_row else ""
+    seq = 0
+    numero_cot = ""
+    if existing_row:
+        prefijo = str(existing_row.get("prefijo") or _pc_prefijo_from_short(empresa_short))
+        try:
+            seq = int(float(existing_row.get("secuencia") or 0))
+        except (TypeError, ValueError):
+            seq = 0
+        numero_cot = str(existing_row.get("numero_cotizacion") or "")
+    if not numero_cot:
+        prefijo = _pc_prefijo_from_short(empresa_short)
+        seq = _next_sequence(df_write, prefijo)
+        numero_cot = _build_numero_cot(prefijo, seq)
+
+    items_df = _build_standard_items_from_panama(items_panama_df)
+    if items_df.empty:
+        raise ValueError("La cotización de Panamá Compra no trajo ítems válidos.")
+
+    impuesto_pct = 7.0 if paga_itbms else 0.0
+    fecha_cot = date.today()
+    cliente_nombre = (str(titulo_excel or "").strip() or "Cliente Panamá Compra")[:120]
+    direccion = "Panamá"
+    cliente_ruc = ""
+    cliente_dv = ""
+
+    condiciones = {
+        "Vigencia": "15 días",
+        "Condicion de pago": "Credito",
+        "Entrega": "Según pliego",
+        "Lugar de entrega": "Según Panamá Compra",
+    }
+    detalles_extra = (
+        f"Generada desde Panamá Compra.\n"
+        f"Enlace: {enlace_pc.strip()}\n"
+        f"Resumen: {str(titulo_excel or '').strip()}"
+    ).strip()
+
+    excel_bytes = _build_standard_quote_excel(
+        empresa=empresa,
+        numero_cot=numero_cot,
+        fecha_cot=fecha_cot,
+        cliente=cliente_nombre,
+        direccion=direccion,
+        cliente_ruc=cliente_ruc,
+        cliente_dv=cliente_dv,
+        items_df=items_df,
+        impuesto_pct=impuesto_pct,
+        condiciones=condiciones,
+        detalles_extra=detalles_extra,
+    )
+
+    subtotal = float((items_df["cantidad"] * items_df["precio_unitario"]).sum())
+    impuesto_monto = subtotal * (impuesto_pct / 100.0)
+    total = subtotal + impuesto_monto
+    tiempo_recuperacion = tiempo_inversion + tiempo_intermedio + tiempo_cobro
+
+    items_json = json.dumps(
+        items_df[["producto_servicio", "cantidad", "precio_unitario"]].to_dict(orient="records"),
+        ensure_ascii=False,
+    )
+    presupuesto_items_json = json.dumps(
+        presupuesto_df[["producto_servicio", "cantidad", "precio_unitario"]].to_dict(orient="records"),
+        ensure_ascii=False,
+    )
+    condiciones_json = json.dumps(condiciones, ensure_ascii=False)
+
+    descripcion_corta = _generate_quote_short_description(
+        tipo_cotizacion="Panama Compra",
+        empresa=empresa,
+        cliente=cliente_nombre,
+        detalles=detalles_extra,
+        items=[str(x).strip() for x in items_df["producto_servicio"].tolist() if str(x).strip()][:5],
+    )
+
+    drive_file_id = existing_row.get("drive_file_id") if existing_row else ""
+    drive_file_name = existing_row.get("drive_file_name") if existing_row else ""
+    drive_file_url = existing_row.get("drive_file_url") if existing_row else ""
+    drive_folder = existing_row.get("drive_folder") if existing_row else ""
+    presupuesto_drive_file_id = existing_row.get("presupuesto_drive_file_id") if existing_row else ""
+    presupuesto_drive_file_name = existing_row.get("presupuesto_drive_file_name") if existing_row else ""
+    presupuesto_drive_file_url = existing_row.get("presupuesto_drive_file_url") if existing_row else ""
+
+    if creds is not None:
+        drive = _get_drive_client(creds)
+        _, folders = _get_drive_folders(drive)
+        folder_id = folders.get(empresa)
+        if folder_id:
+            excel_filename = f"{numero_cot}.xlsx"
+            upload = _upload_drive_binary(
+                drive,
+                folder_id,
+                excel_filename,
+                excel_bytes,
+                _guess_mime_from_filename(excel_filename),
+                existing_file_id=drive_file_id or None,
+            )
+            drive_file_id = upload.get("id", drive_file_id)
+            drive_file_name = upload.get("name", excel_filename)
+            drive_folder = folder_id
+            if drive_file_id:
+                drive_file_url = f"https://drive.google.com/file/d/{drive_file_id}/view"
+
+            presupuesto_html = _build_budget_html(
+                empresa=empresa,
+                numero=numero_cot,
+                fecha_cot=fecha_cot,
+                presupuesto_df=presupuesto_df,
+                costo_interno=costo_interno,
+                factor_ganancia=factor_ganancia,
+                precio_cotizar=precio_cotizar,
+                ganancia=ganancia,
+                financiamiento_tipo=financiamiento_tipo,
+                financiamiento_interes_pct=financiamiento_interes_pct,
+                costo_financiamiento=costo_financiamiento,
+                ganancia_neta=ganancia_neta,
+                tiempo_inversion=tiempo_inversion,
+                inversion_etapa_1=inversion_etapa_1,
+                tiempo_inicio_ejecucion_presentacion=tiempo_intermedio,
+                inversion_etapa_intermedia=inversion_etapa_intermedia,
+                tiempo_cobro=tiempo_cobro,
+                inversion_etapa_2=inversion_etapa_2,
+            )
+            presupuesto_filename = f"Presupuesto_{numero_cot}.html"
+            presupuesto_upload = _upload_quote_html(
+                drive,
+                folder_id,
+                presupuesto_filename,
+                presupuesto_html,
+                existing_file_id=presupuesto_drive_file_id or None,
+            )
+            presupuesto_drive_file_id = presupuesto_upload.get("id", presupuesto_drive_file_id)
+            presupuesto_drive_file_name = presupuesto_upload.get("name", presupuesto_filename)
+            if presupuesto_drive_file_id:
+                presupuesto_drive_file_url = f"https://drive.google.com/file/d/{presupuesto_drive_file_id}/view"
+
+    row = {
+        "id": row_id,
+        "numero_cotizacion": numero_cot,
+        "prefijo": prefijo,
+        "secuencia": seq,
+        "empresa": empresa,
+        "tipo_cotizacion": "Panama Compra",
+        "descripcion_corta": descripcion_corta,
+        "cliente_nombre": cliente_nombre,
+        "cliente_direccion": direccion,
+        "cliente_ruc": cliente_ruc,
+        "cliente_dv": cliente_dv,
+        "fecha_cotizacion": fecha_cot.isoformat(),
+        "created_at": existing_row.get("created_at") if existing_row else now,
+        "updated_at": now,
+        "moneda": "USD",
+        "subtotal": subtotal,
+        "impuesto_pct": impuesto_pct,
+        "impuesto_monto": impuesto_monto,
+        "total": total,
+        "items_json": items_json,
+        "items_resumen": _items_resumen(items_df),
+        "detalles_extra": detalles_extra,
+        "presupuesto_items_json": presupuesto_items_json,
+        "presupuesto_subtotal": costo_interno,
+        "presupuesto_factor_ganancia": factor_ganancia,
+        "presupuesto_precio_cotizar": precio_cotizar,
+        "presupuesto_ganancia": ganancia,
+        "presupuesto_financiamiento_tipo": financiamiento_tipo,
+        "presupuesto_financiamiento_interes_pct": financiamiento_interes_pct,
+        "presupuesto_costo_financiamiento": costo_financiamiento,
+        "presupuesto_ganancia_neta": ganancia_neta,
+        "presupuesto_t_inversion_presentacion": tiempo_inversion,
+        "presupuesto_inversion_etapa_1": inversion_etapa_1,
+        "presupuesto_t_inicio_ejecucion_presentacion": tiempo_intermedio,
+        "presupuesto_inversion_etapa_intermedia": inversion_etapa_intermedia,
+        "presupuesto_t_presentacion_cobro": tiempo_cobro,
+        "presupuesto_inversion_etapa_2": inversion_etapa_2,
+        "presupuesto_t_recuperacion": tiempo_recuperacion,
+        "condiciones_json": condiciones_json,
+        "vigencia": condiciones["Vigencia"],
+        "forma_pago": condiciones["Condicion de pago"],
+        "entrega": condiciones["Entrega"],
+        "lugar_entrega": condiciones["Lugar de entrega"],
+        "estado": existing_row.get("estado", "vigente") if existing_row else "vigente",
+        "notas": existing_row.get("notas", "") if existing_row else "",
+        "drive_file_id": drive_file_id,
+        "drive_file_name": drive_file_name,
+        "drive_file_url": drive_file_url,
+        "drive_folder": drive_folder,
+        "presupuesto_drive_file_id": presupuesto_drive_file_id,
+        "presupuesto_drive_file_name": presupuesto_drive_file_name,
+        "presupuesto_drive_file_url": presupuesto_drive_file_url,
+    }
+
+    if existing_row and row_id in df_write["id"].astype(str).values:
+        idx = df_write.index[df_write["id"].astype(str) == row_id][0]
+        for col in COT_COLUMNS:
+            df_write.at[idx, col] = row.get(col, "")
+    else:
+        df_write = pd.concat([df_write, pd.DataFrame([row])], ignore_index=True)
+    write_worksheet(client, sheet_id, SHEET_NAME_COT, _normalize_cotizaciones_df(df_write))
+
+    return {
+        "row": row,
+        "numero_cotizacion": numero_cot,
+        "excel_bytes": excel_bytes,
+        "excel_name": f"{numero_cot}.xlsx",
+    }
 
 
 def _build_invoice_html(
@@ -1990,25 +2278,188 @@ active_tab = st.segmented_control(
 
 if active_tab == "Cotización - Panamá Compra":
     st.subheader("Generar cotización desde Panamá Compra")
-    col_a, col_b, col_c = st.columns([2.2, 1, 1])
+    if "pc_presupuesto_items_data" not in st.session_state:
+        st.session_state["pc_presupuesto_items_data"] = [
+            {"producto_servicio": "Detalle", "cantidad": 1, "precio_unitario": 0.0},
+        ]
+    if "pc_presupuesto_factor" not in st.session_state:
+        st.session_state["pc_presupuesto_factor"] = 1.3
+    if "pc_presupuesto_t_inversion" not in st.session_state:
+        st.session_state["pc_presupuesto_t_inversion"] = 0.0
+    if "pc_presupuesto_t_intermedio" not in st.session_state:
+        st.session_state["pc_presupuesto_t_intermedio"] = 0.0
+    if "pc_presupuesto_t_cobro" not in st.session_state:
+        st.session_state["pc_presupuesto_t_cobro"] = 0.0
+    if "pc_presupuesto_inv_etapa_1" not in st.session_state:
+        st.session_state["pc_presupuesto_inv_etapa_1"] = 0.0
+    if "pc_presupuesto_inv_etapa_intermedia" not in st.session_state:
+        st.session_state["pc_presupuesto_inv_etapa_intermedia"] = 0.0
+    if "pc_presupuesto_inv_etapa_2" not in st.session_state:
+        st.session_state["pc_presupuesto_inv_etapa_2"] = 0.0
+    if "pc_presupuesto_fin_tipo" not in st.session_state:
+        st.session_state["pc_presupuesto_fin_tipo"] = "Dinero propio"
+    if "pc_presupuesto_fin_interes" not in st.session_state:
+        st.session_state["pc_presupuesto_fin_interes"] = 2.5
+    if "pc_cot_empresa" not in st.session_state:
+        st.session_state["pc_cot_empresa"] = "RS"
+    if "pc_cot_itbms" not in st.session_state:
+        st.session_state["pc_cot_itbms"] = True
+    if "pc_cot_precio_auto" not in st.session_state:
+        st.session_state["pc_cot_precio_auto"] = True
+    if "pc_cot_precio" not in st.session_state:
+        st.session_state["pc_cot_precio"] = 0.0
+
+    st.markdown("### Presupuesto interno (base de participación)")
+    presupuesto_display_df = _build_items_dataframe(
+        pd.DataFrame(st.session_state["pc_presupuesto_items_data"])
+    )
+    presupuesto_raw = st.data_editor(
+        presupuesto_display_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="pc_presupuesto_items_editor",
+        column_config={
+            "producto_servicio": st.column_config.TextColumn("Producto / Servicio", width="large", required=True),
+            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, required=True),
+            "precio_unitario": st.column_config.NumberColumn(
+                "Precio unitario", min_value=0.0, step=10.0, format="$%0.2f", required=True
+            ),
+            "importe": st.column_config.NumberColumn("Subtotal", format="$%0.2f", disabled=True),
+        },
+        disabled=["importe"],
+        hide_index=True,
+    )
+    presupuesto_df_pc = _build_items_dataframe(pd.DataFrame(presupuesto_raw))
+    st.session_state["pc_presupuesto_items_data"] = presupuesto_df_pc[
+        ["producto_servicio", "cantidad", "precio_unitario"]
+    ].to_dict(orient="records")
+    costo_interno_pc = float(presupuesto_df_pc["importe"].sum())
+
+    col_pb1, col_pb2, col_pb3, col_pb4 = st.columns([1, 1, 1, 1])
+    with col_pb1:
+        factor_ganancia_pc = st.number_input(
+            "Factor de ganancia",
+            min_value=0.0,
+            step=0.05,
+            key="pc_presupuesto_factor",
+        )
+    with col_pb2:
+        tiempo_inversion_pc = st.number_input(
+            "Tiempo inversion→inicio de ejecucion (dias)",
+            min_value=0.0,
+            step=1.0,
+            key="pc_presupuesto_t_inversion",
+        )
+        inversion_etapa_1_pc = st.number_input(
+            "Inversion requerida etapa 1",
+            min_value=0.0,
+            step=100.0,
+            key="pc_presupuesto_inv_etapa_1",
+        )
+    with col_pb3:
+        tiempo_intermedio_pc = st.number_input(
+            "Tiempo inicio de ejecucion→presentacion (dias)",
+            min_value=0.0,
+            step=1.0,
+            key="pc_presupuesto_t_intermedio",
+        )
+        inversion_etapa_intermedia_pc = st.number_input(
+            "Inversion requerida etapa 2",
+            min_value=0.0,
+            step=100.0,
+            key="pc_presupuesto_inv_etapa_intermedia",
+        )
+    with col_pb4:
+        tiempo_cobro_pc = st.number_input(
+            "Tiempo presentacion→cobro (dias)",
+            min_value=0.0,
+            step=1.0,
+            key="pc_presupuesto_t_cobro",
+        )
+        inversion_etapa_2_pc = st.number_input(
+            "Inversion requerida etapa 3",
+            min_value=0.0,
+            step=100.0,
+            key="pc_presupuesto_inv_etapa_2",
+        )
+
+    col_pf1, col_pf2 = st.columns([1, 1])
+    with col_pf1:
+        financiamiento_tipo_pc = st.selectbox(
+            "Financiamiento",
+            ["Dinero propio", "Prestamo"],
+            key="pc_presupuesto_fin_tipo",
+        )
+    with col_pf2:
+        financiamiento_interes_pct_pc = st.number_input(
+            "Interes mensual (%)",
+            min_value=0.0,
+            step=0.1,
+            key="pc_presupuesto_fin_interes",
+        )
+
+    precio_cotizar_pc = costo_interno_pc * factor_ganancia_pc
+    ganancia_pc = precio_cotizar_pc - costo_interno_pc
+    tiempo_recuperacion_pc = tiempo_inversion_pc + tiempo_intermedio_pc + tiempo_cobro_pc
+    tiempo_recuperacion_meses_pc = tiempo_recuperacion_pc / 30 if tiempo_recuperacion_pc else 0.0
+    costo_financiamiento_pc = 0.0
+    if financiamiento_tipo_pc == "Prestamo":
+        tasa_mensual_pc = financiamiento_interes_pct_pc / 100.0
+        meses_1 = tiempo_inversion_pc / 30 if tiempo_inversion_pc else 0.0
+        meses_2 = tiempo_intermedio_pc / 30 if tiempo_intermedio_pc else 0.0
+        meses_3 = tiempo_cobro_pc / 30 if tiempo_cobro_pc else 0.0
+        if (
+            inversion_etapa_1_pc <= 0
+            and inversion_etapa_intermedia_pc <= 0
+            and inversion_etapa_2_pc <= 0
+        ):
+            costo_financiamiento_pc = costo_interno_pc * tasa_mensual_pc * tiempo_recuperacion_meses_pc
+        else:
+            costo_financiamiento_pc = (
+                inversion_etapa_1_pc * tasa_mensual_pc * meses_1
+                + inversion_etapa_intermedia_pc * tasa_mensual_pc * meses_2
+                + inversion_etapa_2_pc * tasa_mensual_pc * meses_3
+            )
+    ganancia_neta_pc = ganancia_pc - costo_financiamiento_pc
+
+    st.markdown(
+        f"**Resumen presupuesto:** Costo interno {_format_money(costo_interno_pc)} | "
+        f"Precio sugerido participación {_format_money(precio_cotizar_pc)} | "
+        f"Ganancia {_format_money(ganancia_pc)} | "
+        f"Costo financiamiento {_format_money(costo_financiamiento_pc)} | "
+        f"Ganancia neta {_format_money(ganancia_neta_pc)} | "
+        f"Tiempo recuperacion {tiempo_recuperacion_pc:.0f} dias (~{tiempo_recuperacion_meses_pc:.1f} meses)"
+    )
+
+    st.markdown("### Parámetros de generación")
+    col_a, col_b, col_c = st.columns([2.1, 1, 1])
     with col_a:
         enlace_pc = st.text_input("Enlace de Panamá Compra", key="pc_cot_enlace")
     with col_b:
-        precio_part = st.number_input(
-            "Precio de participación",
-            min_value=0.0,
-            step=10.0,
-            format="%0.2f",
-            key="pc_cot_precio",
-        )
-    with col_c:
         empresa_sel = st.selectbox("Empresa", ["RS", "RIR"], key="pc_cot_empresa")
+    with col_c:
+        paga_itbms = st.checkbox("Aplica ITBMS (7%)", key="pc_cot_itbms")
 
-    paga_itbms = st.checkbox("Aplica ITBMS (7%)", value=True, key="pc_cot_itbms")
+    use_auto_price = st.checkbox(
+        "Usar precio de participación sugerido por presupuesto",
+        key="pc_cot_precio_auto",
+    )
+    if use_auto_price:
+        st.session_state["pc_cot_precio"] = round(float(precio_cotizar_pc), 2)
+    precio_part = st.number_input(
+        "Precio de participación",
+        min_value=0.0,
+        step=10.0,
+        format="%0.2f",
+        key="pc_cot_precio",
+        disabled=bool(use_auto_price),
+    )
 
     if st.button("Generar cotización (Panamá Compra)"):
         if not enlace_pc.strip():
             st.warning("Debes pegar el enlace de Panamá Compra.")
+        elif float(precio_part) <= 0:
+            st.warning("El precio de participación debe ser mayor a 0.")
         else:
             try:
                 client_manual, _ = get_client()
@@ -2021,6 +2472,11 @@ if active_tab == "Cotización - Panamá Compra":
                 }
                 request_id = _append_manual_request(client_manual, payload)
                 st.session_state["pc_cot_request_id"] = request_id
+                st.session_state["pc_cot_payload"] = payload
+                st.session_state.pop("pc_cot_processed_request_id", None)
+                st.session_state.pop("pc_cot_processed_file_id", None)
+                st.session_state.pop("pc_cot_final_excel_bytes", None)
+                st.session_state.pop("pc_cot_final_excel_name", None)
                 st.success("Solicitud enviada. El orquestador iniciará el proceso.")
             except Exception as exc:
                 st.error(f"No se pudo enviar la solicitud: {exc}")
@@ -2037,33 +2493,93 @@ if active_tab == "Cotización - Panamá Compra":
         if row:
             status = (row.get("status") or "").strip().lower()
             notes = (row.get("notes") or "").strip()
+            progress_value = {
+                "pending": 0.15,
+                "enqueued": 0.35,
+                "running": 0.75,
+                "done": 1.0,
+                "error": 1.0,
+            }.get(status, 0.1)
+            progress_text = {
+                "pending": "Generando: solicitud recibida",
+                "enqueued": "Generando: en cola de ejecución",
+                "running": "Generando: orquestador ejecutando scraper",
+                "done": "Generado: cotización lista",
+                "error": "Error en la generación",
+            }.get(status, "Generando...")
+            st.progress(progress_value, text=progress_text)
             st.info(f"Estado actual: {status or 'pendiente'}")
             if notes:
                 st.caption(notes)
             if row.get("result_error"):
                 st.error(row["result_error"])
-            elif status in {"pending", "enqueued", "running"}:
-                st.caption("La cotización se está procesando. Puedes actualizar el estado.")
 
             file_id = (row.get("result_file_id") or "").strip()
-            file_name = (row.get("result_file_name") or "cotizacion_panama.xlsx").strip()
-            if file_id:
-                if st.button("Cargar cotización generada"):
-                    try:
-                        drive = _get_drive_client(creds_manual)
-                        file_bytes = _download_drive_file(drive, file_id)
-                        items_df, titulo_excel, aplica_itbms = _extract_excel_items(file_bytes)
-                        st.session_state["pc_cot_excel_bytes"] = file_bytes
-                        st.session_state["pc_cot_items_df"] = items_df
-                        st.session_state["pc_cot_titulo"] = titulo_excel
-                        st.session_state["pc_cot_itbms"] = aplica_itbms
-                        st.session_state["pc_cot_file_id"] = file_id
-                        st.session_state["pc_cot_file_name"] = file_name
-                        st.success("Cotización cargada para edición.")
-                    except Exception as exc:
-                        st.error(f"No se pudo cargar el archivo: {exc}")
-            elif status == "done":
+            if status == "done" and not file_id:
                 st.warning("La solicitud terminó, pero aún no aparece el archivo. Actualiza el estado.")
+
+            payload_row = _parse_manual_payload(row.get("payload", ""))
+            empresa_from_payload = (
+                str(payload_row.get("empresa") or st.session_state.get("pc_cot_empresa") or "RS").upper()
+            )
+            if empresa_from_payload not in {"RS", "RIR"}:
+                empresa_from_payload = "RS"
+            enlace_from_payload = str(payload_row.get("enlace") or st.session_state.get("pc_cot_enlace") or "")
+            paga_itbms_payload = bool(payload_row.get("paga_itbms", st.session_state.get("pc_cot_itbms", True)))
+            try:
+                precio_participacion_payload = float(
+                    payload_row.get("precio_participacion", st.session_state.get("pc_cot_precio", 0.0))
+                )
+            except (TypeError, ValueError):
+                precio_participacion_payload = float(st.session_state.get("pc_cot_precio", 0.0) or 0.0)
+            ganancia_participacion = precio_participacion_payload - costo_interno_pc
+            ganancia_neta_participacion = ganancia_participacion - costo_financiamiento_pc
+
+            processed_req = st.session_state.get("pc_cot_processed_request_id")
+            processed_file = st.session_state.get("pc_cot_processed_file_id")
+            if status == "done" and file_id and (processed_req != request_id or processed_file != file_id):
+                try:
+                    drive = _get_drive_client(creds_manual)
+                    source_bytes = _download_drive_file(drive, file_id)
+                    items_panama_df, titulo_excel, _ = _extract_excel_items(source_bytes)
+                    save_result = _save_panama_quote_to_history(
+                        client=client_manual,
+                        creds=creds_manual,
+                        sheet_id=sheet_id,
+                        cot_df=cot_df,
+                        manual_request_id=request_id,
+                        empresa_short=empresa_from_payload,
+                        enlace_pc=enlace_from_payload,
+                        titulo_excel=titulo_excel,
+                        items_panama_df=items_panama_df,
+                        paga_itbms=paga_itbms_payload,
+                        presupuesto_df=presupuesto_df_pc,
+                        costo_interno=costo_interno_pc,
+                        factor_ganancia=factor_ganancia_pc,
+                        precio_cotizar=precio_participacion_payload,
+                        ganancia=ganancia_participacion,
+                        financiamiento_tipo=financiamiento_tipo_pc,
+                        financiamiento_interes_pct=financiamiento_interes_pct_pc,
+                        costo_financiamiento=costo_financiamiento_pc,
+                        ganancia_neta=ganancia_neta_participacion,
+                        tiempo_inversion=tiempo_inversion_pc,
+                        inversion_etapa_1=inversion_etapa_1_pc,
+                        tiempo_intermedio=tiempo_intermedio_pc,
+                        inversion_etapa_intermedia=inversion_etapa_intermedia_pc,
+                        tiempo_cobro=tiempo_cobro_pc,
+                        inversion_etapa_2=inversion_etapa_2_pc,
+                    )
+                    st.session_state["pc_cot_final_excel_bytes"] = save_result["excel_bytes"]
+                    st.session_state["pc_cot_final_excel_name"] = save_result["excel_name"]
+                    st.session_state["pc_cot_final_numero"] = save_result["numero_cotizacion"]
+                    st.session_state["pc_cot_processed_request_id"] = request_id
+                    st.session_state["pc_cot_processed_file_id"] = file_id
+                    st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
+                    st.success(
+                        f"Cotización convertida a formato estándar y guardada en historial: {save_result['numero_cotizacion']}"
+                    )
+                except Exception as exc:
+                    st.error(f"No se pudo procesar la cotización final: {exc}")
 
             if "pc_cot_auto_refresh" not in st.session_state:
                 st.session_state["pc_cot_auto_refresh"] = status in {"pending", "enqueued", "running"}
@@ -2077,101 +2593,48 @@ if active_tab == "Cotización - Panamá Compra":
                 time.sleep(10)
                 st.rerun()
 
-    if "pc_cot_items_df" in st.session_state:
-        st.markdown("### Edición de cotización")
-        st.caption("Puedes agregar o eliminar filas desde la tabla.")
-        titulo_edit = st.text_input(
-            "Título (resumen)",
-            value=st.session_state.get("pc_cot_titulo", ""),
-            key="pc_cot_titulo_input",
-        )
-        itbms_edit = st.checkbox(
-            "Aplicar ITBMS (7%)",
-            value=bool(st.session_state.get("pc_cot_itbms", False)),
-            key="pc_cot_itbms_edit",
-        )
-        edited_df = st.data_editor(
-            st.session_state["pc_cot_items_df"],
-            num_rows="dynamic",
-            use_container_width=True,
-            key="pc_cot_items_editor",
-            column_config={
-                "descripcion": st.column_config.TextColumn("Descripción", width="large"),
-                "unidad": st.column_config.TextColumn("Unidad", width="small"),
-                "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0),
-                "precio_unitario": st.column_config.NumberColumn(
-                    "Precio unitario", min_value=0.0, step=0.01, format="$%0.2f"
-                ),
-                "precio_total": st.column_config.NumberColumn("Total", format="$%0.2f", disabled=True),
-            },
-            disabled=["precio_total"],
-            hide_index=True,
-        )
-        edited_df["cantidad"] = pd.to_numeric(edited_df.get("cantidad"), errors="coerce").fillna(0.0)
-        edited_df["precio_unitario"] = pd.to_numeric(edited_df.get("precio_unitario"), errors="coerce").fillna(0.0)
-        edited_df["precio_total"] = edited_df["cantidad"] * edited_df["precio_unitario"]
-        st.session_state["pc_cot_items_df"] = edited_df
+    if st.session_state.get("pc_cot_final_excel_bytes"):
+        st.markdown("### Vista previa (Excel final)")
+        preview_pc = _extract_standard_excel_preview(st.session_state["pc_cot_final_excel_bytes"])
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption("NÚMERO")
+            st.write(preview_pc.get("numero") or st.session_state.get("pc_cot_final_numero") or "-")
+            st.caption("CLIENTE")
+            st.write(preview_pc.get("cliente") or "-")
+        with c2:
+            st.caption("FECHA")
+            st.write(preview_pc.get("fecha") or "-")
+            st.caption("RUC/DV")
+            st.write(preview_pc.get("ruc_dv") or "-")
+        with c3:
+            st.caption("TÍTULO")
+            st.write(preview_pc.get("titulo") or "-")
 
-        if st.button("Guardar cambios y generar Excel"):
-            try:
-                items_to_save = edited_df.copy()
-                items_to_save["descripcion"] = items_to_save.get("descripcion", "").astype(str).str.strip()
-                items_to_save["unidad"] = items_to_save.get("unidad", "").astype(str).str.strip()
-                items_to_save["cantidad"] = pd.to_numeric(
-                    items_to_save.get("cantidad"), errors="coerce"
-                ).fillna(0.0)
-                items_to_save["precio_unitario"] = pd.to_numeric(
-                    items_to_save.get("precio_unitario"), errors="coerce"
-                ).fillna(0.0)
-                items_to_save["precio_total"] = (
-                    items_to_save["cantidad"] * items_to_save["precio_unitario"]
-                )
-                keep_mask = (
-                    items_to_save["descripcion"].astype(str).str.len().gt(0)
-                    | items_to_save["unidad"].astype(str).str.len().gt(0)
-                    | (items_to_save["cantidad"] != 0)
-                    | (items_to_save["precio_unitario"] != 0)
-                )
-                items_to_save = items_to_save[keep_mask].reset_index(drop=True)
-                if items_to_save.empty:
-                    st.warning("Agrega al menos un ítem para guardar la cotización.")
-                    st.stop()
-
-                excel_bytes = _apply_excel_edits(
-                    st.session_state["pc_cot_excel_bytes"],
-                    items_to_save,
-                    titulo_edit,
-                    itbms_edit,
-                )
-                st.session_state["pc_cot_excel_updated"] = excel_bytes
-                st.session_state["pc_cot_excel_bytes"] = excel_bytes
-                st.session_state["pc_cot_items_df"] = items_to_save
-                file_id = st.session_state.get("pc_cot_file_id")
-                if file_id:
-                    _, creds_manual = get_client()
-                    drive = _get_drive_client(creds_manual)
-                    media = MediaIoBaseUpload(
-                        BytesIO(excel_bytes),
-                        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        resumable=False,
-                    )
-                    drive.files().update(
-                        fileId=file_id,
-                        media_body=media,
-                        fields="id,name",
-                        supportsAllDrives=True,
-                    ).execute()
-                st.success("Cotización actualizada.")
-            except Exception as exc:
-                st.error(f"No se pudo guardar la edición: {exc}")
-
-        if st.session_state.get("pc_cot_excel_updated"):
-            st.download_button(
-                "Descargar Excel actualizado",
-                data=st.session_state["pc_cot_excel_updated"],
-                file_name=st.session_state.get("pc_cot_file_name") or "cotizacion_panama.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        preview_items_df = pd.DataFrame(preview_pc.get("items") or [])
+        if not preview_items_df.empty:
+            st.dataframe(
+                preview_items_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Costo Unitario": st.column_config.NumberColumn("Costo Unitario", format="$%0.2f"),
+                    "Total": st.column_config.NumberColumn("Total", format="$%0.2f"),
+                },
             )
+        st.markdown(
+            f"**Totales en Excel:** Subtotal {_format_money(preview_pc.get('subtotal', 0.0))} | "
+            f"Impuesto {_format_money(preview_pc.get('impuesto', 0.0))} | "
+            f"Total {_format_money(preview_pc.get('total', 0.0))}"
+        )
+        st.download_button(
+            "Descargar Excel de cotización",
+            data=st.session_state["pc_cot_final_excel_bytes"],
+            file_name=st.session_state.get("pc_cot_final_excel_name") or "cotizacion_panama_estandar.xlsx",
+            mime=_guess_mime_from_filename(
+                st.session_state.get("pc_cot_final_excel_name") or "cotizacion_panama_estandar.xlsx"
+            ),
+        )
 
 if active_tab == "Cotizacion - Estandar":
     if sheet_error:
