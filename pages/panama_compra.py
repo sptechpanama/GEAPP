@@ -2915,7 +2915,6 @@ def render_df(
 
     metric_state_key = keyp + "metric_filter"
     active_metric = st.session_state.get(metric_state_key)
-    top_modal_key = keyp + "show_top_unidades"
 
     metrics_defs = []
     metrics_defs.append({
@@ -2961,14 +2960,6 @@ def render_df(
             "filter": "fecha_hoy",
         })
 
-    metrics_defs.append({
-        "key": "top_unidades",
-        "label": "Top unidades solicitantes (próximamente)",
-        "count": None,
-        "filter": None,
-        "placeholder": True,
-    })
-
     cols_metrics = st.columns(len(metrics_defs))
     for metric_col, metric in zip(cols_metrics, metrics_defs):
         with metric_col:
@@ -2989,8 +2980,6 @@ def render_df(
             if clicked:
                 if metric["key"] == "total":
                     st.session_state[metric_state_key] = None
-                elif metric.get("placeholder"):
-                    st.session_state[top_modal_key] = not st.session_state.get(top_modal_key, False)
                 else:
                     current = st.session_state.get(metric_state_key)
                     st.session_state[metric_state_key] = None if current == metric["filter"] else metric["filter"]
@@ -3004,9 +2993,6 @@ def render_df(
     elif active_metric == "publicados_hoy" and public_series_normalized is not None:
         mask = public_series_normalized == today_ts
         df = df_base.loc[mask.fillna(False)]
-
-    if st.session_state.get(top_modal_key):
-        st.info("Pronto mostraremos el top de unidades solicitantes con su suma de precio de referencia (últimos 7 días).")
 
     displayable_columns = [c for c in df.columns if c != ROW_ID_COL]
 
