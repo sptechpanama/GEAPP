@@ -84,7 +84,11 @@ COT_COLUMNS = [
     "presupuesto_costo_financiamiento",
     "presupuesto_ganancia_neta",
     "presupuesto_t_inversion_presentacion",
+    "presupuesto_inversion_etapa_1",
+    "presupuesto_t_inicio_ejecucion_presentacion",
+    "presupuesto_inversion_etapa_intermedia",
     "presupuesto_t_presentacion_cobro",
+    "presupuesto_inversion_etapa_2",
     "presupuesto_t_recuperacion",
     "condiciones_json",
     "vigencia",
@@ -422,7 +426,11 @@ def _normalize_cotizaciones_df(df: pd.DataFrame) -> pd.DataFrame:
         "presupuesto_costo_financiamiento",
         "presupuesto_ganancia_neta",
         "presupuesto_t_inversion_presentacion",
+        "presupuesto_inversion_etapa_1",
+        "presupuesto_t_inicio_ejecucion_presentacion",
+        "presupuesto_inversion_etapa_intermedia",
         "presupuesto_t_presentacion_cobro",
+        "presupuesto_inversion_etapa_2",
         "presupuesto_t_recuperacion",
     ):
         out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -1350,7 +1358,11 @@ def _build_budget_html(
     costo_financiamiento: float,
     ganancia_neta: float,
     tiempo_inversion: float,
+    inversion_etapa_1: float,
+    tiempo_inicio_ejecucion_presentacion: float,
+    inversion_etapa_intermedia: float,
     tiempo_cobro: float,
+    inversion_etapa_2: float,
 ) -> str:
     rows = []
     for _, row in presupuesto_df.iterrows():
@@ -1368,7 +1380,7 @@ def _build_budget_html(
         rows.append(
             "<tr><td colspan=\"4\" style=\"text-align:center;color:#64748b;\">Sin items de presupuesto.</td></tr>"
         )
-    tiempo_total = tiempo_inversion + tiempo_cobro
+    tiempo_total = tiempo_inversion + tiempo_inicio_ejecucion_presentacion + tiempo_cobro
     tiempo_meses = tiempo_total / 30 if tiempo_total else 0.0
 
     return f"""
@@ -1406,12 +1418,18 @@ def _build_budget_html(
       {''.join(rows)}
     </tbody>
   </table>
-  <div class="summary">
+    <div class="summary">
     <div><span>Costo interno</span><span>{_format_money(costo_interno)}</span></div>
     <div><span>Factor de ganancia</span><span>{factor_ganancia:.2f}</span></div>
     <div><span>Precio a cotizar</span><span>{_format_money(precio_cotizar)}</span></div>
     <div><span>Ganancia</span><span>{_format_money(ganancia)}</span></div>
     <div><span>Financiamiento</span><span>{html.escape(financiamiento_tipo)} ({financiamiento_interes_pct:.2f}% mensual)</span></div>
+    <div><span>Tiempo inversion→inicio ejecucion</span><span>{tiempo_inversion:.0f} dias</span></div>
+    <div><span>Inversion etapa inversion→inicio ejecucion</span><span>{_format_money(inversion_etapa_1)}</span></div>
+    <div><span>Tiempo inicio ejecucion→presentacion</span><span>{tiempo_inicio_ejecucion_presentacion:.0f} dias</span></div>
+    <div><span>Inversion etapa inicio ejecucion→presentacion</span><span>{_format_money(inversion_etapa_intermedia)}</span></div>
+    <div><span>Tiempo presentacion→cobro</span><span>{tiempo_cobro:.0f} dias</span></div>
+    <div><span>Inversion etapa presentacion→cobro</span><span>{_format_money(inversion_etapa_2)}</span></div>
     <div><span>Costo financiamiento</span><span>{_format_money(costo_financiamiento)}</span></div>
     <div><span>Ganancia neta</span><span>{_format_money(ganancia_neta)}</span></div>
     <div><span>Tiempo recuperacion</span><span>{tiempo_total:.0f} dias (~{tiempo_meses:.1f} meses)</span></div>
@@ -1676,12 +1694,40 @@ def _apply_edit_state(row: dict) -> None:
         t_inv = 0.0
     st.session_state["cot_presupuesto_t_inversion"] = t_inv
 
+    t_intermedio = row.get("presupuesto_t_inicio_ejecucion_presentacion")
+    try:
+        t_intermedio = float(t_intermedio)
+    except (TypeError, ValueError):
+        t_intermedio = 0.0
+    st.session_state["cot_presupuesto_t_intermedio"] = t_intermedio
+
     t_cobro = row.get("presupuesto_t_presentacion_cobro")
     try:
         t_cobro = float(t_cobro)
     except (TypeError, ValueError):
         t_cobro = 0.0
     st.session_state["cot_presupuesto_t_cobro"] = t_cobro
+
+    inv_etapa_1 = row.get("presupuesto_inversion_etapa_1")
+    try:
+        inv_etapa_1 = float(inv_etapa_1)
+    except (TypeError, ValueError):
+        inv_etapa_1 = 0.0
+    st.session_state["cot_presupuesto_inv_etapa_1"] = inv_etapa_1
+
+    inv_etapa_intermedia = row.get("presupuesto_inversion_etapa_intermedia")
+    try:
+        inv_etapa_intermedia = float(inv_etapa_intermedia)
+    except (TypeError, ValueError):
+        inv_etapa_intermedia = 0.0
+    st.session_state["cot_presupuesto_inv_etapa_intermedia"] = inv_etapa_intermedia
+
+    inv_etapa_2 = row.get("presupuesto_inversion_etapa_2")
+    try:
+        inv_etapa_2 = float(inv_etapa_2)
+    except (TypeError, ValueError):
+        inv_etapa_2 = 0.0
+    st.session_state["cot_presupuesto_inv_etapa_2"] = inv_etapa_2
 
     fin_tipo = row.get("presupuesto_financiamiento_tipo") or "Dinero propio"
     if fin_tipo not in ("Dinero propio", "Prestamo"):
@@ -1966,8 +2012,16 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_presupuesto_factor"] = 1.3
     if "cot_presupuesto_t_inversion" not in st.session_state:
         st.session_state["cot_presupuesto_t_inversion"] = 0.0
+    if "cot_presupuesto_t_intermedio" not in st.session_state:
+        st.session_state["cot_presupuesto_t_intermedio"] = 0.0
     if "cot_presupuesto_t_cobro" not in st.session_state:
         st.session_state["cot_presupuesto_t_cobro"] = 0.0
+    if "cot_presupuesto_inv_etapa_1" not in st.session_state:
+        st.session_state["cot_presupuesto_inv_etapa_1"] = 0.0
+    if "cot_presupuesto_inv_etapa_intermedia" not in st.session_state:
+        st.session_state["cot_presupuesto_inv_etapa_intermedia"] = 0.0
+    if "cot_presupuesto_inv_etapa_2" not in st.session_state:
+        st.session_state["cot_presupuesto_inv_etapa_2"] = 0.0
     if "cot_presupuesto_fin_tipo" not in st.session_state:
         st.session_state["cot_presupuesto_fin_tipo"] = "Dinero propio"
     if "cot_presupuesto_fin_interes" not in st.session_state:
@@ -2126,7 +2180,7 @@ if active_tab == "Cotizacion - Estandar":
     ].to_dict(orient="records")
 
     costo_interno = float(presupuesto_df["importe"].sum())
-    col_p1, col_p2, col_p3 = st.columns([1, 1, 1])
+    col_p1, col_p2, col_p3, col_p4 = st.columns([1, 1, 1, 1])
     with col_p1:
         factor_ganancia = st.number_input(
             "Factor de ganancia",
@@ -2136,17 +2190,42 @@ if active_tab == "Cotizacion - Estandar":
         )
     with col_p2:
         tiempo_inversion = st.number_input(
-            "Tiempo desde inversion a presentacion (dias)",
+            "Tiempo inversion→inicio de ejecucion (dias)",
             min_value=0.0,
             step=1.0,
             key="cot_presupuesto_t_inversion",
         )
+        inversion_etapa_1 = st.number_input(
+            "Inversion requerida (etapa inversion→inicio de ejecucion)",
+            min_value=0.0,
+            step=100.0,
+            key="cot_presupuesto_inv_etapa_1",
+        )
     with col_p3:
+        tiempo_intermedio = st.number_input(
+            "Tiempo inicio de ejecucion→presentacion (dias)",
+            min_value=0.0,
+            step=1.0,
+            key="cot_presupuesto_t_intermedio",
+        )
+        inversion_etapa_intermedia = st.number_input(
+            "Inversion requerida (etapa inicio de ejecucion→presentacion)",
+            min_value=0.0,
+            step=100.0,
+            key="cot_presupuesto_inv_etapa_intermedia",
+        )
+    with col_p4:
         tiempo_cobro = st.number_input(
-            "Tiempo desde presentacion a cobro (dias)",
+            "Tiempo presentacion→cobro (dias)",
             min_value=0.0,
             step=1.0,
             key="cot_presupuesto_t_cobro",
+        )
+        inversion_etapa_2 = st.number_input(
+            "Inversion requerida (etapa presentacion→cobro)",
+            min_value=0.0,
+            step=100.0,
+            key="cot_presupuesto_inv_etapa_2",
         )
 
     col_f1, col_f2 = st.columns([1, 1])
@@ -2166,17 +2245,31 @@ if active_tab == "Cotizacion - Estandar":
 
     precio_cotizar = costo_interno * factor_ganancia
     ganancia = precio_cotizar - costo_interno
-    tiempo_recuperacion = tiempo_inversion + tiempo_cobro
+    tiempo_recuperacion = tiempo_inversion + tiempo_intermedio + tiempo_cobro
     tiempo_recuperacion_meses = tiempo_recuperacion / 30 if tiempo_recuperacion else 0.0
     costo_financiamiento = 0.0
     if financiamiento_tipo == "Prestamo":
-        costo_financiamiento = costo_interno * (financiamiento_interes_pct / 100.0) * tiempo_recuperacion_meses
+        tasa_mensual = financiamiento_interes_pct / 100.0
+        meses_etapa_1 = tiempo_inversion / 30 if tiempo_inversion else 0.0
+        meses_etapa_intermedia = tiempo_intermedio / 30 if tiempo_intermedio else 0.0
+        meses_etapa_2 = tiempo_cobro / 30 if tiempo_cobro else 0.0
+        if inversion_etapa_1 <= 0 and inversion_etapa_intermedia <= 0 and inversion_etapa_2 <= 0:
+            costo_financiamiento = costo_interno * tasa_mensual * tiempo_recuperacion_meses
+        else:
+            costo_financiamiento = (
+                (inversion_etapa_1 * tasa_mensual * meses_etapa_1)
+                + (inversion_etapa_intermedia * tasa_mensual * meses_etapa_intermedia)
+                + (inversion_etapa_2 * tasa_mensual * meses_etapa_2)
+            )
     ganancia_neta = ganancia - costo_financiamiento
 
     st.markdown(
         f"**Resumen presupuesto:** Costo interno {_format_money(costo_interno)} | "
         f"Precio a cotizar {_format_money(precio_cotizar)} | "
         f"Ganancia {_format_money(ganancia)} | "
+        f"Inversion etapa 1 {_format_money(inversion_etapa_1)} | "
+        f"Inversion etapa 2 {_format_money(inversion_etapa_intermedia)} | "
+        f"Inversion etapa 3 {_format_money(inversion_etapa_2)} | "
         f"Costo financiamiento {_format_money(costo_financiamiento)} | "
         f"Ganancia neta {_format_money(ganancia_neta)} | "
         f"Tiempo recuperacion {tiempo_recuperacion:.0f} dias (~{tiempo_recuperacion_meses:.1f} meses)"
@@ -2345,7 +2438,11 @@ if active_tab == "Cotizacion - Estandar":
                             costo_financiamiento=costo_financiamiento,
                             ganancia_neta=ganancia_neta,
                             tiempo_inversion=tiempo_inversion,
+                            inversion_etapa_1=inversion_etapa_1,
+                            tiempo_inicio_ejecucion_presentacion=tiempo_intermedio,
+                            inversion_etapa_intermedia=inversion_etapa_intermedia,
                             tiempo_cobro=tiempo_cobro,
+                            inversion_etapa_2=inversion_etapa_2,
                         )
                         presupuesto_filename = f"Presupuesto_{numero_cot}.html"
                         presupuesto_upload = _upload_quote_html(
@@ -2394,7 +2491,11 @@ if active_tab == "Cotizacion - Estandar":
                     "presupuesto_costo_financiamiento": costo_financiamiento,
                     "presupuesto_ganancia_neta": ganancia_neta,
                     "presupuesto_t_inversion_presentacion": tiempo_inversion,
+                    "presupuesto_inversion_etapa_1": inversion_etapa_1,
+                    "presupuesto_t_inicio_ejecucion_presentacion": tiempo_intermedio,
+                    "presupuesto_inversion_etapa_intermedia": inversion_etapa_intermedia,
                     "presupuesto_t_presentacion_cobro": tiempo_cobro,
+                    "presupuesto_inversion_etapa_2": inversion_etapa_2,
                     "presupuesto_t_recuperacion": tiempo_recuperacion,
                     "condiciones_json": condiciones_json,
                     "vigencia": vigencia,
@@ -2517,6 +2618,18 @@ if active_tab == "Historial de cotizaciones":
                 except (TypeError, ValueError):
                     pres_ganancia_neta = 0.0
                 try:
+                    pres_inv_etapa_1 = float(sel_row.get("presupuesto_inversion_etapa_1") or 0)
+                except (TypeError, ValueError):
+                    pres_inv_etapa_1 = 0.0
+                try:
+                    pres_inv_etapa_intermedia = float(sel_row.get("presupuesto_inversion_etapa_intermedia") or 0)
+                except (TypeError, ValueError):
+                    pres_inv_etapa_intermedia = 0.0
+                try:
+                    pres_inv_etapa_2 = float(sel_row.get("presupuesto_inversion_etapa_2") or 0)
+                except (TypeError, ValueError):
+                    pres_inv_etapa_2 = 0.0
+                try:
                     pres_t_rec = float(sel_row.get("presupuesto_t_recuperacion") or 0)
                 except (TypeError, ValueError):
                     pres_t_rec = 0.0
@@ -2526,6 +2639,9 @@ if active_tab == "Historial de cotizaciones":
                     f"Factor {pres_factor:.2f} | Precio a cotizar {_format_money(pres_precio)} | "
                     f"Ganancia {_format_money(pres_ganancia)} | "
                     f"Financiamiento {pres_fin_tipo} ({pres_fin_interes:.2f}% mensual) | "
+                    f"Inversion etapa 1 {_format_money(pres_inv_etapa_1)} | "
+                    f"Inversion etapa 2 {_format_money(pres_inv_etapa_intermedia)} | "
+                    f"Inversion etapa 3 {_format_money(pres_inv_etapa_2)} | "
                     f"Costo financiamiento {_format_money(pres_costo_fin)} | "
                     f"Ganancia neta {_format_money(pres_ganancia_neta)} | "
                     f"Tiempo recuperacion {pres_t_rec:.0f} dias (~{pres_t_rec_meses:.1f} meses)"
