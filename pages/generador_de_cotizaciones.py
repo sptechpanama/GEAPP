@@ -795,6 +795,33 @@ def _build_standard_quote_excel(
 
 
 def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
+    def _to_float(value) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return 0.0
+        text = (
+            text.replace("B/.", "")
+            .replace("B/", "")
+            .replace("$", "")
+            .replace("USD", "")
+            .strip()
+        )
+        if "," in text and "." in text:
+            text = text.replace(",", "")
+        elif "," in text and "." not in text:
+            text = text.replace(",", ".")
+        text = re.sub(r"[^0-9.\-]", "", text)
+        if text in {"", "-", ".", "-."}:
+            return 0.0
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return 0.0
+
     wb = load_workbook(BytesIO(excel_bytes), data_only=True)
     ws = wb["cotizacion"] if "cotizacion" in wb.sheetnames else wb[wb.sheetnames[0]]
 
@@ -815,16 +842,16 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
                 "Item": item,
                 "Descripción": desc or "",
                 "Unidad": unidad or "",
-                "Cantidad": cantidad or 0,
-                "Costo Unitario": float(precio_unitario or 0),
-                "Total": float(total or 0),
+                "Cantidad": _to_float(cantidad),
+                "Costo Unitario": _to_float(precio_unitario),
+                "Total": _to_float(total),
             }
         )
         row += 1
 
-    subtotal = float(ws[f"G{row}"].value or 0)
-    impuesto = float(ws[f"G{row + 1}"].value or 0)
-    total_doc = float(ws[f"G{row + 2}"].value or 0)
+    subtotal = _to_float(ws[f"G{row}"].value)
+    impuesto = _to_float(ws[f"G{row + 1}"].value)
+    total_doc = _to_float(ws[f"G{row + 2}"].value)
 
     conditions = []
     for r in range(28, 90):
