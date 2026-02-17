@@ -794,6 +794,60 @@ def _build_standard_quote_excel(
     return output.getvalue()
 
 
+def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
+    wb = load_workbook(BytesIO(excel_bytes), data_only=True)
+    ws = wb["cotizacion"] if "cotizacion" in wb.sheetnames else wb[wb.sheetnames[0]]
+
+    items = []
+    row = 23
+    max_rows = 800
+    while row < max_rows:
+        item = ws[f"B{row}"].value
+        desc = ws[f"C{row}"].value
+        unidad = ws[f"D{row}"].value
+        cantidad = ws[f"E{row}"].value
+        precio_unitario = ws[f"F{row}"].value
+        total = ws[f"G{row}"].value
+        if not any([item, desc, unidad, cantidad, precio_unitario, total]):
+            break
+        items.append(
+            {
+                "Item": item,
+                "Descripción": desc or "",
+                "Unidad": unidad or "",
+                "Cantidad": cantidad or 0,
+                "Costo Unitario": float(precio_unitario or 0),
+                "Total": float(total or 0),
+            }
+        )
+        row += 1
+
+    subtotal = float(ws[f"G{row}"].value or 0)
+    impuesto = float(ws[f"G{row + 1}"].value or 0)
+    total_doc = float(ws[f"G{row + 2}"].value or 0)
+
+    conditions = []
+    for r in range(28, 90):
+        text = str(ws[f"B{r}"].value or "").strip()
+        if text and ":" in text:
+            conditions.append(text)
+
+    out = {
+        "numero": str(ws["E18"].value or ""),
+        "titulo": str(ws["C19"].value or ""),
+        "cliente": str(ws["B13"].value or ""),
+        "fecha": str(ws["G13"].value or ""),
+        "ruc_dv": str(ws["B14"].value or ""),
+        "items": items,
+        "subtotal": subtotal,
+        "impuesto": impuesto,
+        "total": total_doc,
+        "condiciones": conditions,
+    }
+    wb.close()
+    return out
+
+
 def _build_invoice_html(
     empresa: str,
     branding: Dict[str, str],
@@ -1890,23 +1944,6 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_presupuesto_fin_tipo"] = "Dinero propio"
     if "cot_presupuesto_fin_interes" not in st.session_state:
         st.session_state["cot_presupuesto_fin_interes"] = 2.5
-    if "cot_layout_extra_space" not in st.session_state:
-        st.session_state["cot_layout_extra_space"] = 0
-    for key, default in {
-        "cot_layout_global_offset": 0,
-        "cot_layout_title_offset": 0,
-        "cot_layout_after_title": 0,
-        "cot_layout_after_columns": 0,
-        "cot_layout_after_table": 0,
-        "cot_layout_after_totals": 0,
-        "cot_layout_after_extra": 0,
-        "cot_layout_after_conditions": 0,
-        "cot_pdf_max_pages": 2,
-        "cot_pdf_quality": 0.85,
-        "cot_pdf_render_scale": 1.5,
-    }.items():
-        if key not in st.session_state:
-            st.session_state[key] = default
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
@@ -2117,115 +2154,78 @@ if active_tab == "Cotizacion - Estandar":
         f"Tiempo recuperacion {tiempo_recuperacion:.0f} dias (~{tiempo_recuperacion_meses:.1f} meses)"
     )
 
-    st.markdown("### Vista previa")
-    with st.expander("Ajustes de diseno", expanded=False):
-        col_a, col_b = st.columns([1, 1])
-        with col_a:
-            layout_global_offset = st.slider("Mover todo (px)", -200, 400, value=st.session_state.get("cot_layout_global_offset", 0), step=10, key="cot_layout_global_offset")
-            title_offset = st.slider("Ajuste titulo (px)", -120, 200, value=st.session_state.get("cot_layout_title_offset", 0), step=10, key="cot_layout_title_offset")
-            space_after_title = st.slider("Espacio despues del titulo (px)", -80, 240, value=st.session_state.get("cot_layout_after_title", 0), step=10, key="cot_layout_after_title")
-            space_after_columns = st.slider("Espacio despues de datos (px)", -80, 240, value=st.session_state.get("cot_layout_after_columns", 0), step=10, key="cot_layout_after_columns")
-        with col_b:
-            space_after_table = st.slider("Espacio despues de tabla (px)", -80, 240, value=st.session_state.get("cot_layout_after_table", 0), step=10, key="cot_layout_after_table")
-            space_after_totals = st.slider("Espacio despues de totales (px)", -80, 240, value=st.session_state.get("cot_layout_after_totals", 0), step=10, key="cot_layout_after_totals")
-            space_after_extra = st.slider("Espacio despues de detalles (px)", -80, 240, value=st.session_state.get("cot_layout_after_extra", 0), step=10, key="cot_layout_after_extra")
-            space_after_conditions = st.slider("Espacio despues de condiciones (px)", -80, 240, value=st.session_state.get("cot_layout_after_conditions", 0), step=10, key="cot_layout_after_conditions")
-        extra_space = st.slider("Empuje extra antes de condiciones (px)", min_value=-80, max_value=600, value=st.session_state.get("cot_layout_extra_space", 0), step=10, key="cot_layout_extra_space")
-        if st.button("Restablecer ajustes de diseno"):
-            for key in [
-                "cot_layout_global_offset",
-                "cot_layout_title_offset",
-                "cot_layout_after_title",
-                "cot_layout_after_columns",
-                "cot_layout_after_table",
-                "cot_layout_after_totals",
-                "cot_layout_after_extra",
-                "cot_layout_after_conditions",
-                "cot_layout_extra_space",
-            ]:
-                st.session_state[key] = 0
-            st.rerun()
-    with st.expander("Opciones PDF", expanded=False):
-        pdf_max_pages = st.slider("Max paginas PDF", 1, 2, value=st.session_state.get("cot_pdf_max_pages", 2), step=1, key="cot_pdf_max_pages")
-        pdf_quality = st.slider("Calidad PDF (liviano/alto)", 0.6, 0.95, value=st.session_state.get("cot_pdf_quality", 0.85), step=0.05, key="cot_pdf_quality")
-        render_scale = st.slider("Resolucion PDF", 1.0, 2.0, value=st.session_state.get("cot_pdf_render_scale", 1.5), step=0.1, key="cot_pdf_render_scale")
-    preview_scale = st.slider("Zoom de vista previa",
-        min_value=0.5,
-        max_value=1.1,
-        value=0.7,
-        step=0.05,
-    )
-    layout_spacers = {
-        "global_offset": layout_global_offset,
-        "title_offset": title_offset,
-        "space_after_title": space_after_title,
-        "space_after_columns": space_after_columns,
-        "space_after_table": space_after_table,
-        "space_after_totals": space_after_totals,
-        "space_after_extra": space_after_extra,
-        "space_after_conditions": space_after_conditions,
-    }
     condiciones = {
         "Vigencia": vigencia or "-",
         "Condicion de pago": forma_pago or "-",
         "Entrega": entrega or "-",
         "Lugar de entrega": lugar_entrega or "-",
     }
-
-    html_body = _build_invoice_html(
-        empresa=empresa,
-        branding=COMPANIES[empresa],
-        numero=numero_cot,
-        fecha_cot=fecha_cot,
-        cliente=cliente,
-        direccion=direccion,
-        cliente_ruc=cliente_ruc,
-        cliente_dv=cliente_dv,
-        firma_b64=FIRMA_B64,
-        detalles_extra=detalles_extra,
-        layout_extra_space=extra_space,
-        layout_spacers=layout_spacers,
-        items=items_df,
-        impuesto_pct=impuesto_pct,
-        condiciones=condiciones,
-    )
-
-    _render_pdf_component(
-        html_body,
-        filename=f"{empresa.replace(' ', '_')}_{numero_cot}.pdf",
-        preview_scale=preview_scale,
-        pdf_max_pages=pdf_max_pages,
-        render_scale=render_scale,
-        jpeg_quality=pdf_quality,
-    )
-
+    st.markdown("### Vista previa (Excel final)")
     excel_preview_name = f"{numero_cot}.xlsx"
-    if st.button("Generar Excel (plantilla editable)"):
-        try:
-            excel_preview = _build_standard_quote_excel(
-                empresa=empresa,
-                numero_cot=numero_cot,
-                fecha_cot=fecha_cot,
-                cliente=cliente,
-                direccion=direccion,
-                cliente_ruc=cliente_ruc,
-                cliente_dv=cliente_dv,
-                items_df=items_df,
-                impuesto_pct=impuesto_pct,
-                condiciones=condiciones,
-                detalles_extra=detalles_extra,
-            )
-            st.session_state["cot_std_excel_preview_bytes"] = excel_preview
-            st.session_state["cot_std_excel_preview_name"] = excel_preview_name
-            st.success("Excel generado. Puedes descargarlo.")
-        except Exception as exc:
-            st.error(f"No se pudo generar el Excel: {exc}")
+    excel_preview_bytes = None
+    excel_preview_error = None
+    try:
+        excel_preview_bytes = _build_standard_quote_excel(
+            empresa=empresa,
+            numero_cot=numero_cot,
+            fecha_cot=fecha_cot,
+            cliente=cliente,
+            direccion=direccion,
+            cliente_ruc=cliente_ruc,
+            cliente_dv=cliente_dv,
+            items_df=items_df,
+            impuesto_pct=impuesto_pct,
+            condiciones=condiciones,
+            detalles_extra=detalles_extra,
+        )
+        st.session_state["cot_std_excel_preview_bytes"] = excel_preview_bytes
+        st.session_state["cot_std_excel_preview_name"] = excel_preview_name
+    except Exception as exc:
+        excel_preview_error = str(exc)
+        st.warning(f"No se pudo construir la vista previa Excel: {exc}")
 
-    if st.session_state.get("cot_std_excel_preview_bytes"):
+    if excel_preview_bytes:
+        preview = _extract_standard_excel_preview(excel_preview_bytes)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption("NÚMERO")
+            st.write(preview.get("numero") or numero_cot)
+            st.caption("CLIENTE")
+            st.write(preview.get("cliente") or "-")
+        with c2:
+            st.caption("FECHA")
+            st.write(preview.get("fecha") or "-")
+            st.caption("RUC/DV")
+            st.write(preview.get("ruc_dv") or "-")
+        with c3:
+            st.caption("TÍTULO")
+            st.write(preview.get("titulo") or "-")
+
+        preview_items_df = pd.DataFrame(preview.get("items") or [])
+        if not preview_items_df.empty:
+            st.dataframe(
+                preview_items_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Costo Unitario": st.column_config.NumberColumn("Costo Unitario", format="$%0.2f"),
+                    "Total": st.column_config.NumberColumn("Total", format="$%0.2f"),
+                },
+            )
+        st.markdown(
+            f"**Totales en Excel:** Subtotal {_format_money(preview.get('subtotal', 0.0))} | "
+            f"Impuesto {_format_money(preview.get('impuesto', 0.0))} | "
+            f"Total {_format_money(preview.get('total', 0.0))}"
+        )
+        if preview.get("condiciones"):
+            st.caption("Condiciones colocadas en plantilla:")
+            for line in preview["condiciones"][:8]:
+                st.write(f"- {line}")
+
         st.download_button(
             "Descargar Excel de cotización",
-            data=st.session_state["cot_std_excel_preview_bytes"],
-            file_name=st.session_state.get("cot_std_excel_preview_name") or excel_preview_name,
+            data=excel_preview_bytes,
+            file_name=excel_preview_name,
             mime=_guess_mime_from_filename(excel_preview_name),
         )
 
@@ -2266,19 +2266,22 @@ if active_tab == "Cotizacion - Estandar":
                     else ("Estandar" if active_tab == "Cotizacion - Estandar" else "Panama Compra")
                 )
                 excel_filename = f"{numero_cot}.xlsx"
-                excel_bytes = _build_standard_quote_excel(
-                    empresa=empresa,
-                    numero_cot=numero_cot,
-                    fecha_cot=fecha_cot,
-                    cliente=cliente,
-                    direccion=direccion,
-                    cliente_ruc=cliente_ruc,
-                    cliente_dv=cliente_dv,
-                    items_df=items_df,
-                    impuesto_pct=impuesto_pct,
-                    condiciones=condiciones,
-                    detalles_extra=detalles_extra,
-                )
+                if excel_preview_bytes:
+                    excel_bytes = excel_preview_bytes
+                else:
+                    excel_bytes = _build_standard_quote_excel(
+                        empresa=empresa,
+                        numero_cot=numero_cot,
+                        fecha_cot=fecha_cot,
+                        cliente=cliente,
+                        direccion=direccion,
+                        cliente_ruc=cliente_ruc,
+                        cliente_dv=cliente_dv,
+                        items_df=items_df,
+                        impuesto_pct=impuesto_pct,
+                        condiciones=condiciones,
+                        detalles_extra=detalles_extra,
+                    )
                 st.session_state["cot_std_excel_preview_bytes"] = excel_bytes
                 st.session_state["cot_std_excel_preview_name"] = excel_filename
 
