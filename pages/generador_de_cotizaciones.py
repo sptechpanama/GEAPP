@@ -9,12 +9,15 @@ import math
 import time
 from datetime import date, datetime, timezone
 from io import BytesIO
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from openpyxl import load_workbook
+from openpyxl.drawing.image import Image
+from openpyxl.styles import Alignment, Border, Side
 from gspread.exceptions import WorksheetNotFound
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -131,6 +134,24 @@ ORQUESTADOR_JOB_NAME = "cotizacion_panama"
 ORQUESTADOR_JOB_LABEL = "Cotizacion Panama Compra"
 ORQUESTADOR_JOB_PY = r"C:\Users\rodri\scrapers_repo\.venv\Scripts\python.exe"
 ORQUESTADOR_JOB_SCRIPT = r"C:\Users\rodri\selenium_cotizacion\cotizacion_worker.py"
+
+GEAPP_ROOT = Path(__file__).resolve().parents[1]
+SELENIUM_COTIZACION_DIR = Path(r"C:\Users\rodri\selenium_cotizacion")
+REPO_COTIZACION_BASE_DIR = GEAPP_ROOT / "assets" / "cotizacion_base"
+
+
+def _resolve_base_asset(file_name: str) -> Path:
+    repo_candidate = REPO_COTIZACION_BASE_DIR / file_name
+    if repo_candidate.exists():
+        return repo_candidate
+    return SELENIUM_COTIZACION_DIR / file_name
+
+
+TEMPLATE_RS_STANDARD = _resolve_base_asset("plantilla_cotizacion.xlsx")
+TEMPLATE_RIR_STANDARD = _resolve_base_asset("plantilla_cotizacion_rir.xlsx")
+HEADER_RS_STANDARD = _resolve_base_asset("encabezado.png")
+HEADER_RIR_STANDARD = _resolve_base_asset("encabezado_rir.png")
+SIGNATURE_STANDARD = _resolve_base_asset("firma.png")
 
 
 def _ensure_cotizaciones_sheet(client, sheet_id: str) -> None:
@@ -553,6 +574,224 @@ def _build_items_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
         df["precio_unitario"] = pd.to_numeric(df["precio_unitario"], errors="coerce").fillna(0.0)
     df["importe"] = df["cantidad"] * df["precio_unitario"]
     return df
+
+
+def _guess_mime_from_filename(filename: str) -> str:
+    ext = Path(filename or "").suffix.lower()
+    if ext == ".xlsx":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == ".html":
+        return "text/html"
+    if ext == ".pdf":
+        return "application/pdf"
+    return "application/octet-stream"
+
+
+def _upload_drive_binary(
+    drive,
+    folder_id: str,
+    filename: str,
+    data: bytes,
+    mime_type: str,
+    existing_file_id: str | None = None,
+) -> dict:
+    media = MediaIoBaseUpload(BytesIO(data), mimetype=mime_type, resumable=False)
+    if existing_file_id:
+        return drive.files().update(
+            fileId=existing_file_id,
+            media_body=media,
+            fields="id,name",
+            supportsAllDrives=True,
+        ).execute()
+    metadata = {"name": filename, "parents": [folder_id]}
+    return drive.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id,name",
+        supportsAllDrives=True,
+    ).execute()
+
+
+def _summarize_quote_title(items: pd.DataFrame, details: str) -> str:
+    base = ""
+    if not items.empty:
+        base = str(items.iloc[0].get("producto_servicio", "") or "").strip()
+    if not base:
+        base = str(details or "").strip()
+    base = " ".join(base.split())
+    if not base:
+        return "Cotizacion de bienes y servicios"
+    return base[:55].rstrip()
+
+
+def _build_standard_quote_excel(
+    empresa: str,
+    numero_cot: str,
+    fecha_cot: date,
+    cliente: str,
+    direccion: str,
+    cliente_ruc: str,
+    cliente_dv: str,
+    items_df: pd.DataFrame,
+    impuesto_pct: float,
+    condiciones: Dict[str, str],
+    detalles_extra: str,
+) -> bytes:
+    if empresa == "RIR Medical":
+        template_path = TEMPLATE_RIR_STANDARD
+        header_path = HEADER_RIR_STANDARD
+    else:
+        template_path = TEMPLATE_RS_STANDARD
+        header_path = HEADER_RS_STANDARD
+
+    if not template_path.exists():
+        raise FileNotFoundError(f"No se encontró la plantilla: {template_path}")
+
+    wb = load_workbook(template_path)
+    ws = wb["cotizacion"] if "cotizacion" in wb.sheetnames else wb[wb.sheetnames[0]]
+
+    items = items_df.copy()
+    if "producto_servicio" not in items.columns:
+        items["producto_servicio"] = ""
+    items["producto_servicio"] = items["producto_servicio"].fillna("").astype(str).str.strip()
+    items["cantidad"] = pd.to_numeric(items.get("cantidad"), errors="coerce").fillna(0.0)
+    items["precio_unitario"] = pd.to_numeric(items.get("precio_unitario"), errors="coerce").fillna(0.0)
+    items = items[
+        (items["producto_servicio"].str.len() > 0)
+        | (items["cantidad"] > 0)
+        | (items["precio_unitario"] > 0)
+    ].reset_index(drop=True)
+    if items.empty:
+        raise ValueError("Debes agregar al menos un item para generar el Excel.")
+
+    numero_items = len(items)
+    filas_a_insertar = max(numero_items - 1, 0)
+    fila_inicio_items = 23
+    if filas_a_insertar:
+        ws.insert_rows(fila_inicio_items + 1, filas_a_insertar)
+
+    borde_sencillo = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+    align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    align_right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+
+    subtotal = 0.0
+    for idx, row in items.iterrows():
+        excel_row = fila_inicio_items + idx
+        cantidad = float(row.get("cantidad", 0.0) or 0.0)
+        precio_unitario = float(row.get("precio_unitario", 0.0) or 0.0)
+        total_item = round(cantidad * precio_unitario, 2)
+        subtotal = round(subtotal + total_item, 2)
+
+        ws[f"B{excel_row}"] = idx + 1
+        ws[f"C{excel_row}"] = str(row.get("producto_servicio", "") or "")
+        ws[f"D{excel_row}"] = "UND"
+        ws[f"E{excel_row}"] = cantidad
+        ws[f"F{excel_row}"] = precio_unitario
+        ws[f"G{excel_row}"] = total_item
+
+        ws[f"B{excel_row}"].alignment = align_center
+        ws[f"C{excel_row}"].alignment = Alignment(wrap_text=True, vertical="center")
+        ws[f"D{excel_row}"].alignment = align_center
+        ws[f"E{excel_row}"].alignment = align_center
+        ws[f"F{excel_row}"].alignment = align_right
+        ws[f"G{excel_row}"].alignment = align_right
+        ws[f"F{excel_row}"].number_format = "$#,##0.00"
+        ws[f"G{excel_row}"].number_format = "$#,##0.00"
+
+        for col in ("B", "C", "D", "E", "F", "G"):
+            ws[f"{col}{excel_row}"].border = borde_sencillo
+
+    impuesto = round(subtotal * (float(impuesto_pct) / 100.0), 2)
+    total = round(subtotal + impuesto, 2)
+
+    fila_subtotal = fila_inicio_items + numero_items
+    fila_impuesto = fila_subtotal + 1
+    fila_total = fila_subtotal + 2
+
+    ws[f"F{fila_subtotal}"] = "Subtotal ="
+    ws[f"F{fila_impuesto}"] = f"Impuesto ({impuesto_pct:.2f}%) ="
+    ws[f"F{fila_total}"] = "Total ="
+    ws[f"G{fila_subtotal}"] = subtotal
+    ws[f"G{fila_impuesto}"] = impuesto
+    ws[f"G{fila_total}"] = total
+
+    for row_tot in (fila_subtotal, fila_impuesto, fila_total):
+        ws[f"F{row_tot}"].alignment = align_right
+        ws[f"G{row_tot}"].alignment = align_right
+        ws[f"F{row_tot}"].border = borde_sencillo
+        ws[f"G{row_tot}"].border = borde_sencillo
+        ws[f"G{row_tot}"].number_format = "$#,##0.00"
+
+    title = _summarize_quote_title(items, detalles_extra)
+    ws["B13"] = cliente or "-"
+    ws["G13"] = fecha_cot.strftime("%Y-%m-%d")
+    ws["B14"] = f"RUC: {cliente_ruc or '-'}   DV: {cliente_dv or '-'}"
+    ws["E18"] = numero_cot
+    ws["C19"] = title
+    ws["B21"] = title
+
+    forma_pago = condiciones.get("Condicion de pago") or "Credito"
+    entrega = condiciones.get("Entrega") or "15 días hábiles"
+    lugar_entrega = condiciones.get("Lugar de entrega") or "-"
+    vigencia = condiciones.get("Vigencia") or "15 días"
+
+    fila_lugar = 30 + numero_items
+    ws[f"B{fila_lugar - 1}"] = f"Forma de pago: {forma_pago}"
+    ws[f"B{fila_lugar}"] = f"Lugar de entrega: {lugar_entrega}"
+    ws[f"B{fila_lugar + 1}"] = f"Tiempo de entrega: {entrega}"
+    ws[f"B{fila_lugar + 2}"] = "Garantía: De fábrica"
+    ws[f"B{fila_lugar + 3}"] = "Adjudicación: Global"
+    ws[f"B{fila_lugar + 4}"] = f"Validez de la propuesta: {vigencia}"
+    if direccion:
+        ws[f"B{fila_lugar + 5}"] = f"Dirección del cliente: {direccion}"
+
+    extra_lines = [line.strip() for line in str(detalles_extra or "").splitlines() if line.strip()]
+    extra_row = fila_lugar + 6
+    if extra_lines:
+        ws[f"B{extra_row}"] = "Observaciones:"
+        for idx, line in enumerate(extra_lines[:8], start=1):
+            ws[f"B{extra_row + idx}"] = line
+        base_firma_row = extra_row + min(len(extra_lines), 8) + 3
+    else:
+        base_firma_row = fila_lugar + 9
+
+    firma_row = max(38 + filas_a_insertar, base_firma_row)
+    ws[f"B{firma_row - 2}"] = "Atentamente,"
+    ws[f"B{firma_row + 5}"] = "ING RODRIGO SÁNCHEZ"
+    ws[f"B{firma_row + 6}"] = "Representante Legal"
+
+    if header_path.exists():
+        encabezado = Image(str(header_path))
+        encabezado.width, encabezado.height = 590, 202
+        ws.add_image(encabezado, "B2")
+
+    if SIGNATURE_STANDARD.exists():
+        firma = Image(str(SIGNATURE_STANDARD))
+        firma.width, firma.height = 150, 100
+        ws.add_image(firma, f"B{firma_row}")
+
+    # Impresión amigable: ancho a 1 página y alto automático para tablas largas.
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = 9  # A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.page_margins.left = 0.3
+    ws.page_margins.right = 0.3
+    ws.page_margins.top = 0.3
+    ws.page_margins.bottom = 0.3
+    ws.page_margins.header = 0.2
+    ws.page_margins.footer = 0.2
+    ws.print_title_rows = "1:22"
+
+    output = BytesIO()
+    wb.save(output)
+    wb.close()
+    return output.getvalue()
 
 
 def _build_invoice_html(
@@ -1960,6 +2199,36 @@ if active_tab == "Cotizacion - Estandar":
         jpeg_quality=pdf_quality,
     )
 
+    excel_preview_name = f"{numero_cot}.xlsx"
+    if st.button("Generar Excel (plantilla editable)"):
+        try:
+            excel_preview = _build_standard_quote_excel(
+                empresa=empresa,
+                numero_cot=numero_cot,
+                fecha_cot=fecha_cot,
+                cliente=cliente,
+                direccion=direccion,
+                cliente_ruc=cliente_ruc,
+                cliente_dv=cliente_dv,
+                items_df=items_df,
+                impuesto_pct=impuesto_pct,
+                condiciones=condiciones,
+                detalles_extra=detalles_extra,
+            )
+            st.session_state["cot_std_excel_preview_bytes"] = excel_preview
+            st.session_state["cot_std_excel_preview_name"] = excel_preview_name
+            st.success("Excel generado. Puedes descargarlo.")
+        except Exception as exc:
+            st.error(f"No se pudo generar el Excel: {exc}")
+
+    if st.session_state.get("cot_std_excel_preview_bytes"):
+        st.download_button(
+            "Descargar Excel de cotización",
+            data=st.session_state["cot_std_excel_preview_bytes"],
+            file_name=st.session_state.get("cot_std_excel_preview_name") or excel_preview_name,
+            mime=_guess_mime_from_filename(excel_preview_name),
+        )
+
     if st.button("Guardar cotización en Sheets/Drive"):
         if sheet_error or not sheet_id:
             st.error("No hay conexión a Google Sheets para guardar la cotización.")
@@ -1996,22 +2265,38 @@ if active_tab == "Cotizacion - Estandar":
                     if edit_row and edit_row.get("tipo_cotizacion")
                     else ("Estandar" if active_tab == "Cotizacion - Estandar" else "Panama Compra")
                 )
+                excel_filename = f"{numero_cot}.xlsx"
+                excel_bytes = _build_standard_quote_excel(
+                    empresa=empresa,
+                    numero_cot=numero_cot,
+                    fecha_cot=fecha_cot,
+                    cliente=cliente,
+                    direccion=direccion,
+                    cliente_ruc=cliente_ruc,
+                    cliente_dv=cliente_dv,
+                    items_df=items_df,
+                    impuesto_pct=impuesto_pct,
+                    condiciones=condiciones,
+                    detalles_extra=detalles_extra,
+                )
+                st.session_state["cot_std_excel_preview_bytes"] = excel_bytes
+                st.session_state["cot_std_excel_preview_name"] = excel_filename
 
                 if creds is not None:
                     drive = _get_drive_client(creds)
                     _, folders = _get_drive_folders(drive)
                     folder_id = folders.get(empresa)
                     if folder_id:
-                        filename = f"{numero_cot}.html"
-                        upload = _upload_quote_html(
+                        upload = _upload_drive_binary(
                             drive,
                             folder_id,
-                            filename,
-                            html_body,
+                            excel_filename,
+                            excel_bytes,
+                            _guess_mime_from_filename(excel_filename),
                             existing_file_id=drive_file_id or None,
                         )
                         drive_file_id = upload.get("id", drive_file_id)
-                        drive_file_name = upload.get("name", filename)
+                        drive_file_name = upload.get("name", excel_filename)
                         drive_folder = folder_id
                         if drive_file_id:
                             drive_file_url = f"https://drive.google.com/file/d/{drive_file_id}/view"
@@ -2271,11 +2556,12 @@ if active_tab == "Historial de cotizaciones":
                         except Exception as exc:
                             st.error(f"No se pudo descargar: {exc}")
                     if st.session_state.get(download_key):
+                        out_name = sel_row.get("drive_file_name") or f"{sel_row.get('numero_cotizacion')}.xlsx"
                         st.download_button(
                             "Descargar archivo",
                             data=st.session_state[download_key],
-                            file_name=sel_row.get("drive_file_name") or f"{sel_row.get('numero_cotizacion')}.html",
-                            mime="text/html",
+                            file_name=out_name,
+                            mime=_guess_mime_from_filename(out_name),
                         )
                 if sel_row.get("drive_file_url"):
                     st.link_button("Abrir en Drive", sel_row["drive_file_url"])
