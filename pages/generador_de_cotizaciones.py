@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from openpyxl import load_workbook
@@ -51,6 +52,203 @@ def _format_money(value: float) -> str:
     return f"${value:,.2f}"
 
 
+def _openai_api_key() -> str:
+    candidates: list[str | None] = []
+    try:
+        app_cfg = st.secrets.get("app", {})
+        candidates.append(app_cfg.get("OPENAI_API_KEY"))
+    except Exception:
+        pass
+    try:
+        candidates.append(st.secrets.get("OPENAI_API_KEY"))
+    except Exception:
+        pass
+    candidates.append(os.environ.get("OPENAI_API_KEY"))
+    for raw in candidates:
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return ""
+
+
+def _openai_model_name() -> str:
+    candidates: list[str | None] = []
+    try:
+        app_cfg = st.secrets.get("app", {})
+        candidates.append(app_cfg.get("OPENAI_MODEL"))
+        candidates.append(app_cfg.get("OPENAI_CHAT_MODEL"))
+    except Exception:
+        pass
+    try:
+        candidates.append(st.secrets.get("OPENAI_MODEL"))
+    except Exception:
+        pass
+    candidates.append(os.environ.get("OPENAI_MODEL"))
+    for raw in candidates:
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return "gpt-4o-mini"
+
+
+def _call_openai_chat(
+    *,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": messages,
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError("OpenAI no devolvió contenido.")
+    content = choices[0].get("message", {}).get("content", "")
+    if isinstance(content, list):
+        out = []
+        for item in content:
+            if isinstance(item, dict):
+                out.append(str(item.get("text", "")))
+            else:
+                out.append(str(item))
+        return "".join(out).strip()
+    return str(content).strip()
+
+
+def _enforce_short_description_words(value: str) -> str:
+    text = re.sub(r"[\r\n\t]+", " ", str(value or "").strip())
+    text = re.sub(r"[`\"']", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" .,:;|-")
+    words = [w for w in text.split(" ") if w]
+    if len(words) > 8:
+        words = words[:8]
+    fillers = ["cotizacion", "comercial", "con", "entrega", "programada", "en", "panama"]
+    idx = 0
+    while len(words) < 6 and idx < len(fillers):
+        words.append(fillers[idx])
+        idx += 1
+    if not words:
+        return "Cotizacion comercial con entrega programada en panama"
+    return " ".join(words)
+
+
+def _fallback_quote_description(
+    *,
+    tipo_cotizacion: str,
+    cliente: str,
+    detalles: str,
+    items: list[str],
+) -> str:
+    cliente_short = " ".join(str(cliente or "cliente").split()[:3]).strip() or "cliente"
+    if items:
+        item_short = " ".join(str(items[0]).split()[:4]).strip()
+        candidate = f"Cotizacion de {item_short} para {cliente_short}"
+    elif detalles:
+        detalle_short = " ".join(str(detalles).split()[:4]).strip()
+        candidate = f"Cotizacion de {detalle_short} para {cliente_short}"
+    else:
+        tipo_short = str(tipo_cotizacion or "general").strip().lower() or "general"
+        candidate = f"Cotizacion {tipo_short} para {cliente_short}"
+    return _enforce_short_description_words(candidate)
+
+
+def _generate_quote_short_description(
+    *,
+    tipo_cotizacion: str,
+    empresa: str,
+    cliente: str,
+    detalles: str,
+    items: list[str],
+) -> str:
+    fallback = _fallback_quote_description(
+        tipo_cotizacion=tipo_cotizacion,
+        cliente=cliente,
+        detalles=detalles,
+        items=items,
+    )
+    api_key = _openai_api_key()
+    if not api_key:
+        return fallback
+    try:
+        model = _openai_model_name()
+        items_text = ", ".join([str(x).strip() for x in items if str(x).strip()][:5])
+        prompt = (
+            "Genera una descripcion corta para identificar una cotizacion.\n"
+            "Reglas obligatorias:\n"
+            "- Solo 6 a 8 palabras.\n"
+            "- Español.\n"
+            "- Sin comillas ni explicaciones.\n"
+            "- Sin punto final.\n\n"
+            f"Tipo: {tipo_cotizacion or '-'}\n"
+            f"Empresa: {empresa or '-'}\n"
+            f"Cliente: {cliente or '-'}\n"
+            f"Items: {items_text or '-'}\n"
+            f"Detalles: {(detalles or '-')[:220]}"
+        )
+        raw = _call_openai_chat(
+            api_key=api_key,
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Responde solo con una frase corta para identificar una cotizacion.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=40,
+        )
+        return _enforce_short_description_words(raw)
+    except Exception:
+        return fallback
+
+
+def _extract_item_names_from_row(row: dict, limit: int = 5) -> list[str]:
+    names: list[str] = []
+    try:
+        items = json.loads(row.get("items_json") or "[]")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    val = str(item.get("producto_servicio") or item.get("descripcion") or "").strip()
+                    if val:
+                        names.append(val)
+                if len(names) >= limit:
+                    break
+    except Exception:
+        pass
+    if not names:
+        resumen = str(row.get("items_resumen") or "").strip()
+        if resumen:
+            parts = [p.strip() for p in resumen.split("|") if p.strip()]
+            for part in parts[:limit]:
+                names.append(part[:80])
+    return names[:limit]
+
+
+def _generate_description_for_row(row: dict) -> str:
+    return _generate_quote_short_description(
+        tipo_cotizacion=str(row.get("tipo_cotizacion") or ""),
+        empresa=str(row.get("empresa") or ""),
+        cliente=str(row.get("cliente_nombre") or ""),
+        detalles=str(row.get("detalles_extra") or ""),
+        items=_extract_item_names_from_row(row),
+    )
+
+
 SHEET_NAME_COT = "cotizaciones"
 COT_COLUMNS = [
     "id",
@@ -59,6 +257,7 @@ COT_COLUMNS = [
     "secuencia",
     "empresa",
     "tipo_cotizacion",
+    "descripcion_corta",
     "cliente_nombre",
     "cliente_direccion",
     "cliente_ruc",
@@ -2386,6 +2585,18 @@ if active_tab == "Cotizacion - Estandar":
                     if edit_row and edit_row.get("tipo_cotizacion")
                     else ("Estandar" if active_tab == "Cotizacion - Estandar" else "Panama Compra")
                 )
+                item_names_for_desc = [
+                    str(val).strip()
+                    for val in items_df.get("producto_servicio", pd.Series(dtype=str)).tolist()
+                    if str(val).strip()
+                ][:5]
+                descripcion_corta = _generate_quote_short_description(
+                    tipo_cotizacion=tipo_cotizacion,
+                    empresa=empresa,
+                    cliente=cliente,
+                    detalles=detalles_extra,
+                    items=item_names_for_desc,
+                )
                 excel_filename = f"{numero_cot}.xlsx"
                 if excel_preview_bytes:
                     excel_bytes = excel_preview_bytes
@@ -2466,6 +2677,7 @@ if active_tab == "Cotizacion - Estandar":
                     "secuencia": seq,
                     "empresa": empresa,
                     "tipo_cotizacion": tipo_cotizacion,
+                    "descripcion_corta": descripcion_corta,
                     "cliente_nombre": cliente,
                     "cliente_direccion": direccion,
                     "cliente_ruc": cliente_ruc,
@@ -2534,22 +2746,90 @@ if active_tab == "Historial de cotizaciones":
         if cot_df.empty:
             st.info("Aún no hay cotizaciones registradas.")
         else:
+            desc_col = "descripcion_corta"
+            missing_mask = cot_df[desc_col].fillna("").astype(str).str.strip().eq("")
+            missing_count = int(missing_mask.sum())
+            col_miss_info, col_miss_btn = st.columns([2.2, 1])
+            with col_miss_info:
+                if missing_count:
+                    st.caption(f"Cotizaciones sin descripción corta: {missing_count}")
+            with col_miss_btn:
+                if missing_count and st.button("Generar descripciones faltantes (IA)"):
+                    try:
+                        if client is None:
+                            client, creds = get_client()
+                        df_write = cot_df.copy()
+                        pending_idx = df_write.index[
+                            df_write[desc_col].fillna("").astype(str).str.strip().eq("")
+                        ].tolist()
+                        total_pending = len(pending_idx)
+                        progress = st.progress(0.0, text="Generando descripciones...")
+                        for pos, idx in enumerate(pending_idx, start=1):
+                            row_data = df_write.loc[idx].to_dict()
+                            df_write.at[idx, desc_col] = _generate_description_for_row(row_data)
+                            progress.progress(
+                                pos / total_pending,
+                                text=f"Generando descripciones... {pos}/{total_pending}",
+                            )
+                        write_worksheet(client, sheet_id, SHEET_NAME_COT, _normalize_cotizaciones_df(df_write))
+                        st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
+                        st.success(f"Descripciones generadas: {total_pending}")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudieron generar descripciones: {exc}")
+
+            search_text = st.text_input(
+                "Buscar cotizaciones",
+                key="cot_hist_search",
+                placeholder="Número, cliente, descripción, empresa, tipo...",
+            ).strip()
+            filtered_df = cot_df.copy()
+            if search_text:
+                search_cols = [
+                    "numero_cotizacion",
+                    "cliente_nombre",
+                    "descripcion_corta",
+                    "empresa",
+                    "tipo_cotizacion",
+                    "detalles_extra",
+                    "items_resumen",
+                ]
+                haystack = filtered_df[search_cols].fillna("").astype(str).agg(" ".join, axis=1)
+                filtered_df = filtered_df[haystack.str.contains(search_text, case=False, na=False)]
+
             display_cols = [
                 "numero_cotizacion",
                 "empresa",
                 "fecha_cotizacion",
                 "cliente_nombre",
+                "descripcion_corta",
                 "total",
                 "estado",
             ]
-            st.dataframe(cot_df[display_cols], use_container_width=True)
+            if filtered_df.empty:
+                st.info("No hay cotizaciones que coincidan con la búsqueda.")
+                st.stop()
+            st.dataframe(filtered_df[display_cols], use_container_width=True)
 
-            opciones = cot_df["id"].tolist()
+            opciones = filtered_df["id"].tolist()
+            if (
+                "cot_hist_selected_id" not in st.session_state
+                or st.session_state["cot_hist_selected_id"] not in opciones
+            ):
+                st.session_state["cot_hist_selected_id"] = opciones[0]
+
             def _label(opt):
-                row = cot_df[cot_df["id"] == opt].iloc[0]
-                return f"{row.get('numero_cotizacion', '')} · {row.get('cliente_nombre', '')}"
+                row = filtered_df[filtered_df["id"] == opt].iloc[0]
+                descripcion = str(row.get("descripcion_corta") or "").strip()
+                base = f"{row.get('numero_cotizacion', '')} · {row.get('cliente_nombre', '')}"
+                return f"{base} · {descripcion}" if descripcion else base
 
-            selected_id = st.selectbox("Selecciona una cotización", opciones, format_func=_label)
+            selected_id = st.selectbox(
+                "Selecciona una cotización",
+                opciones,
+                format_func=_label,
+                key="cot_hist_selected_id",
+            )
             sel_row = cot_df[cot_df["id"] == selected_id].iloc[0].to_dict()
 
             st.markdown("#### Detalle")
@@ -2558,6 +2838,7 @@ if active_tab == "Historial de cotizaciones":
                     "Número": sel_row.get("numero_cotizacion"),
                     "Empresa": sel_row.get("empresa"),
                     "Cliente": sel_row.get("cliente_nombre"),
+                    "Descripción": sel_row.get("descripcion_corta"),
                     "RUC": sel_row.get("cliente_ruc"),
                     "DV": sel_row.get("cliente_dv"),
                     "Fecha": sel_row.get("fecha_cotizacion"),
