@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import time
+import unicodedata
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1520,6 +1521,102 @@ def _filter_dataframe_text(df: pd.DataFrame, raw_search: str, mode: str) -> pd.D
     return df.loc[combined].copy()
 
 
+def _normalize_search_value(value: object, *, strip_accents: bool) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if strip_accents:
+        text = "".join(
+            ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch)
+        )
+    return text
+
+
+def _parse_advanced_search_query(raw_query: str) -> tuple[list[str], list[str], list[str]]:
+    raw = (raw_query or "").strip()
+    if not raw:
+        return [], [], []
+
+    phrases = [p.strip() for p in re.findall(r'"([^"]+)"', raw) if p.strip()]
+    remainder = re.sub(r'"[^"]+"', " ", raw)
+
+    include_terms: list[str] = []
+    exclude_terms: list[str] = []
+    for token in re.split(r"[\s,;]+", remainder):
+        t = token.strip()
+        if not t:
+            continue
+        if t.startswith("-") and len(t) > 1:
+            exclude_terms.append(t[1:])
+        else:
+            include_terms.append(t)
+
+    return include_terms, phrases, exclude_terms
+
+
+def _apply_advanced_text_search(
+    df: pd.DataFrame,
+    *,
+    raw_query: str,
+    mode: str,
+    target_column: str | None,
+    ignore_accents: bool,
+) -> tuple[pd.DataFrame, pd.Series]:
+    if df.empty or not raw_query.strip():
+        return df, pd.Series(0, index=df.index, dtype="int64")
+
+    search_columns = [target_column] if target_column and target_column in df.columns else list(df.columns)
+    if not search_columns:
+        return df, pd.Series(0, index=df.index, dtype="int64")
+
+    include_terms, exact_phrases, exclude_terms = _parse_advanced_search_query(raw_query)
+    positive_terms = include_terms + exact_phrases
+    if not positive_terms and not exclude_terms:
+        return df, pd.Series(0, index=df.index, dtype="int64")
+
+    normalized = df[search_columns].fillna("").astype(str).apply(
+        lambda col: col.map(lambda value: _normalize_search_value(value, strip_accents=ignore_accents))
+    )
+
+    score = pd.Series(0, index=df.index, dtype="int64")
+    positive_masks: list[pd.Series] = []
+
+    for term in positive_terms:
+        norm_term = _normalize_search_value(term, strip_accents=ignore_accents)
+        if not norm_term:
+            continue
+        term_hits_by_col = normalized.apply(
+            lambda col: col.str.contains(norm_term, regex=False, na=False)
+        )
+        term_mask = term_hits_by_col.any(axis=1)
+        positive_masks.append(term_mask)
+        # Relevancia = cuantas columnas coinciden por termino (frases pesan un poco mas).
+        weight = 2 if term in exact_phrases else 1
+        score = score + (term_hits_by_col.sum(axis=1) * weight).astype("int64")
+
+    if positive_masks:
+        combined = positive_masks[0]
+        for m in positive_masks[1:]:
+            if mode == "AND":
+                combined = combined & m
+            else:
+                combined = combined | m
+    else:
+        combined = pd.Series(True, index=df.index)
+
+    for term in exclude_terms:
+        norm_term = _normalize_search_value(term, strip_accents=ignore_accents)
+        if not norm_term:
+            continue
+        excluded = normalized.apply(
+            lambda col: col.str.contains(norm_term, regex=False, na=False)
+        ).any(axis=1)
+        combined = combined & (~excluded)
+
+    filtered = df.loc[combined].copy()
+    return filtered, score.loc[filtered.index]
+
+
 def _find_reference_table_name(
     *,
     backend: str,
@@ -2540,8 +2637,11 @@ def _format_money_series(series: pd.Series) -> pd.Series:
     Formato visual fijo de moneda para tablas (sin afectar calculos/filtros).
     Ej: $ 10,000.50
     """
+    if series.empty:
+        return pd.Series(index=series.index, dtype="string")
     numeric = _coerce_money_series(series)
-    return numeric.map(lambda x: f"$ {x:,.2f}" if pd.notna(x) else "")
+    formatted = numeric.map(lambda x: f"$ {x:,.2f}" if pd.notna(x) else "")
+    return formatted.astype("string")
 
 
 def _is_money_column_name(column_name: str) -> bool:
@@ -2864,11 +2964,59 @@ def render_df(
                     df = df[(pd.to_numeric(df[colm], errors="coerce") >= r[0]) &
                             (pd.to_numeric(df[colm], errors="coerce") <= r[1])]
 
-        q = st.text_input("Búsqueda rápida (todas las columnas)", key=keyp+"q",
-                          placeholder="Palabra clave, CT, entidad, título…")
+        q = st.text_input(
+            "Búsqueda rápida (todas las columnas)",
+            key=keyp+"q",
+            placeholder='Ej: chiller "aire acondicionado" -mantenimiento',
+        )
+        search_ui_cols = st.columns([0.85, 1.25, 0.9, 1.0])
+        with search_ui_cols[0]:
+            search_mode = st.radio(
+                "Modo",
+                options=["OR", "AND"],
+                horizontal=True,
+                key=keyp+"q_mode",
+                label_visibility="collapsed",
+            )
+        with search_ui_cols[1]:
+            search_col_options = ["Todas las columnas"] + displayable_columns
+            search_col = st.selectbox(
+                "Columna",
+                options=search_col_options,
+                key=keyp+"q_col",
+                label_visibility="collapsed",
+            )
+        with search_ui_cols[2]:
+            ignore_accents = st.toggle(
+                "Ignorar acentos",
+                value=True,
+                key=keyp+"q_strip_accents",
+            )
+        with search_ui_cols[3]:
+            rank_by_relevance = st.toggle(
+                "Ordenar por relevancia",
+                value=False,
+                key=keyp+"q_rank",
+            )
+
         if q:
-            mask = df.astype(str).apply(lambda s: s.str.contains(q, case=False, na=False)).any(axis=1)
-            df = df[mask]
+            target_column = None if search_col == "Todas las columnas" else search_col
+            filtered_df, relevance_score = _apply_advanced_text_search(
+                df,
+                raw_query=q,
+                mode=search_mode,
+                target_column=target_column,
+                ignore_accents=ignore_accents,
+            )
+            if rank_by_relevance and not filtered_df.empty:
+                filtered_df = (
+                    filtered_df.assign(__relevancia__=relevance_score)
+                    .sort_values("__relevancia__", ascending=False, kind="mergesort")
+                    .drop(columns=["__relevancia__"])
+                )
+            df = filtered_df
+
+        st.caption('Tip: usa comillas para frase exacta y `-palabra` para excluir.')
         def _is_item_column(col_name: str) -> bool:
             normalized = col_name.strip().lower().replace("í", "i")
             return normalized.startswith("item")
