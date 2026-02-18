@@ -1391,7 +1391,7 @@ def _save_panama_quote_to_history(
         str(panama_meta.get("entidad") or "").strip()
         or (str(titulo_excel or "").strip() or "Cliente Panamá Compra")
     )[:120]
-    direccion = "Panamá"
+    direccion = ""
     cliente_ruc = str(panama_meta.get("ruc") or "").strip()
     cliente_dv = str(panama_meta.get("dv") or "").strip()
 
@@ -1401,15 +1401,8 @@ def _save_panama_quote_to_history(
         "Entrega": str(panama_meta.get("tiempo_entrega") or "Según pliego"),
         "Lugar de entrega": str(panama_meta.get("lugar_entrega") or "Según Panamá Compra"),
     }
-    detalles_lines = [
-        "Generada desde Panamá Compra.",
-        f"Número de proceso: {numero_acto or '-'}",
-        f"Número interno: {numero_cot}",
-        f"Enlace: {enlace_pc.strip()}",
-    ]
-    if titulo_resumido:
-        detalles_lines.append(f"Resumen: {titulo_resumido}")
-    detalles_extra = "\n".join(detalles_lines).strip()
+    # En Panamá Compra no mostramos bloque de observaciones automáticas en la plantilla final.
+    detalles_extra = ""
 
     excel_bytes = _build_standard_quote_excel(
         empresa=empresa,
