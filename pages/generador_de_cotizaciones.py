@@ -1071,7 +1071,8 @@ def _build_standard_quote_excel(
         ws[f"D{excel_row}"] = str(row.get("unidad", "UND") or "UND")
         ws[f"E{excel_row}"] = cantidad
         ws[f"F{excel_row}"] = precio_unitario
-        ws[f"G{excel_row}"] = total_item
+        # Mantener fórmula editable en Excel para que recalcule al editar cantidad/costo.
+        ws[f"G{excel_row}"] = f"=IFERROR(E{excel_row}*F{excel_row},0)"
 
         ws[f"B{excel_row}"].alignment = align_center
         ws[f"C{excel_row}"].alignment = Alignment(wrap_text=True, vertical="center")
@@ -1085,19 +1086,19 @@ def _build_standard_quote_excel(
         for col in ("B", "C", "D", "E", "F", "G"):
             ws[f"{col}{excel_row}"].border = borde_sencillo
 
-    impuesto = round(subtotal * (float(impuesto_pct) / 100.0), 2)
-    total = round(subtotal + impuesto, 2)
-
     fila_subtotal = fila_inicio_items + numero_items
     fila_impuesto = fila_subtotal + 1
     fila_total = fila_subtotal + 2
+    last_item_row = fila_inicio_items + numero_items - 1
+    impuesto_factor = float(impuesto_pct) / 100.0
 
     ws[f"F{fila_subtotal}"] = "Subtotal ="
     ws[f"F{fila_impuesto}"] = f"Impuesto ({impuesto_pct:.2f}%) ="
     ws[f"F{fila_total}"] = "Total ="
-    ws[f"G{fila_subtotal}"] = subtotal
-    ws[f"G{fila_impuesto}"] = impuesto
-    ws[f"G{fila_total}"] = total
+    # Totales con fórmula para mantener trazabilidad y edición manual.
+    ws[f"G{fila_subtotal}"] = f"=SUM(G{fila_inicio_items}:G{last_item_row})"
+    ws[f"G{fila_impuesto}"] = f"=G{fila_subtotal}*{impuesto_factor:.6f}"
+    ws[f"G{fila_total}"] = f"=G{fila_subtotal}+G{fila_impuesto}"
 
     for row_tot in (fila_subtotal, fila_impuesto, fila_total):
         ws[f"F{row_tot}"].alignment = align_right
@@ -1177,6 +1178,9 @@ def _build_standard_quote_excel(
 
 
 def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
+    def _is_formula(value) -> bool:
+        return isinstance(value, str) and value.strip().startswith("=")
+
     def _to_float(value) -> float:
         if value is None:
             return 0.0
@@ -1184,6 +1188,8 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
             return float(value)
         text = str(value).strip()
         if not text:
+            return 0.0
+        if text.startswith("="):
             return 0.0
         text = (
             text.replace("B/.", "")
@@ -1204,7 +1210,7 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
         except (TypeError, ValueError):
             return 0.0
 
-    wb = load_workbook(BytesIO(excel_bytes), data_only=True)
+    wb = load_workbook(BytesIO(excel_bytes), data_only=False)
     ws = wb["cotizacion"] if "cotizacion" in wb.sheetnames else wb[wb.sheetnames[0]]
 
     items = []
@@ -1224,14 +1230,18 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
             break
         if not any([item, desc, unidad, cantidad, precio_unitario, total]):
             break
+        cantidad_val = _to_float(cantidad)
+        unit_val = _to_float(precio_unitario)
+        total_val = round(cantidad_val * unit_val, 2) if _is_formula(total) else _to_float(total)
+
         items.append(
             {
                 "Item": item,
                 "Descripción": desc or "",
                 "Unidad": unidad or "",
-                "Cantidad": _to_float(cantidad),
-                "Costo Unitario": _to_float(precio_unitario),
-                "Total": _to_float(total),
+                "Cantidad": cantidad_val,
+                "Costo Unitario": unit_val,
+                "Total": total_val,
             }
         )
         row += 1
@@ -1245,9 +1255,25 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
                 subtotal_row = r
                 break
 
-    subtotal = _to_float(ws[f"G{subtotal_row}"].value)
-    impuesto = _to_float(ws[f"G{subtotal_row + 1}"].value)
-    total_doc = _to_float(ws[f"G{subtotal_row + 2}"].value)
+    subtotal_cell = ws[f"G{subtotal_row}"].value
+    impuesto_cell = ws[f"G{subtotal_row + 1}"].value
+    total_cell = ws[f"G{subtotal_row + 2}"].value
+
+    subtotal_calc = round(sum(float(x.get("Total", 0.0) or 0.0) for x in items), 2)
+    subtotal = subtotal_calc if _is_formula(subtotal_cell) else _to_float(subtotal_cell)
+
+    impuesto_label = str(ws[f"F{subtotal_row + 1}"].value or "")
+    pct_match = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*%", impuesto_label)
+    impuesto_pct = 0.0
+    if pct_match:
+        try:
+            impuesto_pct = float(str(pct_match.group(1)).replace(",", "."))
+        except ValueError:
+            impuesto_pct = 0.0
+    impuesto_calc = round(subtotal * (impuesto_pct / 100.0), 2)
+    impuesto = impuesto_calc if _is_formula(impuesto_cell) else _to_float(impuesto_cell)
+    total_calc = round(subtotal + impuesto, 2)
+    total_doc = total_calc if _is_formula(total_cell) else _to_float(total_cell)
 
     conditions = []
     for r in range(28, 90):
