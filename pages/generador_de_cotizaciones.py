@@ -1038,6 +1038,7 @@ def _build_standard_quote_excel(
     detalles_extra: str,
     numero_excel: Optional[str] = None,
     titulo_override: Optional[str] = None,
+    allow_blank_ruc_dv: bool = False,
 ) -> bytes:
     if empresa == "RIR Medical":
         template_path = TEMPLATE_RIR_STANDARD
@@ -1137,7 +1138,13 @@ def _build_standard_quote_excel(
     numero_visible = str(numero_excel or numero_cot or "").strip() or str(numero_cot)
     ws["B13"] = cliente or "-"
     ws["G13"] = fecha_cot.strftime("%Y-%m-%d")
-    ws["B14"] = f"RUC: {cliente_ruc or '-'}   DV: {cliente_dv or '-'}"
+    if allow_blank_ruc_dv:
+        ruc_text = str(cliente_ruc or "").strip()
+        dv_text = str(cliente_dv or "").strip()
+    else:
+        ruc_text = str(cliente_ruc or "-").strip()
+        dv_text = str(cliente_dv or "-").strip()
+    ws["B14"] = f"RUC: {ruc_text}   DV: {dv_text}"
     ws["E18"] = numero_visible
     ws["C19"] = title
     ws["B21"] = title
@@ -1351,6 +1358,8 @@ def _save_panama_quote_to_history(
     inversion_etapa_intermedia: float,
     tiempo_cobro: float,
     inversion_etapa_2: float,
+    manual_cliente_ruc: str = "",
+    manual_cliente_dv: str = "",
 ) -> dict[str, Any]:
     _ensure_cotizaciones_sheet(client, sheet_id)
     df_write = _normalize_cotizaciones_df(read_worksheet(client, sheet_id, SHEET_NAME_COT))
@@ -1392,8 +1401,8 @@ def _save_panama_quote_to_history(
         or (str(titulo_excel or "").strip() or "Cliente Panamá Compra")
     )[:120]
     direccion = ""
-    cliente_ruc = str(panama_meta.get("ruc") or "").strip()
-    cliente_dv = str(panama_meta.get("dv") or "").strip()
+    cliente_ruc = str(manual_cliente_ruc or "").strip() or str(panama_meta.get("ruc") or "").strip()
+    cliente_dv = str(manual_cliente_dv or "").strip() or str(panama_meta.get("dv") or "").strip()
 
     condiciones = {
         "Vigencia": str(panama_meta.get("vigencia") or "120 días"),
@@ -1418,6 +1427,7 @@ def _save_panama_quote_to_history(
         detalles_extra=detalles_extra,
         numero_excel=numero_acto or numero_cot,
         titulo_override=titulo_resumido or None,
+        allow_blank_ruc_dv=True,
     )
 
     subtotal = float((items_df["cantidad"] * items_df["precio_unitario"]).sum())
@@ -2514,6 +2524,10 @@ if active_tab == "Cotización - Panamá Compra":
         st.session_state["pc_cot_precio_manual"] = not bool(st.session_state.get("pc_cot_precio_auto", True))
     if "pc_cot_precio" not in st.session_state:
         st.session_state["pc_cot_precio"] = 0.0
+    if "pc_cot_cliente_ruc" not in st.session_state:
+        st.session_state["pc_cot_cliente_ruc"] = ""
+    if "pc_cot_cliente_dv" not in st.session_state:
+        st.session_state["pc_cot_cliente_dv"] = ""
 
     st.markdown("### Presupuesto interno (base de participación)")
     presupuesto_display_df = _build_items_dataframe(
@@ -2648,6 +2662,12 @@ if active_tab == "Cotización - Panamá Compra":
     with col_c:
         paga_itbms = st.checkbox("Aplica ITBMS (7%)", key="pc_cot_itbms")
 
+    col_ruc, col_dv = st.columns([1.4, 1])
+    with col_ruc:
+        cliente_ruc_pc = st.text_input("RUC cliente (opcional)", key="pc_cot_cliente_ruc")
+    with col_dv:
+        cliente_dv_pc = st.text_input("DV (opcional)", key="pc_cot_cliente_dv")
+
     manual_price_mode = st.toggle(
         "Precio de participación manual",
         key="pc_cot_precio_manual",
@@ -2680,6 +2700,8 @@ if active_tab == "Cotización - Panamá Compra":
                     "precio_participacion": float(precio_part),
                     "paga_itbms": bool(paga_itbms),
                     "empresa": empresa_sel.strip().lower(),
+                    "cliente_ruc": str(cliente_ruc_pc or "").strip(),
+                    "cliente_dv": str(cliente_dv_pc or "").strip(),
                 }
                 request_id = _append_manual_request(client_manual, payload)
                 st.session_state["pc_cot_request_id"] = request_id
@@ -2743,6 +2765,12 @@ if active_tab == "Cotización - Panamá Compra":
                 empresa_from_payload = "RS"
             enlace_from_payload = str(payload_row.get("enlace") or st.session_state.get("pc_cot_enlace") or "")
             paga_itbms_payload = bool(payload_row.get("paga_itbms", st.session_state.get("pc_cot_itbms", True)))
+            cliente_ruc_payload = str(
+                payload_row.get("cliente_ruc", st.session_state.get("pc_cot_cliente_ruc", "")) or ""
+            ).strip()
+            cliente_dv_payload = str(
+                payload_row.get("cliente_dv", st.session_state.get("pc_cot_cliente_dv", "")) or ""
+            ).strip()
             try:
                 precio_participacion_payload = float(
                     payload_row.get("precio_participacion", st.session_state.get("pc_cot_precio", 0.0))
@@ -2787,6 +2815,8 @@ if active_tab == "Cotización - Panamá Compra":
                         inversion_etapa_intermedia=inversion_etapa_intermedia_pc,
                         tiempo_cobro=tiempo_cobro_pc,
                         inversion_etapa_2=inversion_etapa_2_pc,
+                        manual_cliente_ruc=cliente_ruc_payload,
+                        manual_cliente_dv=cliente_dv_payload,
                     )
                     st.session_state["pc_cot_final_excel_bytes"] = save_result["excel_bytes"]
                     st.session_state["pc_cot_final_excel_name"] = save_result["excel_name"]
