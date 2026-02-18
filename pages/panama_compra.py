@@ -2969,7 +2969,7 @@ def render_df(
             key=keyp+"q",
             placeholder='Ej: chiller "aire acondicionado" -mantenimiento',
         )
-        search_ui_cols = st.columns([0.85, 1.25, 0.9, 1.0])
+        search_ui_cols = st.columns([0.9, 1.4, 1.0])
         with search_ui_cols[0]:
             search_mode = st.radio(
                 "Modo",
@@ -2992,28 +2992,16 @@ def render_df(
                 value=True,
                 key=keyp+"q_strip_accents",
             )
-        with search_ui_cols[3]:
-            rank_by_relevance = st.toggle(
-                "Ordenar por relevancia",
-                value=False,
-                key=keyp+"q_rank",
-            )
 
         if q:
             target_column = None if search_col == "Todas las columnas" else search_col
-            filtered_df, relevance_score = _apply_advanced_text_search(
+            filtered_df, _ = _apply_advanced_text_search(
                 df,
                 raw_query=q,
                 mode=search_mode,
                 target_column=target_column,
                 ignore_accents=ignore_accents,
             )
-            if rank_by_relevance and not filtered_df.empty:
-                filtered_df = (
-                    filtered_df.assign(__relevancia__=relevance_score)
-                    .sort_values("__relevancia__", ascending=False, kind="mergesort")
-                    .drop(columns=["__relevancia__"])
-                )
             df = filtered_df
 
         st.caption('Tip: usa comillas para frase exacta y `-palabra` para excluir.')

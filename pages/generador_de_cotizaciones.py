@@ -2306,6 +2306,8 @@ if active_tab == "Cotización - Panamá Compra":
         st.session_state["pc_cot_itbms"] = True
     if "pc_cot_precio_auto" not in st.session_state:
         st.session_state["pc_cot_precio_auto"] = True
+    if "pc_cot_precio_manual" not in st.session_state:
+        st.session_state["pc_cot_precio_manual"] = not bool(st.session_state.get("pc_cot_precio_auto", True))
     if "pc_cot_precio" not in st.session_state:
         st.session_state["pc_cot_precio"] = 0.0
 
@@ -2398,8 +2400,6 @@ if active_tab == "Cotización - Panamá Compra":
             key="pc_presupuesto_fin_interes",
         )
 
-    precio_cotizar_pc = costo_interno_pc * factor_ganancia_pc
-    ganancia_pc = precio_cotizar_pc - costo_interno_pc
     tiempo_recuperacion_pc = tiempo_inversion_pc + tiempo_intermedio_pc + tiempo_cobro_pc
     tiempo_recuperacion_meses_pc = tiempo_recuperacion_pc / 30 if tiempo_recuperacion_pc else 0.0
     costo_financiamiento_pc = 0.0
@@ -2420,10 +2420,14 @@ if active_tab == "Cotización - Panamá Compra":
                 + inversion_etapa_intermedia_pc * tasa_mensual_pc * meses_2
                 + inversion_etapa_2_pc * tasa_mensual_pc * meses_3
             )
-    ganancia_neta_pc = ganancia_pc - costo_financiamiento_pc
+    costo_total_final_pc = costo_interno_pc + costo_financiamiento_pc
+    precio_cotizar_pc = costo_total_final_pc * factor_ganancia_pc
+    ganancia_pc = precio_cotizar_pc - costo_total_final_pc
+    ganancia_neta_pc = precio_cotizar_pc - costo_total_final_pc
 
     st.markdown(
         f"**Resumen presupuesto:** Costo interno {_format_money(costo_interno_pc)} | "
+        f"Base final (interno + financiamiento) {_format_money(costo_total_final_pc)} | "
         f"Precio sugerido participación {_format_money(precio_cotizar_pc)} | "
         f"Ganancia {_format_money(ganancia_pc)} | "
         f"Costo financiamiento {_format_money(costo_financiamiento_pc)} | "
@@ -2440,20 +2444,23 @@ if active_tab == "Cotización - Panamá Compra":
     with col_c:
         paga_itbms = st.checkbox("Aplica ITBMS (7%)", key="pc_cot_itbms")
 
-    use_auto_price = st.checkbox(
-        "Usar precio de participación sugerido por presupuesto",
-        key="pc_cot_precio_auto",
+    manual_price_mode = st.toggle(
+        "Precio de participación manual",
+        key="pc_cot_precio_manual",
+        help="Si está apagado, se usa automáticamente el precio sugerido por presupuesto.",
     )
-    if use_auto_price:
+    if not manual_price_mode:
         st.session_state["pc_cot_precio"] = round(float(precio_cotizar_pc), 2)
     precio_part = st.number_input(
-        "Precio de participación",
+        "Precio de participación manual",
         min_value=0.0,
         step=10.0,
         format="%0.2f",
         key="pc_cot_precio",
-        disabled=bool(use_auto_price),
+        disabled=not bool(manual_price_mode),
     )
+    if not manual_price_mode:
+        st.caption(f"Precio aplicado (presupuesto): {_format_money(precio_cotizar_pc)}")
 
     if st.button("Generar cotización (Panamá Compra)"):
         if not enlace_pc.strip():
@@ -2532,8 +2539,9 @@ if active_tab == "Cotización - Panamá Compra":
                 )
             except (TypeError, ValueError):
                 precio_participacion_payload = float(st.session_state.get("pc_cot_precio", 0.0) or 0.0)
-            ganancia_participacion = precio_participacion_payload - costo_interno_pc
-            ganancia_neta_participacion = ganancia_participacion - costo_financiamiento_pc
+            costo_total_final_participacion = costo_interno_pc + costo_financiamiento_pc
+            ganancia_participacion = precio_participacion_payload - costo_total_final_participacion
+            ganancia_neta_participacion = precio_participacion_payload - costo_total_final_participacion
 
             processed_req = st.session_state.get("pc_cot_processed_request_id")
             processed_file = st.session_state.get("pc_cot_processed_file_id")
@@ -2905,8 +2913,6 @@ if active_tab == "Cotizacion - Estandar":
             key="cot_presupuesto_fin_interes",
         )
 
-    precio_cotizar = costo_interno * factor_ganancia
-    ganancia = precio_cotizar - costo_interno
     tiempo_recuperacion = tiempo_inversion + tiempo_intermedio + tiempo_cobro
     tiempo_recuperacion_meses = tiempo_recuperacion / 30 if tiempo_recuperacion else 0.0
     costo_financiamiento = 0.0
@@ -2923,10 +2929,14 @@ if active_tab == "Cotizacion - Estandar":
                 + (inversion_etapa_intermedia * tasa_mensual * meses_etapa_intermedia)
                 + (inversion_etapa_2 * tasa_mensual * meses_etapa_2)
             )
-    ganancia_neta = ganancia - costo_financiamiento
+    costo_total_final = costo_interno + costo_financiamiento
+    precio_cotizar = costo_total_final * factor_ganancia
+    ganancia = precio_cotizar - costo_total_final
+    ganancia_neta = precio_cotizar - costo_total_final
 
     st.markdown(
         f"**Resumen presupuesto:** Costo interno {_format_money(costo_interno)} | "
+        f"Base final (interno + financiamiento) {_format_money(costo_total_final)} | "
         f"Precio a cotizar {_format_money(precio_cotizar)} | "
         f"Ganancia {_format_money(ganancia)} | "
         f"Inversion etapa 1 {_format_money(inversion_etapa_1)} | "
