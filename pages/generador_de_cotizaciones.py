@@ -506,6 +506,30 @@ def _fetch_manual_request(client, request_id: str) -> dict | None:
 def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool]:
     wb = load_workbook(BytesIO(excel_bytes))
     ws = wb["cotizacion"]
+
+    def _to_float_safe(value) -> float:
+        if value in (None, ""):
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return 0.0
+        text = (
+            text.replace("B/.", "")
+            .replace("B/", "")
+            .replace("$", "")
+            .replace(",", "")
+            .strip()
+        )
+        text = re.sub(r"[^0-9.\-]", "", text)
+        if text in {"", "-", ".", "-."}:
+            return 0.0
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return 0.0
+
     items = []
     row = 23
     while True:
@@ -514,22 +538,40 @@ def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool]:
         cantidad = ws[f"E{row}"].value
         precio_unit = ws[f"F{row}"].value
         precio_total = ws[f"G{row}"].value
+
+        marker = str(precio_unit or "").strip().lower()
+        is_summary_row = (
+            not any([desc, unidad, cantidad])
+            and any(token in marker for token in ("subtotal", "impuesto", "total"))
+        )
+        if is_summary_row:
+            break
+
         if not any([desc, unidad, cantidad, precio_unit, precio_total]):
             break
+
+        cantidad_num = _to_float_safe(cantidad)
+        precio_unit_num = _to_float_safe(precio_unit)
+        precio_total_num = _to_float_safe(precio_total)
+        if not str(desc or "").strip() and cantidad_num <= 0 and precio_unit_num <= 0 and precio_total_num <= 0:
+            row += 1
+            continue
+
         items.append(
             {
                 "descripcion": desc or "",
                 "unidad": unidad or "",
-                "cantidad": float(cantidad) if cantidad not in (None, "") else 0.0,
-                "precio_unitario": float(precio_unit) if precio_unit not in (None, "") else 0.0,
-                "precio_total": float(precio_total) if precio_total not in (None, "") else 0.0,
+                "cantidad": cantidad_num,
+                "precio_unitario": precio_unit_num,
+                "precio_total": precio_total_num,
             }
         )
         row += 1
     titulo = str(ws["C19"].value or "").strip()
     itbms_row = 23 + len(items) + 1
     itbms_val = ws[f"G{itbms_row}"].value
-    aplica_itbms = float(itbms_val or 0) > 0
+    aplica_itbms = _to_float_safe(itbms_val) > 0
+    wb.close()
     return pd.DataFrame(items), titulo, aplica_itbms
 
 
