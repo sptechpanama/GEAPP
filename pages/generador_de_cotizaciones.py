@@ -155,20 +155,54 @@ def _call_openai_chat(
     return str(content).strip()
 
 
-def _enforce_short_description_words(value: str) -> str:
+def _enforce_short_description_words(value: str, *, fallback_items: Optional[list[str]] = None) -> str:
     text = re.sub(r"[\r\n\t]+", " ", str(value or "").strip())
     text = re.sub(r"[`\"']", "", text)
     text = re.sub(r"\s+", " ", text).strip(" .,:;|-")
     words = [w for w in text.split(" ") if w]
+    banned_words = {
+        "cotizacion",
+        "cotizaciones",
+        "cliente",
+        "empresa",
+        "engineering",
+        "medical",
+        "rs",
+        "rir",
+        "panama",
+        "compra",
+        "estandar",
+        "pc",
+    }
+    words = [w for w in words if w.lower() not in banned_words]
     if len(words) > 8:
         words = words[:8]
-    fillers = ["cotizacion", "comercial", "con", "entrega", "programada", "en", "panama"]
-    idx = 0
-    while len(words) < 6 and idx < len(fillers):
-        words.append(fillers[idx])
-        idx += 1
+
+    if len(words) < 3 and fallback_items:
+        extra_tokens: list[str] = []
+        for item in fallback_items:
+            item_text = re.sub(r"[\r\n\t]+", " ", str(item or "").strip())
+            item_text = re.sub(r"[`\"']", "", item_text)
+            item_text = re.sub(r"\s+", " ", item_text).strip(" .,:;|-")
+            for token in item_text.split(" "):
+                token = token.strip()
+                if not token:
+                    continue
+                if token.lower() in banned_words:
+                    continue
+                extra_tokens.append(token)
+                if len(extra_tokens) >= 8:
+                    break
+            if len(extra_tokens) >= 8:
+                break
+        for token in extra_tokens:
+            if len(words) >= 8:
+                break
+            if token not in words:
+                words.append(token)
+
     if not words:
-        return "Cotizacion comercial con entrega programada en panama"
+        return "insumos generales de laboratorio"
     return " ".join(words)
 
 
@@ -179,17 +213,19 @@ def _fallback_quote_description(
     detalles: str,
     items: list[str],
 ) -> str:
-    cliente_short = " ".join(str(cliente or "cliente").split()[:3]).strip() or "cliente"
+    cliente_short = " ".join(str(cliente or "").split()[:3]).strip()
     if items:
-        item_short = " ".join(str(items[0]).split()[:4]).strip()
-        candidate = f"Cotizacion de {item_short} para {cliente_short}"
+        item_short = " ".join(str(items[0]).split()[:8]).strip()
+        candidate = item_short
     elif detalles:
-        detalle_short = " ".join(str(detalles).split()[:4]).strip()
-        candidate = f"Cotizacion de {detalle_short} para {cliente_short}"
+        detalle_short = " ".join(str(detalles).split()[:8]).strip()
+        candidate = detalle_short
     else:
-        tipo_short = str(tipo_cotizacion or "general").strip().lower() or "general"
-        candidate = f"Cotizacion {tipo_short} para {cliente_short}"
-    return _enforce_short_description_words(candidate)
+        tipo_short = str(tipo_cotizacion or "").strip().lower()
+        candidate = tipo_short if tipo_short else "insumos generales de laboratorio"
+    if cliente_short and not items and not detalles:
+        candidate = f"{candidate} {cliente_short}".strip()
+    return _enforce_short_description_words(candidate, fallback_items=items)
 
 
 def _generate_quote_short_description(
@@ -213,15 +249,15 @@ def _generate_quote_short_description(
         model = _openai_model_name()
         items_text = ", ".join([str(x).strip() for x in items if str(x).strip()][:5])
         prompt = (
-            "Genera una descripcion corta para identificar una cotizacion.\n"
+            "Genera una descripcion corta del OBJETO DEL ACTO/COMPRA.\n"
             "Reglas obligatorias:\n"
-            "- Solo 6 a 8 palabras.\n"
+            "- Solo 3 a 8 palabras.\n"
             "- Español.\n"
             "- Sin comillas ni explicaciones.\n"
             "- Sin punto final.\n\n"
-            f"Tipo: {tipo_cotizacion or '-'}\n"
-            f"Empresa: {empresa or '-'}\n"
-            f"Cliente: {cliente or '-'}\n"
+            "- Debe describir producto/insumo/equipo del acto.\n"
+            "- No mencionar cliente, empresa ni tipo de cotización.\n"
+            "- No usar palabras: cotizacion, cliente, empresa, rs, rir, panama, compra, estandar.\n\n"
             f"Items: {items_text or '-'}\n"
             f"Detalles: {(detalles or '-')[:220]}"
         )
@@ -231,14 +267,14 @@ def _generate_quote_short_description(
             messages=[
                 {
                     "role": "system",
-                    "content": "Responde solo con una frase corta para identificar una cotizacion.",
+                    "content": "Responde solo con una frase corta sobre el objeto del acto.",
                 },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
             max_tokens=40,
         )
-        return _enforce_short_description_words(raw)
+        return _enforce_short_description_words(raw, fallback_items=items)
     except Exception:
         return fallback
 
