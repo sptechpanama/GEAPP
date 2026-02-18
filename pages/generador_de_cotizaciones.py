@@ -2484,7 +2484,7 @@ if active_tab == "Cotización - Panamá Compra":
                 st.session_state.pop("pc_cot_processed_file_id", None)
                 st.session_state.pop("pc_cot_final_excel_bytes", None)
                 st.session_state.pop("pc_cot_final_excel_name", None)
-                st.success("Solicitud enviada. El proceso de scraping iniciará enseguida.")
+                st.success("Solicitud enviada. El scraper iniciará el proceso.")
             except Exception as exc:
                 st.error(f"No se pudo enviar la solicitud: {exc}")
 
