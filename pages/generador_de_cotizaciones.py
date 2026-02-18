@@ -8,6 +8,7 @@ import os
 import re
 import math
 import time
+import unicodedata
 from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -503,7 +504,7 @@ def _fetch_manual_request(client, request_id: str) -> dict | None:
     return None
 
 
-def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool]:
+def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool, dict[str, Any]]:
     wb = load_workbook(BytesIO(excel_bytes))
     ws = wb["cotizacion"]
 
@@ -571,8 +572,54 @@ def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool]:
     itbms_row = 23 + len(items) + 1
     itbms_val = ws[f"G{itbms_row}"].value
     aplica_itbms = _to_float_safe(itbms_val) > 0
+    entidad = str(ws["B13"].value or "").strip()
+    fecha = str(ws["G13"].value or "").strip()
+    numero_acto = str(ws["E18"].value or "").strip()
+    ruc_dv = str(ws["B14"].value or "").strip()
+
+    def _norm_label(value: str) -> str:
+        raw = str(value or "").strip().lower()
+        normalized = unicodedata.normalize("NFKD", raw)
+        return normalized.encode("ascii", "ignore").decode("ascii")
+
+    condiciones_map: dict[str, str] = {}
+    for r in range(26, 140):
+        text = str(ws[f"B{r}"].value or "").strip()
+        if not text or ":" not in text:
+            continue
+        key, value = text.split(":", 1)
+        key_norm = _norm_label(key)
+        val = str(value or "").strip()
+        if "forma de pago" in key_norm:
+            condiciones_map["forma_pago"] = val
+        elif "lugar de entrega" in key_norm:
+            condiciones_map["lugar_entrega"] = val
+        elif "tiempo de entrega" in key_norm:
+            condiciones_map["tiempo_entrega"] = val
+        elif "validez" in key_norm:
+            condiciones_map["vigencia"] = val
+
+    ruc = ""
+    dv = ""
+    m = re.search(r"RUC:\s*([^\s]+)\s+DV:\s*([^\s]+)", ruc_dv, flags=re.IGNORECASE)
+    if m:
+        ruc = str(m.group(1) or "").strip()
+        dv = str(m.group(2) or "").strip()
+
+    meta = {
+        "entidad": entidad,
+        "fecha": fecha,
+        "numero_acto": numero_acto,
+        "ruc": ruc,
+        "dv": dv,
+        "ruc_dv": ruc_dv,
+        "forma_pago": condiciones_map.get("forma_pago", ""),
+        "lugar_entrega": condiciones_map.get("lugar_entrega", ""),
+        "tiempo_entrega": condiciones_map.get("tiempo_entrega", ""),
+        "vigencia": condiciones_map.get("vigencia", ""),
+    }
     wb.close()
-    return pd.DataFrame(items), titulo, aplica_itbms
+    return pd.DataFrame(items), titulo, aplica_itbms, meta
 
 
 def _apply_excel_edits(
@@ -721,10 +768,29 @@ def _parse_manual_payload(raw_payload: str) -> dict[str, Any]:
     return {}
 
 
+def _parse_panama_fecha(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return date.today()
+    text = text[:10]
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return date.today()
+
+
 def _build_standard_items_from_panama(raw_items_df: pd.DataFrame) -> pd.DataFrame:
     src = raw_items_df.copy()
     if "producto_servicio" not in src.columns:
         src["producto_servicio"] = src.get("descripcion", "")
+    if "unidad" not in src.columns:
+        src["unidad"] = src.get("unidad", "UND")
     if "cantidad" not in src.columns:
         src["cantidad"] = 0.0
     if "precio_unitario" not in src.columns:
@@ -732,8 +798,9 @@ def _build_standard_items_from_panama(raw_items_df: pd.DataFrame) -> pd.DataFram
     if "precio_total" not in src.columns:
         src["precio_total"] = 0.0
 
-    out = src[["producto_servicio", "cantidad", "precio_unitario", "precio_total"]].copy()
+    out = src[["producto_servicio", "unidad", "cantidad", "precio_unitario", "precio_total"]].copy()
     out["producto_servicio"] = out["producto_servicio"].fillna("").astype(str).str.strip()
+    out["unidad"] = out["unidad"].fillna("UND").astype(str).str.strip().replace("", "UND")
     out["cantidad"] = pd.to_numeric(out["cantidad"], errors="coerce").fillna(0.0)
     out["precio_unitario"] = pd.to_numeric(out["precio_unitario"], errors="coerce").fillna(0.0)
     out["precio_total"] = pd.to_numeric(out["precio_total"], errors="coerce").fillna(0.0)
@@ -748,7 +815,7 @@ def _build_standard_items_from_panama(raw_items_df: pd.DataFrame) -> pd.DataFram
         "Ítem Panamá Compra"
     )
 
-    out = out[["producto_servicio", "cantidad", "precio_unitario"]]
+    out = out[["producto_servicio", "unidad", "cantidad", "precio_unitario"]]
     out = out[
         (out["producto_servicio"].str.len() > 0)
         | (out["cantidad"] > 0)
@@ -943,6 +1010,8 @@ def _build_standard_quote_excel(
     impuesto_pct: float,
     condiciones: Dict[str, str],
     detalles_extra: str,
+    numero_excel: Optional[str] = None,
+    titulo_override: Optional[str] = None,
 ) -> bytes:
     if empresa == "RIR Medical":
         template_path = TEMPLATE_RIR_STANDARD
@@ -961,6 +1030,9 @@ def _build_standard_quote_excel(
     if "producto_servicio" not in items.columns:
         items["producto_servicio"] = ""
     items["producto_servicio"] = items["producto_servicio"].fillna("").astype(str).str.strip()
+    if "unidad" not in items.columns:
+        items["unidad"] = "UND"
+    items["unidad"] = items["unidad"].fillna("UND").astype(str).str.strip().replace("", "UND")
     items["cantidad"] = pd.to_numeric(items.get("cantidad"), errors="coerce").fillna(0.0)
     items["precio_unitario"] = pd.to_numeric(items.get("precio_unitario"), errors="coerce").fillna(0.0)
     items = items[
@@ -996,7 +1068,7 @@ def _build_standard_quote_excel(
 
         ws[f"B{excel_row}"] = idx + 1
         ws[f"C{excel_row}"] = str(row.get("producto_servicio", "") or "")
-        ws[f"D{excel_row}"] = "UND"
+        ws[f"D{excel_row}"] = str(row.get("unidad", "UND") or "UND")
         ws[f"E{excel_row}"] = cantidad
         ws[f"F{excel_row}"] = precio_unitario
         ws[f"G{excel_row}"] = total_item
@@ -1034,13 +1106,16 @@ def _build_standard_quote_excel(
         ws[f"G{row_tot}"].border = borde_sencillo
         ws[f"G{row_tot}"].number_format = "$#,##0.00"
 
-    title = _summarize_quote_title(items, detalles_extra)
+    title = str(titulo_override or "").strip() or _summarize_quote_title(items, detalles_extra)
+    numero_visible = str(numero_excel or numero_cot or "").strip() or str(numero_cot)
     ws["B13"] = cliente or "-"
     ws["G13"] = fecha_cot.strftime("%Y-%m-%d")
     ws["B14"] = f"RUC: {cliente_ruc or '-'}   DV: {cliente_dv or '-'}"
-    ws["E18"] = numero_cot
+    ws["E18"] = numero_visible
     ws["C19"] = title
     ws["B21"] = title
+    if numero_visible != str(numero_cot or "").strip():
+        ws["B12"] = f"Cotización interna: {numero_cot}"
 
     forma_pago = condiciones.get("Condicion de pago") or "Credito"
     entrega = condiciones.get("Entrega") or "15 días hábiles"
@@ -1206,6 +1281,7 @@ def _save_panama_quote_to_history(
     empresa_short: str,
     enlace_pc: str,
     titulo_excel: str,
+    panama_meta: dict[str, Any],
     items_panama_df: pd.DataFrame,
     paga_itbms: bool,
     presupuesto_df: pd.DataFrame,
@@ -1256,23 +1332,32 @@ def _save_panama_quote_to_history(
         raise ValueError("La cotización de Panamá Compra no trajo ítems válidos.")
 
     impuesto_pct = 7.0 if paga_itbms else 0.0
-    fecha_cot = date.today()
-    cliente_nombre = (str(titulo_excel or "").strip() or "Cliente Panamá Compra")[:120]
+    numero_acto = str(panama_meta.get("numero_acto") or "").strip()
+    titulo_resumido = str(titulo_excel or panama_meta.get("titulo") or "").strip()
+    fecha_cot = _parse_panama_fecha(panama_meta.get("fecha"))
+    cliente_nombre = (
+        str(panama_meta.get("entidad") or "").strip()
+        or (str(titulo_excel or "").strip() or "Cliente Panamá Compra")
+    )[:120]
     direccion = "Panamá"
-    cliente_ruc = ""
-    cliente_dv = ""
+    cliente_ruc = str(panama_meta.get("ruc") or "").strip()
+    cliente_dv = str(panama_meta.get("dv") or "").strip()
 
     condiciones = {
-        "Vigencia": "15 días",
-        "Condicion de pago": "Credito",
-        "Entrega": "Según pliego",
-        "Lugar de entrega": "Según Panamá Compra",
+        "Vigencia": str(panama_meta.get("vigencia") or "120 días"),
+        "Condicion de pago": str(panama_meta.get("forma_pago") or "Credito"),
+        "Entrega": str(panama_meta.get("tiempo_entrega") or "Según pliego"),
+        "Lugar de entrega": str(panama_meta.get("lugar_entrega") or "Según Panamá Compra"),
     }
-    detalles_extra = (
-        f"Generada desde Panamá Compra.\n"
-        f"Enlace: {enlace_pc.strip()}\n"
-        f"Resumen: {str(titulo_excel or '').strip()}"
-    ).strip()
+    detalles_lines = [
+        "Generada desde Panamá Compra.",
+        f"Número de proceso: {numero_acto or '-'}",
+        f"Número interno: {numero_cot}",
+        f"Enlace: {enlace_pc.strip()}",
+    ]
+    if titulo_resumido:
+        detalles_lines.append(f"Resumen: {titulo_resumido}")
+    detalles_extra = "\n".join(detalles_lines).strip()
 
     excel_bytes = _build_standard_quote_excel(
         empresa=empresa,
@@ -1286,6 +1371,8 @@ def _save_panama_quote_to_history(
         impuesto_pct=impuesto_pct,
         condiciones=condiciones,
         detalles_extra=detalles_extra,
+        numero_excel=numero_acto or numero_cot,
+        titulo_override=titulo_resumido or None,
     )
 
     subtotal = float((items_df["cantidad"] * items_df["precio_unitario"]).sum())
@@ -1294,7 +1381,7 @@ def _save_panama_quote_to_history(
     tiempo_recuperacion = tiempo_inversion + tiempo_intermedio + tiempo_cobro
 
     items_json = json.dumps(
-        items_df[["producto_servicio", "cantidad", "precio_unitario"]].to_dict(orient="records"),
+        items_df[["producto_servicio", "unidad", "cantidad", "precio_unitario"]].to_dict(orient="records"),
         ensure_ascii=False,
     )
     presupuesto_items_json = json.dumps(
@@ -2627,7 +2714,7 @@ if active_tab == "Cotización - Panamá Compra":
                 try:
                     drive = _get_drive_client(creds_manual)
                     source_bytes = _download_drive_file(drive, file_id)
-                    items_panama_df, titulo_excel, _ = _extract_excel_items(source_bytes)
+                    items_panama_df, titulo_excel, _, panama_meta = _extract_excel_items(source_bytes)
                     save_result = _save_panama_quote_to_history(
                         client=client_manual,
                         creds=creds_manual,
@@ -2637,6 +2724,7 @@ if active_tab == "Cotización - Panamá Compra":
                         empresa_short=empresa_from_payload,
                         enlace_pc=enlace_from_payload,
                         titulo_excel=titulo_excel,
+                        panama_meta=panama_meta,
                         items_panama_df=items_panama_df,
                         paga_itbms=paga_itbms_payload,
                         presupuesto_df=presupuesto_df_pc,
@@ -2670,11 +2758,11 @@ if active_tab == "Cotización - Panamá Compra":
             if "pc_cot_auto_refresh" not in st.session_state:
                 st.session_state["pc_cot_auto_refresh"] = status in {"pending", "enqueued", "running"}
             auto_refresh = st.checkbox(
-                "Actualizar automáticamente (cada 10s)",
+                "Actualizar automáticamente (cada 5s)",
                 key="pc_cot_auto_refresh",
             )
             if auto_refresh and status in {"pending", "enqueued", "running"}:
-                time.sleep(10)
+                time.sleep(5)
                 st.rerun()
 
     if st.session_state.get("pc_cot_final_excel_bytes"):
