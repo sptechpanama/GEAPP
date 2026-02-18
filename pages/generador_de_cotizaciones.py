@@ -2484,7 +2484,7 @@ if active_tab == "Cotización - Panamá Compra":
                 st.session_state.pop("pc_cot_processed_file_id", None)
                 st.session_state.pop("pc_cot_final_excel_bytes", None)
                 st.session_state.pop("pc_cot_final_excel_name", None)
-                st.success("Solicitud enviada. El orquestador iniciará el proceso.")
+                st.success("Solicitud enviada. El proceso de scraping iniciará enseguida.")
             except Exception as exc:
                 st.error(f"No se pudo enviar la solicitud: {exc}")
 
@@ -2510,14 +2510,20 @@ if active_tab == "Cotización - Panamá Compra":
             progress_text = {
                 "pending": "Generando: solicitud recibida",
                 "enqueued": "Generando: en cola de ejecución",
-                "running": "Generando: orquestador ejecutando scraper",
+                "running": "Generando: scraping en ejecución",
                 "done": "Generado: cotización lista",
                 "error": "Error en la generación",
             }.get(status, "Generando...")
             st.progress(progress_value, text=progress_text)
             st.info(f"Estado actual: {status or 'pendiente'}")
             if notes:
-                st.caption(notes)
+                notes_display = (
+                    notes.replace("Orquestador", "Scraping")
+                    .replace("orquestador", "scraping")
+                    .replace("Orchestrator", "Scraping")
+                    .replace("orchestrator", "scraping")
+                )
+                st.caption(notes_display)
             if row.get("result_error"):
                 st.error(row["result_error"])
 
