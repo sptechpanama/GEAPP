@@ -1135,6 +1135,7 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
     items = []
     row = 23
     max_rows = 800
+    subtotal_row = None
     while row < max_rows:
         item = ws[f"B{row}"].value
         desc = ws[f"C{row}"].value
@@ -1142,6 +1143,10 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
         cantidad = ws[f"E{row}"].value
         precio_unitario = ws[f"F{row}"].value
         total = ws[f"G{row}"].value
+        marker = str(precio_unitario or "").strip().lower()
+        if any(token in marker for token in ("subtotal", "impuesto", "total")):
+            subtotal_row = row
+            break
         if not any([item, desc, unidad, cantidad, precio_unitario, total]):
             break
         items.append(
@@ -1156,9 +1161,18 @@ def _extract_standard_excel_preview(excel_bytes: bytes) -> dict:
         )
         row += 1
 
-    subtotal = _to_float(ws[f"G{row}"].value)
-    impuesto = _to_float(ws[f"G{row + 1}"].value)
-    total_doc = _to_float(ws[f"G{row + 2}"].value)
+    if subtotal_row is None:
+        subtotal_row = row
+        # Fallback: buscar explícitamente la fila de Subtotal.
+        for r in range(23, max_rows):
+            marker = str(ws[f"F{r}"].value or "").strip().lower()
+            if "subtotal" in marker:
+                subtotal_row = r
+                break
+
+    subtotal = _to_float(ws[f"G{subtotal_row}"].value)
+    impuesto = _to_float(ws[f"G{subtotal_row + 1}"].value)
+    total_doc = _to_float(ws[f"G{subtotal_row + 2}"].value)
 
     conditions = []
     for r in range(28, 90):
