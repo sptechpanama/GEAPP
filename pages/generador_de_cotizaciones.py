@@ -8,6 +8,7 @@ import os
 import re
 import math
 import time
+import zipfile
 import unicodedata
 from datetime import date, datetime, timezone
 from io import BytesIO
@@ -18,6 +19,7 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from docx import Document
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image
 from openpyxl.styles import Alignment, Border, Side
@@ -371,6 +373,16 @@ COT_PREFIX = {
     "RS Engineering": "RS",
     "RIR Medical": "RIR",
 }
+LP_DOC_TAB_NAME = "LP_ Doc_Generator"
+LP_DOC_TIPO = "LP Doc Generator"
+LP_DRIVE_FILENAME_BY_EMPRESA = {
+    "RS Engineering": "LP_Doc_Generator_RS.xlsx",
+    "RIR Medical": "LP_Doc_Generator_RIR.xlsx",
+}
+LP_BUDGET_FILENAME_BY_EMPRESA = {
+    "RS Engineering": "LP_Doc_Generator_RS_Presupuesto.html",
+    "RIR Medical": "LP_Doc_Generator_RIR_Presupuesto.html",
+}
 DEFAULT_COT_DRIVE_FOLDER_ID = "0AOB-QlptrUHYUk9PVA"
 CLIENT_COLUMNS = ["RowID", "ClienteID", "ClienteNombre", "Empresa"]
 CLIENT_EMPRESA_MAP = {
@@ -419,6 +431,50 @@ TEMPLATE_RIR_STANDARD = _resolve_base_asset("plantilla_cotizacion_rir.xlsx")
 HEADER_RS_STANDARD = _resolve_base_asset("encabezado.png")
 HEADER_RIR_STANDARD = _resolve_base_asset("encabezado_rir.png")
 SIGNATURE_STANDARD = _resolve_base_asset("firma.png")
+DOC_GEN_LOCAL_DIR = Path(r"C:\Users\rodri\doc_gen")
+DOC_GEN_REPO_DIR = GEAPP_ROOT / "assets" / "doc_gen_base"
+LP_DOC_FOLDER_NAME = "LP_Doc_Generator"
+MESES_ES = {
+    1: "enero",
+    2: "febrero",
+    3: "marzo",
+    4: "abril",
+    5: "mayo",
+    6: "junio",
+    7: "julio",
+    8: "agosto",
+    9: "septiembre",
+    10: "octubre",
+    11: "noviembre",
+    12: "diciembre",
+}
+
+LP_DOC_SPECS = {
+    "RS Engineering": [
+        ("template_medidas_de_retorsion.docx", "medidas_de_retorsion.docx"),
+        ("template_medidas_de_retorsion_sf.docx", "medidas_de_retorsion_sf.docx"),
+        ("template_no_incapacidad_para_contratar.docx", "no_incapacidad_para_contratar.docx"),
+        ("template_no_incapacidad_para_contratar_sf.docx", "no_incapacidad_para_contratar_sf.docx"),
+        ("template_pacto_de_integridad.docx", "pacto_de_integridad.docx"),
+        ("template_pacto_de_integridad_sf.docx", "pacto_de_integridad_sf.docx"),
+        ("template_desglose_de_precios.docx", "desglose_de_precios.docx"),
+        ("template_nota_adicional.docx", "nota_adicional.docx"),
+        ("template_carta_de_adhesion.docx", "carta_de_adhesion.docx"),
+        ("template_carta_de_adhesion_sf.docx", "carta_de_adhesion_sf.docx"),
+    ],
+    "RIR Medical": [
+        ("template_medidas_de_retorsion_rir.docx", "medidas_de_retorsion.docx"),
+        ("template_medidas_de_retorsion_sf_rir.docx", "medidas_de_retorsion_sf.docx"),
+        ("template_no_incapacidad_para_contratar.docx", "no_incapacidad_para_contratar.docx"),
+        ("template_no_incapacidad_para_contratar_sf.docx", "no_incapacidad_para_contratar_sf.docx"),
+        ("template_pacto_de_integridad_rir.docx", "pacto_de_integridad.docx"),
+        ("template_pacto_de_integridad_sf_rir.docx", "pacto_de_integridad_sf.docx"),
+        ("template_desglose_de_precios_rir.docx", "desglose_de_precios.docx"),
+        ("template_nota_adicional_rir.docx", "nota_adicional.docx"),
+        ("template_carta_de_adhesion_rir.docx", "carta_de_adhesion.docx"),
+        ("template_carta_de_adhesion_sf_rir.docx", "carta_de_adhesion_sf.docx"),
+    ],
+}
 
 
 def _ensure_cotizaciones_sheet(client, sheet_id: str) -> None:
@@ -958,6 +1014,202 @@ def _get_drive_folders(drive) -> tuple[str, Dict[str, str]]:
         "RIR Medical": _find_or_create_folder(drive, "RIR", base_id, drive_id=drive_id),
     }
     return base_id, subfolders
+
+
+def _find_file_in_folder(
+    drive,
+    *,
+    folder_id: str,
+    filename: str,
+    drive_id: Optional[str] = None,
+) -> Optional[str]:
+    name = str(filename or "").replace("'", "\\'")
+    if not folder_id or not name:
+        return None
+    query = (
+        "trashed=false and "
+        f"'{folder_id}' in parents and "
+        f"name='{name}'"
+    )
+    list_kwargs = {
+        "q": query,
+        "fields": "files(id,name,modifiedTime)",
+        "orderBy": "modifiedTime desc",
+        "pageSize": 1,
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
+    }
+    if drive_id:
+        list_kwargs["corpora"] = "drive"
+        list_kwargs["driveId"] = drive_id
+    resp = drive.files().list(**list_kwargs).execute()
+    files = resp.get("files") or []
+    if not files:
+        return None
+    return files[0].get("id")
+
+
+def _resolve_doc_gen_template(file_name: str) -> Path:
+    candidates = [
+        DOC_GEN_REPO_DIR / file_name,
+        DOC_GEN_LOCAL_DIR / file_name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"No se encontró la plantilla de Doc_Generator: {file_name}. "
+        f"Busca en {DOC_GEN_REPO_DIR} o {DOC_GEN_LOCAL_DIR}."
+    )
+
+
+def _replace_text_tokens(text: str, replacements: dict[str, str]) -> str:
+    out = str(text or "")
+    for key, value in replacements.items():
+        out = out.replace(key, str(value or ""))
+    return out
+
+
+def _fill_docx_placeholders(template_path: Path, replacements: dict[str, str]) -> bytes:
+    doc = Document(str(template_path))
+
+    for paragraph in doc.paragraphs:
+        new_text = _replace_text_tokens(paragraph.text, replacements)
+        if new_text != paragraph.text:
+            paragraph.text = new_text
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    new_text = _replace_text_tokens(paragraph.text, replacements)
+                    if new_text != paragraph.text:
+                        paragraph.text = new_text
+
+    out = BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+def _fecha_spanish_tokens(fecha_base: date) -> dict[str, str]:
+    mes = MESES_ES.get(int(fecha_base.month), str(fecha_base.month))
+    return {
+        "[fecha]": f"{fecha_base.day:02d} de {mes} de {fecha_base.year}",
+        "[dia]": f"{fecha_base.day:02d}",
+        "[mes]": mes,
+        "[año]": str(fecha_base.year),
+    }
+
+
+def _extract_numero_acto_from_link(enlace: str) -> str:
+    text = str(enlace or "").strip()
+    if not text:
+        return ""
+    patterns = [
+        r"/(?:solicitud-de-cotizacion|pliego-de-cargos)/([^/?#]+)/",
+        r"/(?:solicitud-de-cotizacion|pliego-de-cargos)/([^/?#]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return str(match.group(1) or "").strip()
+    return ""
+
+
+def _build_lp_doc_replacements(
+    *,
+    fecha_base: date,
+    representante_legal_pacto: str,
+    representante_legal_documentos: str,
+    cedula: str,
+    entidad: str,
+    titulo: str,
+    numero_acto: str,
+    lugar_entrega: str,
+    tiempo_entrega: str,
+) -> dict[str, str]:
+    replacements = _fecha_spanish_tokens(fecha_base)
+    replacements.update(
+        {
+            "[Representante_legal_de_la_Entidad_Licitante]": str(
+                representante_legal_documentos or ""
+            ).strip(),
+            "[entidad]": str(entidad or "").strip(),
+            "[titulo]": str(titulo or "").strip(),
+            "[numero_de_acto]": str(numero_acto or "").strip(),
+            "[cedula]": str(cedula or "").strip(),
+            "[lugar]": str(lugar_entrega or "").strip(),
+            "[entrega]": str(tiempo_entrega or "").strip(),
+        }
+    )
+    # En pacto de integridad Doc_Gen usa el representante legal "pacto".
+    if str(representante_legal_pacto or "").strip():
+        replacements["[Representante_legal_de_la_Entidad_Licitante]"] = str(
+            representante_legal_pacto
+        ).strip()
+    return replacements
+
+
+def _build_lp_documents(
+    *,
+    empresa_full: str,
+    fecha_base: date,
+    representante_legal_pacto: str,
+    representante_legal_documentos: str,
+    cedula: str,
+    entidad: str,
+    titulo: str,
+    numero_acto: str,
+    lugar_entrega: str,
+    tiempo_entrega: str,
+) -> list[dict[str, Any]]:
+    specs = LP_DOC_SPECS.get(empresa_full) or LP_DOC_SPECS["RS Engineering"]
+    docs_out: list[dict[str, Any]] = []
+    for template_name, output_name in specs:
+        replacements = _build_lp_doc_replacements(
+            fecha_base=fecha_base,
+            representante_legal_pacto=representante_legal_pacto,
+            representante_legal_documentos=representante_legal_documentos,
+            cedula=cedula,
+            entidad=entidad,
+            titulo=titulo,
+            numero_acto=numero_acto,
+            lugar_entrega=lugar_entrega,
+            tiempo_entrega=tiempo_entrega,
+        )
+        # Ajuste específico de Doc_Gen:
+        # medidas/no-incapacidad/desglose/nota/carta usan "representante_documentos".
+        if any(
+            token in output_name
+            for token in (
+                "medidas_de_retorsion",
+                "no_incapacidad_para_contratar",
+                "desglose_de_precios",
+                "nota_adicional",
+                "carta_de_adhesion",
+            )
+        ):
+            replacements["[Representante_legal_de_la_Entidad_Licitante]"] = str(
+                representante_legal_documentos or ""
+            ).strip()
+        template_path = _resolve_doc_gen_template(template_name)
+        file_bytes = _fill_docx_placeholders(template_path, replacements)
+        docs_out.append(
+            {
+                "template": template_name,
+                "file_name": output_name,
+                "bytes": file_bytes,
+            }
+        )
+    return docs_out
+
+
+def _get_lp_doc_folder(drive, empresa_full: str) -> str:
+    _, company_folders = _get_drive_folders(drive)
+    company_folder = company_folders.get(empresa_full)
+    if not company_folder:
+        raise RuntimeError(f"No se encontró carpeta de Drive para {empresa_full}.")
+    return _find_or_create_folder(drive, LP_DOC_FOLDER_NAME, company_folder)
 
 
 def _upload_quote_html(
@@ -2510,7 +2762,12 @@ def _apply_duplicate_state(row: dict, cotizaciones_df: pd.DataFrame) -> None:
     st.session_state["cot_numero_pref"] = prefijo
 
 
-TAB_OPTIONS = ["Cotización - Panamá Compra", "Cotizacion - Estandar", "Historial de cotizaciones"]
+TAB_OPTIONS = [
+    "Cotización - Panamá Compra",
+    "Cotizacion - Estandar",
+    LP_DOC_TAB_NAME,
+    "Historial de cotizaciones",
+]
 pending_tab = st.session_state.pop(PENDING_TAB_KEY, None)
 if pending_tab in TAB_OPTIONS:
     st.session_state["cotizaciones_tab"] = pending_tab
@@ -2918,6 +3175,191 @@ if active_tab == "Cotización - Panamá Compra":
                 st.session_state.get("pc_cot_final_excel_name") or "cotizacion_panama_estandar.xlsx"
             ),
         )
+
+if active_tab == LP_DOC_TAB_NAME:
+    st.subheader("LP_ Doc_Generator")
+    st.caption("Basado en plantillas de doc_gen. Al generar, en Drive se reemplazan archivos previos por nombre.")
+
+    if "lp_doc_fecha" not in st.session_state:
+        st.session_state["lp_doc_fecha"] = date.today()
+    if "lp_doc_empresa" not in st.session_state:
+        st.session_state["lp_doc_empresa"] = "RS"
+    if "lp_doc_version" not in st.session_state:
+        st.session_state["lp_doc_version"] = "3"
+    if "lp_doc_enlace" not in st.session_state:
+        st.session_state["lp_doc_enlace"] = ""
+    if "lp_doc_numero_acto" not in st.session_state:
+        st.session_state["lp_doc_numero_acto"] = ""
+    if "lp_doc_docs" not in st.session_state:
+        st.session_state["lp_doc_docs"] = []
+    if "lp_doc_links" not in st.session_state:
+        st.session_state["lp_doc_links"] = {}
+    if "lp_doc_zip_name" not in st.session_state:
+        st.session_state["lp_doc_zip_name"] = ""
+    if "lp_doc_zip_bytes" not in st.session_state:
+        st.session_state["lp_doc_zip_bytes"] = b""
+
+    col_lp1, col_lp2, col_lp3 = st.columns([2, 1, 1])
+    with col_lp1:
+        enlace_lp = st.text_input("Enlace Panamá Compra", key="lp_doc_enlace")
+    with col_lp2:
+        st.selectbox("Versión enlace", ["2", "3"], key="lp_doc_version")
+    with col_lp3:
+        empresa_lp = st.selectbox("Empresa", ["RS", "RIR"], key="lp_doc_empresa")
+
+    if enlace_lp and not st.session_state.get("lp_doc_numero_acto"):
+        auto_num = _extract_numero_acto_from_link(enlace_lp)
+        if auto_num:
+            st.session_state["lp_doc_numero_acto"] = auto_num
+
+    col_lp4, col_lp5 = st.columns([1, 1])
+    with col_lp4:
+        st.text_input(
+            "Representante legal (Pacto)",
+            key="lp_doc_representante_pacto",
+            placeholder="Nombre para Pacto de integridad",
+        )
+        st.text_input(
+            "Representante legal (Documentos)",
+            key="lp_doc_representante_docs",
+            placeholder="Nombre para resto de documentos",
+        )
+    with col_lp5:
+        st.text_input("Cédula representante", key="lp_doc_cedula", placeholder="8-888-888")
+        st.date_input("Fecha del documento", key="lp_doc_fecha")
+
+    st.markdown("### Datos del acto")
+    col_lp6, col_lp7 = st.columns([1, 1])
+    with col_lp6:
+        st.text_input("Entidad", key="lp_doc_entidad")
+        st.text_input("Número de acto", key="lp_doc_numero_acto")
+        st.text_input("Lugar de entrega", key="lp_doc_lugar")
+    with col_lp7:
+        st.text_input("Título del acto", key="lp_doc_titulo")
+        st.text_input("Tiempo de entrega", key="lp_doc_tiempo")
+
+    if st.button("Generar documentos LP"):
+        representante_pacto = str(st.session_state.get("lp_doc_representante_pacto") or "").strip()
+        representante_docs = str(st.session_state.get("lp_doc_representante_docs") or "").strip()
+        cedula_lp = str(st.session_state.get("lp_doc_cedula") or "").strip()
+        entidad_lp = str(st.session_state.get("lp_doc_entidad") or "").strip()
+        titulo_lp = str(st.session_state.get("lp_doc_titulo") or "").strip()
+        numero_lp = str(st.session_state.get("lp_doc_numero_acto") or "").strip()
+        lugar_lp = str(st.session_state.get("lp_doc_lugar") or "").strip()
+        tiempo_lp = str(st.session_state.get("lp_doc_tiempo") or "").strip()
+        if not numero_lp:
+            numero_lp = _extract_numero_acto_from_link(st.session_state.get("lp_doc_enlace") or "")
+            st.session_state["lp_doc_numero_acto"] = numero_lp
+
+        missing = []
+        if not representante_pacto:
+            missing.append("Representante legal (Pacto)")
+        if not representante_docs:
+            missing.append("Representante legal (Documentos)")
+        if not cedula_lp:
+            missing.append("Cédula representante")
+        if not entidad_lp:
+            missing.append("Entidad")
+        if not titulo_lp:
+            missing.append("Título del acto")
+        if not numero_lp:
+            missing.append("Número de acto")
+        if not lugar_lp:
+            missing.append("Lugar de entrega")
+        if not tiempo_lp:
+            missing.append("Tiempo de entrega")
+
+        if missing:
+            st.warning("Completa estos campos: " + ", ".join(missing))
+        else:
+            try:
+                empresa_full_lp = _company_full_from_short(st.session_state.get("lp_doc_empresa") or "RS")
+                docs_generated = _build_lp_documents(
+                    empresa_full=empresa_full_lp,
+                    fecha_base=st.session_state.get("lp_doc_fecha") or date.today(),
+                    representante_legal_pacto=representante_pacto,
+                    representante_legal_documentos=representante_docs,
+                    cedula=cedula_lp,
+                    entidad=entidad_lp,
+                    titulo=titulo_lp,
+                    numero_acto=numero_lp,
+                    lugar_entrega=lugar_lp,
+                    tiempo_entrega=tiempo_lp,
+                )
+
+                zip_buffer = BytesIO()
+                with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for doc_info in docs_generated:
+                        zf.writestr(doc_info["file_name"], doc_info["bytes"])
+
+                st.session_state["lp_doc_docs"] = docs_generated
+                st.session_state["lp_doc_zip_name"] = (
+                    f"LP_Doc_Generator_{(st.session_state.get('lp_doc_empresa') or 'RS').upper()}_{numero_lp}.zip"
+                )
+                st.session_state["lp_doc_zip_bytes"] = zip_buffer.getvalue()
+
+                links_map: dict[str, str] = {}
+                try:
+                    if creds is None:
+                        client, creds = get_client()
+                    drive = _get_drive_client(creds)
+                    lp_folder_id = _get_lp_doc_folder(drive, empresa_full_lp)
+                    for doc_info in docs_generated:
+                        file_name = str(doc_info["file_name"])
+                        existing_id = _find_file_in_folder(
+                            drive,
+                            folder_id=lp_folder_id,
+                            filename=file_name,
+                        )
+                        upload = _upload_drive_binary(
+                            drive,
+                            lp_folder_id,
+                            file_name,
+                            doc_info["bytes"],
+                            _guess_mime_from_filename(file_name),
+                            existing_file_id=existing_id or None,
+                        )
+                        file_id = upload.get("id")
+                        if file_id:
+                            links_map[file_name] = f"https://drive.google.com/file/d/{file_id}/view"
+                except Exception as drive_exc:
+                    st.warning(f"Documentos generados localmente. No se pudieron sincronizar en Drive: {drive_exc}")
+
+                st.session_state["lp_doc_links"] = links_map
+                st.success("Documentos LP generados correctamente.")
+            except Exception as exc:
+                st.error(f"No se pudieron generar los documentos LP: {exc}")
+
+    docs_generated = st.session_state.get("lp_doc_docs") or []
+    if docs_generated:
+        st.markdown("### Documentos generados")
+        st.download_button(
+            "Descargar paquete ZIP",
+            data=st.session_state.get("lp_doc_zip_bytes") or b"",
+            file_name=st.session_state.get("lp_doc_zip_name") or "LP_Doc_Generator.zip",
+            mime="application/zip",
+            key="lp_doc_zip_download",
+        )
+        link_map = st.session_state.get("lp_doc_links") or {}
+        for idx, doc_info in enumerate(docs_generated, start=1):
+            file_name = str(doc_info.get("file_name") or f"documento_{idx}.docx")
+            cols = st.columns([1.8, 1.2, 1.2])
+            with cols[0]:
+                st.write(file_name)
+            with cols[1]:
+                st.download_button(
+                    "Descargar .docx",
+                    data=doc_info.get("bytes") or b"",
+                    file_name=file_name,
+                    mime=_guess_mime_from_filename(file_name),
+                    key=f"lp_doc_download_{idx}_{file_name}",
+                )
+            with cols[2]:
+                drive_url = link_map.get(file_name)
+                if drive_url:
+                    st.link_button("Abrir en Drive", drive_url, key=f"lp_doc_drive_{idx}_{file_name}")
+                else:
+                    st.caption("Sin enlace de Drive")
 
 if active_tab == "Cotizacion - Estandar":
     if sheet_error:
