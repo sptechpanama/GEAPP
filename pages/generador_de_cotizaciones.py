@@ -3198,6 +3198,14 @@ if active_tab == LP_DOC_TAB_NAME:
         st.session_state["lp_doc_zip_name"] = ""
     if "lp_doc_zip_bytes" not in st.session_state:
         st.session_state["lp_doc_zip_bytes"] = b""
+    if "lp_doc_extract_request_id" not in st.session_state:
+        st.session_state["lp_doc_extract_request_id"] = ""
+    if "lp_doc_extract_processed_request_id" not in st.session_state:
+        st.session_state["lp_doc_extract_processed_request_id"] = ""
+    if "lp_doc_extract_processed_file_id" not in st.session_state:
+        st.session_state["lp_doc_extract_processed_file_id"] = ""
+    if "lp_doc_extract_auto_refresh" not in st.session_state:
+        st.session_state["lp_doc_extract_auto_refresh"] = True
 
     col_lp1, col_lp2, col_lp3 = st.columns([2, 1, 1])
     with col_lp1:
@@ -3211,6 +3219,108 @@ if active_tab == LP_DOC_TAB_NAME:
         auto_num = _extract_numero_acto_from_link(enlace_lp)
         if auto_num:
             st.session_state["lp_doc_numero_acto"] = auto_num
+
+    col_lp_extract_a, col_lp_extract_b = st.columns([1.2, 2.8])
+    with col_lp_extract_a:
+        if st.button("Extraer datos del acto (scraping)"):
+            if not str(enlace_lp or "").strip():
+                st.warning("Primero pega el enlace de Panamá Compra.")
+            else:
+                try:
+                    client_manual_lp, _ = get_client()
+                    _ensure_pc_config_job(client_manual_lp)
+                    payload_lp = {
+                        "enlace": str(enlace_lp).strip(),
+                        "precio_participacion": 1.0,
+                        "paga_itbms": False,
+                        "empresa": str(st.session_state.get("lp_doc_empresa") or "RS").strip().lower(),
+                        "modo": "lp_doc_autofill",
+                    }
+                    lp_request_id = _append_manual_request(client_manual_lp, payload_lp)
+                    st.session_state["lp_doc_extract_request_id"] = lp_request_id
+                    st.session_state["lp_doc_extract_processed_request_id"] = ""
+                    st.session_state["lp_doc_extract_processed_file_id"] = ""
+                    st.success("Solicitud enviada. El scraper iniciará el proceso.")
+                except Exception as exc:
+                    st.error(f"No se pudo iniciar la extracción: {exc}")
+    with col_lp_extract_b:
+        st.caption(
+            "Los campos de 'Datos del acto' se autocompletan con scraping y XPath "
+            "(misma base del flujo Panamá Compra). Puedes corregirlos manualmente si hace falta."
+        )
+
+    lp_extract_request_id = str(st.session_state.get("lp_doc_extract_request_id") or "").strip()
+    if lp_extract_request_id:
+        try:
+            lp_client, lp_creds = get_client()
+            lp_row = _fetch_manual_request(lp_client, lp_extract_request_id)
+        except Exception as exc:
+            lp_row = None
+            st.error(f"No se pudo consultar estado de extracción: {exc}")
+
+        if lp_row:
+            lp_status = str(lp_row.get("status") or "").strip().lower()
+            lp_notes = str(lp_row.get("notes") or "").strip()
+            lp_progress = {
+                "pending": 0.2,
+                "enqueued": 0.4,
+                "running": 0.75,
+                "done": 1.0,
+                "error": 1.0,
+            }.get(lp_status, 0.1)
+            lp_text = {
+                "pending": "Extrayendo: solicitud recibida",
+                "enqueued": "Extrayendo: en cola",
+                "running": "Extrayendo: scraping en ejecución",
+                "done": "Extracción completada",
+                "error": "Error en extracción",
+            }.get(lp_status, "Extrayendo datos...")
+            st.progress(lp_progress, text=lp_text)
+            if lp_notes:
+                st.caption(
+                    lp_notes.replace("Orquestador", "Scraping")
+                    .replace("orquestador", "scraping")
+                    .replace("Orchestrator", "Scraping")
+                    .replace("orchestrator", "scraping")
+                )
+            lp_error = str(lp_row.get("result_error") or "").strip()
+            if lp_error:
+                st.error(lp_error)
+
+            lp_file_id = str(lp_row.get("result_file_id") or "").strip()
+            lp_done_ready = lp_status == "done" and bool(lp_file_id)
+            lp_processed_req = str(st.session_state.get("lp_doc_extract_processed_request_id") or "")
+            lp_processed_file = str(st.session_state.get("lp_doc_extract_processed_file_id") or "")
+
+            if lp_done_ready and (lp_processed_req != lp_extract_request_id or lp_processed_file != lp_file_id):
+                try:
+                    lp_drive = _get_drive_client(lp_creds)
+                    lp_source_bytes = _download_drive_file(lp_drive, lp_file_id)
+                    lp_items_df, lp_titulo_excel, _, lp_meta = _extract_excel_items(lp_source_bytes)
+                    _ = lp_items_df  # solo metadatos para autocompletar formulario LP
+
+                    st.session_state["lp_doc_entidad"] = str(lp_meta.get("entidad") or "").strip()
+                    st.session_state["lp_doc_titulo"] = str(lp_titulo_excel or "").strip()
+                    st.session_state["lp_doc_numero_acto"] = (
+                        str(lp_meta.get("numero_acto") or "").strip()
+                        or _extract_numero_acto_from_link(st.session_state.get("lp_doc_enlace") or "")
+                    )
+                    st.session_state["lp_doc_lugar"] = str(lp_meta.get("lugar_entrega") or "").strip()
+                    st.session_state["lp_doc_tiempo"] = str(lp_meta.get("tiempo_entrega") or "").strip()
+
+                    st.session_state["lp_doc_extract_processed_request_id"] = lp_extract_request_id
+                    st.session_state["lp_doc_extract_processed_file_id"] = lp_file_id
+                    st.success("Datos del acto autocompletados desde Panamá Compra.")
+                except Exception as exc:
+                    st.error(f"No se pudieron autocompletar los datos del acto: {exc}")
+
+            lp_auto_refresh = st.checkbox(
+                "Actualizar extracción automáticamente (cada 5s)",
+                key="lp_doc_extract_auto_refresh",
+            )
+            if lp_auto_refresh and lp_status in {"pending", "enqueued", "running"}:
+                time.sleep(5)
+                st.rerun()
 
     col_lp4, col_lp5 = st.columns([1, 1])
     with col_lp4:
