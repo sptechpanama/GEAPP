@@ -2601,8 +2601,6 @@ if active_tab == "Cotización - Panamá Compra":
                 "Actualizar automáticamente (cada 10s)",
                 key="pc_cot_auto_refresh",
             )
-            if st.button("Actualizar estado", key="pc_cot_refresh"):
-                st.rerun()
             if auto_refresh and status in {"pending", "enqueued", "running"}:
                 time.sleep(10)
                 st.rerun()
