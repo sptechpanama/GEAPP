@@ -687,10 +687,26 @@ def _build_standard_items_from_panama(raw_items_df: pd.DataFrame) -> pd.DataFram
         src["cantidad"] = 0.0
     if "precio_unitario" not in src.columns:
         src["precio_unitario"] = 0.0
-    out = src[["producto_servicio", "cantidad", "precio_unitario"]].copy()
+    if "precio_total" not in src.columns:
+        src["precio_total"] = 0.0
+
+    out = src[["producto_servicio", "cantidad", "precio_unitario", "precio_total"]].copy()
     out["producto_servicio"] = out["producto_servicio"].fillna("").astype(str).str.strip()
     out["cantidad"] = pd.to_numeric(out["cantidad"], errors="coerce").fillna(0.0)
     out["precio_unitario"] = pd.to_numeric(out["precio_unitario"], errors="coerce").fillna(0.0)
+    out["precio_total"] = pd.to_numeric(out["precio_total"], errors="coerce").fillna(0.0)
+
+    # Fallback: si viene solo total por línea (sin cantidad/precio unitario), lo convertimos a item válido.
+    missing_price = (out["precio_unitario"] <= 0) & (out["precio_total"] > 0)
+    out.loc[missing_price & (out["cantidad"] <= 0), "cantidad"] = 1.0
+    out.loc[missing_price, "precio_unitario"] = (
+        out.loc[missing_price, "precio_total"] / out.loc[missing_price, "cantidad"].replace(0, 1.0)
+    )
+    out.loc[(out["producto_servicio"].str.len() == 0) & (out["precio_total"] > 0), "producto_servicio"] = (
+        "Ítem Panamá Compra"
+    )
+
+    out = out[["producto_servicio", "cantidad", "precio_unitario"]]
     out = out[
         (out["producto_servicio"].str.len() > 0)
         | (out["cantidad"] > 0)
