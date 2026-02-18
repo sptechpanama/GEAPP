@@ -53,6 +53,32 @@ def _format_money(value: float) -> str:
     return f"${value:,.2f}"
 
 
+def _slugify_text(text: str, *, max_words: int = 8, max_len: int = 56) -> str:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return ""
+    normalized = unicodedata.normalize("NFKD", raw)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
+    if not slug:
+        return ""
+    words = [w for w in slug.split("-") if w]
+    if max_words > 0:
+        words = words[:max_words]
+    short_slug = "-".join(words).strip("-")
+    if max_len > 0:
+        short_slug = short_slug[:max_len].strip("-")
+    return short_slug
+
+
+def _quote_excel_filename(numero_cot: str, descripcion_corta: str) -> str:
+    base = str(numero_cot or "").strip() or "COTIZACION"
+    suffix = _slugify_text(descripcion_corta, max_words=8, max_len=56)
+    if suffix:
+        return f"{base}-{suffix}.xlsx"
+    return f"{base}.xlsx"
+
+
 def _openai_api_key() -> str:
     candidates: list[str | None] = []
     try:
@@ -1116,7 +1142,7 @@ def _build_standard_quote_excel(
     ws["C19"] = title
     ws["B21"] = title
     if numero_visible != str(numero_cot or "").strip():
-        ws["B12"] = f"Cotización interna: {numero_cot}"
+        ws["B12"] = str(numero_cot or "").strip()
 
     forma_pago = condiciones.get("Condicion de pago") or "Credito"
     entrega = condiciones.get("Entrega") or "15 días hábiles"
@@ -1423,6 +1449,7 @@ def _save_panama_quote_to_history(
         detalles=detalles_extra,
         items=[str(x).strip() for x in items_df["producto_servicio"].tolist() if str(x).strip()][:5],
     )
+    excel_filename = _quote_excel_filename(numero_cot, descripcion_corta)
 
     drive_file_id = existing_row.get("drive_file_id") if existing_row else ""
     drive_file_name = existing_row.get("drive_file_name") if existing_row else ""
@@ -1437,7 +1464,6 @@ def _save_panama_quote_to_history(
         _, folders = _get_drive_folders(drive)
         folder_id = folders.get(empresa)
         if folder_id:
-            excel_filename = f"{numero_cot}.xlsx"
             upload = _upload_drive_binary(
                 drive,
                 folder_id,
@@ -1552,7 +1578,7 @@ def _save_panama_quote_to_history(
         "row": row,
         "numero_cotizacion": numero_cot,
         "excel_bytes": excel_bytes,
-        "excel_name": f"{numero_cot}.xlsx",
+        "excel_name": excel_filename,
     }
 
 
@@ -3260,7 +3286,7 @@ if active_tab == "Cotizacion - Estandar":
                     detalles=detalles_extra,
                     items=item_names_for_desc,
                 )
-                excel_filename = f"{numero_cot}.xlsx"
+                excel_filename = _quote_excel_filename(numero_cot, descripcion_corta)
                 if excel_preview_bytes:
                     excel_bytes = excel_preview_bytes
                 else:
