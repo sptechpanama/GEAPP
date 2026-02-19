@@ -443,6 +443,22 @@ LP_TEMPLATE_FALLBACKS = {
     # Fallback a la variante SF para no romper la generación.
     "template_no_incapacidad_para_contratar.docx": "template_no_incapacidad_para_contratar_sf.docx",
 }
+LP_STATIC_HIGHLIGHT_VALUES = (
+    "Rodrigo Jesús Sánchez Prado",
+    "Rodrigo Jesus Sanchez Prado",
+    "Rodrigo Sánchez Prado",
+    "Rodrigo Sanchez Prado",
+    "9-740-624",
+    "9-740-624/80",
+    "9-740-624-2017-549317",
+    "RS ENGINEERING",
+    "RIR MEDICAL",
+    "155750585-2-2024",
+    "DV:80",
+    "DV40",
+    "Aviso de Operación",
+    "Aviso de Operacion",
+)
 MESES_ES = {
     1: "enero",
     2: "febrero",
@@ -1131,8 +1147,31 @@ def _collect_lp_highlight_values(replacements: dict[str, str]) -> list[str]:
             continue
         seen.add(lowered)
         values.append(value)
+    for value in LP_STATIC_HIGHLIGHT_VALUES:
+        token = str(value or "").strip()
+        if not token:
+            continue
+        lowered = token.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        values.append(token)
     values.sort(key=len, reverse=True)
     return values
+
+
+def _find_clause_heading_span(text: str) -> Optional[tuple[int, int]]:
+    source = str(text or "")
+    if not source:
+        return None
+    match = re.match(
+        r"^\s*(PRIMERA|SEGUNDA|TERCERA|CUARTA|QUINTA|SEXTA|S[ÉE]PTIMA|OCTAVA|NOVENA|D[ÉE]CIMA)\b",
+        source,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.span(1)
 
 
 def _find_highlight_spans(text: str, highlight_values: list[str]) -> list[tuple[int, int]]:
@@ -1169,24 +1208,47 @@ def _find_highlight_spans(text: str, highlight_values: list[str]) -> list[tuple[
     return merged
 
 
-def _apply_bold_highlights(paragraph, highlight_values: list[str]) -> None:
-    if not highlight_values:
-        return
+def _span_overlaps(segment_start: int, segment_end: int, spans: list[tuple[int, int]]) -> bool:
+    for start, end in spans:
+        if segment_start < end and segment_end > start:
+            return True
+    return False
+
+
+def _apply_semantic_emphasis(paragraph, highlight_values: list[str]) -> None:
     original_text = str(paragraph.text or "")
-    spans = _find_highlight_spans(original_text, highlight_values)
-    if not spans:
+    if not original_text:
         return
 
+    spans = _find_highlight_spans(original_text, highlight_values)
+    clause_span = _find_clause_heading_span(original_text)
+
+    bold_spans = list(spans)
+    underline_spans: list[tuple[int, int]] = []
+    if clause_span:
+        bold_spans.append(clause_span)
+        underline_spans.append(clause_span)
+
+    if not bold_spans and not underline_spans:
+        return
+
+    points = {0, len(original_text)}
+    for start, end in bold_spans + underline_spans:
+        points.add(start)
+        points.add(end)
+    cuts = sorted(points)
+
     paragraph.text = ""
-    cursor = 0
-    for start, end in spans:
-        if start > cursor:
-            paragraph.add_run(original_text[cursor:start])
+    for idx in range(len(cuts) - 1):
+        start = cuts[idx]
+        end = cuts[idx + 1]
+        if start >= end:
+            continue
         run = paragraph.add_run(original_text[start:end])
-        run.bold = True
-        cursor = end
-    if cursor < len(original_text):
-        paragraph.add_run(original_text[cursor:])
+        if _span_overlaps(start, end, bold_spans):
+            run.bold = True
+        if _span_overlaps(start, end, underline_spans):
+            run.underline = True
 
 
 def _style_paragraph(paragraph, *, in_table: bool) -> None:
@@ -1231,14 +1293,14 @@ def _apply_doc_professional_style(doc: Document, *, highlight_values: Optional[l
         section.footer_distance = Inches(0.2)
 
     for paragraph in doc.paragraphs:
-        _apply_bold_highlights(paragraph, highlight_values)
+        _apply_semantic_emphasis(paragraph, highlight_values)
         _style_paragraph(paragraph, in_table=False)
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
-                    _apply_bold_highlights(paragraph, highlight_values)
+                    _apply_semantic_emphasis(paragraph, highlight_values)
                     _style_paragraph(paragraph, in_table=True)
 
     _center_main_title(doc)
