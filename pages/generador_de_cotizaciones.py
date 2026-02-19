@@ -711,7 +711,33 @@ def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool, d
             }
         )
         row += 1
-    titulo = str(ws["C19"].value or "").strip()
+    def _repair_truncated_title(title_text: str, items_rows: list[dict[str, Any]]) -> str:
+        title = str(title_text or "").strip()
+        if not title:
+            return ""
+        last_match = re.search(r"([A-Za-zÁÉÍÓÚÑáéíóúñ]{5,})\s*$", title)
+        if not last_match:
+            return title
+        last_word = last_match.group(1)
+        if len(last_word) < 6:
+            return title
+        candidates: set[str] = set()
+        for item_row in items_rows:
+            desc_text = str(item_row.get("descripcion") or "")
+            for token in re.findall(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]{6,}", desc_text):
+                token_l = token.lower()
+                prefix_l = last_word.lower()
+                if token_l.startswith(prefix_l) and token_l != prefix_l:
+                    candidates.add(token)
+        if not candidates:
+            return title
+        best = sorted(candidates, key=lambda v: (len(v), v.lower()))[0]
+        return re.sub(rf"{re.escape(last_word)}\s*$", best, title)
+
+    titulo_full = str(ws["B22"].value or "").strip()
+    titulo_short = str(ws["C19"].value or "").strip()
+    titulo = titulo_full or titulo_short
+    titulo = _repair_truncated_title(titulo, items)
     itbms_row = 23 + len(items) + 1
     itbms_val = ws[f"G{itbms_row}"].value
     aplica_itbms = _to_float_safe(itbms_val) > 0
@@ -753,6 +779,8 @@ def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool, d
         "entidad": entidad,
         "fecha": fecha,
         "numero_acto": numero_acto,
+        "titulo_full": titulo_full,
+        "titulo_short": titulo_short,
         "ruc": ruc,
         "dv": dv,
         "ruc_dv": ruc_dv,
@@ -3546,7 +3574,12 @@ if active_tab == LP_DOC_TAB_NAME:
                 _, lp_titulo_excel, _, lp_meta = _extract_excel_items(lp_source_bytes)
 
                 entidad_lp = str(lp_meta.get("entidad") or "").strip()
-                titulo_lp = str(lp_titulo_excel or "").strip()
+                titulo_lp = str(
+                    lp_meta.get("titulo_full")
+                    or lp_titulo_excel
+                    or lp_meta.get("titulo_short")
+                    or ""
+                ).strip()
                 numero_lp = (
                     str(lp_meta.get("numero_acto") or "").strip()
                     or _extract_numero_acto_from_link(enlace_lp)
