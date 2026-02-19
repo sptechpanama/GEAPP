@@ -8,6 +8,7 @@ import os
 import re
 import math
 import time
+import logging
 import zipfile
 import unicodedata
 from datetime import date, datetime, timezone
