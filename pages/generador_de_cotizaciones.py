@@ -23,8 +23,6 @@ import streamlit.components.v1 as components
 from docx import Document
 from docx.enum.section import WD_ORIENTATION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image
@@ -1111,45 +1109,31 @@ def _replace_text_tokens(text: str, replacements: dict[str, str]) -> str:
     return out
 
 
-def _set_bottom_border(paragraph, color: str = "2F3B52", size: str = "8") -> None:
-    p = paragraph._p
-    ppr = p.get_or_add_pPr()
-    pbdr = ppr.find(qn("w:pBdr"))
-    if pbdr is None:
-        pbdr = OxmlElement("w:pBdr")
-        ppr.append(pbdr)
-    bottom = pbdr.find(qn("w:bottom"))
-    if bottom is None:
-        bottom = OxmlElement("w:bottom")
-        pbdr.append(bottom)
-    bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), size)
-    bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), color)
-
-
 def _style_paragraph(paragraph, *, in_table: bool) -> None:
     pf = paragraph.paragraph_format
     pf.space_before = Pt(0)
-    pf.space_after = Pt(2 if in_table else 4)
-    pf.line_spacing = 1.08 if in_table else 1.15
+    pf.space_after = Pt(1 if in_table else 2)
+    pf.line_spacing = 1.0
     text = str(paragraph.text or "").strip()
     if text:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT if in_table else WD_ALIGN_PARAGRAPH.JUSTIFY
     for run in paragraph.runs:
         run.font.name = "Calibri"
-        run.font.size = Pt(10 if in_table else 11)
+        run.font.size = Pt(9.5 if in_table else 10.5)
 
 
 def _apply_doc_professional_style(doc: Document) -> None:
     for section in doc.sections:
-        if section.page_width and section.page_height and section.page_width > section.page_height:
-            section.orientation = WD_ORIENTATION.PORTRAIT
-            section.page_width, section.page_height = section.page_height, section.page_width
-        section.top_margin = Inches(0.55)
-        section.bottom_margin = Inches(0.55)
-        section.left_margin = Inches(0.65)
-        section.right_margin = Inches(0.65)
+        # Forzar tamaño legal 8.5" x 14" y márgenes compactos.
+        section.orientation = WD_ORIENTATION.PORTRAIT
+        section.page_width = Inches(8.5)
+        section.page_height = Inches(14)
+        section.top_margin = Inches(0.35)
+        section.bottom_margin = Inches(0.35)
+        section.left_margin = Inches(0.45)
+        section.right_margin = Inches(0.45)
+        section.header_distance = Inches(0.2)
+        section.footer_distance = Inches(0.2)
 
     for paragraph in doc.paragraphs:
         _style_paragraph(paragraph, in_table=False)
@@ -1159,27 +1143,6 @@ def _apply_doc_professional_style(doc: Document) -> None:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     _style_paragraph(paragraph, in_table=True)
-
-
-def _append_signature_block(doc: Document) -> None:
-    signature_path = Path(SIGNATURE_STANDARD)
-    if not signature_path.exists():
-        return
-
-    line_par = doc.add_paragraph()
-    line_par.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    line_par.paragraph_format.space_before = Pt(10)
-    line_par.paragraph_format.space_after = Pt(4)
-    _set_bottom_border(line_par)
-
-    sign_par = doc.add_paragraph()
-    sign_par.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    sign_par.paragraph_format.space_before = Pt(2)
-    sign_par.paragraph_format.space_after = Pt(0)
-    run = sign_par.add_run()
-    run.add_picture(str(signature_path), width=Inches(1.9))
-
-    _style_paragraph(sign_par, in_table=False)
 
 
 def _fill_docx_placeholders(template_path: Path, replacements: dict[str, str]) -> bytes:
@@ -1199,7 +1162,6 @@ def _fill_docx_placeholders(template_path: Path, replacements: dict[str, str]) -
                         paragraph.text = new_text
 
     _apply_doc_professional_style(doc)
-    _append_signature_block(doc)
 
     out = BytesIO()
     doc.save(out)
