@@ -3230,6 +3230,8 @@ if active_tab == LP_DOC_TAB_NAME:
         st.session_state["lp_doc_zip_name"] = ""
     if "lp_doc_zip_bytes" not in st.session_state:
         st.session_state["lp_doc_zip_bytes"] = b""
+    if "lp_doc_folder_url" not in st.session_state:
+        st.session_state["lp_doc_folder_url"] = ""
 
     col_lp1, col_lp2 = st.columns([2.6, 1])
     with col_lp1:
@@ -3391,11 +3393,14 @@ if active_tab == LP_DOC_TAB_NAME:
                 st.session_state["lp_doc_zip_bytes"] = zip_buffer.getvalue()
 
                 links_map: dict[str, str] = {}
+                folder_url = ""
                 try:
                     if creds is None:
                         client, creds = get_client()
                     drive = _get_drive_client(creds)
                     lp_folder_id = _get_lp_doc_folder(drive, empresa_full_lp)
+                    if lp_folder_id:
+                        folder_url = f"https://drive.google.com/drive/folders/{lp_folder_id}"
                     for doc_info in docs_generated:
                         file_name = str(doc_info["file_name"])
                         existing_id = _find_file_in_folder(
@@ -3418,6 +3423,7 @@ if active_tab == LP_DOC_TAB_NAME:
                     st.warning(f"Documentos generados localmente. No se pudieron sincronizar en Drive: {drive_exc}")
 
                 st.session_state["lp_doc_links"] = links_map
+                st.session_state["lp_doc_folder_url"] = folder_url
                 st.success("Documentos LP generados correctamente.")
             except Exception as exc:
                 st.error(f"No se pudieron generar los documentos LP: {exc}")
@@ -3425,6 +3431,9 @@ if active_tab == LP_DOC_TAB_NAME:
     docs_generated = st.session_state.get("lp_doc_docs") or []
     if docs_generated:
         st.markdown("### Documentos generados")
+        folder_url = str(st.session_state.get("lp_doc_folder_url") or "").strip()
+        if folder_url:
+            st.markdown(f"Carpeta en Drive: [Abrir carpeta]({folder_url})")
         st.download_button(
             "Descargar paquete ZIP",
             data=st.session_state.get("lp_doc_zip_bytes") or b"",
@@ -3449,7 +3458,7 @@ if active_tab == LP_DOC_TAB_NAME:
             with cols[2]:
                 drive_url = link_map.get(file_name)
                 if drive_url:
-                    st.link_button("Abrir en Drive", drive_url, key=f"lp_doc_drive_{idx}_{file_name}")
+                    st.markdown(f"[Abrir en Drive]({drive_url})")
                 else:
                     st.caption("Sin enlace de Drive")
 
