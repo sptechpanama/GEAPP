@@ -434,6 +434,11 @@ SIGNATURE_STANDARD = _resolve_base_asset("firma.png")
 DOC_GEN_LOCAL_DIR = Path(r"C:\Users\rodri\doc_gen")
 DOC_GEN_REPO_DIR = GEAPP_ROOT / "assets" / "doc_gen_base"
 LP_DOC_FOLDER_NAME = "LP_Doc_Generator"
+LP_TEMPLATE_FALLBACKS = {
+    # Esta plantilla viene dañada desde origen (CRC en image1.tiff).
+    # Fallback a la variante SF para no romper la generación.
+    "template_no_incapacidad_para_contratar.docx": "template_no_incapacidad_para_contratar_sf.docx",
+}
 MESES_ES = {
     1: "enero",
     2: "febrero",
@@ -1050,16 +1055,46 @@ def _find_file_in_folder(
 
 
 def _resolve_doc_gen_template(file_name: str) -> Path:
+    def _zip_health_error(path: Path) -> str:
+        try:
+            with zipfile.ZipFile(path, "r") as zf:
+                bad_member = zf.testzip()
+            if bad_member:
+                return f"CRC inválido en {bad_member}"
+            return ""
+        except Exception as exc:  # pylint: disable=broad-except
+            return str(exc)
+
     candidates = [
         DOC_GEN_REPO_DIR / file_name,
         DOC_GEN_LOCAL_DIR / file_name,
     ]
+    first_error = ""
     for candidate in candidates:
-        if candidate.exists():
+        if not candidate.exists():
+            continue
+        health_error = _zip_health_error(candidate)
+        if not health_error:
             return candidate
+        if not first_error:
+            first_error = f"{candidate}: {health_error}"
+        fallback_name = LP_TEMPLATE_FALLBACKS.get(file_name)
+        if fallback_name:
+            fallback_candidate = candidate.with_name(fallback_name)
+            if fallback_candidate.exists():
+                fallback_error = _zip_health_error(fallback_candidate)
+                if not fallback_error:
+                    logging.warning(
+                        "Plantilla %s dañada (%s). Usando fallback %s.",
+                        candidate.name,
+                        health_error,
+                        fallback_candidate.name,
+                    )
+                    return fallback_candidate
     raise FileNotFoundError(
         f"No se encontró la plantilla de Doc_Generator: {file_name}. "
-        f"Busca en {DOC_GEN_REPO_DIR} o {DOC_GEN_LOCAL_DIR}."
+        f"Busca en {DOC_GEN_REPO_DIR} o {DOC_GEN_LOCAL_DIR}. "
+        f"{('Detalle: ' + first_error) if first_error else ''}"
     )
 
 
