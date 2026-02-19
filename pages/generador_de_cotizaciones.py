@@ -2765,8 +2765,8 @@ def _apply_duplicate_state(row: dict, cotizaciones_df: pd.DataFrame) -> None:
 TAB_OPTIONS = [
     "Cotización - Panamá Compra",
     "Cotizacion - Estandar",
-    LP_DOC_TAB_NAME,
     "Historial de cotizaciones",
+    LP_DOC_TAB_NAME,
 ]
 pending_tab = st.session_state.pop(PENDING_TAB_KEY, None)
 if pending_tab in TAB_OPTIONS:
