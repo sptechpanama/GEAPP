@@ -1109,6 +1109,86 @@ def _replace_text_tokens(text: str, replacements: dict[str, str]) -> str:
     return out
 
 
+def _collect_lp_highlight_values(replacements: dict[str, str]) -> list[str]:
+    priority_keys = (
+        "[Representante_legal_de_la_Entidad_Licitante]",
+        "[cedula]",
+        "[numero_de_acto]",
+        "[entidad]",
+        "[titulo]",
+        "[lugar]",
+        "[entrega]",
+        "[fecha]",
+    )
+    seen: set[str] = set()
+    values: list[str] = []
+    for key in priority_keys:
+        value = str(replacements.get(key, "") or "").strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        values.append(value)
+    values.sort(key=len, reverse=True)
+    return values
+
+
+def _find_highlight_spans(text: str, highlight_values: list[str]) -> list[tuple[int, int]]:
+    source = str(text or "")
+    if not source or not highlight_values:
+        return []
+
+    source_lower = source.lower()
+    spans: list[tuple[int, int]] = []
+    for value in highlight_values:
+        token = str(value or "").strip()
+        if not token:
+            continue
+        token_lower = token.lower()
+        start = 0
+        while True:
+            idx = source_lower.find(token_lower, start)
+            if idx < 0:
+                break
+            spans.append((idx, idx + len(token)))
+            start = idx + len(token)
+
+    if not spans:
+        return []
+
+    spans.sort(key=lambda pair: (pair[0], -(pair[1] - pair[0])))
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if not merged or start >= merged[-1][1]:
+            merged.append((start, end))
+            continue
+        prev_start, prev_end = merged[-1]
+        merged[-1] = (prev_start, max(prev_end, end))
+    return merged
+
+
+def _apply_bold_highlights(paragraph, highlight_values: list[str]) -> None:
+    if not highlight_values:
+        return
+    original_text = str(paragraph.text or "")
+    spans = _find_highlight_spans(original_text, highlight_values)
+    if not spans:
+        return
+
+    paragraph.text = ""
+    cursor = 0
+    for start, end in spans:
+        if start > cursor:
+            paragraph.add_run(original_text[cursor:start])
+        run = paragraph.add_run(original_text[start:end])
+        run.bold = True
+        cursor = end
+    if cursor < len(original_text):
+        paragraph.add_run(original_text[cursor:])
+
+
 def _style_paragraph(paragraph, *, in_table: bool) -> None:
     pf = paragraph.paragraph_format
     pf.space_before = Pt(0)
@@ -1116,13 +1196,28 @@ def _style_paragraph(paragraph, *, in_table: bool) -> None:
     pf.line_spacing = 1.0
     text = str(paragraph.text or "").strip()
     if text:
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT if in_table else WD_ALIGN_PARAGRAPH.JUSTIFY
+        if in_table:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        elif paragraph.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     for run in paragraph.runs:
         run.font.name = "Calibri"
         run.font.size = Pt(9.5 if in_table else 10.5)
 
 
-def _apply_doc_professional_style(doc: Document) -> None:
+def _center_main_title(doc: Document) -> None:
+    for paragraph in doc.paragraphs:
+        text = str(paragraph.text or "").strip()
+        if not text:
+            continue
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in paragraph.runs:
+            run.bold = True
+        break
+
+
+def _apply_doc_professional_style(doc: Document, *, highlight_values: Optional[list[str]] = None) -> None:
+    highlight_values = highlight_values or []
     for section in doc.sections:
         # Forzar tamaño legal 8.5" x 14" y márgenes compactos.
         section.orientation = WD_ORIENTATION.PORTRAIT
@@ -1136,17 +1231,22 @@ def _apply_doc_professional_style(doc: Document) -> None:
         section.footer_distance = Inches(0.2)
 
     for paragraph in doc.paragraphs:
+        _apply_bold_highlights(paragraph, highlight_values)
         _style_paragraph(paragraph, in_table=False)
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
+                    _apply_bold_highlights(paragraph, highlight_values)
                     _style_paragraph(paragraph, in_table=True)
+
+    _center_main_title(doc)
 
 
 def _fill_docx_placeholders(template_path: Path, replacements: dict[str, str]) -> bytes:
     doc = Document(str(template_path))
+    highlight_values = _collect_lp_highlight_values(replacements)
 
     for paragraph in doc.paragraphs:
         new_text = _replace_text_tokens(paragraph.text, replacements)
@@ -1161,7 +1261,7 @@ def _fill_docx_placeholders(template_path: Path, replacements: dict[str, str]) -
                     if new_text != paragraph.text:
                         paragraph.text = new_text
 
-    _apply_doc_professional_style(doc)
+    _apply_doc_professional_style(doc, highlight_values=highlight_values)
 
     out = BytesIO()
     doc.save(out)
