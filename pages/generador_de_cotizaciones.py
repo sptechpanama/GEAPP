@@ -3184,12 +3184,8 @@ if active_tab == LP_DOC_TAB_NAME:
         st.session_state["lp_doc_fecha"] = date.today()
     if "lp_doc_empresa" not in st.session_state:
         st.session_state["lp_doc_empresa"] = "RS"
-    if "lp_doc_version" not in st.session_state:
-        st.session_state["lp_doc_version"] = "3"
     if "lp_doc_enlace" not in st.session_state:
         st.session_state["lp_doc_enlace"] = ""
-    if "lp_doc_numero_acto" not in st.session_state:
-        st.session_state["lp_doc_numero_acto"] = ""
     if "lp_doc_docs" not in st.session_state:
         st.session_state["lp_doc_docs"] = []
     if "lp_doc_links" not in st.session_state:
@@ -3198,129 +3194,16 @@ if active_tab == LP_DOC_TAB_NAME:
         st.session_state["lp_doc_zip_name"] = ""
     if "lp_doc_zip_bytes" not in st.session_state:
         st.session_state["lp_doc_zip_bytes"] = b""
-    if "lp_doc_extract_request_id" not in st.session_state:
-        st.session_state["lp_doc_extract_request_id"] = ""
-    if "lp_doc_extract_processed_request_id" not in st.session_state:
-        st.session_state["lp_doc_extract_processed_request_id"] = ""
-    if "lp_doc_extract_processed_file_id" not in st.session_state:
-        st.session_state["lp_doc_extract_processed_file_id"] = ""
-    if "lp_doc_extract_auto_refresh" not in st.session_state:
-        st.session_state["lp_doc_extract_auto_refresh"] = True
 
-    col_lp1, col_lp2, col_lp3 = st.columns([2, 1, 1])
+    col_lp1, col_lp2 = st.columns([2.6, 1])
     with col_lp1:
         enlace_lp = st.text_input("Enlace Panamá Compra", key="lp_doc_enlace")
     with col_lp2:
-        st.selectbox("Versión enlace", ["2", "3"], key="lp_doc_version")
-    with col_lp3:
         empresa_lp = st.selectbox("Empresa", ["RS", "RIR"], key="lp_doc_empresa")
-
-    if enlace_lp and not st.session_state.get("lp_doc_numero_acto"):
-        auto_num = _extract_numero_acto_from_link(enlace_lp)
-        if auto_num:
-            st.session_state["lp_doc_numero_acto"] = auto_num
-
-    col_lp_extract_a, col_lp_extract_b = st.columns([1.2, 2.8])
-    with col_lp_extract_a:
-        if st.button("Extraer datos del acto (scraping)"):
-            if not str(enlace_lp or "").strip():
-                st.warning("Primero pega el enlace de Panamá Compra.")
-            else:
-                try:
-                    client_manual_lp, _ = get_client()
-                    _ensure_pc_config_job(client_manual_lp)
-                    payload_lp = {
-                        "enlace": str(enlace_lp).strip(),
-                        "precio_participacion": 1.0,
-                        "paga_itbms": False,
-                        "empresa": str(st.session_state.get("lp_doc_empresa") or "RS").strip().lower(),
-                        "modo": "lp_doc_autofill",
-                    }
-                    lp_request_id = _append_manual_request(client_manual_lp, payload_lp)
-                    st.session_state["lp_doc_extract_request_id"] = lp_request_id
-                    st.session_state["lp_doc_extract_processed_request_id"] = ""
-                    st.session_state["lp_doc_extract_processed_file_id"] = ""
-                    st.success("Solicitud enviada. El scraper iniciará el proceso.")
-                except Exception as exc:
-                    st.error(f"No se pudo iniciar la extracción: {exc}")
-    with col_lp_extract_b:
-        st.caption(
-            "Los campos de 'Datos del acto' se autocompletan con scraping y XPath "
-            "(misma base del flujo Panamá Compra). Puedes corregirlos manualmente si hace falta."
-        )
-
-    lp_extract_request_id = str(st.session_state.get("lp_doc_extract_request_id") or "").strip()
-    if lp_extract_request_id:
-        try:
-            lp_client, lp_creds = get_client()
-            lp_row = _fetch_manual_request(lp_client, lp_extract_request_id)
-        except Exception as exc:
-            lp_row = None
-            st.error(f"No se pudo consultar estado de extracción: {exc}")
-
-        if lp_row:
-            lp_status = str(lp_row.get("status") or "").strip().lower()
-            lp_notes = str(lp_row.get("notes") or "").strip()
-            lp_progress = {
-                "pending": 0.2,
-                "enqueued": 0.4,
-                "running": 0.75,
-                "done": 1.0,
-                "error": 1.0,
-            }.get(lp_status, 0.1)
-            lp_text = {
-                "pending": "Extrayendo: solicitud recibida",
-                "enqueued": "Extrayendo: en cola",
-                "running": "Extrayendo: scraping en ejecución",
-                "done": "Extracción completada",
-                "error": "Error en extracción",
-            }.get(lp_status, "Extrayendo datos...")
-            st.progress(lp_progress, text=lp_text)
-            if lp_notes:
-                st.caption(
-                    lp_notes.replace("Orquestador", "Scraping")
-                    .replace("orquestador", "scraping")
-                    .replace("Orchestrator", "Scraping")
-                    .replace("orchestrator", "scraping")
-                )
-            lp_error = str(lp_row.get("result_error") or "").strip()
-            if lp_error:
-                st.error(lp_error)
-
-            lp_file_id = str(lp_row.get("result_file_id") or "").strip()
-            lp_done_ready = lp_status == "done" and bool(lp_file_id)
-            lp_processed_req = str(st.session_state.get("lp_doc_extract_processed_request_id") or "")
-            lp_processed_file = str(st.session_state.get("lp_doc_extract_processed_file_id") or "")
-
-            if lp_done_ready and (lp_processed_req != lp_extract_request_id or lp_processed_file != lp_file_id):
-                try:
-                    lp_drive = _get_drive_client(lp_creds)
-                    lp_source_bytes = _download_drive_file(lp_drive, lp_file_id)
-                    lp_items_df, lp_titulo_excel, _, lp_meta = _extract_excel_items(lp_source_bytes)
-                    _ = lp_items_df  # solo metadatos para autocompletar formulario LP
-
-                    st.session_state["lp_doc_entidad"] = str(lp_meta.get("entidad") or "").strip()
-                    st.session_state["lp_doc_titulo"] = str(lp_titulo_excel or "").strip()
-                    st.session_state["lp_doc_numero_acto"] = (
-                        str(lp_meta.get("numero_acto") or "").strip()
-                        or _extract_numero_acto_from_link(st.session_state.get("lp_doc_enlace") or "")
-                    )
-                    st.session_state["lp_doc_lugar"] = str(lp_meta.get("lugar_entrega") or "").strip()
-                    st.session_state["lp_doc_tiempo"] = str(lp_meta.get("tiempo_entrega") or "").strip()
-
-                    st.session_state["lp_doc_extract_processed_request_id"] = lp_extract_request_id
-                    st.session_state["lp_doc_extract_processed_file_id"] = lp_file_id
-                    st.success("Datos del acto autocompletados desde Panamá Compra.")
-                except Exception as exc:
-                    st.error(f"No se pudieron autocompletar los datos del acto: {exc}")
-
-            lp_auto_refresh = st.checkbox(
-                "Actualizar extracción automáticamente (cada 5s)",
-                key="lp_doc_extract_auto_refresh",
-            )
-            if lp_auto_refresh and lp_status in {"pending", "enqueued", "running"}:
-                time.sleep(5)
-                st.rerun()
+    st.caption(
+        "Al generar, el sistema ejecuta scraping automáticamente del enlace (versión 3), "
+        "extrae datos del acto y crea los documentos LP."
+    )
 
     col_lp4, col_lp5 = st.columns([1, 1])
     with col_lp4:
@@ -3338,51 +3221,114 @@ if active_tab == LP_DOC_TAB_NAME:
         st.text_input("Cédula representante", key="lp_doc_cedula", placeholder="8-888-888")
         st.date_input("Fecha del documento", key="lp_doc_fecha")
 
-    st.markdown("### Datos del acto")
-    col_lp6, col_lp7 = st.columns([1, 1])
-    with col_lp6:
-        st.text_input("Entidad", key="lp_doc_entidad")
-        st.text_input("Número de acto", key="lp_doc_numero_acto")
-        st.text_input("Lugar de entrega", key="lp_doc_lugar")
-    with col_lp7:
-        st.text_input("Título del acto", key="lp_doc_titulo")
-        st.text_input("Tiempo de entrega", key="lp_doc_tiempo")
-
     if st.button("Generar documentos LP"):
         representante_pacto = str(st.session_state.get("lp_doc_representante_pacto") or "").strip()
         representante_docs = str(st.session_state.get("lp_doc_representante_docs") or "").strip()
         cedula_lp = str(st.session_state.get("lp_doc_cedula") or "").strip()
-        entidad_lp = str(st.session_state.get("lp_doc_entidad") or "").strip()
-        titulo_lp = str(st.session_state.get("lp_doc_titulo") or "").strip()
-        numero_lp = str(st.session_state.get("lp_doc_numero_acto") or "").strip()
-        lugar_lp = str(st.session_state.get("lp_doc_lugar") or "").strip()
-        tiempo_lp = str(st.session_state.get("lp_doc_tiempo") or "").strip()
-        if not numero_lp:
-            numero_lp = _extract_numero_acto_from_link(st.session_state.get("lp_doc_enlace") or "")
-            st.session_state["lp_doc_numero_acto"] = numero_lp
+        enlace_lp = str(st.session_state.get("lp_doc_enlace") or "").strip()
 
         missing = []
+        if not enlace_lp:
+            missing.append("Enlace Panamá Compra")
         if not representante_pacto:
             missing.append("Representante legal (Pacto)")
         if not representante_docs:
             missing.append("Representante legal (Documentos)")
         if not cedula_lp:
             missing.append("Cédula representante")
-        if not entidad_lp:
-            missing.append("Entidad")
-        if not titulo_lp:
-            missing.append("Título del acto")
-        if not numero_lp:
-            missing.append("Número de acto")
-        if not lugar_lp:
-            missing.append("Lugar de entrega")
-        if not tiempo_lp:
-            missing.append("Tiempo de entrega")
 
         if missing:
             st.warning("Completa estos campos: " + ", ".join(missing))
         else:
             try:
+                progress_ph = st.empty()
+                notes_ph = st.empty()
+                progress_ph.progress(0.05, text="Generando: iniciando scraping de datos del acto")
+
+                client_manual_lp, creds_manual_lp = get_client()
+                _ensure_pc_config_job(client_manual_lp)
+                payload_lp = {
+                    "enlace": enlace_lp,
+                    "precio_participacion": 1.0,
+                    "paga_itbms": False,
+                    "empresa": str(st.session_state.get("lp_doc_empresa") or "RS").strip().lower(),
+                    "modo": "lp_doc_autofill",
+                }
+                lp_request_id = _append_manual_request(client_manual_lp, payload_lp)
+
+                start_wait = time.time()
+                timeout_seconds = 300
+                lp_row = None
+                lp_status = "pending"
+                while time.time() - start_wait < timeout_seconds:
+                    lp_row = _fetch_manual_request(client_manual_lp, lp_request_id)
+                    lp_status = str((lp_row or {}).get("status") or "").strip().lower()
+                    lp_notes = str((lp_row or {}).get("notes") or "").strip()
+                    progress_val = {
+                        "pending": 0.2,
+                        "enqueued": 0.35,
+                        "running": 0.7,
+                        "done": 1.0,
+                        "error": 1.0,
+                    }.get(lp_status, 0.15)
+                    progress_txt = {
+                        "pending": "Generando: solicitud enviada",
+                        "enqueued": "Generando: scraping en cola",
+                        "running": "Generando: scraping en ejecución",
+                        "done": "Generando: scraping finalizado",
+                        "error": "Error en scraping",
+                    }.get(lp_status, "Generando...")
+                    progress_ph.progress(progress_val, text=progress_txt)
+                    if lp_notes:
+                        notes_ph.caption(
+                            lp_notes.replace("Orquestador", "Scraping")
+                            .replace("orquestador", "scraping")
+                            .replace("Orchestrator", "Scraping")
+                            .replace("orchestrator", "scraping")
+                        )
+                    if lp_status in {"done", "error"}:
+                        break
+                    time.sleep(5)
+
+                if lp_status not in {"done"}:
+                    if lp_status == "error":
+                        error_msg = str((lp_row or {}).get("result_error") or "").strip()
+                        raise RuntimeError(error_msg or "Falló el scraping para extraer datos del acto.")
+                    raise RuntimeError("El scraping tardó demasiado en completar (timeout de 5 minutos).")
+
+                lp_file_id = str((lp_row or {}).get("result_file_id") or "").strip()
+                if not lp_file_id:
+                    raise RuntimeError("El scraping terminó, pero no devolvió archivo para extraer datos.")
+
+                lp_drive = _get_drive_client(creds_manual_lp)
+                lp_source_bytes = _download_drive_file(lp_drive, lp_file_id)
+                _, lp_titulo_excel, _, lp_meta = _extract_excel_items(lp_source_bytes)
+
+                entidad_lp = str(lp_meta.get("entidad") or "").strip()
+                titulo_lp = str(lp_titulo_excel or "").strip()
+                numero_lp = (
+                    str(lp_meta.get("numero_acto") or "").strip()
+                    or _extract_numero_acto_from_link(enlace_lp)
+                )
+                lugar_lp = str(lp_meta.get("lugar_entrega") or "").strip()
+                tiempo_lp = str(lp_meta.get("tiempo_entrega") or "").strip()
+
+                missing_extracted = []
+                if not entidad_lp:
+                    missing_extracted.append("Entidad")
+                if not titulo_lp:
+                    missing_extracted.append("Título del acto")
+                if not numero_lp:
+                    missing_extracted.append("Número de acto")
+                if not lugar_lp:
+                    missing_extracted.append("Lugar de entrega")
+                if not tiempo_lp:
+                    missing_extracted.append("Tiempo de entrega")
+                if missing_extracted:
+                    raise RuntimeError(
+                        "El scraping no pudo extraer: " + ", ".join(missing_extracted)
+                    )
+
                 empresa_full_lp = _company_full_from_short(st.session_state.get("lp_doc_empresa") or "RS")
                 docs_generated = _build_lp_documents(
                     empresa_full=empresa_full_lp,
