@@ -12,6 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import requests
 import uuid
@@ -36,6 +37,28 @@ CHECKBOX_FLAG_NAMES = {
     "descarte",
 }
 TRUE_VALUES = {"true", "1", "si", "sí", "yes", "y", "t", "x", "on"}
+
+
+def _ensure_scroll_top_on_page_entry() -> None:
+    """
+    Fuerza scroll arriba solo al entrar a esta pagina.
+    Evita brincar al top en cada rerun normal por interacciones.
+    """
+    page_key = "__current_page__"
+    current_page = "panama_compra"
+    previous_page = st.session_state.get(page_key)
+    st.session_state[page_key] = current_page
+    if previous_page == current_page:
+        return
+
+    components.html(
+        """
+        <script>
+        try { window.parent.scrollTo({top: 0, behavior: "auto"}); } catch (e) {}
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _require_authentication() -> None:
@@ -65,6 +88,11 @@ JOB_NAME_LABELS = {
     "rir1": "Licitaciones",
 }
 JOB_NAME_ORDER = ["clrir", "clv", "rir1"]
+JOB_SOURCE_SHEETS = {
+    "clrir": ["cl_prog_sin_ficha", "cl_prog_sin_requisitos", "cl_prog_con_ct"],
+    "clv": ["cl_abiertas", "cl_abiertas_rir_sin_requisitos", "cl_abiertas_rir_con_ct"],
+    "rir1": ["ap_con_ct", "ap_sin_ficha", "ap_sin_requisitos"],
+}
 STATUS_BADGES = {
     "success": ("🟢", "Éxito"),
     "running": ("🟡", "En curso"),
@@ -1294,11 +1322,17 @@ def render_panamacompra_ai_chat(
                     height=260,
                 )
 
-    prompt = st.chat_input(
-        "Ej: Cual proveedor suma mas monto adjudicado en 2025?",
-        key="pc_ai_chat_prompt",
-    )
-    if not prompt:
+    with st.form("pc_ai_chat_form", clear_on_submit=True):
+        prompt = st.text_input(
+            "Pregunta para el asistente",
+            placeholder="Ej: Cual proveedor suma mas monto adjudicado en 2025?",
+            label_visibility="collapsed",
+            key="pc_ai_chat_prompt_text",
+        )
+        submit = st.form_submit_button("Enviar")
+
+    prompt = (prompt or "").strip()
+    if not submit or not prompt:
         return
 
     history.append({"role": "user", "content": prompt})
@@ -2136,6 +2170,63 @@ def _format_pc_duration(row: pd.Series) -> str:
         return "—"
 
 
+@st.cache_data(ttl=180)
+def _latest_sheet_update_by_job() -> dict[str, str]:
+    """Obtiene la fecha mas reciente de actualizacion por job a partir de sus hojas."""
+
+    def _normalize_col(name: str) -> str:
+        value = str(name or "").strip().lower()
+        value = "".join(
+            ch for ch in unicodedata.normalize("NFD", value) if unicodedata.category(ch) != "Mn"
+        )
+        value = re.sub(r"\s+", " ", value)
+        return value
+
+    latest_map: dict[str, str] = {}
+    for job_key, sheets in JOB_SOURCE_SHEETS.items():
+        latest_ts = pd.NaT
+        for sheet_name in sheets:
+            try:
+                sheet_df = load_df(sheet_name)
+            except Exception:
+                continue
+
+            if sheet_df is None or sheet_df.empty:
+                continue
+
+            update_col = None
+            for col in sheet_df.columns:
+                if col == ROW_ID_COL:
+                    continue
+                normalized = _normalize_col(col)
+                if (
+                    normalized == "fecha de actualizacion"
+                    or normalized.startswith("fecha de actualizacion")
+                    or ("fecha" in normalized and "actualiz" in normalized)
+                ):
+                    update_col = col
+                    break
+
+            if not update_col:
+                continue
+
+            parsed = _parse_sheet_date_column(sheet_df[update_col])
+            if parsed.empty:
+                continue
+
+            current_max = parsed.max()
+            if pd.isna(current_max):
+                continue
+
+            if pd.isna(latest_ts) or current_max > latest_ts:
+                latest_ts = current_max
+
+        if pd.notna(latest_ts):
+            latest_map[job_key] = pd.to_datetime(latest_ts, errors="coerce").isoformat()
+
+    return latest_map
+
+
 def render_pc_state_cards(
     pc_state_df: pd.DataFrame | None,
     pc_config_df: pd.DataFrame | None,
@@ -2205,6 +2296,8 @@ def render_pc_state_cards(
         else:
             st.success("Ejecución manual completa encolada correctamente.")
 
+    latest_updates = _latest_sheet_update_by_job()
+
     for start in range(0, len(rows), 3):
         chunk = rows.iloc[start : start + 3]
         cols = st.columns(len(chunk))
@@ -2215,8 +2308,17 @@ def render_pc_state_cards(
             icon, status_label = STATUS_BADGES.get(status_key, ("⚪", status_key.capitalize() or "Sin dato"))
             started_text = _format_pc_datetime(row.get("started_at"))
             duration_text = _format_pc_duration(row)
+            job_key_norm = job_raw.strip().lower()
 
-            job_key = job_raw.strip().lower()
+            sheet_latest_raw = latest_updates.get(job_key_norm, "")
+            sheet_latest_ts = pd.to_datetime(sheet_latest_raw, errors="coerce")
+            card_started_ts = pd.to_datetime(row.get("started_at"), errors="coerce")
+            if pd.notna(sheet_latest_ts):
+                if pd.isna(card_started_ts) or (sheet_latest_ts - card_started_ts) >= timedelta(days=1):
+                    started_text = _format_pc_datetime(sheet_latest_ts)
+                    duration_text = "se ejecuto manual"
+
+            job_key = job_key_norm
             cfg = config_map.get(job_key) if config_map else None
             if cfg is not None:
                 cfg_key = _sanitize_config_value(cfg.get("__pc_key__", job_key))
@@ -2672,6 +2774,7 @@ def _format_money_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
 _require_authentication()
+_ensure_scroll_top_on_page_entry()
 st.title("📋 Visualizador de Actos Panamá Compra")
 
 # ---- Config ----
