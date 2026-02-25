@@ -1963,6 +1963,7 @@ def _build_prospeccion_rir_dataframe(
     db_path_str: str,
     actos_table: str,
     fichas_table: str,
+    fichas_drive_file_id: str = "",
 ) -> pd.DataFrame:
     if not actos_table:
         return pd.DataFrame()
@@ -2030,6 +2031,89 @@ def _build_prospeccion_rir_dataframe(
         return pd.DataFrame()
 
     fichas_meta: dict[str, dict[str, str]] = {}
+
+    def _merge_fichas_meta_from_dataframe(
+        ficha_meta_df: pd.DataFrame,
+        *,
+        ficha_num_col: str,
+        ficha_name_col: str,
+        ficha_ct_col: str,
+        ficha_link_col: str,
+        ficha_class_col: str,
+    ) -> None:
+        if ficha_meta_df.empty or not ficha_num_col:
+            return
+        for _, meta_row in ficha_meta_df.iterrows():
+            tokens = _extract_ficha_tokens(meta_row.get(ficha_num_col))
+            if not tokens:
+                continue
+            payload = {
+                "nombre": _clean_text(meta_row.get(ficha_name_col)) if ficha_name_col else "",
+                "tiene_ct": _coerce_ct_label(meta_row.get(ficha_ct_col)) if ficha_ct_col else "N/D",
+                "enlace_minsa": _clean_text(meta_row.get(ficha_link_col)) if ficha_link_col else "",
+                "clase": _clean_text(meta_row.get(ficha_class_col)) if ficha_class_col else "",
+            }
+            for token in tokens:
+                current = fichas_meta.setdefault(
+                    token,
+                    {"nombre": "", "tiene_ct": "N/D", "enlace_minsa": "", "clase": ""},
+                )
+                if payload["nombre"] and not current["nombre"]:
+                    current["nombre"] = payload["nombre"]
+                if payload["tiene_ct"] != "N/D" and current["tiene_ct"] == "N/D":
+                    current["tiene_ct"] = payload["tiene_ct"]
+                if payload["enlace_minsa"] and not current["enlace_minsa"]:
+                    current["enlace_minsa"] = payload["enlace_minsa"]
+                if payload["clase"] and not current["clase"]:
+                    current["clase"] = payload["clase"]
+
+    # 1) Fuente prioritaria: archivo de fichas (Drive), p.ej. fichas_ctni_con_enlace.xlsx
+    if fichas_drive_file_id:
+        try:
+            drive_fichas_df = load_drive_excel(fichas_drive_file_id)
+        except Exception:
+            drive_fichas_df = pd.DataFrame()
+
+        if not drive_fichas_df.empty:
+            drive_fichas_columns = list(drive_fichas_df.columns)
+            drive_num_col = _resolve_column_by_alias(
+                drive_fichas_columns,
+                ["ficha", "numero ficha", "numero_ficha", "n ficha", "ficha_tecnica", "codigo ficha", "id ficha"],
+            )
+            drive_name_col = _resolve_column_by_alias(
+                drive_fichas_columns,
+                ["nombre ficha", "nombre", "descripcion", "detalle", "denominacion"],
+            )
+            drive_ct_col = _resolve_column_by_alias(
+                drive_fichas_columns,
+                ["tiene ct", "con ct", "ct", "criterio tecnico"],
+            )
+            drive_link_col = _resolve_column_by_alias(
+                drive_fichas_columns,
+                [
+                    "enlace_ficha_tecnica",
+                    "enlace ficha tecnica",
+                    "enlace minsa",
+                    "link minsa",
+                    "url minsa",
+                    "enlace",
+                    "url",
+                ],
+            )
+            drive_class_col = _resolve_column_by_alias(
+                drive_fichas_columns,
+                ["clase", "categoria", "clasificacion", "tipo"],
+            )
+            _merge_fichas_meta_from_dataframe(
+                drive_fichas_df,
+                ficha_num_col=drive_num_col,
+                ficha_name_col=drive_name_col,
+                ficha_ct_col=drive_ct_col,
+                ficha_link_col=drive_link_col,
+                ficha_class_col=drive_class_col,
+            )
+
+    # 2) Fuente secundaria: tabla DB de fichas (completa vacíos si faltan)
     if fichas_table:
         try:
             if backend == "postgres":
@@ -2053,7 +2137,15 @@ def _build_prospeccion_rir_dataframe(
         )
         ficha_link_col = _resolve_column_by_alias(
             fichas_columns,
-            ["enlace minsa", "link minsa", "url minsa", "enlace", "url"],
+            [
+                "enlace_ficha_tecnica",
+                "enlace ficha tecnica",
+                "enlace minsa",
+                "link minsa",
+                "url minsa",
+                "enlace",
+                "url",
+            ],
         )
         ficha_class_col = _resolve_column_by_alias(
             fichas_columns,
@@ -2077,29 +2169,14 @@ def _build_prospeccion_rir_dataframe(
                 )
             except Exception:
                 ficha_meta_df = pd.DataFrame()
-            for _, meta_row in ficha_meta_df.iterrows():
-                tokens = _extract_ficha_tokens(meta_row.get(ficha_num_col))
-                if not tokens:
-                    continue
-                payload = {
-                    "nombre": _clean_text(meta_row.get(ficha_name_col)) if ficha_name_col else "",
-                    "tiene_ct": _coerce_ct_label(meta_row.get(ficha_ct_col)) if ficha_ct_col else "N/D",
-                    "enlace_minsa": _clean_text(meta_row.get(ficha_link_col)) if ficha_link_col else "",
-                    "clase": _clean_text(meta_row.get(ficha_class_col)) if ficha_class_col else "",
-                }
-                for token in tokens:
-                    current = fichas_meta.setdefault(
-                        token,
-                        {"nombre": "", "tiene_ct": "N/D", "enlace_minsa": "", "clase": ""},
-                    )
-                    if payload["nombre"] and not current["nombre"]:
-                        current["nombre"] = payload["nombre"]
-                    if payload["tiene_ct"] != "N/D" and current["tiene_ct"] == "N/D":
-                        current["tiene_ct"] = payload["tiene_ct"]
-                    if payload["enlace_minsa"] and not current["enlace_minsa"]:
-                        current["enlace_minsa"] = payload["enlace_minsa"]
-                    if payload["clase"] and not current["clase"]:
-                        current["clase"] = payload["clase"]
+            _merge_fichas_meta_from_dataframe(
+                ficha_meta_df,
+                ficha_num_col=ficha_num_col,
+                ficha_name_col=ficha_name_col,
+                ficha_ct_col=ficha_ct_col,
+                ficha_link_col=ficha_link_col,
+                ficha_class_col=ficha_class_col,
+            )
 
     col_index = {col: idx for idx, col in enumerate(selected_cols)}
     idx_ficha = col_index[ficha_col]
@@ -2216,7 +2293,6 @@ def _build_prospeccion_rir_dataframe(
             "Tiene CT": meta.get("tiene_ct") or "N/D",
             "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
             "Clase ficha": meta.get("clase") or "",
-            "Actos (monto desc)": ", ".join(str(idx + 1) for idx in range(len(links_unique))),
             "__actos_links__": "\n".join(links_unique),
             "Proponentes distintos": proponentes_distintos,
             "Top 1 ganador": top1_text,
@@ -2243,7 +2319,6 @@ def _build_prospeccion_rir_dataframe(
         "Tiene CT",
         "Enlace ficha MINSA",
         "Clase ficha",
-        "Actos (monto desc)",
     ] + [
         "Proponentes distintos",
         "Top 1 ganador",
@@ -2263,6 +2338,7 @@ def render_prospeccion_rir_panel(
     db_path_str: str,
     actos_table: str,
     fichas_table: str,
+    fichas_drive_file_id: str = "",
     key_prefix: str = "pc_prospeccion_rir",
 ) -> None:
     if not actos_table:
@@ -2277,6 +2353,7 @@ def render_prospeccion_rir_panel(
                 db_path_str=db_path_str,
                 actos_table=actos_table,
                 fichas_table=fichas_table,
+                fichas_drive_file_id=fichas_drive_file_id,
             )
     except Exception as exc:
         st.error(f"No se pudo construir Prospeccion RIR: {exc}")
@@ -2285,6 +2362,70 @@ def render_prospeccion_rir_panel(
     if df.empty:
         st.info("No hay datos suficientes para construir Prospeccion RIR.")
         return
+
+    def _parse_prospeccion_pct(value: object) -> float | None:
+        text = _clean_text(value)
+        if not text:
+            return None
+        first_part = text.split(",")[0].replace("%", "").strip()
+        return _parse_money_value(first_part)
+
+    def _sort_prospeccion_dataframe(
+        in_df: pd.DataFrame,
+        *,
+        sort_column: str,
+        descending: bool,
+    ) -> pd.DataFrame:
+        if in_df.empty or sort_column not in in_df.columns:
+            return in_df
+
+        out_df = in_df.copy()
+        numeric_cols = {
+            "Actos con ficha",
+            "Actos ficha unica",
+            "Monto total (ficha unica)",
+            "Proponentes distintos",
+        }
+        percent_cols = {
+            "% Top 1 (total, unica)",
+            "% Top 2 (total, unica)",
+        }
+        text_cols = {"Ficha #", "Nombre ficha", "Top 1 ganador", "Top 2 ganador", "Tiene CT", "Clase ficha"}
+
+        key_col = "__sort_key__"
+        if sort_column in numeric_cols:
+            out_df[key_col] = _coerce_money_series(out_df[sort_column])
+        elif sort_column in percent_cols:
+            out_df[key_col] = pd.to_numeric(
+                out_df[sort_column].map(_parse_prospeccion_pct),
+                errors="coerce",
+            )
+        elif sort_column in text_cols:
+            out_df[key_col] = out_df[sort_column].fillna("").astype(str).str.lower()
+        else:
+            # Fallback defensivo: intenta numérico y si no, texto.
+            numeric_try = _coerce_money_series(out_df[sort_column])
+            if numeric_try.notna().any():
+                out_df[key_col] = numeric_try
+            else:
+                out_df[key_col] = out_df[sort_column].fillna("").astype(str).str.lower()
+
+        tie_breakers = ["Monto total (ficha unica)", "Actos con ficha", "Actos ficha unica", "Ficha #"]
+        sort_cols = [key_col]
+        ascending_flags = [not descending]
+        for tie_col in tie_breakers:
+            if tie_col in out_df.columns and tie_col != sort_column:
+                sort_cols.append(tie_col)
+                # Los desempates deben mantener prioridad analítica (montos/actos altos primero).
+                ascending_flags.append(False if tie_col != "Ficha #" else True)
+
+        out_df = out_df.sort_values(
+            by=sort_cols,
+            ascending=ascending_flags,
+            kind="mergesort",
+            na_position="last",
+        ).drop(columns=[key_col], errors="ignore")
+        return out_df.reset_index(drop=True)
 
     search_col_options = ["Todas las columnas", "Ficha #", "Nombre ficha", "Top 1 ganador", "Top 2 ganador"]
     search_col = st.selectbox(
@@ -2315,6 +2456,39 @@ def render_prospeccion_rir_panel(
             ignore_accents=True,
         )
 
+    sort_col_options = [
+        "Monto total (ficha unica)",
+        "Actos con ficha",
+        "Actos ficha unica",
+        "Proponentes distintos",
+        "Ficha #",
+        "Nombre ficha",
+        "Top 1 ganador",
+        "Top 2 ganador",
+        "% Top 1 (total, unica)",
+        "% Top 2 (total, unica)",
+    ]
+    sort_ui_cols = st.columns([2.6, 1.4])
+    with sort_ui_cols[0]:
+        sort_col = st.selectbox(
+            "Orden global por",
+            options=[c for c in sort_col_options if c in filtered.columns],
+            index=0 if "Monto total (ficha unica)" in filtered.columns else 0,
+            key=f"{key_prefix}_sort_col",
+        )
+    with sort_ui_cols[1]:
+        sort_desc = st.toggle(
+            "Descendente",
+            value=True,
+            key=f"{key_prefix}_sort_desc",
+        )
+
+    filtered = _sort_prospeccion_dataframe(
+        filtered,
+        sort_column=sort_col,
+        descending=bool(sort_desc),
+    )
+
     page_size = st.slider(
         "Filas por pagina",
         min_value=20,
@@ -2338,16 +2512,15 @@ def render_prospeccion_rir_panel(
     page_df = filtered.iloc[start:end].copy()
     page_df, money_cfg = _prepare_money_columns_for_sorting(page_df)
     links_col = "__actos_links__"
-    display_df = page_df.drop(columns=[links_col], errors="ignore")
+    display_df = page_df.drop(
+        columns=[links_col, "Actos (monto desc)", "actos monto desc"],
+        errors="ignore",
+    )
 
     column_config = {
         "Enlace ficha MINSA": st.column_config.LinkColumn(
             "Enlace ficha MINSA",
             display_text="MINSA",
-        ),
-        "Actos (monto desc)": st.column_config.TextColumn(
-            "Actos (monto desc)",
-            help="Indices de actos ordenados por monto descendente.",
         ),
     }
     column_config.update(money_cfg)
@@ -2361,7 +2534,8 @@ def render_prospeccion_rir_panel(
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
         f"Mostrando hasta {page_size} filas. "
-        "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica."
+        "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica. "
+        "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
 
     if not page_df.empty and links_col in page_df.columns:
@@ -4158,6 +4332,8 @@ def _first_app_value(cfg: dict, keys: list[str]) -> str:
 fichas_file_id = _first_app_value(
     _app_cfg,
     [
+        "DRIVE_FICHAS_CTNI_CON_ENLACE_FILE_ID",
+        "DRIVE_FICHAS_CON_ENLACE_FILE_ID",
         "DRIVE_FICHAS_CTNI_FILE_ID",
         "DRIVE_CRITERIOS_TECNICOS_FILE_ID",
         "DRIVE_FICHAS_TECNICAS_FILE_ID",
@@ -4219,11 +4395,20 @@ with st.expander("Prospeccion RIR", expanded=False):
         db_path_str=db_path_refs,
         actos_table=actos_table,
         fichas_table=fichas_table,
+        fichas_drive_file_id=str(fichas_file_id or ""),
         key_prefix="pc_prospeccion_rir",
     )
 
 with st.expander("Fichas tecnicas", expanded=False):
-    if fichas_table:
+    # Prioriza el documento de fichas con enlace (Drive) por encima de la tabla antigua.
+    if fichas_file_id:
+        render_drive_reference_panel(
+            title="Fichas tecnicas",
+            file_id=str(fichas_file_id or ""),
+            key_prefix="pc_fichas",
+            show_header=False,
+        )
+    elif fichas_table:
         render_db_reference_panel(
             title="Fichas tecnicas",
             key_prefix="pc_fichas",
@@ -4234,12 +4419,7 @@ with st.expander("Fichas tecnicas", expanded=False):
             show_header=False,
         )
     else:
-        render_drive_reference_panel(
-            title="Fichas tecnicas",
-            file_id=str(fichas_file_id or ""),
-            key_prefix="pc_fichas",
-            show_header=False,
-        )
+        st.info("No hay fuente configurada para Fichas tecnicas.")
 
 with st.expander("Oferentes y catalogos", expanded=False):
     if catalogos_table:
