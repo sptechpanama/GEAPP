@@ -1763,8 +1763,13 @@ def render_db_reference_panel(
         st.error(f"No se pudo consultar {table_name}: {exc}")
         return
 
-    page_view = _format_money_columns_for_display(page_df)
-    st.dataframe(page_view, use_container_width=True, height=420)
+    page_view, money_cfg = _prepare_money_columns_for_sorting(page_df)
+    st.dataframe(
+        page_view,
+        use_container_width=True,
+        height=420,
+        column_config=money_cfg,
+    )
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
         f"Mostrando hasta {page_size} filas."
@@ -1832,15 +1837,17 @@ def render_drive_reference_panel(
     end = start + int(page_size)
     page_df = filtered.iloc[start:end].copy()
 
-    page_view = _format_money_columns_for_display(page_df)
-    st.dataframe(page_view, use_container_width=True, height=420)
+    page_view, money_cfg = _prepare_money_columns_for_sorting(page_df)
+    st.dataframe(
+        page_view,
+        use_container_width=True,
+        height=420,
+        column_config=money_cfg,
+    )
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
         f"Mostrando hasta {page_size} filas."
     )
-
-
-PROSPECCION_LINK_COLUMNS = 5
 
 
 def _normalize_column_key(value: object) -> str:
@@ -2209,14 +2216,13 @@ def _build_prospeccion_rir_dataframe(
             "Tiene CT": meta.get("tiene_ct") or "N/D",
             "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
             "Clase ficha": meta.get("clase") or "",
+            "Enlaces actos (monto desc)": ", ".join(links_unique),
             "Proponentes distintos": proponentes_distintos,
             "Top 1 ganador": top1_text,
             "% Top 1 (total, unica)": f"{top1_pct_present:.1f}%, {top1_pct_unique:.1f}%",
             "Top 2 ganador": top2_text,
             "% Top 2 (total, unica)": f"{top2_pct_present:.1f}%, {top2_pct_unique:.1f}%",
         }
-        for idx in range(PROSPECCION_LINK_COLUMNS):
-            row[f"Acto {idx + 1}"] = links_unique[idx] if idx < len(links_unique) else ""
         rows.append(row)
 
     if not rows:
@@ -2236,7 +2242,8 @@ def _build_prospeccion_rir_dataframe(
         "Tiene CT",
         "Enlace ficha MINSA",
         "Clase ficha",
-    ] + [f"Acto {idx + 1}" for idx in range(PROSPECCION_LINK_COLUMNS)] + [
+        "Enlaces actos (monto desc)",
+    ] + [
         "Proponentes distintos",
         "Top 1 ganador",
         "% Top 1 (total, unica)",
@@ -2327,7 +2334,7 @@ def render_prospeccion_rir_panel(
     start = (int(page) - 1) * int(page_size)
     end = start + int(page_size)
     page_df = filtered.iloc[start:end].copy()
-    page_df["Monto total (ficha unica)"] = _format_money_series(page_df["Monto total (ficha unica)"])
+    page_df, money_cfg = _prepare_money_columns_for_sorting(page_df)
 
     column_config = {
         "Enlace ficha MINSA": st.column_config.LinkColumn(
@@ -2335,13 +2342,7 @@ def render_prospeccion_rir_panel(
             display_text="MINSA",
         ),
     }
-    for idx in range(PROSPECCION_LINK_COLUMNS):
-        col = f"Acto {idx + 1}"
-        column_config[col] = st.column_config.LinkColumn(
-            label=str(idx + 1),
-            display_text=str(idx + 1),
-            help="Acto publico donde aparece la ficha (ordenado por monto desc).",
-        )
+    column_config.update(money_cfg)
 
     st.dataframe(
         page_df,
@@ -3284,13 +3285,28 @@ def _is_money_column_name(column_name: str) -> bool:
     return any(token in name for token in money_tokens)
 
 
-def _format_money_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
+def _prepare_money_columns_for_sorting(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """
+    Convierte columnas monetarias a numerico para que el ordenamiento sea correcto.
+    Devuelve (df_convertido, column_config_para_streamlit).
+    """
     if df is None or df.empty:
-        return df
+        return df, {}
     out = df.copy()
+    cfg: dict[str, object] = {}
     for col in out.columns:
         if _is_money_column_name(col):
-            out[col] = _format_money_series(out[col])
+            coerced = _coerce_money_series(out[col])
+            if coerced.notna().any():
+                out[col] = coerced
+                cfg[col] = st.column_config.NumberColumn(col, format="$ %.2f")
+    return out, cfg
+
+
+def _format_money_columns_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    out, _ = _prepare_money_columns_for_sorting(df)
     return out
 
 st.set_page_config(page_title="Visualizador de Actos", layout="wide")
@@ -3523,7 +3539,7 @@ def render_df(
             df[col] = parsed
 
     # Detectar columnas de monto/precio
-    money_cols = [c for c in df.columns if any(x in c.lower() for x in ["precio", "monto", "estimado", "referencia"])]
+    money_cols = [c for c in df.columns if _is_money_column_name(c)]
 
     today = date.today()
     today_ts = pd.Timestamp(today)
@@ -3573,7 +3589,7 @@ def render_df(
 
         if money_cols:
             colm = money_cols[0]
-            v = pd.to_numeric(df[colm], errors="coerce")
+            v = _coerce_money_series(df[colm])
             if v.notna().any():
                 price_min, price_max = 1000.0, 2000000.0
                 if price_min < price_max:
@@ -3585,8 +3601,8 @@ def render_df(
                         step=1000.0,
                         key=keyp+"monto",
                     )
-                    df = df[(pd.to_numeric(df[colm], errors="coerce") >= r[0]) &
-                            (pd.to_numeric(df[colm], errors="coerce") <= r[1])]
+                    parsed_money = _coerce_money_series(df[colm])
+                    df = df[(parsed_money >= r[0]) & (parsed_money <= r[1])]
 
         q = st.text_input(
             "Búsqueda rápida (todas las columnas)",
@@ -3770,9 +3786,10 @@ def render_df(
 
     for c in money_cols:
         if c in display_df.columns:
-            # Solo para visualizacion: no altera el df original ni la logica de filtros/calculos.
-            display_df[c] = _format_money_series(display_df[c])
-            col_cfg[c] = st.column_config.TextColumn(c)
+            coerced = _coerce_money_series(display_df[c])
+            if coerced.notna().any():
+                display_df[c] = coerced
+                col_cfg[c] = st.column_config.NumberColumn(c, format="$ %.2f")
 
     link_col = next((c for c in display_df.columns if c.strip().lower() in {"enlace", "link", "url"}), None)
     if link_col:
@@ -4044,8 +4061,13 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
     if preview_df.empty:
         st.info("No hay filas para los filtros actuales.")
     else:
-        preview_view = _format_money_columns_for_display(preview_df)
-        st.dataframe(preview_view, use_container_width=True, height=520)
+        preview_view, money_cfg = _prepare_money_columns_for_sorting(preview_df)
+        st.dataframe(
+            preview_view,
+            use_container_width=True,
+            height=520,
+            column_config=money_cfg,
+        )
 
     st.caption(
         f"Coincidencias totales: {total_rows:,}. "
