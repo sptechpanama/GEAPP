@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 import unicodedata
+from collections import Counter
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1683,8 +1684,10 @@ def render_db_reference_panel(
     db_url: str,
     db_path_str: str,
     table_name: str,
+    show_header: bool = True,
 ) -> None:
-    st.subheader(title)
+    if show_header:
+        st.subheader(title)
     st.caption(f"Fuente: tabla `{table_name}` ({'Supabase' if backend == 'postgres' else 'SQLite'})")
 
     try:
@@ -1773,8 +1776,10 @@ def render_drive_reference_panel(
     title: str,
     file_id: str,
     key_prefix: str,
+    show_header: bool = True,
 ) -> None:
-    st.subheader(title)
+    if show_header:
+        st.subheader(title)
     if not file_id:
         st.info("No hay archivo configurado para este cuadro.")
         return
@@ -1832,6 +1837,522 @@ def render_drive_reference_panel(
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
         f"Mostrando hasta {page_size} filas."
+    )
+
+
+PROSPECCION_LINK_COLUMNS = 5
+
+
+def _normalize_column_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = "".join(
+        ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch)
+    )
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _resolve_column_by_alias(columns: list[str], aliases: list[str]) -> str:
+    if not columns:
+        return ""
+    normalized = {_normalize_column_key(col): col for col in columns}
+    alias_norm = [_normalize_column_key(alias) for alias in aliases if alias]
+
+    for alias in alias_norm:
+        if alias in normalized:
+            return normalized[alias]
+
+    for alias in alias_norm:
+        for normalized_col, original_col in normalized.items():
+            if alias and alias in normalized_col:
+                return original_col
+    return ""
+
+
+def _clean_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in {"nan", "none", "null", "n/a", "<na>"}:
+        return ""
+    return text
+
+
+def _extract_ficha_tokens(value: object) -> list[str]:
+    raw = _clean_text(value)
+    if not raw:
+        return []
+    normalized = _normalize_column_key(raw)
+    if normalized in {"no detectada", "sin ficha", "no detectado"}:
+        return []
+
+    tokens = re.findall(r"\d{3,}", raw)
+    seen: set[str] = set()
+    out: list[str] = []
+    for token in tokens:
+        cleaned = token.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        out.append(cleaned)
+    return out
+
+
+def _coerce_ct_label(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "N/D"
+    if isinstance(value, bool):
+        return "Si" if value else "No"
+
+    text = _clean_text(value)
+    if not text:
+        return "N/D"
+    norm = _normalize_column_key(text)
+    if norm in {"si", "s", "true", "1", "x", "con ct", "ct"}:
+        return "Si"
+    if norm in {"no", "n", "false", "0", "sin ct"}:
+        return "No"
+    return text
+
+
+@st.cache_data(ttl=300)
+def _load_table_subset(
+    backend: str,
+    db_url: str,
+    db_path_str: str,
+    table_name: str,
+    columns: tuple[str, ...],
+    where_sql: str,
+) -> pd.DataFrame:
+    if not table_name or not columns:
+        return pd.DataFrame()
+
+    selected = [str(col) for col in columns if str(col).strip()]
+    if not selected:
+        return pd.DataFrame()
+
+    quoted_cols = ", ".join(_quote_identifier(col) for col in selected)
+    table_id = _quote_identifier(table_name)
+    query = f"SELECT {quoted_cols} FROM {table_id}"
+    if where_sql.strip():
+        query += f" {where_sql.strip()}"
+
+    if backend == "postgres":
+        engine = _pg_engine(db_url)
+        with engine.connect() as conn:
+            return pd.read_sql_query(text(query), conn)
+
+    with _connect_sqlite(db_path_str) as conn:
+        return pd.read_sql_query(query, conn)
+
+
+@st.cache_data(ttl=300)
+def _build_prospeccion_rir_dataframe(
+    backend: str,
+    db_url: str,
+    db_path_str: str,
+    actos_table: str,
+    fichas_table: str,
+) -> pd.DataFrame:
+    if not actos_table:
+        return pd.DataFrame()
+
+    try:
+        if backend == "postgres":
+            actos_columns = list_postgres_columns(db_url, actos_table)
+        else:
+            actos_columns = list_sqlite_columns(db_path_str, actos_table)
+    except Exception:
+        return pd.DataFrame()
+
+    ficha_col = _resolve_column_by_alias(
+        actos_columns,
+        ["ficha_detectada", "ficha detectada", "ficha", "numero de ficha"],
+    )
+    if not ficha_col:
+        return pd.DataFrame()
+
+    precio_col = _resolve_column_by_alias(
+        actos_columns,
+        ["precio_referencia", "precio referencia", "monto referencia"],
+    )
+    enlace_col = _resolve_column_by_alias(
+        actos_columns,
+        ["enlace", "url", "link"],
+    )
+    ganador_col = _resolve_column_by_alias(
+        actos_columns,
+        ["razon_social", "razon social", "adjudicatario", "proveedor ganador"],
+    )
+
+    proponente_cols = [
+        col
+        for col in actos_columns
+        if re.fullmatch(r"proponente\s+\d+", _normalize_column_key(col))
+    ]
+
+    selected_cols = [ficha_col]
+    for candidate in [precio_col, enlace_col, ganador_col]:
+        if candidate and candidate not in selected_cols:
+            selected_cols.append(candidate)
+    for candidate in proponente_cols:
+        if candidate not in selected_cols:
+            selected_cols.append(candidate)
+
+    ficha_q = _quote_identifier(ficha_col)
+    where_sql = (
+        f"WHERE {ficha_q} IS NOT NULL "
+        f"AND TRIM(CAST({ficha_q} AS TEXT)) <> '' "
+        f"AND LOWER(TRIM(CAST({ficha_q} AS TEXT))) NOT IN ('no detectada', 'sin ficha')"
+    )
+    try:
+        actos_df = _load_table_subset(
+            backend,
+            db_url,
+            db_path_str,
+            actos_table,
+            tuple(selected_cols),
+            where_sql,
+        )
+    except Exception:
+        return pd.DataFrame()
+    if actos_df.empty:
+        return pd.DataFrame()
+
+    fichas_meta: dict[str, dict[str, str]] = {}
+    if fichas_table:
+        try:
+            if backend == "postgres":
+                fichas_columns = list_postgres_columns(db_url, fichas_table)
+            else:
+                fichas_columns = list_sqlite_columns(db_path_str, fichas_table)
+        except Exception:
+            fichas_columns = []
+
+        ficha_num_col = _resolve_column_by_alias(
+            fichas_columns,
+            ["ficha", "numero ficha", "ficha_tecnica", "codigo ficha", "id ficha"],
+        )
+        ficha_name_col = _resolve_column_by_alias(
+            fichas_columns,
+            ["nombre ficha", "nombre", "descripcion", "detalle", "denominacion"],
+        )
+        ficha_ct_col = _resolve_column_by_alias(
+            fichas_columns,
+            ["tiene ct", "con ct", "ct", "criterio tecnico"],
+        )
+        ficha_link_col = _resolve_column_by_alias(
+            fichas_columns,
+            ["enlace minsa", "link minsa", "url minsa", "enlace", "url"],
+        )
+        ficha_class_col = _resolve_column_by_alias(
+            fichas_columns,
+            ["clase", "categoria", "clasificacion", "tipo"],
+        )
+
+        ficha_meta_cols = [
+            col
+            for col in [ficha_num_col, ficha_name_col, ficha_ct_col, ficha_link_col, ficha_class_col]
+            if col
+        ]
+        if ficha_num_col and ficha_meta_cols:
+            try:
+                ficha_meta_df = _load_table_subset(
+                    backend,
+                    db_url,
+                    db_path_str,
+                    fichas_table,
+                    tuple(dict.fromkeys(ficha_meta_cols)),
+                    "",
+                )
+            except Exception:
+                ficha_meta_df = pd.DataFrame()
+            for _, meta_row in ficha_meta_df.iterrows():
+                tokens = _extract_ficha_tokens(meta_row.get(ficha_num_col))
+                if not tokens:
+                    continue
+                payload = {
+                    "nombre": _clean_text(meta_row.get(ficha_name_col)) if ficha_name_col else "",
+                    "tiene_ct": _coerce_ct_label(meta_row.get(ficha_ct_col)) if ficha_ct_col else "N/D",
+                    "enlace_minsa": _clean_text(meta_row.get(ficha_link_col)) if ficha_link_col else "",
+                    "clase": _clean_text(meta_row.get(ficha_class_col)) if ficha_class_col else "",
+                }
+                for token in tokens:
+                    current = fichas_meta.setdefault(
+                        token,
+                        {"nombre": "", "tiene_ct": "N/D", "enlace_minsa": "", "clase": ""},
+                    )
+                    if payload["nombre"] and not current["nombre"]:
+                        current["nombre"] = payload["nombre"]
+                    if payload["tiene_ct"] != "N/D" and current["tiene_ct"] == "N/D":
+                        current["tiene_ct"] = payload["tiene_ct"]
+                    if payload["enlace_minsa"] and not current["enlace_minsa"]:
+                        current["enlace_minsa"] = payload["enlace_minsa"]
+                    if payload["clase"] and not current["clase"]:
+                        current["clase"] = payload["clase"]
+
+    col_index = {col: idx for idx, col in enumerate(selected_cols)}
+    idx_ficha = col_index[ficha_col]
+    idx_precio = col_index.get(precio_col, -1)
+    idx_enlace = col_index.get(enlace_col, -1)
+    idx_ganador = col_index.get(ganador_col, -1)
+    idx_proponentes = [col_index[c] for c in proponente_cols if c in col_index]
+
+    stats: dict[str, dict[str, object]] = {}
+
+    def _state(ficha_token: str) -> dict[str, object]:
+        if ficha_token not in stats:
+            stats[ficha_token] = {
+                "actos_presentes": 0,
+                "actos_unicos": 0,
+                "monto_unicos": 0.0,
+                "links": [],
+                "proponentes": set(),
+                "ganadores": Counter(),
+                "ganadores_unicos": Counter(),
+            }
+        return stats[ficha_token]
+
+    for values in actos_df[selected_cols].itertuples(index=False, name=None):
+        fichas = _extract_ficha_tokens(values[idx_ficha])
+        if not fichas:
+            continue
+
+        unique_ficha = fichas[0] if len(fichas) == 1 else ""
+        precio_ref = _parse_money_value(values[idx_precio]) if idx_precio >= 0 else None
+        enlace = _clean_text(values[idx_enlace]) if idx_enlace >= 0 else ""
+        ganador = _clean_text(values[idx_ganador]) if idx_ganador >= 0 else ""
+
+        proponentes_row = set()
+        for idx in idx_proponentes:
+            proponente = _clean_text(values[idx])
+            if proponente:
+                proponentes_row.add(proponente)
+
+        for ficha_token in fichas:
+            state = _state(ficha_token)
+            state["actos_presentes"] = int(state["actos_presentes"]) + 1
+            if enlace:
+                sort_monto = float(precio_ref) if precio_ref is not None else -1.0
+                state["links"].append((sort_monto, enlace))
+            if ganador:
+                state["ganadores"][ganador] += 1
+            if proponentes_row:
+                state["proponentes"].update(proponentes_row)
+
+            if unique_ficha and ficha_token == unique_ficha:
+                state["actos_unicos"] = int(state["actos_unicos"]) + 1
+                if precio_ref is not None:
+                    state["monto_unicos"] = float(state["monto_unicos"]) + float(precio_ref)
+                if ganador:
+                    state["ganadores_unicos"][ganador] += 1
+
+    rows: list[dict[str, object]] = []
+    for ficha_token, state in stats.items():
+        actos_presentes = int(state["actos_presentes"])
+        actos_unicos = int(state["actos_unicos"])
+        monto_unicos = float(state["monto_unicos"])
+        proponentes_distintos = len(state["proponentes"])
+        ganadores_sorted = sorted(
+            state["ganadores"].items(),
+            key=lambda item: (-item[1], item[0].lower()),
+        )
+
+        def _winner_text(rank: int) -> tuple[str, int]:
+            if len(ganadores_sorted) < rank:
+                return "—", 0
+            name, count = ganadores_sorted[rank - 1]
+            return f"{name} ({count})", int(count)
+
+        top1_text, top1_count = _winner_text(1)
+        top2_text, top2_count = _winner_text(2)
+
+        top1_unique = 0
+        top2_unique = 0
+        if len(ganadores_sorted) >= 1:
+            top1_unique = int(state["ganadores_unicos"].get(ganadores_sorted[0][0], 0))
+        if len(ganadores_sorted) >= 2:
+            top2_unique = int(state["ganadores_unicos"].get(ganadores_sorted[1][0], 0))
+
+        top1_pct_present = (top1_count / actos_presentes * 100.0) if actos_presentes else 0.0
+        top1_pct_unique = (top1_unique / actos_unicos * 100.0) if actos_unicos else 0.0
+        top2_pct_present = (top2_count / actos_presentes * 100.0) if actos_presentes else 0.0
+        top2_pct_unique = (top2_unique / actos_unicos * 100.0) if actos_unicos else 0.0
+
+        links_sorted = sorted(
+            state["links"],
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        links_unique: list[str] = []
+        seen_links: set[str] = set()
+        for _, raw_link in links_sorted:
+            link = _clean_text(raw_link)
+            if not link or link in seen_links:
+                continue
+            seen_links.add(link)
+            links_unique.append(link)
+
+        meta = fichas_meta.get(
+            ficha_token,
+            {"nombre": "", "tiene_ct": "N/D", "enlace_minsa": "", "clase": ""},
+        )
+        row: dict[str, object] = {
+            "Ficha #": ficha_token,
+            "Nombre ficha": meta.get("nombre") or f"Ficha {ficha_token}",
+            "Actos con ficha": actos_presentes,
+            "Actos ficha unica": actos_unicos,
+            "Monto total (ficha unica)": monto_unicos,
+            "Tiene CT": meta.get("tiene_ct") or "N/D",
+            "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
+            "Clase ficha": meta.get("clase") or "",
+            "Proponentes distintos": proponentes_distintos,
+            "Top 1 ganador": top1_text,
+            "% Top 1 (total, unica)": f"{top1_pct_present:.1f}%, {top1_pct_unique:.1f}%",
+            "Top 2 ganador": top2_text,
+            "% Top 2 (total, unica)": f"{top2_pct_present:.1f}%, {top2_pct_unique:.1f}%",
+        }
+        for idx in range(PROSPECCION_LINK_COLUMNS):
+            row[f"Acto {idx + 1}"] = links_unique[idx] if idx < len(links_unique) else ""
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    out = out.sort_values(
+        by=["Actos con ficha", "Actos ficha unica", "Monto total (ficha unica)"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+    ordered_cols = [
+        "Ficha #",
+        "Nombre ficha",
+        "Actos con ficha",
+        "Actos ficha unica",
+        "Monto total (ficha unica)",
+        "Tiene CT",
+        "Enlace ficha MINSA",
+        "Clase ficha",
+    ] + [f"Acto {idx + 1}" for idx in range(PROSPECCION_LINK_COLUMNS)] + [
+        "Proponentes distintos",
+        "Top 1 ganador",
+        "% Top 1 (total, unica)",
+        "Top 2 ganador",
+        "% Top 2 (total, unica)",
+    ]
+    out = out[[col for col in ordered_cols if col in out.columns]]
+    return out
+
+
+def render_prospeccion_rir_panel(
+    *,
+    backend: str,
+    db_url: str,
+    db_path_str: str,
+    actos_table: str,
+    fichas_table: str,
+    key_prefix: str = "pc_prospeccion_rir",
+) -> None:
+    if not actos_table:
+        st.info("No encontramos tabla de actos para construir Prospeccion RIR.")
+        return
+
+    try:
+        with st.spinner("Construyendo Prospeccion RIR..."):
+            df = _build_prospeccion_rir_dataframe(
+                backend=backend,
+                db_url=db_url,
+                db_path_str=db_path_str,
+                actos_table=actos_table,
+                fichas_table=fichas_table,
+            )
+    except Exception as exc:
+        st.error(f"No se pudo construir Prospeccion RIR: {exc}")
+        return
+
+    if df.empty:
+        st.info("No hay datos suficientes para construir Prospeccion RIR.")
+        return
+
+    search_col_options = ["Todas las columnas", "Ficha #", "Nombre ficha", "Top 1 ganador", "Top 2 ganador"]
+    search_col = st.selectbox(
+        "Columna de busqueda",
+        options=search_col_options,
+        key=f"{key_prefix}_search_col",
+    )
+    search_text = st.text_input(
+        "Buscar ficha/proveedor",
+        key=f"{key_prefix}_search_text",
+        placeholder='Ej: 109491 "insumo laboratorio" -reactivo',
+    )
+    search_mode = st.radio(
+        "Modo de busqueda",
+        options=["OR", "AND"],
+        horizontal=True,
+        key=f"{key_prefix}_search_mode",
+    )
+
+    filtered = df.copy()
+    if search_text.strip():
+        target = None if search_col == "Todas las columnas" else search_col
+        filtered, _ = _apply_advanced_text_search(
+            filtered,
+            raw_query=search_text,
+            mode=search_mode,
+            target_column=target,
+            ignore_accents=True,
+        )
+
+    page_size = st.slider(
+        "Filas por pagina",
+        min_value=20,
+        max_value=1000,
+        value=120,
+        step=20,
+        key=f"{key_prefix}_page_size",
+    )
+    total = len(filtered)
+    total_pages = max(1, math.ceil(total / max(1, page_size)))
+    page = st.number_input(
+        "Pagina",
+        min_value=1,
+        max_value=total_pages,
+        value=1,
+        step=1,
+        key=f"{key_prefix}_page",
+    )
+    start = (int(page) - 1) * int(page_size)
+    end = start + int(page_size)
+    page_df = filtered.iloc[start:end].copy()
+    page_df["Monto total (ficha unica)"] = _format_money_series(page_df["Monto total (ficha unica)"])
+
+    column_config = {
+        "Enlace ficha MINSA": st.column_config.LinkColumn(
+            "Enlace ficha MINSA",
+            display_text="MINSA",
+        ),
+    }
+    for idx in range(PROSPECCION_LINK_COLUMNS):
+        col = f"Acto {idx + 1}"
+        column_config[col] = st.column_config.LinkColumn(
+            label=str(idx + 1),
+            display_text=str(idx + 1),
+            help="Acto publico donde aparece la ficha (ordenado por monto desc).",
+        )
+
+    st.dataframe(
+        page_df,
+        use_container_width=True,
+        height=520,
+        column_config=column_config,
+    )
+    st.caption(
+        f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
+        f"Mostrando hasta {page_size} filas. "
+        "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica."
     )
 
 
@@ -3318,10 +3839,11 @@ def render_df(
     render_pc_state_cards(pc_state_df, pc_config_df, suffix=suffix)
 
 
-def render_panamacompra_db_panel() -> None:
+def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
     """Muestra una vista de tablas desde SQLite local o Supabase."""
-    st.divider()
-    st.subheader("Base panamacompra.db")
+    if show_header:
+        st.divider()
+        st.subheader("Base panamacompra.db")
 
     backend = _active_db_backend()
     db_path_str = ""
@@ -3569,8 +4091,6 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
-render_panamacompra_db_panel()
-
 try:
     _app_cfg = st.secrets.get("app", {})
 except Exception:
@@ -3638,37 +4158,56 @@ catalogos_table = _first_app_value(
 )
 
 st.divider()
-if fichas_table:
-    render_db_reference_panel(
-        title="Fichas tecnicas",
-        key_prefix="pc_fichas",
+with st.expander("Base de datos de actos publicos, fichas y oferentes", expanded=False):
+    render_panamacompra_db_panel(show_header=False)
+
+with st.expander("Prospeccion RIR", expanded=False):
+    render_prospeccion_rir_panel(
         backend=backend_refs,
         db_url=db_url_refs,
         db_path_str=db_path_refs,
-        table_name=fichas_table,
-    )
-else:
-    render_drive_reference_panel(
-        title="Fichas tecnicas",
-        file_id=str(fichas_file_id or ""),
-        key_prefix="pc_fichas",
+        actos_table=actos_table,
+        fichas_table=fichas_table,
+        key_prefix="pc_prospeccion_rir",
     )
 
-if catalogos_table:
-    render_db_reference_panel(
-        title="Oferentes y catalogos",
-        key_prefix="pc_catalogos",
-        backend=backend_refs,
-        db_url=db_url_refs,
-        db_path_str=db_path_refs,
-        table_name=catalogos_table,
-    )
-else:
-    render_drive_reference_panel(
-        title="Oferentes y catalogos",
-        file_id=str(catalogos_file_id or ""),
-        key_prefix="pc_catalogos",
-    )
+with st.expander("Fichas tecnicas", expanded=False):
+    if fichas_table:
+        render_db_reference_panel(
+            title="Fichas tecnicas",
+            key_prefix="pc_fichas",
+            backend=backend_refs,
+            db_url=db_url_refs,
+            db_path_str=db_path_refs,
+            table_name=fichas_table,
+            show_header=False,
+        )
+    else:
+        render_drive_reference_panel(
+            title="Fichas tecnicas",
+            file_id=str(fichas_file_id or ""),
+            key_prefix="pc_fichas",
+            show_header=False,
+        )
+
+with st.expander("Oferentes y catalogos", expanded=False):
+    if catalogos_table:
+        render_db_reference_panel(
+            title="Oferentes y catalogos",
+            key_prefix="pc_catalogos",
+            backend=backend_refs,
+            db_url=db_url_refs,
+            db_path_str=db_path_refs,
+            table_name=catalogos_table,
+            show_header=False,
+        )
+    else:
+        render_drive_reference_panel(
+            title="Oferentes y catalogos",
+            file_id=str(catalogos_file_id or ""),
+            key_prefix="pc_catalogos",
+            show_header=False,
+        )
 
 render_panamacompra_ai_chat(
     backend=backend_refs,
