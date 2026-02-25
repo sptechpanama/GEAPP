@@ -2217,6 +2217,7 @@ def _build_prospeccion_rir_dataframe(
             "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
             "Clase ficha": meta.get("clase") or "",
             "Actos (monto desc)": ", ".join(str(idx + 1) for idx in range(len(links_unique))),
+            "__actos_links__": "\n".join(links_unique),
             "Proponentes distintos": proponentes_distintos,
             "Top 1 ganador": top1_text,
             "% Top 1 (total, unica)": f"{top1_pct_present:.1f}%, {top1_pct_unique:.1f}%",
@@ -2249,6 +2250,7 @@ def _build_prospeccion_rir_dataframe(
         "% Top 1 (total, unica)",
         "Top 2 ganador",
         "% Top 2 (total, unica)",
+        "__actos_links__",
     ]
     out = out[[col for col in ordered_cols if col in out.columns]]
     return out
@@ -2335,17 +2337,23 @@ def render_prospeccion_rir_panel(
     end = start + int(page_size)
     page_df = filtered.iloc[start:end].copy()
     page_df, money_cfg = _prepare_money_columns_for_sorting(page_df)
+    links_col = "__actos_links__"
+    display_df = page_df.drop(columns=[links_col], errors="ignore")
 
     column_config = {
         "Enlace ficha MINSA": st.column_config.LinkColumn(
             "Enlace ficha MINSA",
             display_text="MINSA",
         ),
+        "Actos (monto desc)": st.column_config.TextColumn(
+            "Actos (monto desc)",
+            help="Indices de actos ordenados por monto descendente.",
+        ),
     }
     column_config.update(money_cfg)
 
     st.dataframe(
-        page_df,
+        display_df,
         use_container_width=True,
         height=520,
         column_config=column_config,
@@ -2355,6 +2363,25 @@ def render_prospeccion_rir_panel(
         f"Mostrando hasta {page_size} filas. "
         "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica."
     )
+
+    if not page_df.empty and links_col in page_df.columns:
+        selector_options = list(range(len(page_df)))
+        selected_idx = st.selectbox(
+            "Ver enlaces clickeables de la fila",
+            options=selector_options,
+            key=f"{key_prefix}_links_row_selector",
+            format_func=lambda i: (
+                f"{page_df.iloc[i].get('Ficha #', 'N/D')} | "
+                f"{page_df.iloc[i].get('Nombre ficha', 'Sin nombre')}"
+            ),
+        )
+        raw_links = str(page_df.iloc[int(selected_idx)].get(links_col, "") or "")
+        link_list = [u.strip() for u in raw_links.splitlines() if u.strip()]
+        if link_list:
+            links_md = ", ".join(f"[{idx + 1}]({url})" for idx, url in enumerate(link_list))
+            st.markdown(f"**Enlaces actos (monto desc):** {links_md}")
+        else:
+            st.caption("Sin enlaces disponibles para esta fila.")
 
 
 PC_CONFIG_OVERRIDE_TTL_SECONDS = 180
@@ -3271,6 +3298,8 @@ def _format_money_series(series: pd.Series) -> pd.Series:
 def _is_money_column_name(column_name: str) -> bool:
     name = str(column_name or "").strip().lower()
     if not name:
+        return False
+    if name.startswith("actos (monto desc)") or name == "actos monto desc":
         return False
     # Deteccion conservadora para no tocar columnas no monetarias.
     money_tokens = (
