@@ -1739,25 +1739,39 @@ def render_db_reference_panel(
         st.error(f"No se pudo contar registros de {table_name}: {exc}")
         return
 
-    total_pages = max(1, math.ceil(total / max(1, page_size)))
-    page = st.number_input(
-        "Pagina",
-        min_value=1,
-        max_value=total_pages,
-        value=1,
-        step=1,
-        key=f"{key_prefix}_page",
+    show_all_default = key_prefix.startswith("pc_fichas")
+    show_all_rows = st.toggle(
+        "Mostrar todas las filas en una sola pagina",
+        value=show_all_default,
+        key=f"{key_prefix}_show_all",
     )
-    offset = (int(page) - 1) * int(page_size)
+
+    if show_all_rows:
+        effective_page_size = max(1, int(total))
+        page = 1
+        total_pages = 1
+        offset = 0
+    else:
+        effective_page_size = int(page_size)
+        total_pages = max(1, math.ceil(total / max(1, effective_page_size)))
+        page = st.number_input(
+            "Pagina",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key=f"{key_prefix}_page",
+        )
+        offset = (int(page) - 1) * int(effective_page_size)
 
     try:
         if backend == "postgres":
             page_df = query_postgres_preview(
-                db_url, table_name, where_sql, query_params, int(page_size), int(offset)
+                db_url, table_name, where_sql, query_params, int(effective_page_size), int(offset)
             )
         else:
             page_df = query_sqlite_preview(
-                db_path_str, table_name, where_sql, query_params, int(page_size), int(offset)
+                db_path_str, table_name, where_sql, query_params, int(effective_page_size), int(offset)
             )
     except Exception as exc:
         st.error(f"No se pudo consultar {table_name}: {exc}")
@@ -1772,7 +1786,7 @@ def render_db_reference_panel(
     )
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
-        f"Mostrando hasta {page_size} filas."
+        f"Mostrando hasta {effective_page_size if not show_all_rows else total:,} filas."
     )
 
 
@@ -1824,17 +1838,31 @@ def render_drive_reference_panel(
         key=f"{key_prefix}_page_size",
     )
     total = len(filtered)
-    total_pages = max(1, math.ceil(total / max(1, page_size)))
-    page = st.number_input(
-        "Pagina",
-        min_value=1,
-        max_value=total_pages,
-        value=1,
-        step=1,
-        key=f"{key_prefix}_page",
+    show_all_default = key_prefix.startswith("pc_fichas")
+    show_all_rows = st.toggle(
+        "Mostrar todas las filas en una sola pagina",
+        value=show_all_default,
+        key=f"{key_prefix}_show_all",
     )
-    start = (int(page) - 1) * int(page_size)
-    end = start + int(page_size)
+    if show_all_rows:
+        page = 1
+        total_pages = 1
+        start = 0
+        end = total
+        effective_page_size = max(1, total)
+    else:
+        effective_page_size = int(page_size)
+        total_pages = max(1, math.ceil(total / max(1, effective_page_size)))
+        page = st.number_input(
+            "Pagina",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key=f"{key_prefix}_page",
+        )
+        start = (int(page) - 1) * int(effective_page_size)
+        end = start + int(effective_page_size)
     page_df = filtered.iloc[start:end].copy()
 
     page_view, money_cfg = _prepare_money_columns_for_sorting(page_df)
@@ -1846,7 +1874,7 @@ def render_drive_reference_panel(
     )
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
-        f"Mostrando hasta {page_size} filas."
+        f"Mostrando hasta {effective_page_size if not show_all_rows else total:,} filas."
     )
 
 
@@ -2498,17 +2526,30 @@ def render_prospeccion_rir_panel(
         key=f"{key_prefix}_page_size",
     )
     total = len(filtered)
-    total_pages = max(1, math.ceil(total / max(1, page_size)))
-    page = st.number_input(
-        "Pagina",
-        min_value=1,
-        max_value=total_pages,
-        value=1,
-        step=1,
-        key=f"{key_prefix}_page",
+    show_all_rows = st.toggle(
+        "Mostrar todas las fichas en una sola pagina",
+        value=True,
+        key=f"{key_prefix}_show_all",
     )
-    start = (int(page) - 1) * int(page_size)
-    end = start + int(page_size)
+    if show_all_rows:
+        page = 1
+        total_pages = 1
+        start = 0
+        end = total
+        effective_page_size = max(1, total)
+    else:
+        effective_page_size = int(page_size)
+        total_pages = max(1, math.ceil(total / max(1, effective_page_size)))
+        page = st.number_input(
+            "Pagina",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key=f"{key_prefix}_page",
+        )
+        start = (int(page) - 1) * int(effective_page_size)
+        end = start + int(effective_page_size)
     page_df = filtered.iloc[start:end].copy()
     page_df, money_cfg = _prepare_money_columns_for_sorting(page_df)
     links_col = "__actos_links__"
@@ -2533,7 +2574,7 @@ def render_prospeccion_rir_panel(
     )
     st.caption(
         f"Coincidencias: {total:,}. Pagina {int(page)} de {total_pages}. "
-        f"Mostrando hasta {page_size} filas. "
+        f"Mostrando hasta {effective_page_size if not show_all_rows else total:,} filas. "
         "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica. "
         "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
