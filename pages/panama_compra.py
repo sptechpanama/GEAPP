@@ -2216,7 +2216,7 @@ def _build_prospeccion_rir_dataframe(
             "Tiene CT": meta.get("tiene_ct") or "N/D",
             "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
             "Clase ficha": meta.get("clase") or "",
-            "Enlaces actos (monto desc)": ", ".join(links_unique),
+            "Actos (monto desc)": ", ".join(str(idx + 1) for idx in range(len(links_unique))),
             "Proponentes distintos": proponentes_distintos,
             "Top 1 ganador": top1_text,
             "% Top 1 (total, unica)": f"{top1_pct_present:.1f}%, {top1_pct_unique:.1f}%",
@@ -2242,7 +2242,7 @@ def _build_prospeccion_rir_dataframe(
         "Tiene CT",
         "Enlace ficha MINSA",
         "Clase ficha",
-        "Enlaces actos (monto desc)",
+        "Actos (monto desc)",
     ] + [
         "Proponentes distintos",
         "Top 1 ganador",
