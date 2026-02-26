@@ -1513,6 +1513,39 @@ def load_drive_excel(file_id: str) -> pd.DataFrame:
 
     mime_type = str(meta.get("mimeType", ""))
     if mime_type == "application/vnd.google-apps.spreadsheet":
+        # Para Google Sheets, leer valores mostrados directamente evita perder
+        # columnas tipo enlace_ficha_tecnica cuando hay formulas/hyperlinks.
+        try:
+            gc, _ = get_client()
+            sh = gc.open_by_key(fid)
+            ws = sh.get_worksheet(0)
+            values = ws.get_all_values()
+            if not values:
+                return pd.DataFrame()
+
+            raw_headers = ws.row_values(1)
+            if not any(str(c or "").strip() for c in raw_headers):
+                header_row_idx = None
+                for r in range(min(10, len(values))):
+                    non_empty = sum(1 for c in values[r] if str(c or "").strip())
+                    if non_empty >= 3:
+                        header_row_idx = r
+                        break
+                if header_row_idx is None:
+                    return pd.DataFrame()
+                headers = _make_unique(values[header_row_idx])
+                data_rows = values[header_row_idx + 1 :]
+            else:
+                headers = _make_unique(raw_headers)
+                data_rows = values[1:]
+
+            width = len(headers)
+            normalized_rows = [row[:width] + [""] * (width - len(row)) for row in data_rows]
+            return pd.DataFrame(normalized_rows, columns=headers)
+        except Exception:
+            # Fallback al flujo de exportacion si falla lectura directa.
+            pass
+
         request = drive.files().export_media(
             fileId=fid,
             mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2489,7 +2522,7 @@ def render_prospeccion_rir_panel(
         st.info("No encontramos tabla de actos para construir Prospeccion RIR.")
         return
 
-    cfg_cols = st.columns([2.2, 1.2, 1.2])
+    cfg_cols = st.columns([2.4, 1.2])
     with cfg_cols[0]:
         meta_source_label = st.selectbox(
             "Fuente metadata fichas",
@@ -2506,13 +2539,6 @@ def render_prospeccion_rir_panel(
         if st.button("Recargar prospeccion", key=f"{key_prefix}_reload"):
             _build_prospeccion_rir_dataframe.clear()
             st.rerun()
-    with cfg_cols[2]:
-        st.caption(" ")
-        show_full_names_inline = st.toggle(
-            "Nombres completos",
-            value=True,
-            key=f"{key_prefix}_show_full_names_inline",
-        )
 
     meta_source_mode = {
         "Auto (Drive + DB)": "auto",
@@ -2538,20 +2564,6 @@ def render_prospeccion_rir_panel(
     if df.empty:
         st.info("No hay datos suficientes para construir Prospeccion RIR.")
         return
-
-    def _yn_counts(in_df: pd.DataFrame, column: str) -> tuple[int, int]:
-        if in_df.empty or column not in in_df.columns:
-            return 0, 0
-        normalized = (
-            in_df[column]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.lower()
-        )
-        yes = int((normalized == "si").sum())
-        no = int((normalized == "no").sum())
-        return yes, no
 
     def _parse_prospeccion_pct(value: object) -> float | None:
         text = _clean_text(value)
@@ -2662,19 +2674,6 @@ def render_prospeccion_rir_panel(
             ignore_accents=True,
         )
 
-    base_meta_si, base_meta_no = _yn_counts(filtered, "__meta_found__")
-    base_ct_si, base_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
-    base_rs_si, base_rs_no = _yn_counts(filtered, "Registro sanitario")
-    base_link_with_url = 0
-    if "Enlace ficha MINSA" in filtered.columns:
-        base_link_with_url = int(
-            filtered["Enlace ficha MINSA"]
-            .fillna("")
-            .astype(str)
-            .str.contains(r"^https?://", regex=True, na=False)
-            .sum()
-        )
-
     filter_cols = st.columns([1.4, 1.9])
     with filter_cols[0]:
         only_ct_yes = st.toggle(
@@ -2702,32 +2701,7 @@ def render_prospeccion_rir_panel(
             filtered["Registro sanitario"].fillna("").astype(str).str.strip().str.lower() == "no"
         ].copy()
 
-    post_meta_si, post_meta_no = _yn_counts(filtered, "__meta_found__")
-    post_ct_si, post_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
-    post_rs_si, post_rs_no = _yn_counts(filtered, "Registro sanitario")
-    post_link_with_url = 0
-    if "Enlace ficha MINSA" in filtered.columns:
-        post_link_with_url = int(
-            filtered["Enlace ficha MINSA"]
-            .fillna("")
-            .astype(str)
-            .str.contains(r"^https?://", regex=True, na=False)
-            .sum()
-        )
-    st.caption(
-        "Cobertura metadata fichas (antes filtros -> despues): "
-        f"Con metadata {base_meta_si:,}/Sin metadata {base_meta_no:,} -> "
-        f"Con metadata {post_meta_si:,}/Sin metadata {post_meta_no:,}"
-    )
-    st.caption(
-        "Conteo CT/RS (antes filtros -> despues): "
-        f"CT Si {base_ct_si:,}/No {base_ct_no:,} -> Si {post_ct_si:,}/No {post_ct_no:,} | "
-        f"RS Si {base_rs_si:,}/No {base_rs_no:,} -> Si {post_rs_si:,}/No {post_rs_no:,}"
-    )
-    st.caption(
-        "Cobertura enlace MINSA (antes filtros -> despues): "
-        f"Con URL {base_link_with_url:,} -> Con URL {post_link_with_url:,}"
-    )
+    # Diagnosticos ocultos por solicitud de UX limpia.
 
     sort_col_options = [
         "Monto total (ficha unica)",
@@ -2827,57 +2801,6 @@ def render_prospeccion_rir_panel(
         "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica. "
         "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
-
-    if show_full_names_inline and not filtered.empty:
-        st.markdown("**Nombres ficha completos (sin recorte):**")
-        names_page_cols = st.columns([1.7, 1.3])
-        with names_page_cols[0]:
-            names_page_size = st.slider(
-                "Nombres por bloque",
-                min_value=50,
-                max_value=2000,
-                value=500,
-                step=50,
-                key=f"{key_prefix}_full_names_page_size",
-            )
-        with names_page_cols[1]:
-            names_total_rows = len(filtered)
-            names_total_pages = max(1, math.ceil(names_total_rows / max(1, int(names_page_size))))
-            names_page = st.number_input(
-                "Bloque",
-                min_value=1,
-                max_value=names_total_pages,
-                value=1,
-                step=1,
-                key=f"{key_prefix}_full_names_page",
-            )
-        names_start = (int(names_page) - 1) * int(names_page_size)
-        names_end = names_start + int(names_page_size)
-        names_slice = filtered.iloc[names_start:names_end].copy()
-        names_lines = [
-            f"{str(row.get('Ficha #', '')).strip()} | {str(row.get('Nombre ficha', '')).strip()}"
-            for _, row in names_slice.iterrows()
-        ]
-        st.caption(
-            f"Mostrando bloque {int(names_page)} de {names_total_pages} "
-            f"({len(names_lines):,} filas; total {names_total_rows:,})."
-        )
-        st.text_area(
-            "Listado de nombres completos",
-            value="\n".join(names_lines),
-            height=260,
-            key=f"{key_prefix}_full_names_text",
-            disabled=True,
-        )
-
-    with st.expander("Ver nombres completos (pagina actual)", expanded=False):
-        if page_df.empty:
-            st.caption("Sin filas en la pagina actual.")
-        else:
-            for _, row in page_df.iterrows():
-                ficha_id = str(row.get("Ficha #", "") or "").strip()
-                full_name = str(row.get("Nombre ficha", "") or "").strip()
-                st.markdown(f"- **{ficha_id}**: {full_name}")
 
     if not page_df.empty and links_col in page_df.columns:
         selector_options = list(range(len(page_df)))
