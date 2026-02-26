@@ -2746,21 +2746,46 @@ def render_prospeccion_rir_panel(
         "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
 
-    if show_full_names_inline and not page_df.empty:
-        st.markdown("**Nombres ficha completos (pagina actual):**")
-        names_df = (
-            page_df[["Ficha #", "Nombre ficha"]]
-            .copy()
-            .rename(columns={"Ficha #": "Ficha", "Nombre ficha": "Nombre completo"})
-        )
-        if len(names_df) > 500:
-            st.caption(
-                f"Mostrando 500 de {len(names_df):,} nombres completos en esta pagina "
-                "(para mantener rendimiento)."
+    if show_full_names_inline and not filtered.empty:
+        st.markdown("**Nombres ficha completos (sin recorte):**")
+        names_page_cols = st.columns([1.7, 1.3])
+        with names_page_cols[0]:
+            names_page_size = st.slider(
+                "Nombres por bloque",
+                min_value=50,
+                max_value=2000,
+                value=500,
+                step=50,
+                key=f"{key_prefix}_full_names_page_size",
             )
-            names_df = names_df.head(500)
-        st.table(
-            names_df
+        with names_page_cols[1]:
+            names_total_rows = len(filtered)
+            names_total_pages = max(1, math.ceil(names_total_rows / max(1, int(names_page_size))))
+            names_page = st.number_input(
+                "Bloque",
+                min_value=1,
+                max_value=names_total_pages,
+                value=1,
+                step=1,
+                key=f"{key_prefix}_full_names_page",
+            )
+        names_start = (int(names_page) - 1) * int(names_page_size)
+        names_end = names_start + int(names_page_size)
+        names_slice = filtered.iloc[names_start:names_end].copy()
+        names_lines = [
+            f"{str(row.get('Ficha #', '')).strip()} | {str(row.get('Nombre ficha', '')).strip()}"
+            for _, row in names_slice.iterrows()
+        ]
+        st.caption(
+            f"Mostrando bloque {int(names_page)} de {names_total_pages} "
+            f"({len(names_lines):,} filas; total {names_total_rows:,})."
+        )
+        st.text_area(
+            "Listado de nombres completos",
+            value="\n".join(names_lines),
+            height=260,
+            key=f"{key_prefix}_full_names_text",
+            disabled=True,
         )
 
     with st.expander("Ver nombres completos (pagina actual)", expanded=False):
