@@ -1938,19 +1938,17 @@ def _extract_ficha_tokens(value: object) -> list[str]:
 
 def _coerce_ct_label(value: object) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "N/D"
+        return "No"
     if isinstance(value, bool):
         return "Si" if value else "No"
 
     text = _clean_text(value)
     if not text:
-        return "N/D"
+        return "No"
     norm = _normalize_column_key(text)
     if norm in {"si", "s", "true", "1", "x", "con ct", "ct"}:
         return "Si"
-    if norm in {"no", "n", "false", "0", "sin ct"}:
-        return "No"
-    return text
+    return "No"
 
 
 @st.cache_data(ttl=300)
@@ -2077,18 +2075,18 @@ def _build_prospeccion_rir_dataframe(
                 continue
             payload = {
                 "nombre": _clean_text(meta_row.get(ficha_name_col)) if ficha_name_col else "",
-                "tiene_ct": _coerce_ct_label(meta_row.get(ficha_ct_col)) if ficha_ct_col else "N/D",
+                "tiene_ct": _coerce_ct_label(meta_row.get(ficha_ct_col)) if ficha_ct_col else "No",
                 "enlace_minsa": _clean_text(meta_row.get(ficha_link_col)) if ficha_link_col else "",
                 "clase": _clean_text(meta_row.get(ficha_class_col)) if ficha_class_col else "",
             }
             for token in tokens:
                 current = fichas_meta.setdefault(
                     token,
-                    {"nombre": "", "tiene_ct": "N/D", "enlace_minsa": "", "clase": ""},
+                    {"nombre": "", "tiene_ct": "No", "enlace_minsa": "", "clase": ""},
                 )
                 if payload["nombre"] and not current["nombre"]:
                     current["nombre"] = payload["nombre"]
-                if payload["tiene_ct"] != "N/D" and current["tiene_ct"] == "N/D":
+                if payload["tiene_ct"] == "Si":
                     current["tiene_ct"] = payload["tiene_ct"]
                 if payload["enlace_minsa"] and not current["enlace_minsa"]:
                     current["enlace_minsa"] = payload["enlace_minsa"]
@@ -2310,7 +2308,7 @@ def _build_prospeccion_rir_dataframe(
 
         meta = fichas_meta.get(
             ficha_token,
-            {"nombre": "", "tiene_ct": "N/D", "enlace_minsa": "", "clase": ""},
+            {"nombre": "", "tiene_ct": "No", "enlace_minsa": "", "clase": ""},
         )
         row: dict[str, object] = {
             "Ficha #": ficha_token,
@@ -2318,7 +2316,7 @@ def _build_prospeccion_rir_dataframe(
             "Actos con ficha": actos_presentes,
             "Actos ficha unica": actos_unicos,
             "Monto total (ficha unica)": monto_unicos,
-            "Tiene CT": meta.get("tiene_ct") or "N/D",
+            "Tiene criterio tecnico": meta.get("tiene_ct") or "No",
             "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
             "Clase ficha": meta.get("clase") or "",
             "__actos_links__": "\n".join(links_unique),
@@ -2344,7 +2342,7 @@ def _build_prospeccion_rir_dataframe(
         "Actos con ficha",
         "Actos ficha unica",
         "Monto total (ficha unica)",
-        "Tiene CT",
+        "Tiene criterio tecnico",
         "Enlace ficha MINSA",
         "Clase ficha",
     ] + [
@@ -2418,7 +2416,14 @@ def render_prospeccion_rir_panel(
             "% Top 1 (total, unica)",
             "% Top 2 (total, unica)",
         }
-        text_cols = {"Ficha #", "Nombre ficha", "Top 1 ganador", "Top 2 ganador", "Tiene CT", "Clase ficha"}
+        text_cols = {
+            "Ficha #",
+            "Nombre ficha",
+            "Top 1 ganador",
+            "Top 2 ganador",
+            "Tiene criterio tecnico",
+            "Clase ficha",
+        }
 
         key_col = "__sort_key__"
         if sort_column in numeric_cols:
