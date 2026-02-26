@@ -2112,7 +2112,7 @@ def _build_prospeccion_rir_dataframe(
             )
             drive_ct_col = _resolve_column_by_alias(
                 drive_fichas_columns,
-                ["tiene ct", "con ct", "ct", "criterio tecnico"],
+                ["tiene ct", "con ct", "ct", "criterio tecnico", "criterio"],
             )
             drive_link_col = _resolve_column_by_alias(
                 drive_fichas_columns,
@@ -2159,7 +2159,7 @@ def _build_prospeccion_rir_dataframe(
         )
         ficha_ct_col = _resolve_column_by_alias(
             fichas_columns,
-            ["tiene ct", "con ct", "ct", "criterio tecnico"],
+            ["tiene ct", "con ct", "ct", "criterio tecnico", "criterio"],
         )
         ficha_link_col = _resolve_column_by_alias(
             fichas_columns,
