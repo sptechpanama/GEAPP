@@ -2543,13 +2543,13 @@ def render_prospeccion_rir_panel(
     with filter_cols[0]:
         only_ct_yes = st.toggle(
             "Solo actos con CT = Si",
-            value=True,
+            value=False,
             key=f"{key_prefix}_only_ct_yes",
         )
     with filter_cols[1]:
         only_without_rs = st.toggle(
             "Solo actos sin registro sanitario",
-            value=True,
+            value=False,
             key=f"{key_prefix}_only_without_rs",
         )
 
@@ -2637,6 +2637,10 @@ def render_prospeccion_rir_panel(
     )
 
     column_config = {
+        "Nombre ficha": st.column_config.TextColumn(
+            "Nombre ficha",
+            width="large",
+        ),
         "Enlace ficha MINSA": st.column_config.LinkColumn(
             "Enlace ficha MINSA",
             display_text="MINSA",
@@ -2668,6 +2672,9 @@ def render_prospeccion_rir_panel(
                 f"{page_df.iloc[i].get('Nombre ficha', 'Sin nombre')}"
             ),
         )
+        selected_name = str(page_df.iloc[int(selected_idx)].get("Nombre ficha", "") or "").strip()
+        if selected_name:
+            st.markdown(f"**Nombre ficha completo:** {selected_name}")
         raw_links = str(page_df.iloc[int(selected_idx)].get(links_col, "") or "")
         link_list = [u.strip() for u in raw_links.splitlines() if u.strip()]
         if link_list:
