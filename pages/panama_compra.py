@@ -2409,6 +2409,7 @@ def _build_prospeccion_rir_dataframe(
         "% Top 1 (total, unica)",
         "Top 2 ganador",
         "% Top 2 (total, unica)",
+        "__meta_found__",
         "__actos_links__",
     ]
     out = out[[col for col in ordered_cols if col in out.columns]]
