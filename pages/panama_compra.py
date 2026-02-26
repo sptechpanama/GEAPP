@@ -1941,13 +1941,6 @@ def _normalize_minsa_link(value: object) -> str:
     return ""
 
 
-def _default_minsa_link_for_ficha(ficha_token: object) -> str:
-    token = _normalize_ficha_token(ficha_token)
-    if not token:
-        return ""
-    return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={token}&idparam=0"
-
-
 def _normalize_ficha_token(value: object) -> str:
     raw = _clean_text(value)
     if not raw:
@@ -2215,18 +2208,29 @@ def _build_prospeccion_rir_dataframe(
                 drive_fichas_columns,
                 ["registro sanitario", "registro_sanitario", "reg sanitario"],
             )
-            drive_link_col = _resolve_column_by_alias(
-                drive_fichas_columns,
-                [
-                    "enlace_ficha_tecnica",
-                    "enlace ficha tecnica",
-                    "enlace minsa",
-                    "link minsa",
-                    "url minsa",
-                    "enlace",
-                    "url",
-                ],
+            # Prioriza exactamente la columna esperada del archivo de Drive.
+            drive_link_col = next(
+                (
+                    col
+                    for col in drive_fichas_columns
+                    if _normalize_column_key(col) == "enlace_ficha_tecnica"
+                ),
+                "",
             )
+            if not drive_link_col:
+                drive_link_col = _resolve_column_by_alias(
+                    drive_fichas_columns,
+                    [
+                        "enlace_ficha_tecnica",
+                        "enlace ficha tecnica",
+                        "enlace ficha minsa",
+                        "enlace minsa",
+                        "link minsa",
+                        "url minsa",
+                        "enlace",
+                        "url",
+                    ],
+                )
             drive_class_col = _resolve_column_by_alias(
                 drive_fichas_columns,
                 ["clase", "categoria", "clasificacion", "tipo"],
@@ -2272,6 +2276,7 @@ def _build_prospeccion_rir_dataframe(
             [
                 "enlace_ficha_tecnica",
                 "enlace ficha tecnica",
+                "enlace ficha minsa",
                 "enlace minsa",
                 "link minsa",
                 "url minsa",
@@ -2419,8 +2424,6 @@ def _build_prospeccion_rir_dataframe(
             {"nombre": "", "tiene_ct": "No", "registro_sanitario": "No", "enlace_minsa": "", "clase": ""},
         )
         enlace_minsa = _normalize_minsa_link(meta.get("enlace_minsa"))
-        if not enlace_minsa:
-            enlace_minsa = _default_minsa_link_for_ficha(ficha_token)
         row: dict[str, object] = {
             "Ficha #": ficha_token,
             "Nombre ficha": meta.get("nombre") or f"Ficha {ficha_token}",
