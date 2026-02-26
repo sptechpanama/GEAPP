@@ -1951,6 +1951,23 @@ def _coerce_ct_label(value: object) -> str:
     return "No"
 
 
+def _coerce_registro_sanitario_label(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "No"
+    if isinstance(value, bool):
+        return "Si" if value else "No"
+
+    text = _clean_text(value)
+    if not text:
+        return "No"
+    norm = _normalize_column_key(text)
+    if norm.startswith("si"):
+        return "Si"
+    if norm in {"true", "1", "x", "con registro sanitario", "con registro"}:
+        return "Si"
+    return "No"
+
+
 @st.cache_data(ttl=300)
 def _load_table_subset(
     backend: str,
@@ -2064,6 +2081,7 @@ def _build_prospeccion_rir_dataframe(
         ficha_num_col: str,
         ficha_name_col: str,
         ficha_ct_col: str,
+        ficha_rs_col: str,
         ficha_link_col: str,
         ficha_class_col: str,
     ) -> None:
@@ -2076,18 +2094,29 @@ def _build_prospeccion_rir_dataframe(
             payload = {
                 "nombre": _clean_text(meta_row.get(ficha_name_col)) if ficha_name_col else "",
                 "tiene_ct": _coerce_ct_label(meta_row.get(ficha_ct_col)) if ficha_ct_col else "No",
+                "registro_sanitario": (
+                    _coerce_registro_sanitario_label(meta_row.get(ficha_rs_col)) if ficha_rs_col else "No"
+                ),
                 "enlace_minsa": _clean_text(meta_row.get(ficha_link_col)) if ficha_link_col else "",
                 "clase": _clean_text(meta_row.get(ficha_class_col)) if ficha_class_col else "",
             }
             for token in tokens:
                 current = fichas_meta.setdefault(
                     token,
-                    {"nombre": "", "tiene_ct": "No", "enlace_minsa": "", "clase": ""},
+                    {
+                        "nombre": "",
+                        "tiene_ct": "No",
+                        "registro_sanitario": "No",
+                        "enlace_minsa": "",
+                        "clase": "",
+                    },
                 )
                 if payload["nombre"] and not current["nombre"]:
                     current["nombre"] = payload["nombre"]
                 if payload["tiene_ct"] == "Si":
                     current["tiene_ct"] = payload["tiene_ct"]
+                if payload["registro_sanitario"] == "Si":
+                    current["registro_sanitario"] = payload["registro_sanitario"]
                 if payload["enlace_minsa"] and not current["enlace_minsa"]:
                     current["enlace_minsa"] = payload["enlace_minsa"]
                 if payload["clase"] and not current["clase"]:
@@ -2114,6 +2143,10 @@ def _build_prospeccion_rir_dataframe(
                 drive_fichas_columns,
                 ["tiene ct", "con ct", "ct", "criterio tecnico", "criterio"],
             )
+            drive_rs_col = _resolve_column_by_alias(
+                drive_fichas_columns,
+                ["registro sanitario", "registro_sanitario", "reg sanitario"],
+            )
             drive_link_col = _resolve_column_by_alias(
                 drive_fichas_columns,
                 [
@@ -2135,6 +2168,7 @@ def _build_prospeccion_rir_dataframe(
                 ficha_num_col=drive_num_col,
                 ficha_name_col=drive_name_col,
                 ficha_ct_col=drive_ct_col,
+                ficha_rs_col=drive_rs_col,
                 ficha_link_col=drive_link_col,
                 ficha_class_col=drive_class_col,
             )
@@ -2161,6 +2195,10 @@ def _build_prospeccion_rir_dataframe(
             fichas_columns,
             ["tiene ct", "con ct", "ct", "criterio tecnico", "criterio"],
         )
+        ficha_rs_col = _resolve_column_by_alias(
+            fichas_columns,
+            ["registro sanitario", "registro_sanitario", "reg sanitario"],
+        )
         ficha_link_col = _resolve_column_by_alias(
             fichas_columns,
             [
@@ -2180,7 +2218,7 @@ def _build_prospeccion_rir_dataframe(
 
         ficha_meta_cols = [
             col
-            for col in [ficha_num_col, ficha_name_col, ficha_ct_col, ficha_link_col, ficha_class_col]
+            for col in [ficha_num_col, ficha_name_col, ficha_ct_col, ficha_rs_col, ficha_link_col, ficha_class_col]
             if col
         ]
         if ficha_num_col and ficha_meta_cols:
@@ -2200,6 +2238,7 @@ def _build_prospeccion_rir_dataframe(
                 ficha_num_col=ficha_num_col,
                 ficha_name_col=ficha_name_col,
                 ficha_ct_col=ficha_ct_col,
+                ficha_rs_col=ficha_rs_col,
                 ficha_link_col=ficha_link_col,
                 ficha_class_col=ficha_class_col,
             )
@@ -2308,7 +2347,7 @@ def _build_prospeccion_rir_dataframe(
 
         meta = fichas_meta.get(
             ficha_token,
-            {"nombre": "", "tiene_ct": "No", "enlace_minsa": "", "clase": ""},
+            {"nombre": "", "tiene_ct": "No", "registro_sanitario": "No", "enlace_minsa": "", "clase": ""},
         )
         row: dict[str, object] = {
             "Ficha #": ficha_token,
@@ -2317,6 +2356,7 @@ def _build_prospeccion_rir_dataframe(
             "Actos ficha unica": actos_unicos,
             "Monto total (ficha unica)": monto_unicos,
             "Tiene criterio tecnico": meta.get("tiene_ct") or "No",
+            "Registro sanitario": meta.get("registro_sanitario") or "No",
             "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
             "Clase ficha": meta.get("clase") or "",
             "__actos_links__": "\n".join(links_unique),
@@ -2343,6 +2383,7 @@ def _build_prospeccion_rir_dataframe(
         "Actos ficha unica",
         "Monto total (ficha unica)",
         "Tiene criterio tecnico",
+        "Registro sanitario",
         "Enlace ficha MINSA",
         "Clase ficha",
     ] + [
@@ -2422,6 +2463,7 @@ def render_prospeccion_rir_panel(
             "Top 1 ganador",
             "Top 2 ganador",
             "Tiene criterio tecnico",
+            "Registro sanitario",
             "Clase ficha",
         }
 
@@ -2460,7 +2502,15 @@ def render_prospeccion_rir_panel(
         ).drop(columns=[key_col], errors="ignore")
         return out_df.reset_index(drop=True)
 
-    search_col_options = ["Todas las columnas", "Ficha #", "Nombre ficha", "Top 1 ganador", "Top 2 ganador"]
+    search_col_options = [
+        "Todas las columnas",
+        "Ficha #",
+        "Nombre ficha",
+        "Tiene criterio tecnico",
+        "Registro sanitario",
+        "Top 1 ganador",
+        "Top 2 ganador",
+    ]
     search_col = st.selectbox(
         "Columna de busqueda",
         options=search_col_options,
@@ -2488,6 +2538,29 @@ def render_prospeccion_rir_panel(
             target_column=target,
             ignore_accents=True,
         )
+
+    filter_cols = st.columns([1.4, 1.9])
+    with filter_cols[0]:
+        only_ct_yes = st.toggle(
+            "Solo actos con CT = Si",
+            value=True,
+            key=f"{key_prefix}_only_ct_yes",
+        )
+    with filter_cols[1]:
+        only_without_rs = st.toggle(
+            "Solo actos sin registro sanitario",
+            value=True,
+            key=f"{key_prefix}_only_without_rs",
+        )
+
+    if only_ct_yes and "Tiene criterio tecnico" in filtered.columns:
+        filtered = filtered[
+            filtered["Tiene criterio tecnico"].fillna("").astype(str).str.strip().str.lower() == "si"
+        ].copy()
+    if only_without_rs and "Registro sanitario" in filtered.columns:
+        filtered = filtered[
+            filtered["Registro sanitario"].fillna("").astype(str).str.strip().str.lower() == "no"
+        ].copy()
 
     sort_col_options = [
         "Monto total (ficha unica)",
