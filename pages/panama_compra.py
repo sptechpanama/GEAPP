@@ -2430,6 +2430,20 @@ def render_prospeccion_rir_panel(
         st.info("No hay datos suficientes para construir Prospeccion RIR.")
         return
 
+    def _yn_counts(in_df: pd.DataFrame, column: str) -> tuple[int, int]:
+        if in_df.empty or column not in in_df.columns:
+            return 0, 0
+        normalized = (
+            in_df[column]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        yes = int((normalized == "si").sum())
+        no = int((normalized == "no").sum())
+        return yes, no
+
     def _parse_prospeccion_pct(value: object) -> float | None:
         text = _clean_text(value)
         if not text:
@@ -2539,6 +2553,9 @@ def render_prospeccion_rir_panel(
             ignore_accents=True,
         )
 
+    base_ct_si, base_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
+    base_rs_si, base_rs_no = _yn_counts(filtered, "Registro sanitario")
+
     filter_cols = st.columns([1.4, 1.9])
     with filter_cols[0]:
         only_ct_yes = st.toggle(
@@ -2552,6 +2569,10 @@ def render_prospeccion_rir_panel(
             value=False,
             key=f"{key_prefix}_only_without_rs",
         )
+    if st.button("Restablecer filtros", key=f"{key_prefix}_reset_filters"):
+        st.session_state[f"{key_prefix}_only_ct_yes"] = False
+        st.session_state[f"{key_prefix}_only_without_rs"] = False
+        st.rerun()
 
     if only_ct_yes and "Tiene criterio tecnico" in filtered.columns:
         filtered = filtered[
@@ -2561,6 +2582,14 @@ def render_prospeccion_rir_panel(
         filtered = filtered[
             filtered["Registro sanitario"].fillna("").astype(str).str.strip().str.lower() == "no"
         ].copy()
+
+    post_ct_si, post_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
+    post_rs_si, post_rs_no = _yn_counts(filtered, "Registro sanitario")
+    st.caption(
+        "Conteo CT/RS (antes filtros -> despues): "
+        f"CT Si {base_ct_si:,}/No {base_ct_no:,} -> Si {post_ct_si:,}/No {post_ct_no:,} | "
+        f"RS Si {base_rs_si:,}/No {base_rs_no:,} -> Si {post_rs_si:,}/No {post_rs_no:,}"
+    )
 
     sort_col_options = [
         "Monto total (ficha unica)",
@@ -2660,6 +2689,15 @@ def render_prospeccion_rir_panel(
         "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica. "
         "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
+
+    with st.expander("Ver nombres completos (pagina actual)", expanded=False):
+        if page_df.empty:
+            st.caption("Sin filas en la pagina actual.")
+        else:
+            for _, row in page_df.iterrows():
+                ficha_id = str(row.get("Ficha #", "") or "").strip()
+                full_name = str(row.get("Nombre ficha", "") or "").strip()
+                st.markdown(f"- **{ficha_id}**: {full_name}")
 
     if not page_df.empty and links_col in page_df.columns:
         selector_options = list(range(len(page_df)))
