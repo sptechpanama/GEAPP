@@ -21,7 +21,7 @@ from datetime import date, timedelta, datetime, timezone
 from ui.theme import apply_global_theme
 from sqlalchemy import create_engine, text
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
@@ -1562,6 +1562,247 @@ def load_drive_excel(file_id: str) -> pd.DataFrame:
     return pd.read_excel(fh)
 
 
+def _prospeccion_favorites_filename() -> str:
+    return "prospeccion_rir_favoritos.xlsx"
+
+
+def _prospeccion_favorites_file_id_from_secrets() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    candidates = [
+        "DRIVE_PROSPECCION_RIR_FAVORITOS_FILE_ID",
+        "DRIVE_FAVORITOS_PROSPECCION_FILE_ID",
+    ]
+    for key in candidates:
+        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
+        if value is not None and str(value).strip():
+            return _normalize_drive_file_id(str(value))
+    return ""
+
+
+def _prospeccion_favorites_folder_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    for key in ("DRIVE_TOPS_FOLDER_ID", "DRIVE_BACKUP_FOLDER_ID"):
+        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _download_drive_file_bytes(file_id: str) -> bytes:
+    fid = _normalize_drive_file_id(file_id)
+    if not fid:
+        return b""
+    drive = get_drive_delegated()
+    if drive is None:
+        return b""
+    request = drive.files().get_media(fileId=fid, supportsAllDrives=True)
+    fh = BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    fh.seek(0)
+    return fh.read()
+
+
+def _upload_drive_file_bytes(
+    *,
+    file_id: str = "",
+    file_name: str,
+    data: bytes,
+    mime_type: str,
+    parent_folder_id: str = "",
+) -> dict[str, str]:
+    drive = get_drive_delegated()
+    if drive is None:
+        return {}
+
+    media = MediaIoBaseUpload(BytesIO(data), mimetype=mime_type, resumable=False)
+    if file_id:
+        payload = drive.files().update(
+            fileId=file_id,
+            media_body=media,
+            fields="id,name,webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        return {
+            "id": str(payload.get("id", "")),
+            "name": str(payload.get("name", "")),
+            "webViewLink": str(payload.get("webViewLink", "")),
+        }
+
+    body: dict[str, object] = {"name": file_name}
+    if parent_folder_id:
+        body["parents"] = [parent_folder_id]
+    payload = drive.files().create(
+        body=body,
+        media_body=media,
+        fields="id,name,webViewLink",
+        supportsAllDrives=True,
+    ).execute()
+    return {
+        "id": str(payload.get("id", "")),
+        "name": str(payload.get("name", "")),
+        "webViewLink": str(payload.get("webViewLink", "")),
+    }
+
+
+def _find_drive_file_by_name(file_name: str) -> dict[str, str]:
+    drive = get_drive_delegated()
+    if drive is None:
+        return {}
+    escaped = str(file_name or "").replace("'", "\\'")
+    q = (
+        "trashed = false "
+        "and mimeType = "
+        "'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' "
+        f"and name = '{escaped}'"
+    )
+    result = drive.files().list(
+        q=q,
+        pageSize=1,
+        fields="files(id,name,webViewLink)",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+    ).execute()
+    files = result.get("files", []) if isinstance(result, dict) else []
+    if not files:
+        return {}
+    item = files[0]
+    return {
+        "id": str(item.get("id", "")),
+        "name": str(item.get("name", "")),
+        "webViewLink": str(item.get("webViewLink", "")),
+    }
+
+
+def _default_favorites_dataframe() -> pd.DataFrame:
+    return pd.DataFrame(columns=["Ficha #", "Nombre ficha", "Fecha favorito"])
+
+
+def _load_prospeccion_favorites_df(file_id: str) -> pd.DataFrame:
+    fid = _normalize_drive_file_id(file_id)
+    if not fid:
+        return _default_favorites_dataframe()
+    try:
+        raw = _download_drive_file_bytes(fid)
+    except Exception:
+        return _default_favorites_dataframe()
+    if not raw:
+        return _default_favorites_dataframe()
+    try:
+        df = pd.read_excel(BytesIO(raw))
+    except Exception:
+        return _default_favorites_dataframe()
+    if df.empty:
+        return _default_favorites_dataframe()
+
+    cols = list(df.columns)
+    ficha_col = _resolve_column_by_alias(cols, ["ficha #", "ficha", "numero ficha"])
+    nombre_col = _resolve_column_by_alias(cols, ["nombre ficha", "nombre"])
+    fecha_col = _resolve_column_by_alias(cols, ["fecha favorito", "fecha", "updated_at"])
+    if not ficha_col:
+        return _default_favorites_dataframe()
+
+    out = pd.DataFrame()
+    out["Ficha #"] = df[ficha_col].apply(_normalize_ficha_token)
+    out["Nombre ficha"] = (
+        df[nombre_col].fillna("").astype(str).str.strip() if nombre_col else ""
+    )
+    out["Fecha favorito"] = (
+        df[fecha_col].fillna("").astype(str).str.strip() if fecha_col else ""
+    )
+    out = out[out["Ficha #"].astype(str).str.strip() != ""].copy()
+    if out.empty:
+        return _default_favorites_dataframe()
+    out = out.drop_duplicates(subset=["Ficha #"], keep="last").reset_index(drop=True)
+    return out
+
+
+def _save_prospeccion_favorites_df(
+    file_id: str,
+    favorites_df: pd.DataFrame,
+    *,
+    file_name: str,
+    parent_folder_id: str = "",
+) -> dict[str, str]:
+    out_df = favorites_df.copy()
+    if out_df.empty:
+        out_df = _default_favorites_dataframe()
+    for col in ["Ficha #", "Nombre ficha", "Fecha favorito"]:
+        if col not in out_df.columns:
+            out_df[col] = ""
+    out_df = out_df[["Ficha #", "Nombre ficha", "Fecha favorito"]]
+
+    buff = BytesIO()
+    out_df.to_excel(buff, index=False)
+    payload = buff.getvalue()
+    if not payload:
+        return {}
+    return _upload_drive_file_bytes(
+        file_id=file_id,
+        file_name=file_name,
+        data=payload,
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        parent_folder_id=parent_folder_id,
+    )
+
+
+def _ensure_prospeccion_favorites_file() -> dict[str, str]:
+    file_name = _prospeccion_favorites_filename()
+    from_secret = _prospeccion_favorites_file_id_from_secrets()
+    folder_id = _prospeccion_favorites_folder_id()
+    cache_key = "__pc_prospeccion_favorites_file__"
+
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict) and cached.get("id"):
+        return {
+            "id": str(cached.get("id", "")),
+            "name": str(cached.get("name", file_name)),
+            "webViewLink": str(cached.get("webViewLink", "")),
+        }
+
+    if from_secret:
+        drive = get_drive_delegated()
+        if drive is not None:
+            try:
+                meta = drive.files().get(
+                    fileId=from_secret,
+                    fields="id,name,webViewLink",
+                    supportsAllDrives=True,
+                ).execute()
+                out = {
+                    "id": str(meta.get("id", "")),
+                    "name": str(meta.get("name", "")),
+                    "webViewLink": str(meta.get("webViewLink", "")),
+                }
+                st.session_state[cache_key] = out
+                return out
+            except Exception:
+                pass
+
+    existing = _find_drive_file_by_name(file_name)
+    if existing.get("id"):
+        st.session_state[cache_key] = existing
+        return existing
+
+    created = _save_prospeccion_favorites_df(
+        "",
+        _default_favorites_dataframe(),
+        file_name=file_name,
+        parent_folder_id=folder_id,
+    )
+    if created.get("id"):
+        st.session_state[cache_key] = created
+    return created
+
+
 def _filter_dataframe_text(df: pd.DataFrame, raw_search: str, mode: str) -> pd.DataFrame:
     search_terms = _split_search_terms(raw_search)
     if df.empty or not search_terms:
@@ -2565,6 +2806,25 @@ def render_prospeccion_rir_panel(
         st.info("No hay datos suficientes para construir Prospeccion RIR.")
         return
 
+    favorites_file = _ensure_prospeccion_favorites_file()
+    favorites_file_id = _normalize_drive_file_id(favorites_file.get("id", ""))
+    favorites_file_link = str(favorites_file.get("webViewLink", "") or "").strip()
+    favorites_file_name = _prospeccion_favorites_filename()
+    favorites_folder_id = _prospeccion_favorites_folder_id()
+
+    favorites_df = _load_prospeccion_favorites_df(favorites_file_id)
+    favorite_tokens = set(
+        favorites_df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).tolist()
+    )
+
+    if favorites_file_id:
+        if favorites_file_link:
+            st.caption(f"Archivo favoritos: [{favorites_file_name}]({favorites_file_link})")
+        else:
+            st.caption(f"Archivo favoritos activo: {favorites_file_name}")
+    else:
+        st.warning("No se pudo inicializar archivo de favoritos en Drive.")
+
     def _parse_prospeccion_pct(value: object) -> float | None:
         text = _clean_text(value)
         if not text:
@@ -2674,7 +2934,7 @@ def render_prospeccion_rir_panel(
             ignore_accents=True,
         )
 
-    filter_cols = st.columns([1.4, 1.9])
+    filter_cols = st.columns([1.3, 1.8, 1.3])
     with filter_cols[0]:
         only_ct_yes = st.toggle(
             "Solo actos con CT = Si",
@@ -2687,9 +2947,16 @@ def render_prospeccion_rir_panel(
             value=False,
             key=f"{key_prefix}_only_without_rs",
         )
+    with filter_cols[2]:
+        only_favorites = st.toggle(
+            "Mostrar solo favoritos",
+            value=False,
+            key=f"{key_prefix}_only_favorites",
+        )
     if st.button("Restablecer filtros", key=f"{key_prefix}_reset_filters"):
         st.session_state[f"{key_prefix}_only_ct_yes"] = False
         st.session_state[f"{key_prefix}_only_without_rs"] = False
+        st.session_state[f"{key_prefix}_only_favorites"] = False
         st.rerun()
 
     if only_ct_yes and "Tiene criterio tecnico" in filtered.columns:
@@ -2700,6 +2967,13 @@ def render_prospeccion_rir_panel(
         filtered = filtered[
             filtered["Registro sanitario"].fillna("").astype(str).str.strip().str.lower() == "no"
         ].copy()
+    if only_favorites:
+        if favorite_tokens:
+            filtered = filtered[
+                filtered["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).isin(favorite_tokens)
+            ].copy()
+        else:
+            filtered = filtered.iloc[0:0].copy()
 
     # Diagnosticos ocultos por solicitud de UX limpia.
 
@@ -2801,6 +3075,97 @@ def render_prospeccion_rir_panel(
         "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica. "
         "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
+
+    if not page_df.empty:
+        st.markdown("**Selector de favoritos (pagina actual)**")
+        fav_idx_options = list(range(len(page_df)))
+        fav_cols = st.columns([3.6, 1.1, 1.1])
+        with fav_cols[0]:
+            fav_idx = st.selectbox(
+                "Ficha",
+                options=fav_idx_options,
+                key=f"{key_prefix}_fav_selector",
+                format_func=lambda i: (
+                    f"{page_df.iloc[i].get('Ficha #', 'N/D')} | "
+                    f"{page_df.iloc[i].get('Nombre ficha', 'Sin nombre')}"
+                ),
+                label_visibility="collapsed",
+            )
+        selected_row = page_df.iloc[int(fav_idx)]
+        selected_token = _normalize_ficha_token(selected_row.get("Ficha #"))
+        selected_name = _clean_text(selected_row.get("Nombre ficha"))
+
+        add_clicked = fav_cols[1].button("Agregar", key=f"{key_prefix}_fav_add")
+        remove_clicked = fav_cols[2].button("Quitar", key=f"{key_prefix}_fav_remove")
+
+        if add_clicked or remove_clicked:
+            if not selected_token:
+                st.warning("No se pudo resolver la ficha seleccionada.")
+            elif not favorites_file_id:
+                st.error("No hay archivo de favoritos en Drive para guardar cambios.")
+            else:
+                updated = favorites_df.copy()
+                updated["Ficha #"] = updated["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
+                updated = updated[updated["Ficha #"] != ""].copy()
+                updated = updated.drop_duplicates(subset=["Ficha #"], keep="last")
+
+                if add_clicked:
+                    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    updated = updated[updated["Ficha #"] != selected_token].copy()
+                    updated = pd.concat(
+                        [
+                            updated,
+                            pd.DataFrame(
+                                [
+                                    {
+                                        "Ficha #": selected_token,
+                                        "Nombre ficha": selected_name or f"Ficha {selected_token}",
+                                        "Fecha favorito": now_text,
+                                    }
+                                ]
+                            ),
+                        ],
+                        ignore_index=True,
+                    )
+                elif remove_clicked:
+                    updated = updated[updated["Ficha #"] != selected_token].copy()
+
+                saved_meta = _save_prospeccion_favorites_df(
+                    favorites_file_id,
+                    updated,
+                    file_name=favorites_file_name,
+                    parent_folder_id=favorites_folder_id,
+                )
+                if saved_meta.get("id"):
+                    st.success("Favoritos actualizados en Drive.")
+                    st.rerun()
+                else:
+                    st.error("No se pudo guardar favoritos en Drive.")
+
+    favorites_view = df[
+        df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).isin(favorite_tokens)
+    ].copy()
+    with st.expander("Favoritos", expanded=False):
+        if favorites_view.empty:
+            st.caption("No hay fichas favoritas guardadas.")
+        else:
+            fav_display = favorites_view.copy()
+            fav_display, fav_money_cfg = _prepare_money_columns_for_sorting(fav_display)
+            fav_display = fav_display.drop(
+                columns=["__actos_links__", "__meta_found__", "Actos (monto desc)", "actos monto desc"],
+                errors="ignore",
+            )
+            fav_column_cfg = {
+                "Nombre ficha": st.column_config.TextColumn("Nombre ficha", width="large"),
+                "Enlace ficha MINSA": st.column_config.LinkColumn("Enlace ficha MINSA", display_text="MINSA"),
+            }
+            fav_column_cfg.update(fav_money_cfg)
+            st.dataframe(
+                fav_display,
+                use_container_width=True,
+                height=360,
+                column_config=fav_column_cfg,
+            )
 
     if not page_df.empty and links_col in page_df.columns:
         selector_options = list(range(len(page_df)))
