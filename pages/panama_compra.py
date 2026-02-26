@@ -1916,6 +1916,17 @@ def _clean_text(value: object) -> str:
     return text
 
 
+def _normalize_ficha_token(value: object) -> str:
+    raw = _clean_text(value)
+    if not raw:
+        return ""
+    digits = re.sub(r"\D+", "", raw)
+    if not digits:
+        return ""
+    normalized = digits.lstrip("0")
+    return normalized or "0"
+
+
 def _extract_ficha_tokens(value: object) -> list[str]:
     raw = _clean_text(value)
     if not raw:
@@ -1928,7 +1939,7 @@ def _extract_ficha_tokens(value: object) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for token in tokens:
-        cleaned = token.strip()
+        cleaned = _normalize_ficha_token(token)
         if not cleaned or cleaned in seen:
             continue
         seen.add(cleaned)
@@ -2007,6 +2018,7 @@ def _build_prospeccion_rir_dataframe(
     actos_table: str,
     fichas_table: str,
     fichas_drive_file_id: str = "",
+    meta_source_mode: str = "auto",
 ) -> pd.DataFrame:
     if not actos_table:
         return pd.DataFrame()
@@ -2122,8 +2134,11 @@ def _build_prospeccion_rir_dataframe(
                 if payload["clase"] and not current["clase"]:
                     current["clase"] = payload["clase"]
 
+    use_drive_meta = meta_source_mode in {"auto", "drive"}
+    use_db_meta = meta_source_mode in {"auto", "db"}
+
     # 1) Fuente prioritaria: archivo de fichas (Drive), p.ej. fichas_ctni_con_enlace.xlsx
-    if fichas_drive_file_id:
+    if use_drive_meta and fichas_drive_file_id:
         try:
             drive_fichas_df = load_drive_excel(fichas_drive_file_id)
         except Exception:
@@ -2174,7 +2189,7 @@ def _build_prospeccion_rir_dataframe(
             )
 
     # 2) Fuente secundaria: tabla DB de fichas (completa vacíos si faltan)
-    if fichas_table:
+    if use_db_meta and fichas_table:
         try:
             if backend == "postgres":
                 fichas_columns = list_postgres_columns(db_url, fichas_table)
@@ -2345,6 +2360,7 @@ def _build_prospeccion_rir_dataframe(
             seen_links.add(link)
             links_unique.append(link)
 
+        has_meta = ficha_token in fichas_meta
         meta = fichas_meta.get(
             ficha_token,
             {"nombre": "", "tiene_ct": "No", "registro_sanitario": "No", "enlace_minsa": "", "clase": ""},
@@ -2365,6 +2381,7 @@ def _build_prospeccion_rir_dataframe(
             "% Top 1 (total, unica)": f"{top1_pct_present:.1f}%, {top1_pct_unique:.1f}%",
             "Top 2 ganador": top2_text,
             "% Top 2 (total, unica)": f"{top2_pct_present:.1f}%, {top2_pct_unique:.1f}%",
+            "__meta_found__": "Si" if has_meta else "No",
         }
         rows.append(row)
 
@@ -2412,6 +2429,37 @@ def render_prospeccion_rir_panel(
         st.info("No encontramos tabla de actos para construir Prospeccion RIR.")
         return
 
+    cfg_cols = st.columns([2.2, 1.2, 1.2])
+    with cfg_cols[0]:
+        meta_source_label = st.selectbox(
+            "Fuente metadata fichas",
+            options=[
+                "Auto (Drive + DB)",
+                "Solo Drive",
+                "Solo tabla DB",
+            ],
+            index=0,
+            key=f"{key_prefix}_meta_source",
+        )
+    with cfg_cols[1]:
+        st.caption(" ")
+        if st.button("Recargar prospeccion", key=f"{key_prefix}_reload"):
+            _build_prospeccion_rir_dataframe.clear()
+            st.rerun()
+    with cfg_cols[2]:
+        st.caption(" ")
+        show_full_names_inline = st.toggle(
+            "Nombres completos",
+            value=True,
+            key=f"{key_prefix}_show_full_names_inline",
+        )
+
+    meta_source_mode = {
+        "Auto (Drive + DB)": "auto",
+        "Solo Drive": "drive",
+        "Solo tabla DB": "db",
+    }.get(meta_source_label, "auto")
+
     try:
         with st.spinner("Construyendo Prospeccion RIR..."):
             df = _build_prospeccion_rir_dataframe(
@@ -2421,6 +2469,7 @@ def render_prospeccion_rir_panel(
                 actos_table=actos_table,
                 fichas_table=fichas_table,
                 fichas_drive_file_id=fichas_drive_file_id,
+                meta_source_mode=meta_source_mode,
             )
     except Exception as exc:
         st.error(f"No se pudo construir Prospeccion RIR: {exc}")
@@ -2553,6 +2602,7 @@ def render_prospeccion_rir_panel(
             ignore_accents=True,
         )
 
+    base_meta_si, base_meta_no = _yn_counts(filtered, "__meta_found__")
     base_ct_si, base_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
     base_rs_si, base_rs_no = _yn_counts(filtered, "Registro sanitario")
 
@@ -2583,8 +2633,14 @@ def render_prospeccion_rir_panel(
             filtered["Registro sanitario"].fillna("").astype(str).str.strip().str.lower() == "no"
         ].copy()
 
+    post_meta_si, post_meta_no = _yn_counts(filtered, "__meta_found__")
     post_ct_si, post_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
     post_rs_si, post_rs_no = _yn_counts(filtered, "Registro sanitario")
+    st.caption(
+        "Cobertura metadata fichas (antes filtros -> despues): "
+        f"Con metadata {base_meta_si:,}/Sin metadata {base_meta_no:,} -> "
+        f"Con metadata {post_meta_si:,}/Sin metadata {post_meta_no:,}"
+    )
     st.caption(
         "Conteo CT/RS (antes filtros -> despues): "
         f"CT Si {base_ct_si:,}/No {base_ct_no:,} -> Si {post_ct_si:,}/No {post_ct_no:,} | "
@@ -2661,7 +2717,7 @@ def render_prospeccion_rir_panel(
     page_df, money_cfg = _prepare_money_columns_for_sorting(page_df)
     links_col = "__actos_links__"
     display_df = page_df.drop(
-        columns=[links_col, "Actos (monto desc)", "actos monto desc"],
+        columns=[links_col, "__meta_found__", "Actos (monto desc)", "actos monto desc"],
         errors="ignore",
     )
 
@@ -2689,6 +2745,23 @@ def render_prospeccion_rir_panel(
         "Porcentaje ganador: % sobre actos con ficha, % sobre actos con ficha unica. "
         "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
+
+    if show_full_names_inline and not page_df.empty:
+        st.markdown("**Nombres ficha completos (pagina actual):**")
+        names_df = (
+            page_df[["Ficha #", "Nombre ficha"]]
+            .copy()
+            .rename(columns={"Ficha #": "Ficha", "Nombre ficha": "Nombre completo"})
+        )
+        if len(names_df) > 500:
+            st.caption(
+                f"Mostrando 500 de {len(names_df):,} nombres completos en esta pagina "
+                "(para mantener rendimiento)."
+            )
+            names_df = names_df.head(500)
+        st.table(
+            names_df
+        )
 
     with st.expander("Ver nombres completos (pagina actual)", expanded=False):
         if page_df.empty:
