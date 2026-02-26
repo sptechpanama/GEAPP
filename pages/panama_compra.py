@@ -1916,6 +1916,38 @@ def _clean_text(value: object) -> str:
     return text
 
 
+def _normalize_minsa_link(value: object) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+
+    url_match = re.search(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)
+    if url_match:
+        return url_match.group(0).rstrip(".,);")
+
+    path_match = re.search(
+        r"/Utilities/LoadFicha/\?idficha=\d+[^\s\"'<>]*",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if path_match:
+        path = path_match.group(0)
+        return f"https://ctni.minsa.gob.pa{path}"
+
+    id_match = re.search(r"idficha\s*=\s*(\d+)", text, flags=re.IGNORECASE)
+    if id_match:
+        return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={id_match.group(1)}&idparam=0"
+
+    return ""
+
+
+def _default_minsa_link_for_ficha(ficha_token: object) -> str:
+    token = _normalize_ficha_token(ficha_token)
+    if not token:
+        return ""
+    return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={token}&idparam=0"
+
+
 def _normalize_ficha_token(value: object) -> str:
     raw = _clean_text(value)
     if not raw:
@@ -2099,17 +2131,38 @@ def _build_prospeccion_rir_dataframe(
     ) -> None:
         if ficha_meta_df.empty or not ficha_num_col:
             return
+        fallback_link_cols = [
+            col
+            for col in list(ficha_meta_df.columns)
+            if _normalize_column_key(col)
+            in {
+                "acciones",
+                "accion",
+                "enlace",
+                "url",
+                "link",
+                "enlace ficha",
+                "enlace ficha tecnica",
+                "enlace ficha minsa",
+            }
+        ]
         for _, meta_row in ficha_meta_df.iterrows():
             tokens = _extract_ficha_tokens(meta_row.get(ficha_num_col))
             if not tokens:
                 continue
+            enlace_minsa = _normalize_minsa_link(meta_row.get(ficha_link_col)) if ficha_link_col else ""
+            if not enlace_minsa:
+                for fallback_col in fallback_link_cols:
+                    enlace_minsa = _normalize_minsa_link(meta_row.get(fallback_col))
+                    if enlace_minsa:
+                        break
             payload = {
                 "nombre": _clean_text(meta_row.get(ficha_name_col)) if ficha_name_col else "",
                 "tiene_ct": _coerce_ct_label(meta_row.get(ficha_ct_col)) if ficha_ct_col else "No",
                 "registro_sanitario": (
                     _coerce_registro_sanitario_label(meta_row.get(ficha_rs_col)) if ficha_rs_col else "No"
                 ),
-                "enlace_minsa": _clean_text(meta_row.get(ficha_link_col)) if ficha_link_col else "",
+                "enlace_minsa": enlace_minsa,
                 "clase": _clean_text(meta_row.get(ficha_class_col)) if ficha_class_col else "",
             }
             for token in tokens:
@@ -2365,6 +2418,9 @@ def _build_prospeccion_rir_dataframe(
             ficha_token,
             {"nombre": "", "tiene_ct": "No", "registro_sanitario": "No", "enlace_minsa": "", "clase": ""},
         )
+        enlace_minsa = _normalize_minsa_link(meta.get("enlace_minsa"))
+        if not enlace_minsa:
+            enlace_minsa = _default_minsa_link_for_ficha(ficha_token)
         row: dict[str, object] = {
             "Ficha #": ficha_token,
             "Nombre ficha": meta.get("nombre") or f"Ficha {ficha_token}",
@@ -2373,7 +2429,7 @@ def _build_prospeccion_rir_dataframe(
             "Monto total (ficha unica)": monto_unicos,
             "Tiene criterio tecnico": meta.get("tiene_ct") or "No",
             "Registro sanitario": meta.get("registro_sanitario") or "No",
-            "Enlace ficha MINSA": meta.get("enlace_minsa") or "",
+            "Enlace ficha MINSA": enlace_minsa,
             "Clase ficha": meta.get("clase") or "",
             "__actos_links__": "\n".join(links_unique),
             "Proponentes distintos": proponentes_distintos,
@@ -2606,6 +2662,15 @@ def render_prospeccion_rir_panel(
     base_meta_si, base_meta_no = _yn_counts(filtered, "__meta_found__")
     base_ct_si, base_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
     base_rs_si, base_rs_no = _yn_counts(filtered, "Registro sanitario")
+    base_link_with_url = 0
+    if "Enlace ficha MINSA" in filtered.columns:
+        base_link_with_url = int(
+            filtered["Enlace ficha MINSA"]
+            .fillna("")
+            .astype(str)
+            .str.contains(r"^https?://", regex=True, na=False)
+            .sum()
+        )
 
     filter_cols = st.columns([1.4, 1.9])
     with filter_cols[0]:
@@ -2637,6 +2702,15 @@ def render_prospeccion_rir_panel(
     post_meta_si, post_meta_no = _yn_counts(filtered, "__meta_found__")
     post_ct_si, post_ct_no = _yn_counts(filtered, "Tiene criterio tecnico")
     post_rs_si, post_rs_no = _yn_counts(filtered, "Registro sanitario")
+    post_link_with_url = 0
+    if "Enlace ficha MINSA" in filtered.columns:
+        post_link_with_url = int(
+            filtered["Enlace ficha MINSA"]
+            .fillna("")
+            .astype(str)
+            .str.contains(r"^https?://", regex=True, na=False)
+            .sum()
+        )
     st.caption(
         "Cobertura metadata fichas (antes filtros -> despues): "
         f"Con metadata {base_meta_si:,}/Sin metadata {base_meta_no:,} -> "
@@ -2646,6 +2720,10 @@ def render_prospeccion_rir_panel(
         "Conteo CT/RS (antes filtros -> despues): "
         f"CT Si {base_ct_si:,}/No {base_ct_no:,} -> Si {post_ct_si:,}/No {post_ct_no:,} | "
         f"RS Si {base_rs_si:,}/No {base_rs_no:,} -> Si {post_rs_si:,}/No {post_rs_no:,}"
+    )
+    st.caption(
+        "Cobertura enlace MINSA (antes filtros -> despues): "
+        f"Con URL {base_link_with_url:,} -> Con URL {post_link_with_url:,}"
     )
 
     sort_col_options = [
