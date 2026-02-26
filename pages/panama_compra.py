@@ -2975,6 +2975,23 @@ def render_prospeccion_rir_panel(
         else:
             filtered = filtered.iloc[0:0].copy()
 
+    link_url_count = 0
+    if "Enlace ficha MINSA" in filtered.columns and not filtered.empty:
+        link_url_count = int(
+            filtered["Enlace ficha MINSA"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.contains(r"^https?://", regex=True, na=False)
+            .sum()
+        )
+    if not filtered.empty and link_url_count == 0:
+        st.warning(
+            "No se detectaron enlaces MINSA en Prospeccion. "
+            "Verifica en secrets: DRIVE_FICHAS_CTNI_CON_ENLACE_FILE_ID "
+            "y que el archivo este compartido con la cuenta de servicio."
+        )
+
     # Diagnosticos ocultos por solicitud de UX limpia.
 
     sort_col_options = [
