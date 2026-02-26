@@ -2180,6 +2180,17 @@ def _resolve_column_by_alias(columns: list[str], aliases: list[str]) -> str:
     return ""
 
 
+def _resolve_column_exact(columns: list[str], candidates: list[str]) -> str:
+    if not columns:
+        return ""
+    normalized = {_normalize_column_key(col): col for col in columns}
+    for candidate in candidates:
+        key = _normalize_column_key(candidate)
+        if key in normalized:
+            return normalized[key]
+    return ""
+
+
 def _clean_text(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -2470,10 +2481,16 @@ def _build_prospeccion_rir_dataframe(
                 drive_fichas_columns,
                 ["ficha", "numero ficha", "numero_ficha", "n ficha", "ficha_tecnica", "codigo ficha", "id ficha"],
             )
-            drive_name_col = _resolve_column_by_alias(
+            # Requerimiento: usar Nombre Generico del Excel (no Descripcion).
+            drive_name_col = _resolve_column_exact(
                 drive_fichas_columns,
-                ["nombre ficha", "nombre", "descripcion", "detalle", "denominacion"],
+                ["Nombre Genérico", "Nombre Generico"],
             )
+            if not drive_name_col:
+                drive_name_col = _resolve_column_by_alias(
+                    drive_fichas_columns,
+                    ["nombre generico", "nombre ficha", "nombre"],
+                )
             drive_ct_col = _resolve_column_by_alias(
                 drive_fichas_columns,
                 ["tiene ct", "con ct", "ct", "criterio tecnico", "criterio"],
@@ -2535,7 +2552,7 @@ def _build_prospeccion_rir_dataframe(
         )
         ficha_name_col = _resolve_column_by_alias(
             fichas_columns,
-            ["nombre ficha", "nombre", "descripcion", "detalle", "denominacion"],
+            ["nombre generico", "nombre ficha", "nombre"],
         )
         ficha_ct_col = _resolve_column_by_alias(
             fichas_columns,
@@ -2707,7 +2724,6 @@ def _build_prospeccion_rir_dataframe(
             "Tiene criterio tecnico": meta.get("tiene_ct") or "No",
             "Registro sanitario": meta.get("registro_sanitario") or "No",
             "Enlace ficha MINSA": enlace_minsa,
-            "Clase ficha": meta.get("clase") or "",
             "__actos_links__": "\n".join(links_unique),
             "Proponentes distintos": proponentes_distintos,
             "Top 1 ganador": top1_text,
@@ -2735,7 +2751,6 @@ def _build_prospeccion_rir_dataframe(
         "Tiene criterio tecnico",
         "Registro sanitario",
         "Enlace ficha MINSA",
-        "Clase ficha",
     ] + [
         "Proponentes distintos",
         "Top 1 ganador",
@@ -2859,7 +2874,6 @@ def render_prospeccion_rir_panel(
             "Top 2 ganador",
             "Tiene criterio tecnico",
             "Registro sanitario",
-            "Clase ficha",
         }
 
         key_col = "__sort_key__"
