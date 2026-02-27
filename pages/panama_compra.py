@@ -2257,6 +2257,22 @@ def _extract_ficha_tokens(value: object) -> list[str]:
     return out
 
 
+def _parse_manual_ficha_tokens(raw_value: object) -> list[str]:
+    raw = _clean_text(raw_value)
+    if not raw:
+        return []
+    candidates = re.findall(r"\d{3,}", raw)
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for candidate in candidates:
+        token = _normalize_ficha_token(candidate)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
 def _coerce_ct_label(value: object) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "No"
@@ -3110,7 +3126,7 @@ def render_prospeccion_rir_panel(
     if not page_df.empty:
         st.markdown("**Selector de favoritos (pagina actual)**")
         fav_idx_options = list(range(len(page_df)))
-        fav_cols = st.columns([3.6, 1.1, 1.1])
+        fav_cols = st.columns([3.2, 2.4, 1.1, 1.1])
         with fav_cols[0]:
             fav_idx = st.selectbox(
                 "Ficha",
@@ -3122,15 +3138,26 @@ def render_prospeccion_rir_panel(
                 ),
                 label_visibility="collapsed",
             )
+        manual_fichas_raw = fav_cols[1].text_input(
+            "Fichas manuales",
+            key=f"{key_prefix}_fav_manual_input",
+            placeholder="Ej: 103169, 107066, 44818",
+            label_visibility="collapsed",
+        )
         selected_row = page_df.iloc[int(fav_idx)]
         selected_token = _normalize_ficha_token(selected_row.get("Ficha #"))
         selected_name = _clean_text(selected_row.get("Nombre ficha"))
 
-        add_clicked = fav_cols[1].button("Agregar", key=f"{key_prefix}_fav_add")
-        remove_clicked = fav_cols[2].button("Quitar", key=f"{key_prefix}_fav_remove")
+        add_clicked = fav_cols[2].button("Agregar", key=f"{key_prefix}_fav_add")
+        remove_clicked = fav_cols[3].button("Quitar", key=f"{key_prefix}_fav_remove")
 
         if add_clicked or remove_clicked:
-            if not selected_token:
+            manual_tokens = _parse_manual_ficha_tokens(manual_fichas_raw)
+            tokens_to_add = manual_tokens if manual_tokens else ([selected_token] if selected_token else [])
+
+            if add_clicked and not tokens_to_add:
+                st.warning("No se pudo resolver la ficha seleccionada.")
+            elif remove_clicked and not selected_token:
                 st.warning("No se pudo resolver la ficha seleccionada.")
             elif not favorites_file_id:
                 st.error("No hay archivo de favoritos en Drive para guardar cambios.")
@@ -3142,22 +3169,41 @@ def render_prospeccion_rir_panel(
 
                 if add_clicked:
                     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    updated = updated[updated["Ficha #"] != selected_token].copy()
-                    updated = pd.concat(
-                        [
-                            updated,
-                            pd.DataFrame(
-                                [
-                                    {
-                                        "Ficha #": selected_token,
-                                        "Nombre ficha": selected_name or f"Ficha {selected_token}",
-                                        "Fecha favorito": now_text,
-                                    }
-                                ]
-                            ),
-                        ],
-                        ignore_index=True,
-                    )
+                    name_map: dict[str, str] = {}
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        ficha_series = df.get("Ficha #", pd.Series(dtype=str))
+                        nombre_series = df.get("Nombre ficha", pd.Series(dtype=str))
+                        if len(ficha_series) == len(nombre_series):
+                            for raw_ficha, raw_nombre in zip(ficha_series.tolist(), nombre_series.tolist()):
+                                ficha_token = _normalize_ficha_token(raw_ficha)
+                                if not ficha_token or ficha_token in name_map:
+                                    continue
+                                clean_name = _clean_text(raw_nombre)
+                                if clean_name:
+                                    name_map[ficha_token] = clean_name
+
+                    rows_to_add: list[dict[str, str]] = []
+                    for token in tokens_to_add:
+                        token_name = name_map.get(token, "")
+                        if not token_name and token == selected_token:
+                            token_name = selected_name
+                        rows_to_add.append(
+                            {
+                                "Ficha #": token,
+                                "Nombre ficha": token_name or f"Ficha {token}",
+                                "Fecha favorito": now_text,
+                            }
+                        )
+
+                    updated = updated[~updated["Ficha #"].isin(tokens_to_add)].copy()
+                    if rows_to_add:
+                        updated = pd.concat(
+                            [
+                                updated,
+                                pd.DataFrame(rows_to_add),
+                            ],
+                            ignore_index=True,
+                        )
                 elif remove_clicked:
                     updated = updated[updated["Ficha #"] != selected_token].copy()
 
@@ -3168,7 +3214,12 @@ def render_prospeccion_rir_panel(
                     parent_folder_id=favorites_folder_id,
                 )
                 if saved_meta.get("id"):
-                    st.success("Favoritos actualizados en Drive.")
+                    if add_clicked and manual_tokens:
+                        st.success(
+                            f"Favoritos actualizados en Drive. Se agregaron {len(tokens_to_add)} fichas."
+                        )
+                    else:
+                        st.success("Favoritos actualizados en Drive.")
                     st.rerun()
                 else:
                     st.error("No se pudo guardar favoritos en Drive.")
