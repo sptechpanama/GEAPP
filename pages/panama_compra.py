@@ -281,9 +281,18 @@ def list_postgres_columns(db_url: str, table_name: str) -> list[str]:
 
 
 def _split_search_terms(raw: str) -> list[str]:
-    if not raw:
+    """
+    Parser de terminos para buscadores simples:
+    - Con comas/;: cada segmento se trata como grupo/frase exacta.
+      Ej: "chiller, aire acondicionado, cuarto frio"
+    - Sin comas/;: mantiene compatibilidad por palabras separadas por espacios.
+    - Soporta comillas para frases exactas.
+    """
+    if not raw or not str(raw).strip():
         return []
-    return [part.strip() for part in re.split(r"[\s,;]+", raw) if part.strip()]
+
+    include_terms, exact_phrases, _exclude_terms = _parse_advanced_search_query(str(raw))
+    return [*include_terms, *exact_phrases]
 
 
 def _build_sql_conditions(
@@ -1683,7 +1692,45 @@ def _find_drive_file_by_name(file_name: str) -> dict[str, str]:
 
 
 def _default_favorites_dataframe() -> pd.DataFrame:
-    return pd.DataFrame(columns=["Ficha #", "Nombre ficha", "Fecha favorito"])
+    return pd.DataFrame(columns=["Ficha #", "Nombre ficha", "Fecha favorito", "Prioridad"])
+
+
+def _normalize_favorites_priority_df(favorites_df: pd.DataFrame) -> pd.DataFrame:
+    if favorites_df is None or favorites_df.empty:
+        return _default_favorites_dataframe()
+
+    out = favorites_df.copy()
+    for col in ["Ficha #", "Nombre ficha", "Fecha favorito", "Prioridad"]:
+        if col not in out.columns:
+            out[col] = ""
+
+    out["Ficha #"] = out["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
+    out["Nombre ficha"] = out["Nombre ficha"].fillna("").astype(str).str.strip()
+    out["Fecha favorito"] = out["Fecha favorito"].fillna("").astype(str).str.strip()
+    out["Prioridad"] = pd.to_numeric(out["Prioridad"], errors="coerce")
+    out["__row_order__"] = range(len(out))
+    out = out[out["Ficha #"] != ""].copy()
+    if out.empty:
+        return _default_favorites_dataframe()
+
+    next_priority = int(out["Prioridad"].dropna().max()) if out["Prioridad"].notna().any() else 0
+    filled_priorities: list[int] = []
+    for value in out["Prioridad"].tolist():
+        if pd.notna(value):
+            filled_priorities.append(int(value))
+        else:
+            next_priority += 1
+            filled_priorities.append(next_priority)
+    out["Prioridad"] = filled_priorities
+
+    out = out.sort_values(
+        by=["Prioridad", "__row_order__"],
+        ascending=[True, True],
+        kind="mergesort",
+    ).drop_duplicates(subset=["Ficha #"], keep="first")
+    out["Prioridad"] = range(1, len(out) + 1)
+    out = out.drop(columns=["__row_order__"], errors="ignore").reset_index(drop=True)
+    return out[["Ficha #", "Nombre ficha", "Fecha favorito", "Prioridad"]]
 
 
 def _load_prospeccion_favorites_df(file_id: str) -> pd.DataFrame:
@@ -1707,6 +1754,7 @@ def _load_prospeccion_favorites_df(file_id: str) -> pd.DataFrame:
     ficha_col = _resolve_column_by_alias(cols, ["ficha #", "ficha", "numero ficha"])
     nombre_col = _resolve_column_by_alias(cols, ["nombre ficha", "nombre"])
     fecha_col = _resolve_column_by_alias(cols, ["fecha favorito", "fecha", "updated_at"])
+    prioridad_col = _resolve_column_by_alias(cols, ["prioridad", "priority", "orden"])
     if not ficha_col:
         return _default_favorites_dataframe()
 
@@ -1718,11 +1766,10 @@ def _load_prospeccion_favorites_df(file_id: str) -> pd.DataFrame:
     out["Fecha favorito"] = (
         df[fecha_col].fillna("").astype(str).str.strip() if fecha_col else ""
     )
-    out = out[out["Ficha #"].astype(str).str.strip() != ""].copy()
-    if out.empty:
-        return _default_favorites_dataframe()
-    out = out.drop_duplicates(subset=["Ficha #"], keep="last").reset_index(drop=True)
-    return out
+    out["Prioridad"] = (
+        pd.to_numeric(df[prioridad_col], errors="coerce") if prioridad_col else pd.NA
+    )
+    return _normalize_favorites_priority_df(out)
 
 
 def _save_prospeccion_favorites_df(
@@ -1735,10 +1782,7 @@ def _save_prospeccion_favorites_df(
     out_df = favorites_df.copy()
     if out_df.empty:
         out_df = _default_favorites_dataframe()
-    for col in ["Ficha #", "Nombre ficha", "Fecha favorito"]:
-        if col not in out_df.columns:
-            out_df[col] = ""
-    out_df = out_df[["Ficha #", "Nombre ficha", "Fecha favorito"]]
+    out_df = _normalize_favorites_priority_df(out_df)
 
     buff = BytesIO()
     out_df.to_excel(buff, index=False)
@@ -1846,21 +1890,39 @@ def _parse_advanced_search_query(raw_query: str) -> tuple[list[str], list[str], 
     if not raw:
         return [], [], []
 
-    phrases = [p.strip() for p in re.findall(r'"([^"]+)"', raw) if p.strip()]
+    explicit_grouping = bool(re.search(r"[,;]", raw))
+    quoted_phrases = [p.strip() for p in re.findall(r'"([^"]+)"', raw) if p.strip()]
     remainder = re.sub(r'"[^"]+"', " ", raw)
 
     include_terms: list[str] = []
+    exact_phrases: list[str] = list(quoted_phrases)
     exclude_terms: list[str] = []
-    for token in re.split(r"[\s,;]+", remainder):
-        t = token.strip()
-        if not t:
-            continue
-        if t.startswith("-") and len(t) > 1:
-            exclude_terms.append(t[1:])
-        else:
-            include_terms.append(t)
 
-    return include_terms, phrases, exclude_terms
+    if explicit_grouping:
+        chunks = [part.strip() for part in re.split(r"[,;]+", remainder) if part.strip()]
+        for chunk in chunks:
+            is_exclude = chunk.startswith("-")
+            token = chunk[1:].strip() if is_exclude else chunk.strip()
+            if not token:
+                continue
+            if is_exclude:
+                exclude_terms.append(token)
+            elif " " in token:
+                exact_phrases.append(token)
+            else:
+                include_terms.append(token)
+    else:
+        # Compatibilidad previa: sin comas, separa por espacios.
+        for token in re.split(r"\s+", remainder):
+            t = token.strip()
+            if not t:
+                continue
+            if t.startswith("-") and len(t) > 1:
+                exclude_terms.append(t[1:])
+            else:
+                include_terms.append(t)
+
+    return include_terms, exact_phrases, exclude_terms
 
 
 def _apply_advanced_text_search(
@@ -1976,7 +2038,7 @@ def render_db_reference_panel(
     search_text = st.text_input(
         f"Buscar en {title}",
         key=f"{key_prefix}_search",
-        placeholder="Palabras separadas por espacio, coma o punto y coma",
+        placeholder="Ej: chiller, refrigeracion, aires acondicionados",
     )
     mode = st.radio(
         "Modo de busqueda",
@@ -2092,7 +2154,7 @@ def render_drive_reference_panel(
     search_text = st.text_input(
         f"Buscar en {title}",
         key=f"{key_prefix}_search",
-        placeholder="Palabras separadas por espacio, coma o punto y coma",
+        placeholder="Ej: chiller, refrigeracion, aires acondicionados",
     )
     mode = st.radio(
         "Modo de busqueda",
@@ -2844,6 +2906,12 @@ def render_prospeccion_rir_panel(
     favorites_folder_id = _prospeccion_favorites_folder_id()
 
     favorites_df = _load_prospeccion_favorites_df(favorites_file_id)
+    favorites_priority_map = dict(
+        zip(
+            favorites_df["Ficha #"].fillna("").astype(str),
+            pd.to_numeric(favorites_df["Prioridad"], errors="coerce").fillna(0).astype(int),
+        )
+    )
     favorite_tokens = set(
         favorites_df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).tolist()
     )
@@ -2944,7 +3012,7 @@ def render_prospeccion_rir_panel(
     search_text = st.text_input(
         "Buscar ficha/proveedor",
         key=f"{key_prefix}_search_text",
-        placeholder='Ej: 109491 "insumo laboratorio" -reactivo',
+        placeholder="Ej: 109491, insumo laboratorio, reactivo",
     )
     search_mode = st.radio(
         "Modo de busqueda",
@@ -3163,12 +3231,13 @@ def render_prospeccion_rir_panel(
                 st.error("No hay archivo de favoritos en Drive para guardar cambios.")
             else:
                 updated = favorites_df.copy()
-                updated["Ficha #"] = updated["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
-                updated = updated[updated["Ficha #"] != ""].copy()
-                updated = updated.drop_duplicates(subset=["Ficha #"], keep="last")
+                updated = _normalize_favorites_priority_df(updated)
 
                 if add_clicked:
                     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    max_priority = (
+                        int(updated["Prioridad"].max()) if not updated.empty else 0
+                    )
                     name_map: dict[str, str] = {}
                     if isinstance(df, pd.DataFrame) and not df.empty:
                         ficha_series = df.get("Ficha #", pd.Series(dtype=str))
@@ -3183,7 +3252,7 @@ def render_prospeccion_rir_panel(
                                     name_map[ficha_token] = clean_name
 
                     rows_to_add: list[dict[str, str]] = []
-                    for token in tokens_to_add:
+                    for offset, token in enumerate(tokens_to_add, start=1):
                         token_name = name_map.get(token, "")
                         if not token_name and token == selected_token:
                             token_name = selected_name
@@ -3192,6 +3261,7 @@ def render_prospeccion_rir_panel(
                                 "Ficha #": token,
                                 "Nombre ficha": token_name or f"Ficha {token}",
                                 "Fecha favorito": now_text,
+                                "Prioridad": max_priority + offset,
                             }
                         )
 
@@ -3204,8 +3274,10 @@ def render_prospeccion_rir_panel(
                             ],
                             ignore_index=True,
                         )
+                    updated = _normalize_favorites_priority_df(updated)
                 elif remove_clicked:
                     updated = updated[updated["Ficha #"] != selected_token].copy()
+                    updated = _normalize_favorites_priority_df(updated)
 
                 saved_meta = _save_prospeccion_favorites_df(
                     favorites_file_id,
@@ -3232,22 +3304,80 @@ def render_prospeccion_rir_panel(
             st.caption("No hay fichas favoritas guardadas.")
         else:
             fav_display = favorites_view.copy()
+            fav_display["Ficha #"] = fav_display["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
+            fav_display["Prioridad"] = fav_display["Ficha #"].map(favorites_priority_map)
+            fav_display["Fecha favorito"] = fav_display["Ficha #"].map(
+                favorites_df.set_index("Ficha #")["Fecha favorito"].to_dict()
+            )
             fav_display, fav_money_cfg = _prepare_money_columns_for_sorting(fav_display)
+            fav_display["Prioridad"] = pd.to_numeric(
+                fav_display["Prioridad"], errors="coerce"
+            ).fillna(len(fav_display) + 9999).astype(int)
+            fav_display = fav_display.sort_values(
+                by=["Prioridad", "Ficha #"],
+                ascending=[True, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
             fav_display = fav_display.drop(
                 columns=["__actos_links__", "__meta_found__", "Actos (monto desc)", "actos monto desc"],
                 errors="ignore",
             )
+            st.caption("Edita `Prioridad` y guarda para fijar el orden manual de favoritos.")
             fav_column_cfg = {
+                "Prioridad": st.column_config.NumberColumn(
+                    "Prioridad",
+                    min_value=1,
+                    step=1,
+                    format="%d",
+                    width="small",
+                ),
                 "Nombre ficha": st.column_config.TextColumn("Nombre ficha", width="large"),
                 "Enlace ficha MINSA": st.column_config.LinkColumn("Enlace ficha MINSA", display_text="MINSA"),
             }
             fav_column_cfg.update(fav_money_cfg)
-            st.dataframe(
+            disabled_cols = [col for col in fav_display.columns if col != "Prioridad"]
+            fav_editor = st.data_editor(
                 fav_display,
                 use_container_width=True,
                 height=1000,
                 column_config=fav_column_cfg,
+                disabled=disabled_cols,
+                hide_index=True,
+                key=f"{key_prefix}_favorites_editor",
             )
+            if st.button("Guardar orden favoritos", key=f"{key_prefix}_save_favorites_order"):
+                if not favorites_file_id:
+                    st.error("No hay archivo de favoritos en Drive para guardar el orden.")
+                else:
+                    editor_df = fav_editor.copy()
+                    editor_df["Ficha #"] = editor_df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
+                    editor_df["Nombre ficha"] = editor_df["Nombre ficha"].fillna("").astype(str).str.strip()
+                    editor_df["Fecha favorito"] = editor_df["Fecha favorito"].fillna("").astype(str).str.strip()
+                    editor_df["Prioridad"] = pd.to_numeric(editor_df["Prioridad"], errors="coerce")
+                    full_updated = favorites_df.copy()
+                    reorder_tokens = set(editor_df["Ficha #"].tolist())
+                    full_updated = full_updated[
+                        ~full_updated["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).isin(reorder_tokens)
+                    ].copy()
+                    full_updated = pd.concat(
+                        [
+                            full_updated,
+                            editor_df[["Ficha #", "Nombre ficha", "Fecha favorito", "Prioridad"]],
+                        ],
+                        ignore_index=True,
+                    )
+                    full_updated = _normalize_favorites_priority_df(full_updated)
+                    saved_meta = _save_prospeccion_favorites_df(
+                        favorites_file_id,
+                        full_updated,
+                        file_name=favorites_file_name,
+                        parent_folder_id=favorites_folder_id,
+                    )
+                    if saved_meta.get("id"):
+                        st.success("Orden de favoritos actualizado en Drive.")
+                        st.rerun()
+                    else:
+                        st.error("No se pudo guardar el orden de favoritos en Drive.")
 
     if not page_df.empty and links_col in page_df.columns:
         selector_options = list(range(len(page_df)))
@@ -4524,7 +4654,7 @@ def render_df(
         q = st.text_input(
             "Búsqueda rápida (todas las columnas)",
             key=keyp+"q",
-            placeholder='Ej: chiller "aire acondicionado" -mantenimiento',
+            placeholder="Ej: chiller, refrigeracion, aires acondicionados",
         )
         search_ui_cols = st.columns([0.9, 1.4, 1.0])
         with search_ui_cols[0]:
@@ -4561,7 +4691,7 @@ def render_df(
             )
             df = filtered_df
 
-        st.caption('Tip: usa comillas para frase exacta y `-palabra` para excluir.')
+        st.caption("Tip: separa grupos con comas. Ej: chiller, aire acondicionado, cuarto frio.")
         def _is_item_column(col_name: str) -> bool:
             normalized = col_name.strip().lower().replace("í", "i")
             return normalized.startswith("item")
@@ -4846,7 +4976,7 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
     search_text = st.text_input(
         "Buscador de texto (todas las columnas)",
         key="pc_db_search_text",
-        placeholder="Ej: jeringa hospital enero",
+        placeholder="Ej: jeringa, hospital, enero 2026",
     )
     search_mode = st.radio(
         "Modo del buscador",
