@@ -3113,7 +3113,7 @@ def render_prospeccion_rir_panel(
     st.dataframe(
         display_df,
         use_container_width=True,
-        height=2400,
+        height=3200,
         column_config=column_config,
     )
     st.caption(
@@ -3245,7 +3245,7 @@ def render_prospeccion_rir_panel(
             st.dataframe(
                 fav_display,
                 use_container_width=True,
-                height=720,
+                height=1000,
                 column_config=fav_column_cfg,
             )
 
