@@ -3344,10 +3344,11 @@ def render_prospeccion_rir_panel(
             if add_clicked or remove_clicked:
                 manual_tokens = _parse_manual_ficha_tokens(manual_fichas_raw)
                 tokens_to_add = manual_tokens if manual_tokens else ([selected_token] if selected_token else [])
+                tokens_to_remove = manual_tokens if manual_tokens else ([selected_token] if selected_token else [])
 
                 if add_clicked and not tokens_to_add:
                     st.warning("No se pudo resolver la ficha seleccionada.")
-                elif remove_clicked and not selected_token:
+                elif remove_clicked and not tokens_to_remove:
                     st.warning("No se pudo resolver la ficha seleccionada.")
                 elif not file_id:
                     st.error(f"No hay archivo de {title.lower()} en Drive para guardar cambios.")
@@ -3378,7 +3379,7 @@ def render_prospeccion_rir_panel(
                             )
                         updated = _normalize_favorites_priority_df(updated)
                     elif remove_clicked:
-                        updated = updated[updated["Ficha #"] != selected_token].copy()
+                        updated = updated[~updated["Ficha #"].isin(tokens_to_remove)].copy()
                         updated = _normalize_favorites_priority_df(updated)
 
                     saved_meta = _save_prospeccion_favorites_df(
@@ -3393,7 +3394,12 @@ def render_prospeccion_rir_panel(
                                 f"{title} actualizado en Drive. Se agregaron {len(tokens_to_add)} fichas."
                             )
                         else:
-                            st.success(f"{title} actualizado en Drive.")
+                            if remove_clicked and manual_tokens:
+                                st.success(
+                                    f"{title} actualizado en Drive. Se quitaron {len(tokens_to_remove)} fichas."
+                                )
+                            else:
+                                st.success(f"{title} actualizado en Drive.")
                         st.rerun()
                     else:
                         st.error(f"No se pudo guardar {title.lower()} en Drive.")
