@@ -1575,6 +1575,10 @@ def _prospeccion_favorites_filename() -> str:
     return "prospeccion_rir_favoritos.xlsx"
 
 
+def _prospeccion_foyomed_filename() -> str:
+    return "prospeccion_rir_presentes_catalogo_foyomed.xlsx"
+
+
 def _prospeccion_favorites_file_id_from_secrets() -> str:
     try:
         app_cfg = st.secrets.get("app", {})
@@ -1583,6 +1587,23 @@ def _prospeccion_favorites_file_id_from_secrets() -> str:
     candidates = [
         "DRIVE_PROSPECCION_RIR_FAVORITOS_FILE_ID",
         "DRIVE_FAVORITOS_PROSPECCION_FILE_ID",
+    ]
+    for key in candidates:
+        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
+        if value is not None and str(value).strip():
+            return _normalize_drive_file_id(str(value))
+    return ""
+
+
+def _prospeccion_foyomed_file_id_from_secrets() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    candidates = [
+        "DRIVE_PROSPECCION_RIR_FOYOMED_FILE_ID",
+        "DRIVE_PROSPECCION_RIR_CATALOGO_FOYOMED_FILE_ID",
+        "DRIVE_CATALOGO_FOYOMED_FILE_ID",
     ]
     for key in candidates:
         value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
@@ -1803,6 +1824,55 @@ def _ensure_prospeccion_favorites_file() -> dict[str, str]:
     from_secret = _prospeccion_favorites_file_id_from_secrets()
     folder_id = _prospeccion_favorites_folder_id()
     cache_key = "__pc_prospeccion_favorites_file__"
+
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict) and cached.get("id"):
+        return {
+            "id": str(cached.get("id", "")),
+            "name": str(cached.get("name", file_name)),
+            "webViewLink": str(cached.get("webViewLink", "")),
+        }
+
+    if from_secret:
+        drive = get_drive_delegated()
+        if drive is not None:
+            try:
+                meta = drive.files().get(
+                    fileId=from_secret,
+                    fields="id,name,webViewLink",
+                    supportsAllDrives=True,
+                ).execute()
+                out = {
+                    "id": str(meta.get("id", "")),
+                    "name": str(meta.get("name", "")),
+                    "webViewLink": str(meta.get("webViewLink", "")),
+                }
+                st.session_state[cache_key] = out
+                return out
+            except Exception:
+                pass
+
+    existing = _find_drive_file_by_name(file_name)
+    if existing.get("id"):
+        st.session_state[cache_key] = existing
+        return existing
+
+    created = _save_prospeccion_favorites_df(
+        "",
+        _default_favorites_dataframe(),
+        file_name=file_name,
+        parent_folder_id=folder_id,
+    )
+    if created.get("id"):
+        st.session_state[cache_key] = created
+    return created
+
+
+def _ensure_prospeccion_foyomed_file() -> dict[str, str]:
+    file_name = _prospeccion_foyomed_filename()
+    from_secret = _prospeccion_foyomed_file_id_from_secrets()
+    folder_id = _prospeccion_favorites_folder_id()
+    cache_key = "__pc_prospeccion_foyomed_file__"
 
     cached = st.session_state.get(cache_key)
     if isinstance(cached, dict) and cached.get("id"):
@@ -2916,6 +2986,21 @@ def render_prospeccion_rir_panel(
         favorites_df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).tolist()
     )
 
+    foyomed_file = _ensure_prospeccion_foyomed_file()
+    foyomed_file_id = _normalize_drive_file_id(foyomed_file.get("id", ""))
+    foyomed_file_link = str(foyomed_file.get("webViewLink", "") or "").strip()
+    foyomed_file_name = _prospeccion_foyomed_filename()
+    foyomed_df = _load_prospeccion_favorites_df(foyomed_file_id)
+    foyomed_priority_map = dict(
+        zip(
+            foyomed_df["Ficha #"].fillna("").astype(str),
+            pd.to_numeric(foyomed_df["Prioridad"], errors="coerce").fillna(0).astype(int),
+        )
+    )
+    foyomed_tokens = set(
+        foyomed_df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).tolist()
+    )
+
     if favorites_file_id:
         if favorites_file_link:
             st.caption(f"Archivo favoritos: [{favorites_file_name}]({favorites_file_link})")
@@ -2923,6 +3008,13 @@ def render_prospeccion_rir_panel(
             st.caption(f"Archivo favoritos activo: {favorites_file_name}")
     else:
         st.warning("No se pudo inicializar archivo de favoritos en Drive.")
+    if foyomed_file_id:
+        if foyomed_file_link:
+            st.caption(f"Archivo catalogo Foyomed: [{foyomed_file_name}]({foyomed_file_link})")
+        else:
+            st.caption(f"Archivo catalogo Foyomed activo: {foyomed_file_name}")
+    else:
+        st.warning("No se pudo inicializar archivo de catalogo Foyomed en Drive.")
 
     def _parse_prospeccion_pct(value: object) -> float | None:
         text = _clean_text(value)
@@ -3191,193 +3283,224 @@ def render_prospeccion_rir_panel(
         "El orden se aplica sobre toda la tabla filtrada antes de paginar."
     )
 
-    if not page_df.empty:
-        st.markdown("**Selector de favoritos (pagina actual)**")
-        fav_idx_options = list(range(len(page_df)))
-        fav_cols = st.columns([3.2, 2.4, 1.1, 1.1])
-        with fav_cols[0]:
-            fav_idx = st.selectbox(
-                "Ficha",
-                options=fav_idx_options,
-                key=f"{key_prefix}_fav_selector",
-                format_func=lambda i: (
-                    f"{page_df.iloc[i].get('Ficha #', 'N/D')} | "
-                    f"{page_df.iloc[i].get('Nombre ficha', 'Sin nombre')}"
-                ),
+    def _build_ficha_name_map(source_df: pd.DataFrame) -> dict[str, str]:
+        name_map: dict[str, str] = {}
+        if not isinstance(source_df, pd.DataFrame) or source_df.empty:
+            return name_map
+        ficha_series = source_df.get("Ficha #", pd.Series(dtype=str))
+        nombre_series = source_df.get("Nombre ficha", pd.Series(dtype=str))
+        if len(ficha_series) != len(nombre_series):
+            return name_map
+        for raw_ficha, raw_nombre in zip(ficha_series.tolist(), nombre_series.tolist()):
+            ficha_token = _normalize_ficha_token(raw_ficha)
+            if not ficha_token or ficha_token in name_map:
+                continue
+            clean_name = _clean_text(raw_nombre)
+            if clean_name:
+                name_map[ficha_token] = clean_name
+        return name_map
+
+    ficha_name_map = _build_ficha_name_map(df)
+
+    def _render_manual_ficha_list(
+        *,
+        title: str,
+        selector_title: str,
+        list_df: pd.DataFrame,
+        list_tokens: set[str],
+        priority_map: dict[str, int],
+        file_id: str,
+        file_name: str,
+        key_stem: str,
+    ) -> None:
+        if not page_df.empty:
+            st.markdown(f"**{selector_title} (pagina actual)**")
+            idx_options = list(range(len(page_df)))
+            list_cols = st.columns([3.2, 2.4, 1.1, 1.1])
+            with list_cols[0]:
+                selected_idx = st.selectbox(
+                    "Ficha",
+                    options=idx_options,
+                    key=f"{key_stem}_selector",
+                    format_func=lambda i: (
+                        f"{page_df.iloc[i].get('Ficha #', 'N/D')} | "
+                        f"{page_df.iloc[i].get('Nombre ficha', 'Sin nombre')}"
+                    ),
+                    label_visibility="collapsed",
+                )
+            manual_fichas_raw = list_cols[1].text_input(
+                "Fichas manuales",
+                key=f"{key_stem}_manual_input",
+                placeholder="Ej: 103169, 107066, 44818",
                 label_visibility="collapsed",
             )
-        manual_fichas_raw = fav_cols[1].text_input(
-            "Fichas manuales",
-            key=f"{key_prefix}_fav_manual_input",
-            placeholder="Ej: 103169, 107066, 44818",
-            label_visibility="collapsed",
-        )
-        selected_row = page_df.iloc[int(fav_idx)]
-        selected_token = _normalize_ficha_token(selected_row.get("Ficha #"))
-        selected_name = _clean_text(selected_row.get("Nombre ficha"))
+            selected_row = page_df.iloc[int(selected_idx)]
+            selected_token = _normalize_ficha_token(selected_row.get("Ficha #"))
+            selected_name = _clean_text(selected_row.get("Nombre ficha"))
 
-        add_clicked = fav_cols[2].button("Agregar", key=f"{key_prefix}_fav_add")
-        remove_clicked = fav_cols[3].button("Quitar", key=f"{key_prefix}_fav_remove")
+            add_clicked = list_cols[2].button("Agregar", key=f"{key_stem}_add")
+            remove_clicked = list_cols[3].button("Quitar", key=f"{key_stem}_remove")
 
-        if add_clicked or remove_clicked:
-            manual_tokens = _parse_manual_ficha_tokens(manual_fichas_raw)
-            tokens_to_add = manual_tokens if manual_tokens else ([selected_token] if selected_token else [])
+            if add_clicked or remove_clicked:
+                manual_tokens = _parse_manual_ficha_tokens(manual_fichas_raw)
+                tokens_to_add = manual_tokens if manual_tokens else ([selected_token] if selected_token else [])
 
-            if add_clicked and not tokens_to_add:
-                st.warning("No se pudo resolver la ficha seleccionada.")
-            elif remove_clicked and not selected_token:
-                st.warning("No se pudo resolver la ficha seleccionada.")
-            elif not favorites_file_id:
-                st.error("No hay archivo de favoritos en Drive para guardar cambios.")
-            else:
-                updated = favorites_df.copy()
-                updated = _normalize_favorites_priority_df(updated)
-
-                if add_clicked:
-                    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    max_priority = (
-                        int(updated["Prioridad"].max()) if not updated.empty else 0
-                    )
-                    name_map: dict[str, str] = {}
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        ficha_series = df.get("Ficha #", pd.Series(dtype=str))
-                        nombre_series = df.get("Nombre ficha", pd.Series(dtype=str))
-                        if len(ficha_series) == len(nombre_series):
-                            for raw_ficha, raw_nombre in zip(ficha_series.tolist(), nombre_series.tolist()):
-                                ficha_token = _normalize_ficha_token(raw_ficha)
-                                if not ficha_token or ficha_token in name_map:
-                                    continue
-                                clean_name = _clean_text(raw_nombre)
-                                if clean_name:
-                                    name_map[ficha_token] = clean_name
-
-                    rows_to_add: list[dict[str, str]] = []
-                    for offset, token in enumerate(tokens_to_add, start=1):
-                        token_name = name_map.get(token, "")
-                        if not token_name and token == selected_token:
-                            token_name = selected_name
-                        rows_to_add.append(
-                            {
-                                "Ficha #": token,
-                                "Nombre ficha": token_name or f"Ficha {token}",
-                                "Fecha favorito": now_text,
-                                "Prioridad": max_priority + offset,
-                            }
-                        )
-
-                    updated = updated[~updated["Ficha #"].isin(tokens_to_add)].copy()
-                    if rows_to_add:
-                        updated = pd.concat(
-                            [
-                                updated,
-                                pd.DataFrame(rows_to_add),
-                            ],
-                            ignore_index=True,
-                        )
-                    updated = _normalize_favorites_priority_df(updated)
-                elif remove_clicked:
-                    updated = updated[updated["Ficha #"] != selected_token].copy()
-                    updated = _normalize_favorites_priority_df(updated)
-
-                saved_meta = _save_prospeccion_favorites_df(
-                    favorites_file_id,
-                    updated,
-                    file_name=favorites_file_name,
-                    parent_folder_id=favorites_folder_id,
-                )
-                if saved_meta.get("id"):
-                    if add_clicked and manual_tokens:
-                        st.success(
-                            f"Favoritos actualizados en Drive. Se agregaron {len(tokens_to_add)} fichas."
-                        )
-                    else:
-                        st.success("Favoritos actualizados en Drive.")
-                    st.rerun()
+                if add_clicked and not tokens_to_add:
+                    st.warning("No se pudo resolver la ficha seleccionada.")
+                elif remove_clicked and not selected_token:
+                    st.warning("No se pudo resolver la ficha seleccionada.")
+                elif not file_id:
+                    st.error(f"No hay archivo de {title.lower()} en Drive para guardar cambios.")
                 else:
-                    st.error("No se pudo guardar favoritos en Drive.")
+                    updated = _normalize_favorites_priority_df(list_df.copy())
 
-    favorites_view = df[
-        df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).isin(favorite_tokens)
-    ].copy()
-    with st.expander("Favoritos", expanded=False):
-        if favorites_view.empty:
-            st.caption("No hay fichas favoritas guardadas.")
-        else:
-            fav_display = favorites_view.copy()
-            fav_display["Ficha #"] = fav_display["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
-            fav_display["Prioridad"] = fav_display["Ficha #"].map(favorites_priority_map)
-            fav_display["Fecha favorito"] = fav_display["Ficha #"].map(
-                favorites_df.set_index("Ficha #")["Fecha favorito"].to_dict()
-            )
-            fav_display, fav_money_cfg = _prepare_money_columns_for_sorting(fav_display)
-            fav_display["Prioridad"] = pd.to_numeric(
-                fav_display["Prioridad"], errors="coerce"
-            ).fillna(len(fav_display) + 9999).astype(int)
-            fav_display = fav_display.sort_values(
-                by=["Prioridad", "Ficha #"],
-                ascending=[True, True],
-                kind="mergesort",
-            ).reset_index(drop=True)
-            fav_display = fav_display.drop(
-                columns=["__actos_links__", "__meta_found__", "Actos (monto desc)", "actos monto desc"],
-                errors="ignore",
-            )
-            st.caption("Edita `Prioridad` y guarda para fijar el orden manual de favoritos.")
-            fav_column_cfg = {
-                "Prioridad": st.column_config.NumberColumn(
-                    "Prioridad",
-                    min_value=1,
-                    step=1,
-                    format="%d",
-                    width="small",
-                ),
-                "Nombre ficha": st.column_config.TextColumn("Nombre ficha", width="large"),
-                "Enlace ficha MINSA": st.column_config.LinkColumn("Enlace ficha MINSA", display_text="MINSA"),
-            }
-            fav_column_cfg.update(fav_money_cfg)
-            disabled_cols = [col for col in fav_display.columns if col != "Prioridad"]
-            fav_editor = st.data_editor(
-                fav_display,
-                use_container_width=True,
-                height=1000,
-                column_config=fav_column_cfg,
-                disabled=disabled_cols,
-                hide_index=True,
-                key=f"{key_prefix}_favorites_editor",
-            )
-            if st.button("Guardar orden favoritos", key=f"{key_prefix}_save_favorites_order"):
-                if not favorites_file_id:
-                    st.error("No hay archivo de favoritos en Drive para guardar el orden.")
-                else:
-                    editor_df = fav_editor.copy()
-                    editor_df["Ficha #"] = editor_df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
-                    editor_df["Nombre ficha"] = editor_df["Nombre ficha"].fillna("").astype(str).str.strip()
-                    editor_df["Fecha favorito"] = editor_df["Fecha favorito"].fillna("").astype(str).str.strip()
-                    editor_df["Prioridad"] = pd.to_numeric(editor_df["Prioridad"], errors="coerce")
-                    full_updated = favorites_df.copy()
-                    reorder_tokens = set(editor_df["Ficha #"].tolist())
-                    full_updated = full_updated[
-                        ~full_updated["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).isin(reorder_tokens)
-                    ].copy()
-                    full_updated = pd.concat(
-                        [
-                            full_updated,
-                            editor_df[["Ficha #", "Nombre ficha", "Fecha favorito", "Prioridad"]],
-                        ],
-                        ignore_index=True,
-                    )
-                    full_updated = _normalize_favorites_priority_df(full_updated)
+                    if add_clicked:
+                        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        max_priority = int(updated["Prioridad"].max()) if not updated.empty else 0
+                        rows_to_add: list[dict[str, str | int]] = []
+                        for offset, token in enumerate(tokens_to_add, start=1):
+                            token_name = ficha_name_map.get(token, "")
+                            if not token_name and token == selected_token:
+                                token_name = selected_name
+                            rows_to_add.append(
+                                {
+                                    "Ficha #": token,
+                                    "Nombre ficha": token_name or f"Ficha {token}",
+                                    "Fecha favorito": now_text,
+                                    "Prioridad": max_priority + offset,
+                                }
+                            )
+                        updated = updated[~updated["Ficha #"].isin(tokens_to_add)].copy()
+                        if rows_to_add:
+                            updated = pd.concat(
+                                [updated, pd.DataFrame(rows_to_add)],
+                                ignore_index=True,
+                            )
+                        updated = _normalize_favorites_priority_df(updated)
+                    elif remove_clicked:
+                        updated = updated[updated["Ficha #"] != selected_token].copy()
+                        updated = _normalize_favorites_priority_df(updated)
+
                     saved_meta = _save_prospeccion_favorites_df(
-                        favorites_file_id,
-                        full_updated,
-                        file_name=favorites_file_name,
+                        file_id,
+                        updated,
+                        file_name=file_name,
                         parent_folder_id=favorites_folder_id,
                     )
                     if saved_meta.get("id"):
-                        st.success("Orden de favoritos actualizado en Drive.")
+                        if add_clicked and manual_tokens:
+                            st.success(
+                                f"{title} actualizado en Drive. Se agregaron {len(tokens_to_add)} fichas."
+                            )
+                        else:
+                            st.success(f"{title} actualizado en Drive.")
                         st.rerun()
                     else:
-                        st.error("No se pudo guardar el orden de favoritos en Drive.")
+                        st.error(f"No se pudo guardar {title.lower()} en Drive.")
+
+        list_view = df[
+            df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).isin(list_tokens)
+        ].copy()
+        with st.expander(title, expanded=False):
+            if list_view.empty:
+                st.caption(f"No hay fichas guardadas en {title.lower()}.")
+            else:
+                display = list_view.copy()
+                display["Ficha #"] = display["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
+                display["Prioridad"] = display["Ficha #"].map(priority_map)
+                display["Fecha favorito"] = display["Ficha #"].map(
+                    list_df.set_index("Ficha #")["Fecha favorito"].to_dict()
+                )
+                display, list_money_cfg = _prepare_money_columns_for_sorting(display)
+                display["Prioridad"] = pd.to_numeric(
+                    display["Prioridad"], errors="coerce"
+                ).fillna(len(display) + 9999).astype(int)
+                display = display.sort_values(
+                    by=["Prioridad", "Ficha #"],
+                    ascending=[True, True],
+                    kind="mergesort",
+                ).reset_index(drop=True)
+                display = display.drop(
+                    columns=["__actos_links__", "__meta_found__", "Actos (monto desc)", "actos monto desc"],
+                    errors="ignore",
+                )
+                st.caption(f"Edita `Prioridad` y guarda para fijar el orden manual de {title.lower()}.")
+                list_column_cfg = {
+                    "Prioridad": st.column_config.NumberColumn(
+                        "Prioridad",
+                        min_value=1,
+                        step=1,
+                        format="%d",
+                        width="small",
+                    ),
+                    "Nombre ficha": st.column_config.TextColumn("Nombre ficha", width="large"),
+                    "Enlace ficha MINSA": st.column_config.LinkColumn("Enlace ficha MINSA", display_text="MINSA"),
+                }
+                list_column_cfg.update(list_money_cfg)
+                disabled_cols = [col for col in display.columns if col != "Prioridad"]
+                editor = st.data_editor(
+                    display,
+                    use_container_width=True,
+                    height=1000,
+                    column_config=list_column_cfg,
+                    disabled=disabled_cols,
+                    hide_index=True,
+                    key=f"{key_stem}_editor",
+                )
+                if st.button(f"Guardar orden {title}", key=f"{key_stem}_save_order"):
+                    if not file_id:
+                        st.error(f"No hay archivo de {title.lower()} en Drive para guardar el orden.")
+                    else:
+                        editor_df = editor.copy()
+                        editor_df["Ficha #"] = editor_df["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token)
+                        editor_df["Nombre ficha"] = editor_df["Nombre ficha"].fillna("").astype(str).str.strip()
+                        editor_df["Fecha favorito"] = editor_df["Fecha favorito"].fillna("").astype(str).str.strip()
+                        editor_df["Prioridad"] = pd.to_numeric(editor_df["Prioridad"], errors="coerce")
+                        full_updated = list_df.copy()
+                        reorder_tokens = set(editor_df["Ficha #"].tolist())
+                        full_updated = full_updated[
+                            ~full_updated["Ficha #"].fillna("").astype(str).map(_normalize_ficha_token).isin(reorder_tokens)
+                        ].copy()
+                        full_updated = pd.concat(
+                            [
+                                full_updated,
+                                editor_df[["Ficha #", "Nombre ficha", "Fecha favorito", "Prioridad"]],
+                            ],
+                            ignore_index=True,
+                        )
+                        full_updated = _normalize_favorites_priority_df(full_updated)
+                        saved_meta = _save_prospeccion_favorites_df(
+                            file_id,
+                            full_updated,
+                            file_name=file_name,
+                            parent_folder_id=favorites_folder_id,
+                        )
+                        if saved_meta.get("id"):
+                            st.success(f"Orden de {title.lower()} actualizado en Drive.")
+                            st.rerun()
+                        else:
+                            st.error(f"No se pudo guardar el orden de {title.lower()} en Drive.")
+
+    _render_manual_ficha_list(
+        title="Favoritos",
+        selector_title="Selector de favoritos",
+        list_df=favorites_df,
+        list_tokens=favorite_tokens,
+        priority_map=favorites_priority_map,
+        file_id=favorites_file_id,
+        file_name=favorites_file_name,
+        key_stem=f"{key_prefix}_favorites",
+    )
+    _render_manual_ficha_list(
+        title="Presentes en catalogo de Foyomed",
+        selector_title="Selector presentes en catalogo de Foyomed",
+        list_df=foyomed_df,
+        list_tokens=foyomed_tokens,
+        priority_map=foyomed_priority_map,
+        file_id=foyomed_file_id,
+        file_name=foyomed_file_name,
+        key_stem=f"{key_prefix}_foyomed",
+    )
 
     if not page_df.empty and links_col in page_df.columns:
         selector_options = list(range(len(page_df)))
