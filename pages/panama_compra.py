@@ -83,6 +83,7 @@ PC_STATE_WORKSHEET = "pc_state"
 PC_CONFIG_WORKSHEET = "pc_config"
 PC_MANUAL_SHEET_ID = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
 PC_MANUAL_WORKSHEET = "pc_manual"
+CT_RIR_LIST_WORKSHEET = "ct_rir_fichas"
 JOB_NAME_LABELS = {
     "clrir": "Cotizaciones Programadas",
     "clv": "Cotizaciones Abiertas",
@@ -2068,10 +2069,27 @@ def _find_reference_table_name(
     if not candidates:
         return ""
 
+    available: list[str] = []
     if backend == "postgres":
-        available = list_postgres_tables(db_url)
+        try:
+            available = list_postgres_tables(db_url)
+        except Exception:
+            available = []
+            fallback_path = db_path_str.strip() if db_path_str else ""
+            if not fallback_path:
+                db_path_obj = _preferred_db_path()
+                if db_path_obj and db_path_obj.exists():
+                    fallback_path = str(db_path_obj)
+            if fallback_path:
+                try:
+                    available = list_sqlite_tables(fallback_path)
+                except Exception:
+                    available = []
     else:
-        available = list_sqlite_tables(db_path_str)
+        try:
+            available = list_sqlite_tables(db_path_str)
+        except Exception:
+            available = []
 
     # Respeta prioridad del caller: primer candidato existente gana.
     available_map = {str(table).strip().lower(): str(table) for table in available}
@@ -2403,6 +2421,136 @@ def _parse_manual_ficha_tokens(raw_value: object) -> list[str]:
         seen.add(token)
         tokens.append(token)
     return tokens
+
+
+def _load_ct_rir_tokens() -> list[str]:
+    try:
+        sh = get_gc().open_by_key(SHEET_ID)
+    except Exception:
+        return []
+    try:
+        ws = sh.worksheet(CT_RIR_LIST_WORKSHEET)
+    except Exception:
+        try:
+            ws = sh.add_worksheet(title=CT_RIR_LIST_WORKSHEET, rows=2000, cols=3)
+            ws.update("A1:C1", [["Ficha #", "Actualizado por", "Actualizado"]])
+        except Exception:
+            return []
+
+    try:
+        values = ws.get_all_values()
+    except Exception:
+        return []
+
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for row in values:
+        if not row:
+            continue
+        token = _normalize_ficha_token(row[0])
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def _save_ct_rir_tokens(tokens: list[str]) -> bool:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        clean_token = _normalize_ficha_token(token)
+        if not clean_token or clean_token in seen:
+            continue
+        seen.add(clean_token)
+        normalized.append(clean_token)
+
+    try:
+        sh = get_gc().open_by_key(SHEET_ID)
+        try:
+            ws = sh.worksheet(CT_RIR_LIST_WORKSHEET)
+        except Exception:
+            ws = sh.add_worksheet(title=CT_RIR_LIST_WORKSHEET, rows=2000, cols=3)
+    except Exception:
+        return False
+
+    user_name = _current_user()
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = [["Ficha #", "Actualizado por", "Actualizado"]]
+    rows.extend([[token, user_name, now_text] for token in normalized])
+    try:
+        ws.clear()
+        end_row = max(1, len(rows))
+        ws.update(f"A1:C{end_row}", rows)
+        return True
+    except Exception:
+        return False
+
+
+def _render_ct_rir_manager(source_df: pd.DataFrame, *, key_prefix: str = "ct_rir") -> None:
+    current_tokens = _load_ct_rir_tokens()
+    current_set = set(current_tokens)
+
+    detected_tokens: list[str] = []
+    if isinstance(source_df, pd.DataFrame) and not source_df.empty:
+        if "ficha_detectada" in source_df.columns:
+            for raw in source_df["ficha_detectada"].fillna("").astype(str).tolist():
+                for token in _parse_manual_ficha_tokens(raw):
+                    if token not in detected_tokens:
+                        detected_tokens.append(token)
+        if not detected_tokens and "Ficha #" in source_df.columns:
+            for raw in source_df["Ficha #"].fillna("").astype(str).tolist():
+                token = _normalize_ficha_token(raw)
+                if token and token not in detected_tokens:
+                    detected_tokens.append(token)
+
+    options = detected_tokens if detected_tokens else (current_tokens if current_tokens else [""])
+    controls = st.columns([2.2, 2.2, 1.1, 1.1])
+    with controls[0]:
+        selected = st.selectbox(
+            "Ficha detectada",
+            options=options,
+            key=f"{key_prefix}_selector",
+            format_func=lambda value: value if value else "Sin fichas detectadas en esta hoja",
+            label_visibility="collapsed",
+            disabled=(options == [""]),
+        )
+    manual_raw = controls[1].text_input(
+        "Fichas manuales",
+        key=f"{key_prefix}_manual_input",
+        placeholder="Ej: 43358, 103496, 107066",
+        label_visibility="collapsed",
+    )
+    add_clicked = controls[2].button("Agregar", key=f"{key_prefix}_add")
+    remove_clicked = controls[3].button("Quitar", key=f"{key_prefix}_remove")
+
+    if add_clicked or remove_clicked:
+        manual_tokens = _parse_manual_ficha_tokens(manual_raw)
+        selected_token = _normalize_ficha_token(selected)
+        target_tokens = manual_tokens if manual_tokens else ([selected_token] if selected_token else [])
+        if not target_tokens:
+            st.warning("Ingresa una o mas fichas separadas por coma, o selecciona una ficha de la lista.")
+        else:
+            if add_clicked:
+                updated = current_tokens + [token for token in target_tokens if token not in current_set]
+            else:
+                remove_set = set(target_tokens)
+                updated = [token for token in current_tokens if token not in remove_set]
+
+            if _save_ct_rir_tokens(updated):
+                action = "agregaron" if add_clicked else "quitaron"
+                st.success(f"Lista CT_RIR actualizada: se {action} {len(target_tokens)} ficha(s).")
+                st.rerun()
+            else:
+                st.error("No se pudo guardar la lista CT_RIR en Google Sheets.")
+
+    with st.expander("Fichas incluidas en CT_RIR", expanded=False):
+        if not current_tokens:
+            st.caption("Sin fichas configuradas.")
+        else:
+            ct_df = pd.DataFrame({"Ficha #": current_tokens})
+            st.dataframe(ct_df, use_container_width=True, height=240, hide_index=True)
+            st.caption(f"Total fichas CT_RIR: {len(current_tokens)}")
 
 
 def _coerce_ct_label(value: object) -> str:
@@ -4500,13 +4648,16 @@ SHEET_LABELS = {
     "cl_abiertas_rir_sin_requisitos": "CL abiertas RIR sin requisitos",
     "cl_abiertas": "CL abiertas",
     "cl_abiertas_rir_con_ct": "CL abiertas RIR con CT",
+    "cl_abiertas_ct_rir": "CL abiertas CT_RIR",
     "cl_prog_sin_ficha": "CL programadas sin ficha",
     "cl_prog_sin_requisitos": "CL programadas sin requisitos",
     "cl_prog_con_ct": "CL programadas con CT",
+    "cl_prog_ct_rir": "CL programadas CT_RIR",
     "cl_prioritarios": "CL prioritarios",
     "ap_con_ct": "AP con CT",
     "ap_sin_ficha": "AP sin ficha",
     "ap_sin_requisitos": "AP sin requisitos",
+    "ap_ct_rir": "AP CT_RIR",
 }
 
 SHEET_GROUPS = {
@@ -4525,6 +4676,11 @@ SHEET_GROUPS = {
         "ap_sin_ficha",
         "ap_sin_requisitos",
     ],
+    "Criterios Tecnicos RIR": [
+        "cl_abiertas_ct_rir",
+        "cl_prog_ct_rir",
+        "ap_ct_rir",
+    ],
     "Prioritarias": [
         "cl_prioritarios",
     ],
@@ -4534,6 +4690,7 @@ CATEGORY_ORDER = [
     "Cotizaciones Abiertas",
     "Cotizaciones Programadas",
     "Licitaciones",
+    "Criterios Tecnicos RIR",
     "Prioritarias",
 ]
 
@@ -4566,7 +4723,10 @@ def apply_checkbox_updates(sheet_name: str, updates):
 @st.cache_data(ttl=300)
 def load_df(sheet_name: str) -> pd.DataFrame:
     sh = get_gc().open_by_key(SHEET_ID)
-    ws = sh.worksheet(sheet_name)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except Exception:
+        return pd.DataFrame()
 
     raw_headers = ws.row_values(1)
     values = ws.get_all_values()
@@ -5284,6 +5444,8 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             )
 
         df = load_df(sheet_name)
+        if category_name == "Criterios Tecnicos RIR":
+            _render_ct_rir_manager(df, key_prefix=f"{selector_key}_ct_rir")
         if df.empty:
             st.info("Sin datos en esta pestaña.")
         else:
@@ -5324,7 +5486,17 @@ catalogos_file_id = _first_app_value(
 backend_refs = _active_db_backend()
 db_url_refs = _supabase_db_url() if backend_refs == "postgres" else ""
 db_path_refs = ""
-if backend_refs != "postgres":
+if backend_refs == "postgres":
+    try:
+        # Si Supabase no responde, evita romper la carga de la página.
+        list_postgres_tables(db_url_refs)
+    except Exception:
+        db_path_obj = _preferred_db_path()
+        if db_path_obj and db_path_obj.exists():
+            backend_refs = "sqlite"
+            db_url_refs = ""
+            db_path_refs = str(db_path_obj)
+else:
     db_path_obj = _preferred_db_path()
     if db_path_obj and db_path_obj.exists():
         db_path_refs = str(db_path_obj)
