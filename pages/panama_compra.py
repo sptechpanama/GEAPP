@@ -5208,8 +5208,40 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         try:
             db_tables = list_postgres_tables(db_url)
         except Exception as exc:
-            st.error(f"No fue posible conectar a Supabase: {exc}")
-            return
+            db_path = _preferred_db_path()
+            if db_path is None:
+                st.error(f"No fue posible conectar a Supabase: {exc}")
+                return
+            if not db_path.exists():
+                st.error(
+                    "No fue posible conectar a Supabase y no hay una base local disponible. "
+                    f"Detalle: {exc}"
+                )
+                return
+
+            db_path_str = str(db_path)
+            try:
+                db_tables = list_sqlite_tables(db_path_str)
+            except sqlite3.OperationalError as sqlite_exc:
+                st.error(
+                    "No fue posible conectar a Supabase y tampoco abrir la base local: "
+                    f"{sqlite_exc}"
+                )
+                return
+            except Exception as sqlite_exc:
+                st.error(
+                    "No fue posible conectar a Supabase y tampoco listar tablas locales: "
+                    f"{sqlite_exc}"
+                )
+                return
+
+            backend = "sqlite"
+            db_url = ""
+            st.warning(
+                "Supabase no responde en este momento. "
+                "Se usa la base local como respaldo para mantener el panel operativo."
+            )
+            st.caption(f"Origen alterno: `{db_path}`")
     else:
         db_path = _preferred_db_path()
         if db_path is None:
