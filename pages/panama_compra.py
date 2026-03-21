@@ -161,6 +161,54 @@ def _preferred_db_path() -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _panamacompra_drive_file_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    candidates = [
+        "DRIVE_PANAMACOMPRA_FILE_ID",
+        "DRIVE_PANAMACOMPRA_DB_FILE_ID",
+        "DRIVE_DB_PANAMACOMPRA_FILE_ID",
+    ]
+    for key in candidates:
+        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+@st.cache_data(ttl=900)
+def _download_panamacompra_db_bytes(file_id: str) -> bytes:
+    return _download_drive_file_bytes(file_id)
+
+
+def _runtime_panamacompra_db_path() -> Path | None:
+    db_path = _preferred_db_path()
+    if db_path and db_path.exists():
+        return db_path
+
+    file_id = _panamacompra_drive_file_id()
+    if not file_id:
+        return db_path
+
+    try:
+        raw = _download_panamacompra_db_bytes(file_id)
+    except Exception:
+        return db_path
+    if not raw:
+        return db_path
+
+    runtime_path = Path.cwd() / "data" / "db" / "panamacompra_drive.db"
+    try:
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        if (not runtime_path.exists()) or runtime_path.stat().st_size != len(raw):
+            runtime_path.write_bytes(raw)
+    except Exception:
+        return db_path
+    return runtime_path
+
+
 def _supabase_db_url() -> str:
     try:
         app_cfg = st.secrets["app"]
@@ -5208,7 +5256,7 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         try:
             db_tables = list_postgres_tables(db_url)
         except Exception as exc:
-            db_path = _preferred_db_path()
+            db_path = _runtime_panamacompra_db_path()
             if db_path is None:
                 st.error(f"No fue posible conectar a Supabase: {exc}")
                 return
@@ -5243,7 +5291,7 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
             )
             st.caption(f"Origen alterno: `{db_path}`")
     else:
-        db_path = _preferred_db_path()
+        db_path = _runtime_panamacompra_db_path()
         if db_path is None:
             st.info("No hay rutas configuradas para la base panamacompra.db.")
             return
