@@ -4746,6 +4746,18 @@ CATEGORY_ORDER = [
 def _sheet_label(name: str) -> str:
     return SHEET_LABELS.get(name, name.replace("_", " ").title())
 
+
+def _sheet_tipo_convocatoria(sheet_name: str) -> str:
+    raw = str(sheet_name or "").strip().lower()
+    if raw.startswith("cl_abiertas"):
+        return "Abierta"
+    if raw.startswith("cl_prog"):
+        return "Programada"
+    if raw.startswith("ap_"):
+        return "Licitacion"
+    return "Otro"
+
+
 def get_gc():
     # Reutiliza las credenciales centralizadas en sheets.get_client()
     client, _ = get_client()
@@ -5502,12 +5514,47 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         st.subheader(category_name)
         sheets = SHEET_GROUPS.get(category_name, [])
         if not sheets:
-            st.info("Sin hojas configuradas para esta categoría.")
+            st.info("Sin hojas configuradas para esta categoria.")
             continue
 
         selector_slug = re.sub(r"[^0-9a-z]+", "_", category_name.lower())
         selector_key = f"sheet_selector_{selector_slug.strip('_')}"
         tab_suffix = selector_slug.strip("_") or None
+
+        if category_name == "Criterios Tecnicos RIR":
+            parts: list[pd.DataFrame] = []
+            for source_sheet in sheets:
+                source_df = load_df(source_sheet)
+                if source_df.empty:
+                    continue
+                work = source_df.copy()
+                work["Tipo convocatoria"] = _sheet_tipo_convocatoria(source_sheet)
+                work["Pestana origen"] = _sheet_label(source_sheet)
+                parts.append(work)
+
+            if parts:
+                df = pd.concat(parts, ignore_index=True, sort=False)
+            else:
+                df = pd.DataFrame()
+
+            _render_ct_rir_manager(df, key_prefix=f"{selector_key}_ct_rir")
+            if df.empty:
+                st.info("Sin datos en esta pestana.")
+            else:
+                read_only_cols = [c for c in df.columns if not _is_checkbox_target(c)]
+                df_read_only = df[read_only_cols].copy() if read_only_cols else df.copy()
+                st.caption(
+                    "Vista unificada de Abiertas, Programadas y Licitaciones "
+                    "con columna de tipo de convocatoria."
+                )
+                render_df(
+                    df_read_only,
+                    "ct_rir_unificado",
+                    pc_state_df,
+                    pc_config_df,
+                    suffix=tab_suffix,
+                )
+            continue
 
         if len(sheets) == 1:
             sheet_name = sheets[0]
@@ -5527,7 +5574,7 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         if category_name == "Criterios Tecnicos RIR":
             _render_ct_rir_manager(df, key_prefix=f"{selector_key}_ct_rir")
         if df.empty:
-            st.info("Sin datos en esta pestaña.")
+            st.info("Sin datos en esta pestana.")
         else:
             render_df(df, sheet_name, pc_state_df, pc_config_df, suffix=tab_suffix)
 
