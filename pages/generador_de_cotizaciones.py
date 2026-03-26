@@ -1557,7 +1557,41 @@ def _parse_decimal_input(value: Any) -> float:
         return 0.0
 
 
-def _build_items_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+def _try_parse_decimal_input(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        return float(value)
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+    raw = raw.replace("$", "").replace(" ", "")
+
+    comma_pos = raw.rfind(",")
+    dot_pos = raw.rfind(".")
+    if comma_pos >= 0 and dot_pos >= 0:
+        if comma_pos > dot_pos:
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+    elif comma_pos >= 0:
+        raw = raw.replace(".", "").replace(",", ".")
+    else:
+        raw = raw.replace(",", "")
+
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _build_items_dataframe(raw: pd.DataFrame, fallback: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     df = raw.copy()
     if "producto_servicio" not in df.columns:
         df["producto_servicio"] = ""
@@ -1565,8 +1599,25 @@ def _build_items_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
         df["cantidad"] = 0.0
     if "precio_unitario" not in df.columns:
         df["precio_unitario"] = 0.0
-    df["cantidad"] = df["cantidad"].map(_parse_decimal_input)
-    df["precio_unitario"] = df["precio_unitario"].map(_parse_decimal_input)
+
+    if fallback is not None:
+        fb = fallback.copy()
+        if "cantidad" not in fb.columns:
+            fb["cantidad"] = 0.0
+        if "precio_unitario" not in fb.columns:
+            fb["precio_unitario"] = 0.0
+        fb["cantidad"] = fb["cantidad"].map(_parse_decimal_input)
+        fb["precio_unitario"] = fb["precio_unitario"].map(_parse_decimal_input)
+        fb = fb.reindex(range(len(df)))
+
+        parsed_qty = df["cantidad"].map(_try_parse_decimal_input)
+        parsed_price = df["precio_unitario"].map(_try_parse_decimal_input)
+        df["cantidad"] = parsed_qty.combine_first(fb["cantidad"]).fillna(0.0)
+        df["precio_unitario"] = parsed_price.combine_first(fb["precio_unitario"]).fillna(0.0)
+    else:
+        df["cantidad"] = df["cantidad"].map(_parse_decimal_input)
+        df["precio_unitario"] = df["precio_unitario"].map(_parse_decimal_input)
+
     df["importe"] = df["cantidad"] * df["precio_unitario"]
     return df
 
@@ -3149,7 +3200,10 @@ if active_tab == "Cotización - Panamá Compra":
         disabled=["importe"],
         hide_index=True,
     )
-    presupuesto_df_pc = _build_items_dataframe(pd.DataFrame(presupuesto_raw))
+    presupuesto_df_pc = _build_items_dataframe(
+        pd.DataFrame(presupuesto_raw),
+        fallback=presupuesto_display_df,
+    )
     st.session_state["pc_presupuesto_items_data"] = presupuesto_df_pc[
         ["producto_servicio", "cantidad", "precio_unitario"]
     ].to_dict(orient="records")
@@ -3919,7 +3973,10 @@ if active_tab == "Cotizacion - Estandar":
         hide_index=True,
     )
 
-    items_df = _build_items_dataframe(pd.DataFrame(items_raw))
+    items_df = _build_items_dataframe(
+        pd.DataFrame(items_raw),
+        fallback=items_display_df,
+    )
     st.session_state[items_state_key] = items_df[
         ["producto_servicio", "cantidad", "precio_unitario"]
     ].to_dict(orient="records")
@@ -3990,7 +4047,10 @@ if active_tab == "Cotizacion - Estandar":
         hide_index=True,
     )
 
-    presupuesto_df = _build_items_dataframe(pd.DataFrame(presupuesto_raw))
+    presupuesto_df = _build_items_dataframe(
+        pd.DataFrame(presupuesto_raw),
+        fallback=presupuesto_display_df,
+    )
     st.session_state[presupuesto_state_key] = presupuesto_df[
         ["producto_servicio", "cantidad", "precio_unitario"]
     ].to_dict(orient="records")
