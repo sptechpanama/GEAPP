@@ -201,6 +201,74 @@ def _parse_number_maybe_es(value) -> float:
         return 0.0
 
 
+def _editor_state_to_dataframe(
+    original_df: pd.DataFrame,
+    editor_key: str,
+    *,
+    numeric_cols: set[str] | None = None,
+) -> pd.DataFrame:
+    work = original_df.copy().reset_index(drop=True)
+    editor_state = st.session_state.get(editor_key)
+    if not isinstance(editor_state, dict):
+        if numeric_cols:
+            for col in numeric_cols:
+                if col in work.columns:
+                    work[col] = work[col].map(_parse_number_maybe_es)
+        return work
+
+    numeric_cols = numeric_cols or set()
+
+    edited_rows = editor_state.get("edited_rows") or {}
+    for row_idx, changes in edited_rows.items():
+        try:
+            i = int(row_idx)
+        except Exception:
+            continue
+        if i < 0 or i >= len(work) or not isinstance(changes, dict):
+            continue
+        for col, value in changes.items():
+            if col not in work.columns:
+                continue
+            if col in numeric_cols:
+                work.at[i, col] = _parse_number_maybe_es(value)
+            else:
+                work.at[i, col] = value
+
+    deleted_rows = sorted(editor_state.get("deleted_rows") or [], reverse=True)
+    for row_idx in deleted_rows:
+        try:
+            i = int(row_idx)
+        except Exception:
+            continue
+        if 0 <= i < len(work):
+            work = work.drop(index=i)
+
+    added_rows = editor_state.get("added_rows") or []
+    if added_rows:
+        base_defaults = {c: "" for c in work.columns}
+        for col in numeric_cols:
+            if col in base_defaults:
+                base_defaults[col] = 0.0
+        new_records: list[dict] = []
+        for row in added_rows:
+            if not isinstance(row, dict):
+                continue
+            rec = base_defaults.copy()
+            for col, value in row.items():
+                if col not in rec:
+                    continue
+                rec[col] = _parse_number_maybe_es(value) if col in numeric_cols else value
+            new_records.append(rec)
+        if new_records:
+            work = pd.concat([work, pd.DataFrame(new_records)], ignore_index=True)
+
+    work = work.reset_index(drop=True)
+    for col in numeric_cols:
+        if col in work.columns:
+            work[col] = work[col].map(_parse_number_maybe_es)
+    return work
+
+
 def _ensure_text(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
@@ -1139,8 +1207,11 @@ edited_ing = st.data_editor(
     df_ing_editor, num_rows="dynamic", hide_index=True, width="stretch",
     column_config=ing_colcfg, key="tabla_ingresos"
 )
-if COL_MONTO in edited_ing.columns:
-    edited_ing[COL_MONTO] = edited_ing[COL_MONTO].map(_parse_number_maybe_es)
+edited_ing = _editor_state_to_dataframe(
+    df_ing_editor,
+    "tabla_ingresos",
+    numeric_cols={COL_MONTO},
+)
 
 # === BORRADO REAL PRIMERO (INGRESOS) ===
 if COL_ROWID not in edited_ing.columns:
@@ -1341,8 +1412,17 @@ edited_gas = st.data_editor(
     column_config=gas_colcfg, key="tabla_gastos",
     column_order=gas_order  # ← NUEVO: asegura que Proveedor quede debajo de Descripción
 )
-if COL_MONTO in edited_gas.columns:
-    edited_gas[COL_MONTO] = edited_gas[COL_MONTO].map(_parse_number_maybe_es)
+edited_gas = _editor_state_to_dataframe(
+    (
+        lambda _df: (
+            _df.assign(**{COL_MONTO: _df[COL_MONTO].map(_format_number_es)})
+            if COL_MONTO in _df.columns
+            else _df
+        )
+    )(df_gas_f[gas_cols_view].copy()),
+    "tabla_gastos",
+    numeric_cols={COL_MONTO},
+)
 # === BORRADO REAL PRIMERO (GASTOS) ===
 if COL_ROWID not in edited_gas.columns:
     st.warning("No se encontró columna RowID en la tabla de Gastos; no se pueden borrar filas en Sheets.")
