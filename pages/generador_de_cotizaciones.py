@@ -1622,6 +1622,72 @@ def _build_items_dataframe(raw: pd.DataFrame, fallback: Optional[pd.DataFrame] =
     return df
 
 
+def _normalize_items_records(raw_items: Any) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if isinstance(raw_items, list):
+        for row in raw_items:
+            if isinstance(row, dict):
+                records.append(
+                    {
+                        "producto_servicio": str(row.get("producto_servicio", "") or ""),
+                        "cantidad": _parse_decimal_input(row.get("cantidad", 0.0)),
+                        "precio_unitario": _parse_decimal_input(row.get("precio_unitario", 0.0)),
+                    }
+                )
+    return records
+
+
+def _sync_items_from_editor_delta(editor_key: str, state_key: str) -> None:
+    editor_state = st.session_state.get(editor_key)
+    if not isinstance(editor_state, dict):
+        return
+
+    rows = _normalize_items_records(st.session_state.get(state_key, []))
+    if not rows:
+        rows = [{"producto_servicio": "", "cantidad": 0.0, "precio_unitario": 0.0}]
+
+    edited_rows = editor_state.get("edited_rows") or {}
+    for row_idx, changes in edited_rows.items():
+        try:
+            idx = int(row_idx)
+        except Exception:
+            continue
+        while idx >= len(rows):
+            rows.append({"producto_servicio": "", "cantidad": 0.0, "precio_unitario": 0.0})
+        if not isinstance(changes, dict):
+            continue
+        for col, value in changes.items():
+            if col == "producto_servicio":
+                rows[idx][col] = str(value or "")
+            elif col in {"cantidad", "precio_unitario"}:
+                rows[idx][col] = _parse_decimal_input(value)
+
+    deleted_rows = sorted(editor_state.get("deleted_rows") or [], reverse=True)
+    for idx in deleted_rows:
+        try:
+            i = int(idx)
+        except Exception:
+            continue
+        if 0 <= i < len(rows):
+            rows.pop(i)
+
+    added_rows = editor_state.get("added_rows") or []
+    for new_row in added_rows:
+        if not isinstance(new_row, dict):
+            continue
+        rows.append(
+            {
+                "producto_servicio": str(new_row.get("producto_servicio", "") or ""),
+                "cantidad": _parse_decimal_input(new_row.get("cantidad", 0.0)),
+                "precio_unitario": _parse_decimal_input(new_row.get("precio_unitario", 0.0)),
+            }
+        )
+
+    if not rows:
+        rows = [{"producto_servicio": "", "cantidad": 0.0, "precio_unitario": 0.0}]
+    st.session_state[state_key] = rows
+
+
 def _guess_mime_from_filename(filename: str) -> str:
     ext = Path(filename or "").suffix.lower()
     if ext == ".xlsx":
@@ -3186,24 +3252,23 @@ if active_tab == "Cotización - Panamá Compra":
     )
     presupuesto_raw = st.data_editor(
         presupuesto_display_df,
-        num_rows="dynamic",
+        num_rows="fixed",
         use_container_width=True,
         key="pc_presupuesto_items_editor",
+        on_change=_sync_items_from_editor_delta,
+        args=("pc_presupuesto_items_editor", "pc_presupuesto_items_data"),
         column_config={
             "producto_servicio": st.column_config.TextColumn("Producto / Servicio", width="large", required=True),
-            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, required=True),
+            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=0.01, format="%0.2f", required=True),
             "precio_unitario": st.column_config.NumberColumn(
-                "Precio unitario", min_value=0.0, step=10.0, format="$%0.2f", required=True
+                "Precio unitario", min_value=0.0, step=0.01, format="$%0.2f", required=True
             ),
             "importe": st.column_config.NumberColumn("Subtotal", format="$%0.2f", disabled=True),
         },
         disabled=["importe"],
         hide_index=True,
     )
-    presupuesto_df_pc = _build_items_dataframe(
-        pd.DataFrame(presupuesto_raw),
-        fallback=presupuesto_display_df,
-    )
+    presupuesto_df_pc = _build_items_dataframe(pd.DataFrame(st.session_state.get("pc_presupuesto_items_data", [])))
     st.session_state["pc_presupuesto_items_data"] = presupuesto_df_pc[
         ["producto_servicio", "cantidad", "precio_unitario"]
     ].to_dict(orient="records")
@@ -3959,6 +4024,8 @@ if active_tab == "Cotizacion - Estandar":
         num_rows="fixed",
         use_container_width=True,
         key="cotizacion_privada_items",
+        on_change=_sync_items_from_editor_delta,
+        args=("cotizacion_privada_items", items_state_key),
         column_config={
             "producto_servicio": st.column_config.TextColumn("Producto / Servicio", width="large", required=True),
             "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=0.01, format="%0.2f", required=True),
@@ -3973,10 +4040,7 @@ if active_tab == "Cotizacion - Estandar":
         hide_index=True,
     )
 
-    items_df = _build_items_dataframe(
-        pd.DataFrame(items_raw),
-        fallback=items_display_df,
-    )
+    items_df = _build_items_dataframe(pd.DataFrame(st.session_state.get(items_state_key, [])))
     st.session_state[items_state_key] = items_df[
         ["producto_servicio", "cantidad", "precio_unitario"]
     ].to_dict(orient="records")
@@ -4033,6 +4097,8 @@ if active_tab == "Cotizacion - Estandar":
         num_rows="fixed",
         use_container_width=True,
         key="cotizacion_presupuesto_items",
+        on_change=_sync_items_from_editor_delta,
+        args=("cotizacion_presupuesto_items", presupuesto_state_key),
         column_config={
             "producto_servicio": st.column_config.TextColumn("Producto / Servicio", width="large", required=True),
             "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=0.01, format="%0.2f", required=True),
@@ -4047,10 +4113,7 @@ if active_tab == "Cotizacion - Estandar":
         hide_index=True,
     )
 
-    presupuesto_df = _build_items_dataframe(
-        pd.DataFrame(presupuesto_raw),
-        fallback=presupuesto_display_df,
-    )
+    presupuesto_df = _build_items_dataframe(pd.DataFrame(st.session_state.get(presupuesto_state_key, [])))
     st.session_state[presupuesto_state_key] = presupuesto_df[
         ["producto_servicio", "cantidad", "precio_unitario"]
     ].to_dict(orient="records")
