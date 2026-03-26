@@ -150,6 +150,57 @@ def _current_user() -> str:
     return ""
 
 
+def _format_number_es(value, decimals: int = 2) -> str:
+    """Formatea con miles '.' y decimales ',' (ej: 1.500,00)."""
+    try:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return ""
+        n = float(value)
+    except Exception:
+        return ""
+    us = f"{n:,.{decimals}f}"
+    return us.replace(",", "__tmp__").replace(".", ",").replace("__tmp__", ".")
+
+
+def _format_money_es(value) -> str:
+    return f"${_format_number_es(value, 2)}"
+
+
+def _parse_number_maybe_es(value) -> float:
+    """Acepta 1500.00, 1,500.00, 1500,00, 1.500,00 y devuelve float."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        try:
+            if pd.isna(value):
+                return 0.0
+        except Exception:
+            pass
+        return float(value)
+
+    s = str(value).strip()
+    if not s:
+        return 0.0
+    s = s.replace("$", "").replace(" ", "")
+
+    comma_pos = s.rfind(",")
+    dot_pos = s.rfind(".")
+    if comma_pos >= 0 and dot_pos >= 0:
+        if comma_pos > dot_pos:
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif comma_pos >= 0:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(",", "")
+
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
 def _ensure_text(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
@@ -718,9 +769,9 @@ capital_disponible = saldo_actual - colchon_fijo - cxp_activas
 cxc_futuras = float(df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "Sí"][COL_MONTO].sum()) if not df_ing_f.empty else 0.0
 
 k1, k2, k3 = st.columns(3)
-with k1: st.metric("Capital disponible para inversión", f"${capital_disponible:,.2f}")
-with k2: st.metric("Capital actual", f"${saldo_actual:,.2f}")
-with k3: st.metric("Cuentas por cobrar (futuras)", f"${cxc_futuras:,.2f}")
+with k1: st.metric("Capital disponible para inversión", _format_money_es(capital_disponible))
+with k2: st.metric("Capital actual", _format_money_es(saldo_actual))
+with k3: st.metric("Cuentas por cobrar (futuras)", _format_money_es(cxc_futuras))
 
 # -------------------- Gráficas y análisis --------------------
 with st.expander("📈 Ver análisis y gráficas", expanded=False):
@@ -1074,16 +1125,22 @@ if COL_CAT in df_ing_f.columns:
 ing_colcfg = {
     COL_POR_COB: st.column_config.SelectboxColumn(COL_POR_COB, options=["No","Sí"]),
     COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=ing_cat_options),
+    COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     # COL_CONC oculto en la vista
     COL_DESC:    st.column_config.TextColumn(COL_DESC),
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
     COL_ROWID:   st.column_config.TextColumn(COL_ROWID, disabled=True),
     COL_USER:   st.column_config.TextColumn(COL_USER, disabled=True),
 }
+df_ing_editor = df_ing_f[ing_cols_view].copy()
+if COL_MONTO in df_ing_editor.columns:
+    df_ing_editor[COL_MONTO] = df_ing_editor[COL_MONTO].map(_format_number_es)
 edited_ing = st.data_editor(
-    df_ing_f[ing_cols_view], num_rows="dynamic", hide_index=True, width="stretch",
+    df_ing_editor, num_rows="dynamic", hide_index=True, width="stretch",
     column_config=ing_colcfg, key="tabla_ingresos"
 )
+if COL_MONTO in edited_ing.columns:
+    edited_ing[COL_MONTO] = edited_ing[COL_MONTO].map(_parse_number_maybe_es)
 
 # === BORRADO REAL PRIMERO (INGRESOS) ===
 if COL_ROWID not in edited_ing.columns:
@@ -1254,6 +1311,7 @@ st.markdown("### Gastos (tabla)")
 gas_cols_view = [c for c in df_gas_f.columns if c not in (COL_ROWID, COL_ESC)] + [COL_ROWID]
 gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
+    COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     COL_CAT:     st.column_config.SelectboxColumn(
         COL_CAT,
         options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos", "Comisiones"],
@@ -1272,10 +1330,19 @@ gas_order = [x for x in [
 ] if x in gas_cols_view]
 
 edited_gas = st.data_editor(
-    df_gas_f[gas_cols_view], num_rows="dynamic", hide_index=True, width="stretch",
+    (
+        lambda _df: (
+            _df.assign(**{COL_MONTO: _df[COL_MONTO].map(_format_number_es)})
+            if COL_MONTO in _df.columns
+            else _df
+        )
+    )(df_gas_f[gas_cols_view].copy()),
+    num_rows="dynamic", hide_index=True, width="stretch",
     column_config=gas_colcfg, key="tabla_gastos",
     column_order=gas_order  # ← NUEVO: asegura que Proveedor quede debajo de Descripción
 )
+if COL_MONTO in edited_gas.columns:
+    edited_gas[COL_MONTO] = edited_gas[COL_MONTO].map(_parse_number_maybe_es)
 # === BORRADO REAL PRIMERO (GASTOS) ===
 if COL_ROWID not in edited_gas.columns:
     st.warning("No se encontró columna RowID en la tabla de Gastos; no se pueden borrar filas en Sheets.")
