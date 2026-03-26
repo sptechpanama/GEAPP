@@ -1521,12 +1521,52 @@ def _items_resumen(items_df: pd.DataFrame) -> str:
     if restantes:
         return f"{first} (+{restantes} más)"
     return first
+
+
+def _parse_decimal_input(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        try:
+            if pd.isna(value):
+                return 0.0
+        except Exception:
+            pass
+        return float(value)
+
+    raw = str(value).strip()
+    if not raw:
+        return 0.0
+    raw = raw.replace("$", "").replace(" ", "")
+
+    comma_pos = raw.rfind(",")
+    dot_pos = raw.rfind(".")
+    if comma_pos >= 0 and dot_pos >= 0:
+        if comma_pos > dot_pos:
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+    elif comma_pos >= 0:
+        raw = raw.replace(".", "").replace(",", ".")
+    else:
+        raw = raw.replace(",", "")
+
+    try:
+        return float(raw)
+    except Exception:
+        return 0.0
+
+
 def _build_items_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.copy()
-    if "cantidad" in df.columns:
-        df["cantidad"] = pd.to_numeric(df["cantidad"], errors="coerce").fillna(0.0)
-    if "precio_unitario" in df.columns:
-        df["precio_unitario"] = pd.to_numeric(df["precio_unitario"], errors="coerce").fillna(0.0)
+    if "producto_servicio" not in df.columns:
+        df["producto_servicio"] = ""
+    if "cantidad" not in df.columns:
+        df["cantidad"] = 0.0
+    if "precio_unitario" not in df.columns:
+        df["precio_unitario"] = 0.0
+    df["cantidad"] = df["cantidad"].map(_parse_decimal_input)
+    df["precio_unitario"] = df["precio_unitario"].map(_parse_decimal_input)
     df["importe"] = df["cantidad"] * df["precio_unitario"]
     return df
 
@@ -3833,17 +3873,43 @@ if active_tab == "Cotizacion - Estandar":
             {"producto_servicio": "Producto o servicio", "cantidad": 1, "precio_unitario": 100.0},
         ]
 
+    row_items = st.session_state.get(items_state_key) or []
+    bi1, bi2, bi3 = st.columns([1, 1, 1])
+    with bi1:
+        if st.button("➕ Agregar fila", key="cot_items_add_row"):
+            row_items.append({"producto_servicio": "", "cantidad": 0.0, "precio_unitario": 0.0})
+            st.session_state[items_state_key] = row_items
+            st.rerun()
+    with bi2:
+        if st.button(
+            "🗑 Quitar última",
+            key="cot_items_remove_row",
+            disabled=len(row_items) <= 1,
+        ):
+            row_items.pop()
+            st.session_state[items_state_key] = row_items
+            st.rerun()
+    with bi3:
+        if st.button(
+            "📄 Duplicar última",
+            key="cot_items_duplicate_row",
+            disabled=len(row_items) == 0,
+        ):
+            row_items.append(dict(row_items[-1]))
+            st.session_state[items_state_key] = row_items
+            st.rerun()
+
     items_display_df = _build_items_dataframe(pd.DataFrame(st.session_state[items_state_key]))
     items_raw = st.data_editor(
         items_display_df,
-        num_rows="dynamic",
+        num_rows="fixed",
         use_container_width=True,
         key="cotizacion_privada_items",
         column_config={
             "producto_servicio": st.column_config.TextColumn("Producto / Servicio", width="large", required=True),
-            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, required=True),
+            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=0.01, format="%0.2f", required=True),
             "precio_unitario": st.column_config.NumberColumn(
-                "Precio unitario", min_value=0.0, step=10.0, format="$%0.2f", required=True
+                "Precio unitario", min_value=0.0, step=0.01, format="$%0.2f", required=True
             ),
             "importe": st.column_config.NumberColumn(
                 "Subtotal", format="$%0.2f", disabled=True
@@ -3878,17 +3944,43 @@ if active_tab == "Cotizacion - Estandar":
             {"producto_servicio": "Detalle", "cantidad": 1, "precio_unitario": 0.0},
         ]
 
+    row_pres = st.session_state.get(presupuesto_state_key) or []
+    bp1, bp2, bp3 = st.columns([1, 1, 1])
+    with bp1:
+        if st.button("➕ Agregar fila presupuesto", key="cot_pres_add_row"):
+            row_pres.append({"producto_servicio": "", "cantidad": 0.0, "precio_unitario": 0.0})
+            st.session_state[presupuesto_state_key] = row_pres
+            st.rerun()
+    with bp2:
+        if st.button(
+            "🗑 Quitar última presupuesto",
+            key="cot_pres_remove_row",
+            disabled=len(row_pres) <= 1,
+        ):
+            row_pres.pop()
+            st.session_state[presupuesto_state_key] = row_pres
+            st.rerun()
+    with bp3:
+        if st.button(
+            "📄 Duplicar última presupuesto",
+            key="cot_pres_duplicate_row",
+            disabled=len(row_pres) == 0,
+        ):
+            row_pres.append(dict(row_pres[-1]))
+            st.session_state[presupuesto_state_key] = row_pres
+            st.rerun()
+
     presupuesto_display_df = _build_items_dataframe(pd.DataFrame(st.session_state[presupuesto_state_key]))
     presupuesto_raw = st.data_editor(
         presupuesto_display_df,
-        num_rows="dynamic",
+        num_rows="fixed",
         use_container_width=True,
         key="cotizacion_presupuesto_items",
         column_config={
             "producto_servicio": st.column_config.TextColumn("Producto / Servicio", width="large", required=True),
-            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, required=True),
+            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=0.01, format="%0.2f", required=True),
             "precio_unitario": st.column_config.NumberColumn(
-                "Precio unitario", min_value=0.0, step=10.0, format="$%0.2f", required=True
+                "Precio unitario", min_value=0.0, step=0.01, format="$%0.2f", required=True
             ),
             "importe": st.column_config.NumberColumn(
                 "Subtotal", format="$%0.2f", disabled=True
