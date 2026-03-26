@@ -4768,28 +4768,35 @@ def apply_checkbox_updates(sheet_name: str, updates):
     if not updates:
         return
 
-    ws = get_gc().open_by_key(SHEET_ID).worksheet(sheet_name)
-    headers = _make_unique(ws.row_values(1))
+    try:
+        ws = get_gc().open_by_key(SHEET_ID).worksheet(sheet_name)
+        headers = _make_unique(ws.row_values(1))
+    except Exception as exc:
+        st.error(f"No se pudieron preparar actualizaciones en {sheet_name}: {exc}")
+        return
 
     for row_number, column_name, value in updates:
         try:
             col_idx = headers.index(column_name) + 1
         except ValueError:
             continue
-        ws.update_cell(int(row_number), col_idx, "TRUE" if value else "FALSE")
+        try:
+            ws.update_cell(int(row_number), col_idx, "TRUE" if value else "FALSE")
+        except Exception as exc:
+            st.error(f"No se pudo actualizar fila {row_number} en {sheet_name}: {exc}")
 
 # --- reemplaza tu load_df y añade el helper _make_unique ---
 
 @st.cache_data(ttl=300)
 def load_df(sheet_name: str) -> pd.DataFrame:
-    sh = get_gc().open_by_key(SHEET_ID)
     try:
+        sh = get_gc().open_by_key(SHEET_ID)
         ws = sh.worksheet(sheet_name)
-    except Exception:
+        raw_headers = ws.row_values(1)
+        values = ws.get_all_values()
+    except Exception as exc:
+        print(f"[panama_compra] No se pudo leer la hoja '{sheet_name}': {exc}")
         return pd.DataFrame()
-
-    raw_headers = ws.row_values(1)
-    values = ws.get_all_values()
 
     if not values:
         return pd.DataFrame()
