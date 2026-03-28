@@ -117,6 +117,37 @@ def _resolve_column_by_alias(columns: list[str], aliases: list[str]) -> str:
     return ""
 
 
+def _is_registro_sanitario_required(value: object) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    norm = _normalize_column_key(raw)
+    if not norm:
+        return False
+    negative_markers = [
+        "no",
+        "no aplica",
+        "no requiere",
+        "sin rs",
+        "sin registro sanitario",
+        "no rs",
+    ]
+    for marker in negative_markers:
+        if norm == marker or norm.startswith(marker + " "):
+            return False
+
+    positive_markers = [
+        "si",
+        "sí",
+        "requiere",
+        "con rs",
+        "registro sanitario",
+        "rs lcrsp",
+        "lcrsp",
+    ]
+    return any(marker in norm for marker in positive_markers)
+
+
 def _candidate_fichas_paths() -> list[Path]:
     raw_candidates = [
         APP_ROOT / "fichas_ctni_con_enlace.xlsx",
@@ -355,7 +386,7 @@ def _find_drive_file_id_by_names(names: list[str]) -> str:
         return ""
 
 
-def _build_ficha_name_map_from_df(df: pd.DataFrame) -> dict[str, str]:
+def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, object]]:
     if df.empty:
         return {}
     columns = list(df.columns)
@@ -380,29 +411,51 @@ def _build_ficha_name_map_from_df(df: pd.DataFrame) -> dict[str, str]:
             "descripcion",
         ],
     )
-    if not ficha_col or not nombre_col:
+    registro_col = _resolve_column_by_alias(
+        columns,
+        [
+            "registro sanitario",
+            "registro_sanitario",
+            "reg sanitario",
+            "tiene registro sanitario",
+            "rs",
+        ],
+    )
+    if not ficha_col:
         return {}
 
-    mapping: dict[str, str] = {}
-    for _, row in df[[ficha_col, nombre_col]].iterrows():
-        raw_name = str(row.get(nombre_col, "")).strip()
-        if not raw_name or raw_name.lower() in {"nan", "none", "null"}:
-            continue
+    mapping: dict[str, dict[str, object]] = {}
+    selected_cols = [ficha_col]
+    if nombre_col:
+        selected_cols.append(nombre_col)
+    if registro_col and registro_col not in selected_cols:
+        selected_cols.append(registro_col)
+
+    for _, row in df[selected_cols].iterrows():
+        raw_name = str(row.get(nombre_col, "")).strip() if nombre_col else ""
+        if raw_name.lower() in {"nan", "none", "null"}:
+            raw_name = ""
+        rs_required = _is_registro_sanitario_required(row.get(registro_col, "")) if registro_col else False
         tokens = _extract_ficha_tokens(row.get(ficha_col, ""))
         for token in tokens:
             ficha_num = re.sub(r"\D", "", token or "")
-            if ficha_num and ficha_num not in mapping:
-                mapping[ficha_num] = raw_name
+            if not ficha_num:
+                continue
+            current = mapping.setdefault(ficha_num, {"nombre_ficha": "", "rs_requerido": False})
+            if raw_name and not str(current.get("nombre_ficha", "")).strip():
+                current["nombre_ficha"] = raw_name
+            if rs_required:
+                current["rs_requerido"] = True
     return mapping
 
 
 @st.cache_data(show_spinner=False, ttl=900)
-def _load_ficha_name_map() -> dict[str, str]:
+def _load_ficha_reference_map() -> dict[str, dict[str, object]]:
     for path in _candidate_fichas_paths():
         try:
             if path.exists() and path.is_file() and path.stat().st_size > 0:
                 local_df = pd.read_excel(path)
-                mapped = _build_ficha_name_map_from_df(local_df)
+                mapped = _build_ficha_reference_map_from_df(local_df)
                 if mapped:
                     return mapped
         except Exception:
@@ -418,7 +471,7 @@ def _load_ficha_name_map() -> dict[str, str]:
         return {}
     try:
         drive_df = pd.read_excel(io.BytesIO(raw))
-        return _build_ficha_name_map_from_df(drive_df)
+        return _build_ficha_reference_map_from_df(drive_df)
     except Exception:
         return {}
 
@@ -622,8 +675,19 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["ficha"] = exploded["ficha_token"].str.replace(r"\D", "", regex=True)
     exploded = exploded[exploded["ficha"] != ""].copy()
     exploded = exploded.drop_duplicates(subset=["id", "ficha"]).reset_index(drop=True)
-    ficha_name_map = _load_ficha_name_map()
-    exploded["nombre_ficha"] = exploded["ficha"].astype(str).map(ficha_name_map).fillna("")
+    ficha_reference_map = _load_ficha_reference_map()
+    exploded["nombre_ficha"] = exploded["ficha"].astype(str).map(
+        lambda x: str((ficha_reference_map.get(str(x)) or {}).get("nombre_ficha", "") or "")
+    )
+    exploded["rs_requerido"] = exploded["ficha"].astype(str).map(
+        lambda x: bool((ficha_reference_map.get(str(x)) or {}).get("rs_requerido", False))
+    )
+    exploded = exploded[~exploded["rs_requerido"]].copy()
+    if exploded.empty:
+        st.session_state["intel_db_status"] = (
+            f"DB leida ({db_path}) pero todas las fichas detectadas requieren registro sanitario."
+        )
+        return pd.DataFrame(), pd.DataFrame(), db_path
 
     grouped = exploded.groupby("ficha", dropna=False)
     ficha_metrics = pd.DataFrame(
@@ -641,7 +705,9 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     else:
         ficha_metrics["ultima_fecha"] = ""
 
-    ficha_metrics["nombre_ficha"] = ficha_metrics["ficha"].astype(str).map(ficha_name_map).fillna("")
+    ficha_metrics["nombre_ficha"] = ficha_metrics["ficha"].astype(str).map(
+        lambda x: str((ficha_reference_map.get(str(x)) or {}).get("nombre_ficha", "") or "")
+    )
     ficha_metrics["afinidad_negocio"] = 0.5
     ficha_metrics["barreras_regulatorias"] = 0.5
 
