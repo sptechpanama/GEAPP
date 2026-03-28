@@ -15,6 +15,7 @@ import bcrypt
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from sqlalchemy import create_engine
 
 from core.config import APP_ROOT, DB_PATH
 from services.auth_drive import get_drive_delegated
@@ -125,6 +126,17 @@ def _panamacompra_drive_file_id() -> str:
         value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
         if value and str(value).strip():
             return _normalize_drive_file_id(str(value).strip())
+    try:
+        for key in (
+            "DRIVE_PANAMACOMPRA_FILE_ID",
+            "DRIVE_PANAMACOMPRA_DB_FILE_ID",
+            "DRIVE_DB_PANAMACOMPRA_FILE_ID",
+        ):
+            value = st.secrets.get(key)
+            if value and str(value).strip():
+                return _normalize_drive_file_id(str(value).strip())
+    except Exception:
+        pass
     for key in (
         "DRIVE_PANAMACOMPRA_FILE_ID",
         "DRIVE_PANAMACOMPRA_DB_FILE_ID",
@@ -224,11 +236,64 @@ def _resolve_db_path() -> Path | None:
     return None
 
 
+def _supabase_db_url() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    candidates = [
+        app_cfg.get("SUPABASE_DB_URL") if isinstance(app_cfg, dict) else None,
+        app_cfg.get("DATABASE_URL") if isinstance(app_cfg, dict) else None,
+        os.environ.get("SUPABASE_DB_URL"),
+        os.environ.get("DATABASE_URL"),
+    ]
+    for raw in candidates:
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return ""
+
+
+def _load_actos_postgres_df() -> tuple[pd.DataFrame, str]:
+    db_url = _supabase_db_url()
+    if not db_url:
+        return pd.DataFrame(), ""
+    try:
+        engine = create_engine(db_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            tables_df = pd.read_sql_query(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='public'",
+                conn,
+            )
+            tables = [str(x) for x in tables_df["table_name"].tolist()]
+            lower_map = {t.lower(): t for t in tables}
+            table = ""
+            for candidate in ("actos_publicos", "actos", "panamacompra_actos"):
+                if candidate in lower_map:
+                    table = lower_map[candidate]
+                    break
+            if not table:
+                for t in tables:
+                    if "acto" in t.lower():
+                        table = t
+                        break
+            if not table:
+                return pd.DataFrame(), "postgres"
+            df = pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
+            st.session_state["intel_db_status"] = f"DB OK (postgres): tabla={table}"
+            return df, "postgres"
+    except Exception as exc:
+        st.session_state["intel_db_status"] = f"Error leyendo postgres: {exc}"
+        return pd.DataFrame(), "postgres"
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def _load_actos_db_df() -> tuple[pd.DataFrame, str]:
     db_path = _resolve_db_path()
     if db_path is None:
-        st.session_state["intel_db_status"] = "No se encontro panamacompra.db local ni se pudo descargar de Drive."
+        pg_df, pg_source = _load_actos_postgres_df()
+        if not pg_df.empty:
+            return pg_df, pg_source
+        st.session_state["intel_db_status"] = "No se encontro panamacompra.db local/Drive y tampoco se pudo leer postgres."
         return pd.DataFrame(), ""
     try:
         with sqlite3.connect(db_path) as conn:
