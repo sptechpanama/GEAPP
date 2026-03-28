@@ -170,6 +170,24 @@ def _candidate_fichas_paths() -> list[Path]:
     return unique
 
 
+def _candidate_criterios_paths() -> list[Path]:
+    raw_candidates = [
+        APP_ROOT / "criterios_tecnicos.xlsx",
+        APP_ROOT / "data" / "criterios_tecnicos.xlsx",
+        Path.cwd() / "criterios_tecnicos.xlsx",
+        Path.cwd() / "data" / "criterios_tecnicos.xlsx",
+    ]
+    unique: list[Path] = []
+    for path in raw_candidates:
+        try:
+            normalized = path.expanduser().resolve()
+        except Exception:
+            normalized = path.expanduser()
+        if normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
 def _candidate_db_paths() -> list[Path]:
     raw_candidates = [
         Path(DB_PATH),
@@ -426,6 +444,7 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
         [
             "clase de riesgo",
             "clase riesgo",
+            "clase",
             "riesgo",
             "nivel de riesgo",
             "risk class",
@@ -469,31 +488,86 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
     return mapping
 
 
+def _merge_reference_maps(
+    base_map: dict[str, dict[str, object]],
+    new_map: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    merged = dict(base_map)
+    for ficha, payload in (new_map or {}).items():
+        if not ficha:
+            continue
+        current = merged.setdefault(
+            str(ficha),
+            {"nombre_ficha": "", "rs_requerido": False, "clase_riesgo": ""},
+        )
+        name_val = str(payload.get("nombre_ficha", "") or "").strip()
+        risk_val = str(payload.get("clase_riesgo", "") or "").strip()
+        rs_val = bool(payload.get("rs_requerido", False))
+
+        if name_val and not str(current.get("nombre_ficha", "")).strip():
+            current["nombre_ficha"] = name_val
+        if risk_val and not str(current.get("clase_riesgo", "")).strip():
+            current["clase_riesgo"] = risk_val
+        if rs_val:
+            current["rs_requerido"] = True
+    return merged
+
+
 @st.cache_data(show_spinner=False, ttl=900)
 def _load_ficha_reference_map() -> dict[str, dict[str, object]]:
+    merged_map: dict[str, dict[str, object]] = {}
+
+    # 1) Fichas locales
     for path in _candidate_fichas_paths():
         try:
             if path.exists() and path.is_file() and path.stat().st_size > 0:
                 local_df = pd.read_excel(path)
                 mapped = _build_ficha_reference_map_from_df(local_df)
                 if mapped:
-                    return mapped
+                    merged_map = _merge_reference_maps(merged_map, mapped)
         except Exception:
             continue
 
+    # 2) Criterios locales (fallback para clase de riesgo)
+    for path in _candidate_criterios_paths():
+        try:
+            if path.exists() and path.is_file() and path.stat().st_size > 0:
+                crit_df = pd.read_excel(path)
+                mapped = _build_ficha_reference_map_from_df(crit_df)
+                if mapped:
+                    merged_map = _merge_reference_maps(merged_map, mapped)
+        except Exception:
+            continue
+
+    # 3) Fichas desde Drive
     file_id = _fichas_drive_file_id() or _find_drive_file_id_by_names(
         ["fichas_ctni_con_enlace.xlsx", "fichas_ctni.xlsx"]
     )
-    if not file_id:
-        return {}
-    raw, _ = _download_drive_file_bytes(file_id)
-    if not raw:
-        return {}
-    try:
-        drive_df = pd.read_excel(io.BytesIO(raw))
-        return _build_ficha_reference_map_from_df(drive_df)
-    except Exception:
-        return {}
+    if file_id:
+        raw, _ = _download_drive_file_bytes(file_id)
+        if raw:
+            try:
+                drive_df = pd.read_excel(io.BytesIO(raw))
+                mapped = _build_ficha_reference_map_from_df(drive_df)
+                if mapped:
+                    merged_map = _merge_reference_maps(merged_map, mapped)
+            except Exception:
+                pass
+
+    # 4) Criterios desde Drive (fallback por nombre)
+    criterios_drive_id = _find_drive_file_id_by_names(["criterios_tecnicos.xlsx"])
+    if criterios_drive_id:
+        raw, _ = _download_drive_file_bytes(criterios_drive_id)
+        if raw:
+            try:
+                crit_drive_df = pd.read_excel(io.BytesIO(raw))
+                mapped = _build_ficha_reference_map_from_df(crit_drive_df)
+                if mapped:
+                    merged_map = _merge_reference_maps(merged_map, mapped)
+            except Exception:
+                pass
+
+    return merged_map
 
 
 def _resolve_db_path() -> Path | None:
@@ -696,6 +770,15 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded = exploded[exploded["ficha"] != ""].copy()
     exploded = exploded.drop_duplicates(subset=["id", "ficha"]).reset_index(drop=True)
     ficha_reference_map = _load_ficha_reference_map()
+    risk_count = sum(
+        1
+        for payload in ficha_reference_map.values()
+        if str((payload or {}).get("clase_riesgo", "") or "").strip()
+    )
+    st.session_state["intel_risk_map_status"] = (
+        f"Mapeo de fichas cargado: {len(ficha_reference_map):,} fichas, "
+        f"{risk_count:,} con clase de riesgo."
+    )
     exploded["nombre_ficha"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("nombre_ficha", "") or "")
     )
@@ -913,8 +996,11 @@ def _render_kpis(ranked_df: pd.DataFrame) -> None:
 def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
     st.markdown("### Dashboard Ejecutivo")
     db_status = str(st.session_state.get("intel_db_status", "")).strip()
+    risk_status = str(st.session_state.get("intel_risk_map_status", "")).strip()
     if db_status:
         st.caption(f"Estado fuente: {db_status}")
+    if risk_status:
+        st.caption(risk_status)
     if ranked_df.empty:
         st.warning("No hay fichas detectadas en la base para construir el dashboard.")
         return
