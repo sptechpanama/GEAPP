@@ -61,7 +61,7 @@ def _placeholder_block(title: str, text: str, columns: list[str] | None = None) 
 
 def _render_sidebar() -> None:
     st.sidebar.markdown("### 🎛️ Filtros globales")
-    st.sidebar.selectbox("Ficha técnica", ["Todas"], index=0)
+    st.sidebar.selectbox("Ficha", ["Todas"], index=0)
     st.sidebar.selectbox("Estado ficha", ["Todos"], index=0)
     st.sidebar.selectbox("Prioridad", ["Todas"], index=0)
     st.sidebar.selectbox("Proveedor", ["Todos"], index=0)
@@ -69,7 +69,7 @@ def _render_sidebar() -> None:
     st.sidebar.selectbox("Clasificación de contacto", ["Todas"], index=0)
     st.sidebar.checkbox("Solo con contacto encontrado", value=False)
     st.sidebar.checkbox("Solo con seguimiento vencido", value=False)
-    st.sidebar.checkbox("Solo ficha viable con proveedor en conversación", value=False)
+    st.sidebar.checkbox("Solo viable: prov. en conv.", value=False)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ Acciones rápidas")
@@ -83,18 +83,18 @@ def _render_sidebar() -> None:
 def _render_kpis() -> None:
     st.markdown("### 📌 Centro de control")
     cols = st.columns(5)
-    cols[0].metric("Fichas detectadas con actos en DB", "—")
-    cols[1].metric("Fichas en seguimiento", "—")
-    cols[2].metric("Fichas en estudio", "—")
-    cols[3].metric("Seguimientos vencidos", "—")
-    cols[4].metric("Correos por enviar", "—")
+    cols[0].metric("Fichas det. con actos", "—")
+    cols[1].metric("Fichas en seg.", "—")
+    cols[2].metric("Fichas en est.", "—")
+    cols[3].metric("Seg. vencidos", "—")
+    cols[4].metric("Correos por env.", "—")
 
     cols2 = st.columns(5)
-    cols2[0].metric("Ficha viable con proveedor en conversación", "—")
-    cols2[1].metric("Ficha en estudio pendiente de contactar", "—")
-    cols2[2].metric("Ficha en estudio sin encontrar proveedor", "—")
-    cols2[3].metric("Ficha contactada no rentable", "—")
-    cols2[4].metric("Justificaciones no rentables pendientes", "—")
+    cols2[0].metric("Viable: prov. en conv.", "—")
+    cols2[1].metric("Estudio: pend. contacto", "—")
+    cols2[2].metric("Estudio: sin proveedor", "—")
+    cols2[3].metric("Contactada no rentable", "—")
+    cols2[4].metric("Justif. no rent. pend.", "—")
 
 
 def _render_tab_dashboard() -> None:
@@ -165,7 +165,7 @@ def _render_tab_deteccion_ct() -> None:
 
 
 def _render_tab_seguimiento_ct() -> None:
-    st.markdown("### Fichas en seguimiento")
+    st.markdown("### Fichas en seg.")
     _placeholder_block(
         "Pipeline de fichas",
         "Aquí se visualizará el pipeline manual de fichas seleccionadas para seguimiento.",
@@ -272,13 +272,13 @@ def _render_tab_resultado_final() -> None:
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
         _placeholder_block(
-            "Ficha viable con proveedor en conversación",
+            "Ficha viable: prov. en conv.",
             "Aquí se listarán fichas viables con contacto activo y proveedor útil.",
             ["ficha", "proveedor", "marca", "modelo", "pais_origen", "email", "whatsapp", "estado_contacto", "precio", "observaciones"],
         )
     with row1_col2:
         _placeholder_block(
-            "Ficha en estudio pendiente de contactar proveedor",
+            "Ficha en est.: pend. contacto",
             "Aquí se listarán fichas que requieren primer contacto o siguiente acción inmediata.",
             ["ficha", "prioridad", "proveedor_objetivo", "canal_recomendado", "observaciones"],
         )
@@ -286,7 +286,7 @@ def _render_tab_resultado_final() -> None:
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
         _placeholder_block(
-            "Ficha en estudio sin encontrar proveedor",
+            "Ficha en est.: sin proveedor",
             "Aquí se listarán fichas con intentos agotados sin proveedor confirmado.",
             ["ficha", "intentos_realizados", "canales_usados", "motivo_actual", "proximo_paso"],
         )
@@ -331,13 +331,13 @@ _render_architecture_notes()
 tabs = st.tabs(
     [
         "Dashboard",
-        "Detección CT",
-        "Fichas en seguimiento",
-        "Estudio profundo por ficha",
-        "Proveedores históricos + IA",
+        "Detecc. fichas",
+        "Fichas en seg.",
+        "Estudio ficha",
+        "Prov. hist. + IA",
         "Contacto y correos",
-        "Seguimiento de contacto",
-        "Resultado final por ficha",
+        "Seg. contacto",
+        "Resultado ficha",
     ]
 )
 
