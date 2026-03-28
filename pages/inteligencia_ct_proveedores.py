@@ -673,30 +673,42 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         st.session_state["intel_weights"] = weights
 
         total_weights = sum(weights.values())
-        st.caption(f"Suma de pesos: {total_weights:.1f}")
-        if total_weights <= 0:
-            st.error("La suma de pesos debe ser mayor a 0 para calcular score.")
+        st.caption(f"Suma de pesos: {total_weights:.1f} (debe ser 100)")
+        if abs(total_weights - 100.0) > 0.001:
+            st.error("La suma de pesos debe ser exactamente 100 para calcular el score.")
 
         b1, b2, b3, b4 = st.columns(4)
         if b1.button("Recalcular"):
-            st.success("Scoring recalculado con los pesos actuales.")
+            if abs(total_weights - 100.0) > 0.001:
+                st.warning("No se recalcula: ajusta los pesos para sumar 100.")
+            else:
+                st.success("Scoring recalculado con los pesos actuales.")
         if b2.button("Restaurar default"):
             st.session_state["intel_weights"] = default_weights.copy()
             st.rerun()
-        b3.button("Guardar configuracion", disabled=True)
-        b4.button("Cargar configuracion", disabled=True)
+        if b3.button("Normalizar a 100"):
+            if total_weights > 0:
+                factor = 100.0 / total_weights
+                for key in list(weights.keys()):
+                    weights[key] = round(float(weights[key]) * factor, 2)
+                # ajuste fino para cerrar exactamente en 100
+                diff = round(100.0 - sum(weights.values()), 2)
+                weights["actos"] = round(weights["actos"] + diff, 2)
+                st.session_state["intel_weights"] = weights
+                st.rerun()
+        b4.button("Guardar config (fase 2)", disabled=True)
+
+    if abs(sum(weights.values()) - 100.0) > 0.001:
+        with sub2:
+            st.warning("Ajusta los pesos para sumar 100 y ver el ranking.")
+        with sub3:
+            st.info("Ajusta pesos para habilitar detalle por ficha.")
+        return pd.DataFrame()
 
     ranked_df = _score_fichas(ficha_metrics_df, weights)
 
     with sub2:
-        st.caption("Ranking de fichas detectadas en actos: normaliza 43358, 43358* y 43358.")
-        order_mode = st.selectbox(
-            "Orden",
-            ["Ficha (asc)", "Score (desc)"],
-            index=0,
-            key="intel_order_mode",
-        )
-        max_rows = st.slider("Max. fichas a mostrar", 10, 300, 60, 10)
+        st.caption("Ranking completo de fichas detectadas en actos (ordenado por score).")
         ranking_cols = [
             "ficha",
             "score_total",
@@ -707,36 +719,31 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             "ganadores_distintos",
             "competencia_promedio",
         ]
-        if order_mode == "Ficha (asc)":
-            view_df = ranked_df.sort_values(
-                "ficha",
-                ascending=True,
-                kind="stable",
-                key=lambda s: pd.to_numeric(s, errors="coerce"),
-            ).reset_index(drop=True)
-        else:
-            view_df = ranked_df.sort_values("score_total", ascending=False, kind="stable").reset_index(drop=True)
+        view_df = ranked_df.sort_values(
+            ["score_total", "actos", "monto_historico"],
+            ascending=[False, False, False],
+            kind="stable",
+        ).reset_index(drop=True)
+        st.dataframe(view_df[ranking_cols], use_container_width=True, hide_index=True)
 
-        shown_df = view_df[ranking_cols].head(max_rows).copy()
-        st.dataframe(shown_df, use_container_width=True, hide_index=True)
-
-        st.markdown("#### Acciones por ficha")
-        for _, row in shown_df.iterrows():
-            ficha_val = str(row["ficha"])
-            c0, c1, c2, c3, c4 = st.columns([1.3, 0.9, 1.0, 1.0, 1.5])
-            c0.markdown(f"**Ficha {ficha_val}**")
-            c1.write(f"Score: {float(row['score_total']):.1f}")
-            c2.write(f"Actos: {int(row['actos'])}")
-            c3.write(str(row["clasificacion"]))
-            if c4.button("Ver actos", key=f"intel_view_{ficha_val}"):
-                st.session_state["intel_selected_ficha"] = ficha_val
-                st.rerun()
-            if c4.button("Pasar a estudio", key=f"intel_study_{ficha_val}"):
-                full_row = ranked_df[ranked_df["ficha"].astype(str) == ficha_val]
-                if not full_row.empty and _add_ficha_to_study(full_row.iloc[0]):
-                    st.success(f"Ficha {ficha_val} enviada a 'Fichas en seg.'")
-                else:
-                    st.info(f"Ficha {ficha_val} ya estaba en seguimiento.")
+        st.markdown("#### Acciones sobre ficha seleccionada")
+        ficha_opts = view_df["ficha"].astype(str).tolist()
+        selected_action_ficha = st.selectbox(
+            "Selecciona ficha",
+            ficha_opts,
+            index=0 if ficha_opts else None,
+            key="intel_action_ficha",
+        )
+        a1, a2 = st.columns(2)
+        if a1.button("Ver actos de ficha", disabled=not bool(selected_action_ficha)):
+            st.session_state["intel_selected_ficha"] = str(selected_action_ficha)
+            st.rerun()
+        if a2.button("Pasar ficha a estudio", disabled=not bool(selected_action_ficha)):
+            full_row = ranked_df[ranked_df["ficha"].astype(str) == str(selected_action_ficha)]
+            if not full_row.empty and _add_ficha_to_study(full_row.iloc[0]):
+                st.success(f"Ficha {selected_action_ficha} enviada a 'Fichas en seg.'")
+            else:
+                st.info(f"Ficha {selected_action_ficha} ya estaba en seguimiento.")
 
     with sub3:
         selected = st.session_state.get("intel_selected_ficha")
