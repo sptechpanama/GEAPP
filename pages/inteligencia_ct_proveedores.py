@@ -4,13 +4,17 @@ import re
 import sqlite3
 from datetime import date
 import io
+import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
 import bcrypt
 from googleapiclient.http import MediaIoBaseDownload
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 from core.config import APP_ROOT, DB_PATH
 from services.auth_drive import get_drive_delegated
@@ -120,24 +124,76 @@ def _panamacompra_drive_file_id() -> str:
     ):
         value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
         if value and str(value).strip():
-            return str(value).strip()
+            return _normalize_drive_file_id(str(value).strip())
+    for key in (
+        "DRIVE_PANAMACOMPRA_FILE_ID",
+        "DRIVE_PANAMACOMPRA_DB_FILE_ID",
+        "DRIVE_DB_PANAMACOMPRA_FILE_ID",
+    ):
+        value = os.environ.get(key)
+        if value and str(value).strip():
+            return _normalize_drive_file_id(str(value).strip())
     return ""
 
 
-def _download_panamacompra_db_from_drive(file_id: str) -> bytes | None:
+def _normalize_drive_file_id(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        return value
+
+    parsed = urlparse(value)
+    qs = parse_qs(parsed.query)
+    if "id" in qs and qs["id"]:
+        return qs["id"][0]
+
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", parsed.path)
+    if match:
+        return match.group(1)
+    return value
+
+
+def _get_drive_client() -> tuple[object | None, str]:
     try:
         drive = get_drive_delegated()
+        if drive is not None:
+            return drive, "delegated"
+    except Exception:
+        pass
+
+    # fallback: direct service account (without domain delegation)
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    json_path = os.environ.get("FINAPP_SERVICE_ACCOUNT_FILE") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    try:
+        if json_path:
+            creds = service_account.Credentials.from_service_account_file(json_path, scopes=scopes)
+        else:
+            info = dict(st.secrets["google_service_account"])
+            private_key = info.get("private_key", "")
+            if "\\n" in private_key and "\n" not in private_key:
+                info["private_key"] = private_key.replace("\\n", "\n")
+            creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        drive = build("drive", "v3", credentials=creds)
+        return drive, "service_account"
+    except Exception as exc:
+        return None, f"auth_error:{exc}"
+
+
+def _download_panamacompra_db_from_drive(file_id: str) -> tuple[bytes | None, str]:
+    try:
+        drive, mode = _get_drive_client()
         if drive is None:
-            return None
+            return None, mode
         request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
         stream = io.BytesIO()
         downloader = MediaIoBaseDownload(stream, request)
         done = False
         while not done:
             _, done = downloader.next_chunk()
-        return stream.getvalue()
-    except Exception:
-        return None
+        return stream.getvalue(), mode
+    except Exception as exc:
+        return None, f"download_error:{exc}"
 
 
 def _resolve_db_path() -> Path | None:
@@ -149,15 +205,22 @@ def _resolve_db_path() -> Path | None:
 
     file_id = _panamacompra_drive_file_id()
     if file_id:
-        raw = _download_panamacompra_db_from_drive(file_id)
+        raw, mode = _download_panamacompra_db_from_drive(file_id)
         if raw:
             runtime_path = APP_ROOT / "data" / "db" / "panamacompra_drive.db"
             try:
                 runtime_path.parent.mkdir(parents=True, exist_ok=True)
                 runtime_path.write_bytes(raw)
+                st.session_state["intel_db_status"] = (
+                    f"DB descargada desde Drive ({mode}) -> {runtime_path}"
+                )
                 return runtime_path
             except Exception:
                 pass
+        else:
+            st.session_state["intel_db_status"] = (
+                f"No se pudo descargar DB de Drive. file_id={file_id} ({mode})"
+            )
     return None
 
 
