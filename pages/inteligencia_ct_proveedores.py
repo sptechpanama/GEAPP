@@ -3,14 +3,17 @@ from __future__ import annotations
 import re
 import sqlite3
 from datetime import date
+import io
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
 import bcrypt
+from googleapiclient.http import MediaIoBaseDownload
 
-from core.config import DB_PATH
+from core.config import APP_ROOT, DB_PATH
+from services.auth_drive import get_drive_delegated
 from ui.theme import apply_global_theme
 
 
@@ -56,6 +59,7 @@ authenticator.logout("Cerrar sesión", location="sidebar")
 
 
 FICHA_TOKEN_RE = re.compile(r"\b\d{3,8}\*?\b")
+FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
 
 
 def _normalize_text(value: object) -> str:
@@ -82,12 +86,78 @@ def _parse_number(value: object) -> float:
         return 0.0
 
 
+def _candidate_db_paths() -> list[Path]:
+    raw_candidates = [
+        Path(DB_PATH),
+        APP_ROOT / "panamacompra.db",
+        APP_ROOT / "data" / "panamacompra.db",
+        APP_ROOT / "data" / "db" / "panamacompra_drive.db",
+        Path.cwd() / "panamacompra.db",
+        Path.cwd() / "data" / "panamacompra.db",
+        Path.cwd() / "data" / "db" / "panamacompra_drive.db",
+        FALLBACK_DB_PATH,
+    ]
+    unique: list[Path] = []
+    for path in raw_candidates:
+        try:
+            normalized = path.expanduser().resolve()
+        except Exception:
+            normalized = path.expanduser()
+        if normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
+def _panamacompra_drive_file_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    for key in (
+        "DRIVE_PANAMACOMPRA_FILE_ID",
+        "DRIVE_PANAMACOMPRA_DB_FILE_ID",
+        "DRIVE_DB_PANAMACOMPRA_FILE_ID",
+    ):
+        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _download_panamacompra_db_from_drive(file_id: str) -> bytes | None:
+    try:
+        drive = get_drive_delegated()
+        if drive is None:
+            return None
+        request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+        stream = io.BytesIO()
+        downloader = MediaIoBaseDownload(stream, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return stream.getvalue()
+    except Exception:
+        return None
+
+
 def _resolve_db_path() -> Path | None:
-    candidates = [Path(DB_PATH), Path("panamacompra.db"), Path("data/panamacompra.db")]
+    candidates = _candidate_db_paths()
     for candidate in candidates:
         path = candidate.expanduser()
-        if path.exists():
+        if path.exists() and path.is_file() and path.stat().st_size > 0:
             return path
+
+    file_id = _panamacompra_drive_file_id()
+    if file_id:
+        raw = _download_panamacompra_db_from_drive(file_id)
+        if raw:
+            runtime_path = APP_ROOT / "data" / "db" / "panamacompra_drive.db"
+            try:
+                runtime_path.parent.mkdir(parents=True, exist_ok=True)
+                runtime_path.write_bytes(raw)
+                return runtime_path
+            except Exception:
+                pass
     return None
 
 
@@ -95,12 +165,31 @@ def _resolve_db_path() -> Path | None:
 def _load_actos_db_df() -> tuple[pd.DataFrame, str]:
     db_path = _resolve_db_path()
     if db_path is None:
+        st.session_state["intel_db_status"] = "No se encontro panamacompra.db local ni se pudo descargar de Drive."
         return pd.DataFrame(), ""
     try:
         with sqlite3.connect(db_path) as conn:
-            df = pd.read_sql_query("SELECT * FROM actos_publicos", conn)
+            tables_df = pd.read_sql_query(
+                "SELECT name FROM sqlite_master WHERE type='table'",
+                conn,
+            )
+            tables = set(tables_df["name"].astype(str).tolist())
+            actos_table = ""
+            for candidate in ("actos_publicos", "actos", "panamacompra_actos"):
+                if candidate in tables:
+                    actos_table = candidate
+                    break
+            if not actos_table:
+                st.session_state["intel_db_status"] = (
+                    f"Se encontro DB en `{db_path}` pero no existe tabla de actos "
+                    "(esperadas: actos_publicos, actos, panamacompra_actos)."
+                )
+                return pd.DataFrame(), str(db_path)
+            df = pd.read_sql_query(f"SELECT * FROM {actos_table}", conn)
+        st.session_state["intel_db_status"] = f"DB OK: {db_path}"
         return df, str(db_path)
-    except Exception:
+    except Exception as exc:
+        st.session_state["intel_db_status"] = f"Error leyendo DB `{db_path}`: {exc}"
         return pd.DataFrame(), str(db_path)
 
 
@@ -141,8 +230,21 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
         work["id"] = range(1, len(work) + 1)
     work["ficha_detectada"] = work.get("ficha_detectada", "").fillna("").astype(str)
     work["ficha_tokens"] = work["ficha_detectada"].map(_extract_ficha_tokens)
+    # Fallback: if ficha_detectada is missing/empty in source, try extraction from key text fields.
+    if work["ficha_tokens"].map(len).sum() == 0:
+        fallback_cols = [
+            col
+            for col in ("ficha", "titulo", "descripcion", "item_1", "item_2", "observaciones")
+            if col in work.columns
+        ]
+        if fallback_cols:
+            merged_text = work[fallback_cols].fillna("").astype(str).agg(" ".join, axis=1)
+            work["ficha_tokens"] = merged_text.map(_extract_ficha_tokens)
     work = work[work["ficha_tokens"].map(len) > 0].copy()
     if work.empty:
+        st.session_state["intel_db_status"] = (
+            f"DB leida ({db_path}) pero no se detectaron fichas en columnas de referencia."
+        )
         return pd.DataFrame(), pd.DataFrame(), db_path
 
     work["monto_estimado"] = work.apply(_winner_price_from_row, axis=1)
@@ -329,6 +431,9 @@ def _render_kpis(ranked_df: pd.DataFrame) -> None:
 
 def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
     st.markdown("### Dashboard Ejecutivo")
+    db_status = str(st.session_state.get("intel_db_status", "")).strip()
+    if db_status:
+        st.caption(f"Estado fuente: {db_status}")
     if ranked_df.empty:
         st.warning("No hay fichas detectadas en la base para construir el dashboard.")
         return
