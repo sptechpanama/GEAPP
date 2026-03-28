@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import re
+import sqlite3
+from datetime import date
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
 import bcrypt
 
+from core.config import DB_PATH
 from ui.theme import apply_global_theme
 
 
@@ -47,6 +53,219 @@ if st.session_state.get("authentication_status") is not True:
 authenticator.logout("Cerrar sesión", location="sidebar")
 
 
+
+
+FICHA_TOKEN_RE = re.compile(r"\b\d{3,8}\*?\b")
+
+
+def _normalize_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _parse_number(value: object) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    text = text.replace("$", "").replace("USD", "").replace("us$", "").replace(" ", "")
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _resolve_db_path() -> Path | None:
+    candidates = [Path(DB_PATH), Path("panamacompra.db"), Path("data/panamacompra.db")]
+    for candidate in candidates:
+        path = candidate.expanduser()
+        if path.exists():
+            return path
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_actos_db_df() -> tuple[pd.DataFrame, str]:
+    db_path = _resolve_db_path()
+    if db_path is None:
+        return pd.DataFrame(), ""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            df = pd.read_sql_query("SELECT * FROM actos_publicos", conn)
+        return df, str(db_path)
+    except Exception:
+        return pd.DataFrame(), str(db_path)
+
+
+def _extract_ficha_tokens(raw_value: object) -> list[str]:
+    tokens = FICHA_TOKEN_RE.findall(str(raw_value or ""))
+    unique: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        if token not in seen:
+            seen.add(token)
+            unique.append(token)
+    return unique
+
+
+def _winner_price_from_row(row: pd.Series) -> float:
+    winner = _normalize_text(row.get("razon_social", "")) or _normalize_text(row.get("nombre_comercial", ""))
+    if winner:
+        for idx in range(1, 15):
+            proponente = _normalize_text(row.get(f"Proponente {idx}", ""))
+            if proponente and proponente == winner:
+                winner_price = _parse_number(row.get(f"Precio Proponente {idx}", ""))
+                if winner_price > 0:
+                    return winner_price
+    return _parse_number(row.get("precio_referencia", 0))
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    base_df, db_path = _load_actos_db_df()
+    if base_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), db_path
+
+    work = base_df.copy()
+    if "id" not in work.columns:
+        work["id"] = range(1, len(work) + 1)
+    work["ficha_detectada"] = work.get("ficha_detectada", "").fillna("").astype(str)
+    work["ficha_tokens"] = work["ficha_detectada"].map(_extract_ficha_tokens)
+    work = work[work["ficha_tokens"].map(len) > 0].copy()
+    if work.empty:
+        return pd.DataFrame(), pd.DataFrame(), db_path
+
+    work["monto_estimado"] = work.apply(_winner_price_from_row, axis=1)
+    work["num_participantes_num"] = work.get("num_participantes", 0).map(_parse_number)
+    work["entidad"] = work.get("entidad", "").fillna("").astype(str).str.strip()
+    work["ganador"] = work.get("razon_social", "").fillna("").astype(str).str.strip()
+
+    exploded = work.explode("ficha_tokens").rename(columns={"ficha_tokens": "ficha_token"})
+    exploded["ficha_token"] = exploded["ficha_token"].astype(str).str.strip()
+    exploded = exploded[exploded["ficha_token"] != ""].copy()
+    exploded["ficha"] = exploded["ficha_token"].str.replace(r"\D", "", regex=True)
+    exploded = exploded[exploded["ficha"] != ""].copy()
+    exploded = exploded.drop_duplicates(subset=["id", "ficha"]).reset_index(drop=True)
+
+    grouped = exploded.groupby("ficha", dropna=False)
+    ficha_metrics = pd.DataFrame(
+        {
+            "ficha": grouped["ficha"].first(),
+            "actos": grouped["id"].nunique(),
+            "monto_historico": grouped["monto_estimado"].sum(),
+            "entidades_distintas": grouped["entidad"].nunique(),
+            "ganadores_distintos": grouped["ganador"].apply(lambda s: s[s.str.strip() != ""].nunique()),
+            "competencia_promedio": grouped["num_participantes_num"].mean(),
+        }
+    ).reset_index(drop=True)
+    if "fecha_adjudicacion" in exploded.columns:
+        ficha_metrics["ultima_fecha"] = grouped["fecha_adjudicacion"].max().reset_index(drop=True)
+    else:
+        ficha_metrics["ultima_fecha"] = ""
+
+    ficha_metrics["afinidad_negocio"] = 0.5
+    ficha_metrics["barreras_regulatorias"] = 0.5
+
+    return ficha_metrics, exploded, db_path
+
+
+def _minmax(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce").fillna(0.0)
+    smin = float(numeric.min())
+    smax = float(numeric.max())
+    if smax <= smin:
+        return pd.Series([0.0] * len(numeric), index=numeric.index)
+    return (numeric - smin) / (smax - smin)
+
+
+def _classify_score(score: float) -> str:
+    if score >= 75:
+        return "atacar ya"
+    if score >= 55:
+        return "prometedor"
+    if score >= 35:
+        return "observacion"
+    return "baja prioridad"
+
+
+def _default_weights() -> dict[str, float]:
+    return {
+        "actos": 20.0,
+        "monto": 20.0,
+        "entidades": 15.0,
+        "ganadores": 10.0,
+        "competencia": 10.0,
+        "afinidad": 15.0,
+        "barreras": 10.0,
+    }
+
+
+def _score_fichas(ficha_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataFrame:
+    if ficha_df.empty:
+        return ficha_df
+    df = ficha_df.copy()
+    df["f_actos"] = _minmax(df["actos"])
+    df["f_monto"] = _minmax(df["monto_historico"])
+    df["f_entidades"] = _minmax(df["entidades_distintas"])
+    df["f_ganadores"] = _minmax(df["ganadores_distintos"])
+    df["f_competencia"] = _minmax(df["competencia_promedio"])
+    df["f_afinidad"] = _minmax(df["afinidad_negocio"])
+    df["f_barreras"] = _minmax(df["barreras_regulatorias"])
+
+    barreras_component = 1.0 - df["f_barreras"]
+    total_weight = sum(weights.values()) or 1.0
+    weighted = (
+        weights["actos"] * df["f_actos"]
+        + weights["monto"] * df["f_monto"]
+        + weights["entidades"] * df["f_entidades"]
+        + weights["ganadores"] * df["f_ganadores"]
+        + weights["competencia"] * df["f_competencia"]
+        + weights["afinidad"] * df["f_afinidad"]
+        + weights["barreras"] * barreras_component
+    )
+    df["score_total"] = (100.0 * weighted / total_weight).round(2)
+    df["clasificacion"] = df["score_total"].map(_classify_score)
+    return df.sort_values(["score_total", "actos", "monto_historico"], ascending=[False, False, False]).reset_index(drop=True)
+
+
+def _ensure_study_state() -> list[dict]:
+    if "intel_fichas_estudio" not in st.session_state:
+        st.session_state["intel_fichas_estudio"] = []
+    return st.session_state["intel_fichas_estudio"]
+
+
+def _add_ficha_to_study(row: pd.Series) -> bool:
+    current = _ensure_study_state()
+    ficha = str(row.get("ficha", "")).strip()
+    if not ficha:
+        return False
+    if any(str(item.get("ficha", "")).strip() == ficha for item in current):
+        return False
+    current.append(
+        {
+            "ficha": ficha,
+            "score_inicial": float(row.get("score_total", 0.0)),
+            "clasificacion": str(row.get("clasificacion", "")),
+            "actos": int(row.get("actos", 0)),
+            "monto_historico": float(row.get("monto_historico", 0.0)),
+            "estado": "pendiente de estudio profundo",
+            "fecha_ingreso": date.today().isoformat(),
+            "notas": "",
+        }
+    )
+    st.session_state["intel_fichas_estudio"] = current
+    return True
+
 def _empty_table(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
@@ -80,98 +299,263 @@ def _render_sidebar() -> None:
     st.sidebar.caption("Fase 1: botones visuales (sin ejecución).")
 
 
-def _render_kpis() -> None:
-    st.markdown("### 📌 Centro de control")
+def _render_kpis(ranked_df: pd.DataFrame) -> None:
+    st.markdown("### Centro de control")
+    total_fichas = int(len(ranked_df))
+    top_ataque = int((ranked_df.get("clasificacion", pd.Series(dtype=str)) == "atacar ya").sum()) if not ranked_df.empty else 0
+    prometedoras = int((ranked_df.get("clasificacion", pd.Series(dtype=str)) == "prometedor").sum()) if not ranked_df.empty else 0
+    fichas_estudio = _ensure_study_state()
+    total_en_seguimiento = len(fichas_estudio)
+    total_en_estudio = sum(1 for x in fichas_estudio if str(x.get("estado", "")).strip().lower() == "en estudio")
+
     cols = st.columns(5)
-    cols[0].metric("Fichas det. con actos", "—")
-    cols[1].metric("Fichas en seg.", "—")
-    cols[2].metric("Fichas en est.", "—")
-    cols[3].metric("Seg. vencidos", "—")
-    cols[4].metric("Correos por env.", "—")
+    cols[0].metric("Fichas det. con actos", f"{total_fichas:,}")
+    cols[1].metric("Fichas en seg.", f"{total_en_seguimiento:,}")
+    cols[2].metric("Fichas en est.", f"{total_en_estudio:,}")
+    cols[3].metric("Seg. vencidos", "0")
+    cols[4].metric("Correos por env.", "0")
 
     cols2 = st.columns(5)
-    cols2[0].metric("Viable: prov. en conv.", "—")
-    cols2[1].metric("Estudio: pend. contacto", "—")
-    cols2[2].metric("Estudio: sin proveedor", "—")
-    cols2[3].metric("Contactada no rentable", "—")
-    cols2[4].metric("Justif. no rent. pend.", "—")
+    cols2[0].metric("Viable: prov. en conv.", "0")
+    cols2[1].metric("Estudio: pend. contacto", "0")
+    cols2[2].metric("Estudio: sin proveedor", "0")
+    cols2[3].metric("Contactada no rentable", "0")
+    cols2[4].metric("Justif. no rent. pend.", "0")
 
-
-def _render_tab_dashboard() -> None:
-    st.markdown("### Dashboard Ejecutivo")
-    _placeholder_block(
-        "Resumen ejecutivo",
-        "Aquí se mostrará un resumen textual automático del estado general del embudo comercial por ficha.",
+    st.caption(
+        f"Captacion actual (DB): {top_ataque} fichas en 'atacar ya' y {prometedoras} en 'prometedor'. "
+        "Estados de seguimiento/contacto se habilitan en la siguiente fase."
     )
+
+def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
+    st.markdown("### Dashboard Ejecutivo")
+    if ranked_df.empty:
+        st.warning("No hay fichas detectadas en la base para construir el dashboard.")
+        return
+
+    st.info(
+        f"Base utilizada: `{db_path}`. Captacion inicial por ficha detectada "
+        "(incluye fichas con y sin asterisco, normalizadas a numero base)."
+    )
+
     _placeholder_block(
-        "Alertas y tareas del día",
-        "Aquí se mostrarán alertas (vencimientos, fichas sin avance, contactos pendientes) y tareas recomendadas.",
+        "Alertas y tareas del dia",
+        "Aqui se mostraran alertas (vencimientos, fichas sin avance, contactos pendientes) y tareas recomendadas.",
         ["tipo_alerta", "ficha", "proveedor", "prioridad", "fecha_limite", "accion_sugerida"],
     )
-    _placeholder_block(
-        "Top fichas por score",
-        "Aquí se mostrará el ranking principal de fichas para atacar hoy.",
-        ["ficha", "descripcion", "score_total", "clasificacion", "estado"],
-    )
 
-
-def _render_tab_deteccion_ct() -> None:
-    st.markdown("### Detección automática de fichas")
-    sub1, sub2, sub3 = st.tabs(["Scoring", "Resultados", "Detalle ficha"])
-
-    with sub1:
-        st.markdown("#### Ajuste de pesos del score")
-        c1, c2, c3 = st.columns(3)
-        c1.slider("Peso frecuencia", 0, 100, 20, disabled=True)
-        c1.slider("Peso monto histórico", 0, 100, 20, disabled=True)
-        c2.slider("Peso entidades", 0, 100, 15, disabled=True)
-        c2.slider("Peso ganadores distintos", 0, 100, 10, disabled=True)
-        c3.slider("Peso competencia", 0, 100, 10, disabled=True)
-        c3.slider("Peso afinidad negocio", 0, 100, 15, disabled=True)
-        st.slider("Peso barreras regulatorias/técnicas", 0, 100, 10, disabled=True)
-        st.caption("Aquí se mostrará la suma total de pesos y validación automática.")
-        b1, b2, b3, b4 = st.columns(4)
-        b1.button("Recalcular", disabled=True)
-        b2.button("Restaurar default", disabled=True)
-        b3.button("Guardar configuración", disabled=True)
-        b4.button("Cargar configuración", disabled=True)
-
-    with sub2:
-        _placeholder_block(
-            "Tabla principal de detección de fichas",
-            "Aquí se mostrarán las fichas detectadas con score y clasificación visual.",
+    st.markdown("#### Top fichas por score (captacion)")
+    st.dataframe(
+        ranked_df[
             [
                 "ficha",
-                "descripcion",
-                "frecuencia_actos",
+                "score_total",
+                "clasificacion",
+                "actos",
                 "monto_historico",
                 "entidades_distintas",
                 "ganadores_distintos",
                 "competencia_promedio",
-                "afinidad_negocio",
-                "barreras",
-                "score_total",
-                "clasificacion",
-            ],
+            ]
+        ].head(15),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.DataFrame) -> pd.DataFrame:
+    st.markdown("### Deteccion automatica de fichas")
+    sub1, sub2, sub3 = st.tabs(["Scoring", "Resultados", "Detalle ficha"])
+    default_weights = _default_weights()
+
+    if "intel_weights" not in st.session_state:
+        st.session_state["intel_weights"] = default_weights.copy()
+    weights = st.session_state["intel_weights"]
+
+    if ficha_metrics_df.empty:
+        with sub1:
+            st.warning("No hay actos con ficha detectada en la base actual.")
+        with sub2:
+            st.info("Sin datos para ranking.")
+        with sub3:
+            st.info("Sin datos para detalle.")
+        return pd.DataFrame()
+
+    with sub1:
+        st.markdown("#### Ajuste de pesos del score")
+        c1, c2, c3 = st.columns(3)
+        weights["actos"] = c1.slider("Peso frecuencia", 0.0, 100.0, float(weights["actos"]), 1.0)
+        weights["monto"] = c1.slider("Peso monto historico", 0.0, 100.0, float(weights["monto"]), 1.0)
+        weights["entidades"] = c2.slider("Peso entidades", 0.0, 100.0, float(weights["entidades"]), 1.0)
+        weights["ganadores"] = c2.slider("Peso ganadores distintos", 0.0, 100.0, float(weights["ganadores"]), 1.0)
+        weights["competencia"] = c3.slider("Peso competencia", 0.0, 100.0, float(weights["competencia"]), 1.0)
+        weights["afinidad"] = c3.slider("Peso afinidad negocio", 0.0, 100.0, float(weights["afinidad"]), 1.0)
+        weights["barreras"] = st.slider("Peso barreras regulatorias/tecnicas", 0.0, 100.0, float(weights["barreras"]), 1.0)
+        st.session_state["intel_weights"] = weights
+
+        total_weights = sum(weights.values())
+        st.caption(f"Suma de pesos: {total_weights:.1f}")
+        if total_weights <= 0:
+            st.error("La suma de pesos debe ser mayor a 0 para calcular score.")
+
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button("Recalcular"):
+            st.success("Scoring recalculado con los pesos actuales.")
+        if b2.button("Restaurar default"):
+            st.session_state["intel_weights"] = default_weights.copy()
+            st.rerun()
+        b3.button("Guardar configuracion", disabled=True)
+        b4.button("Cargar configuracion", disabled=True)
+
+    ranked_df = _score_fichas(ficha_metrics_df, weights)
+
+    with sub2:
+        st.caption("Ranking de fichas detectadas en actos: normaliza 43358, 43358* y 43358.")
+        order_mode = st.selectbox(
+            "Orden",
+            ["Ficha (asc)", "Score (desc)"],
+            index=0,
+            key="intel_order_mode",
         )
-        st.caption("Acciones por fila (Fase 2): agregar a seguimiento, ignorar, ver detalle.")
+        max_rows = st.slider("Max. fichas a mostrar", 10, 300, 60, 10)
+        ranking_cols = [
+            "ficha",
+            "score_total",
+            "clasificacion",
+            "actos",
+            "monto_historico",
+            "entidades_distintas",
+            "ganadores_distintos",
+            "competencia_promedio",
+        ]
+        if order_mode == "Ficha (asc)":
+            view_df = ranked_df.sort_values(
+                "ficha",
+                ascending=True,
+                kind="stable",
+                key=lambda s: pd.to_numeric(s, errors="coerce"),
+            ).reset_index(drop=True)
+        else:
+            view_df = ranked_df.sort_values("score_total", ascending=False, kind="stable").reset_index(drop=True)
+
+        shown_df = view_df[ranking_cols].head(max_rows).copy()
+        st.dataframe(shown_df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Acciones por ficha")
+        for _, row in shown_df.iterrows():
+            ficha_val = str(row["ficha"])
+            c0, c1, c2, c3, c4 = st.columns([1.3, 0.9, 1.0, 1.0, 1.5])
+            c0.markdown(f"**Ficha {ficha_val}**")
+            c1.write(f"Score: {float(row['score_total']):.1f}")
+            c2.write(f"Actos: {int(row['actos'])}")
+            c3.write(str(row["clasificacion"]))
+            if c4.button("Ver actos", key=f"intel_view_{ficha_val}"):
+                st.session_state["intel_selected_ficha"] = ficha_val
+                st.rerun()
+            if c4.button("Pasar a estudio", key=f"intel_study_{ficha_val}"):
+                full_row = ranked_df[ranked_df["ficha"].astype(str) == ficha_val]
+                if not full_row.empty and _add_ficha_to_study(full_row.iloc[0]):
+                    st.success(f"Ficha {ficha_val} enviada a 'Fichas en seg.'")
+                else:
+                    st.info(f"Ficha {ficha_val} ya estaba en seguimiento.")
 
     with sub3:
-        _placeholder_block(
-            "Descomposición del score por ficha",
-            "Aquí se mostrará el detalle de cada factor del score para la ficha seleccionada.",
-            ["ficha", "factor", "valor_normalizado", "peso", "contribucion_score"],
-        )
+        selected = st.session_state.get("intel_selected_ficha")
+        if not selected:
+            st.info("Selecciona una ficha en Resultados para ver su detalle.")
+            return ranked_df
 
+        row = ranked_df[ranked_df["ficha"].astype(str) == str(selected)]
+        if row.empty:
+            st.info("No hay detalle para la ficha seleccionada.")
+            return ranked_df
+
+        row = row.iloc[0]
+        detail_score = pd.DataFrame(
+            [
+                ["frecuencia", row["f_actos"], weights["actos"]],
+                ["monto_historico", row["f_monto"], weights["monto"]],
+                ["entidades", row["f_entidades"], weights["entidades"]],
+                ["ganadores", row["f_ganadores"], weights["ganadores"]],
+                ["competencia", row["f_competencia"], weights["competencia"]],
+                ["afinidad", row["f_afinidad"], weights["afinidad"]],
+                ["barreras (inverso)", 1.0 - row["f_barreras"], weights["barreras"]],
+            ],
+            columns=["factor", "valor_norm", "peso"],
+        )
+        detail_score["contribucion"] = detail_score["valor_norm"] * detail_score["peso"]
+        st.markdown(f"#### Score de ficha {selected}: {row['score_total']:.2f} ({row['clasificacion']})")
+        st.dataframe(detail_score, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Actos asociados")
+        acts = ficha_acts_df[ficha_acts_df["ficha"].astype(str) == str(selected)].copy()
+        acts = acts.rename(columns={"ganador": "proveedor_ganador", "num_participantes": "participantes"})
+        show_cols = [
+            "id",
+            "ficha_token",
+            "titulo",
+            "entidad",
+            "fecha",
+            "fecha_adjudicacion",
+            "proveedor_ganador",
+            "participantes",
+            "monto_estimado",
+            "enlace",
+        ]
+        proponent_cols = [c for c in acts.columns if c.startswith("Proponente ")]
+        price_cols = [c for c in acts.columns if c.startswith("Precio Proponente ")]
+        show_cols.extend(proponent_cols + price_cols)
+        present_cols = [c for c in show_cols if c in acts.columns]
+        st.dataframe(acts[present_cols].head(500), use_container_width=True, hide_index=True)
+
+    return ranked_df
 
 def _render_tab_seguimiento_ct() -> None:
     st.markdown("### Fichas en seg.")
-    _placeholder_block(
-        "Pipeline de fichas",
-        "Aquí se visualizará el pipeline manual de fichas seleccionadas para seguimiento.",
-        ["ficha", "descripcion", "score_inicial", "prioridad_manual", "estado", "fecha_ingreso", "notas"],
+    fichas_estudio = _ensure_study_state()
+    if not fichas_estudio:
+        st.info("Todavia no has enviado fichas a seguimiento desde 'Detecc. fichas'.")
+        return
+
+    df_seg = pd.DataFrame(fichas_estudio)
+    show_cols = [
+        "ficha",
+        "score_inicial",
+        "clasificacion",
+        "actos",
+        "monto_historico",
+        "estado",
+        "fecha_ingreso",
+        "notas",
+    ]
+    cols = [c for c in show_cols if c in df_seg.columns]
+    st.dataframe(df_seg[cols], use_container_width=True, hide_index=True)
+
+    c1, c2, c3 = st.columns([1.4, 1.8, 1.0])
+    target = c1.selectbox("Ficha a gestionar", df_seg["ficha"].astype(str).tolist(), key="intel_seg_target")
+    new_state = c2.selectbox(
+        "Nuevo estado",
+        [
+            "pendiente de estudio profundo",
+            "en estudio",
+            "listo para busqueda de proveedores",
+            "pausado",
+            "descartado",
+        ],
+        key="intel_seg_state",
     )
-    st.caption("Estados sugeridos: pendiente, en estudio, listo para proveedores, pausado, descartado.")
+    if c3.button("Actualizar estado"):
+        for item in fichas_estudio:
+            if str(item.get("ficha", "")) == str(target):
+                item["estado"] = new_state
+        st.session_state["intel_fichas_estudio"] = fichas_estudio
+        st.success(f"Estado actualizado para ficha {target}.")
+
+    if st.button("Quitar ficha seleccionada"):
+        st.session_state["intel_fichas_estudio"] = [
+            x for x in fichas_estudio if str(x.get("ficha", "")) != str(target)
+        ]
+        st.success(f"Ficha {target} removida de seguimiento.")
+        st.rerun()
 
 
 def _render_tab_estudio_profundo() -> None:
@@ -322,10 +706,16 @@ def _render_architecture_notes() -> None:
 
 
 st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
-st.caption("Fase 1: arquitectura visual y textual (sin datos operativos).")
+st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
+
+if "intel_weights" not in st.session_state:
+    st.session_state["intel_weights"] = _default_weights().copy()
+
+ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe()
+ranked_df = _score_fichas(ficha_metrics_df, st.session_state["intel_weights"])
 
 _render_sidebar()
-_render_kpis()
+_render_kpis(ranked_df)
 _render_architecture_notes()
 
 tabs = st.tabs(
@@ -342,9 +732,9 @@ tabs = st.tabs(
 )
 
 with tabs[0]:
-    _render_tab_dashboard()
+    _render_tab_dashboard(ranked_df, db_path)
 with tabs[1]:
-    _render_tab_deteccion_ct()
+    _render_tab_deteccion_ct(ficha_metrics_df, ficha_acts_df)
 with tabs[2]:
     _render_tab_seguimiento_ct()
 with tabs[3]:
