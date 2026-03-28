@@ -166,6 +166,32 @@ def _normalize_drive_file_id(raw: str) -> str:
     return value
 
 
+def _find_panamacompra_db_file_id_in_drive() -> str:
+    try:
+        drive, mode = _get_drive_client()
+        if drive is None:
+            st.session_state["intel_db_status"] = f"Drive no disponible para busqueda por nombre ({mode})."
+            return ""
+        response = (
+            drive.files()
+            .list(
+                q="name='panamacompra.db' and trashed=false",
+                fields="files(id,name,modifiedTime,parents)",
+                pageSize=5,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        files = response.get("files", []) or []
+        if not files:
+            return ""
+        # Toma el primer match (el API suele devolver primero el más relevante/reciente).
+        return str(files[0].get("id", "")).strip()
+    except Exception:
+        return ""
+
+
 def _get_drive_client() -> tuple[object | None, str]:
     try:
         drive = get_drive_delegated()
@@ -216,6 +242,8 @@ def _resolve_db_path() -> Path | None:
             return path
 
     file_id = _panamacompra_drive_file_id()
+    if not file_id:
+        file_id = _find_panamacompra_db_file_id_in_drive()
     if file_id:
         raw, mode = _download_panamacompra_db_from_drive(file_id)
         if raw:
@@ -233,6 +261,10 @@ def _resolve_db_path() -> Path | None:
             st.session_state["intel_db_status"] = (
                 f"No se pudo descargar DB de Drive. file_id={file_id} ({mode})"
             )
+    else:
+        st.session_state["intel_db_status"] = (
+            "Sin file_id de Drive para panamacompra.db y sin hallazgo por nombre."
+        )
     return None
 
 
@@ -250,6 +282,9 @@ def _supabase_db_url() -> str:
     for raw in candidates:
         if raw and str(raw).strip():
             return str(raw).strip()
+    st.session_state["intel_db_status"] = (
+        "No hay SUPABASE_DB_URL/DATABASE_URL configurado en secrets/app ni env."
+    )
     return ""
 
 
@@ -277,6 +312,9 @@ def _load_actos_postgres_df() -> tuple[pd.DataFrame, str]:
                         table = t
                         break
             if not table:
+                st.session_state["intel_db_status"] = (
+                    "Postgres conectado pero no hay tabla de actos (actos_publicos/actos/panamacompra_actos)."
+                )
                 return pd.DataFrame(), "postgres"
             df = pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
             st.session_state["intel_db_status"] = f"DB OK (postgres): tabla={table}"
@@ -293,7 +331,16 @@ def _load_actos_db_df() -> tuple[pd.DataFrame, str]:
         pg_df, pg_source = _load_actos_postgres_df()
         if not pg_df.empty:
             return pg_df, pg_source
-        st.session_state["intel_db_status"] = "No se encontro panamacompra.db local/Drive y tampoco se pudo leer postgres."
+        current = str(st.session_state.get("intel_db_status", "")).strip()
+        if current:
+            st.session_state["intel_db_status"] = (
+                "No se encontro panamacompra.db local/Drive. "
+                f"Detalle final: {current}"
+            )
+        else:
+            st.session_state["intel_db_status"] = (
+                "No se encontro panamacompra.db local/Drive y tampoco se pudo leer postgres."
+            )
         return pd.DataFrame(), ""
     try:
         with sqlite3.connect(db_path) as conn:
