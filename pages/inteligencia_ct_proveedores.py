@@ -5,6 +5,7 @@ import sqlite3
 from datetime import date
 import io
 import os
+import unicodedata
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -89,6 +90,53 @@ def _parse_number(value: object) -> float:
         return float(text)
     except ValueError:
         return 0.0
+
+
+def _normalize_column_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _resolve_column_by_alias(columns: list[str], aliases: list[str]) -> str:
+    if not columns:
+        return ""
+    normalized = {_normalize_column_key(col): col for col in columns}
+    for alias in aliases:
+        hit = normalized.get(_normalize_column_key(alias))
+        if hit:
+            return hit
+    for alias in aliases:
+        alias_norm = _normalize_column_key(alias)
+        if not alias_norm:
+            continue
+        for norm_col, real_col in normalized.items():
+            if alias_norm in norm_col:
+                return real_col
+    return ""
+
+
+def _candidate_fichas_paths() -> list[Path]:
+    raw_candidates = [
+        APP_ROOT / "fichas_ctni_con_enlace.xlsx",
+        APP_ROOT / "fichas_ctni.xlsx",
+        APP_ROOT / "data" / "fichas_ctni_con_enlace.xlsx",
+        APP_ROOT / "data" / "fichas_ctni.xlsx",
+        Path.cwd() / "fichas_ctni_con_enlace.xlsx",
+        Path.cwd() / "fichas_ctni.xlsx",
+        Path.cwd() / "data" / "fichas_ctni_con_enlace.xlsx",
+        Path.cwd() / "data" / "fichas_ctni.xlsx",
+    ]
+    unique: list[Path] = []
+    for path in raw_candidates:
+        try:
+            normalized = path.expanduser().resolve()
+        except Exception:
+            normalized = path.expanduser()
+        if normalized not in unique:
+            unique.append(normalized)
+    return unique
 
 
 def _candidate_db_paths() -> list[Path]:
@@ -232,6 +280,147 @@ def _download_panamacompra_db_from_drive(file_id: str) -> tuple[bytes | None, st
         return stream.getvalue(), mode
     except Exception as exc:
         return None, f"download_error:{exc}"
+
+
+def _fichas_drive_file_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    for key in (
+        "DRIVE_FICHAS_CTNI_CON_ENLACE_FILE_ID",
+        "DRIVE_FICHAS_CON_ENLACE_FILE_ID",
+        "DRIVE_FICHAS_CTNI_FILE_ID",
+        "DRIVE_FICHAS_TECNICAS_FILE_ID",
+    ):
+        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
+        if value and str(value).strip():
+            return _normalize_drive_file_id(str(value).strip())
+    for key in (
+        "DRIVE_FICHAS_CTNI_CON_ENLACE_FILE_ID",
+        "DRIVE_FICHAS_CON_ENLACE_FILE_ID",
+        "DRIVE_FICHAS_CTNI_FILE_ID",
+        "DRIVE_FICHAS_TECNICAS_FILE_ID",
+    ):
+        value = os.environ.get(key)
+        if value and str(value).strip():
+            return _normalize_drive_file_id(str(value).strip())
+    return ""
+
+
+def _download_drive_file_bytes(file_id: str) -> tuple[bytes | None, str]:
+    try:
+        drive, mode = _get_drive_client()
+        if drive is None:
+            return None, mode
+        request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+        stream = io.BytesIO()
+        downloader = MediaIoBaseDownload(stream, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return stream.getvalue(), mode
+    except Exception as exc:
+        return None, f"download_error:{exc}"
+
+
+def _find_drive_file_id_by_names(names: list[str]) -> str:
+    target_names = [str(name or "").strip() for name in names if str(name or "").strip()]
+    if not target_names:
+        return ""
+    try:
+        drive, _ = _get_drive_client()
+        if drive is None:
+            return ""
+        escaped = [name.replace("'", "\\'") for name in target_names]
+        query = "trashed=false and (" + " or ".join([f"name='{n}'" for n in escaped]) + ")"
+        response = (
+            drive.files()
+            .list(
+                q=query,
+                fields="files(id,name,modifiedTime)",
+                pageSize=10,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                corpora="allDrives",
+            )
+            .execute()
+        )
+        files = response.get("files", []) or []
+        if not files:
+            return ""
+        files.sort(key=lambda item: str(item.get("modifiedTime", "")), reverse=True)
+        return str(files[0].get("id", "")).strip()
+    except Exception:
+        return ""
+
+
+def _build_ficha_name_map_from_df(df: pd.DataFrame) -> dict[str, str]:
+    if df.empty:
+        return {}
+    columns = list(df.columns)
+    ficha_col = _resolve_column_by_alias(
+        columns,
+        [
+            "numero ficha",
+            "número ficha",
+            "ficha",
+            "ficha tecnica",
+            "codigo ficha",
+            "id ficha",
+        ],
+    )
+    nombre_col = _resolve_column_by_alias(
+        columns,
+        [
+            "nombre generico",
+            "nombre genérico",
+            "nombre ficha",
+            "nombre",
+            "descripcion",
+        ],
+    )
+    if not ficha_col or not nombre_col:
+        return {}
+
+    mapping: dict[str, str] = {}
+    for _, row in df[[ficha_col, nombre_col]].iterrows():
+        raw_name = str(row.get(nombre_col, "")).strip()
+        if not raw_name or raw_name.lower() in {"nan", "none", "null"}:
+            continue
+        tokens = _extract_ficha_tokens(row.get(ficha_col, ""))
+        for token in tokens:
+            ficha_num = re.sub(r"\D", "", token or "")
+            if ficha_num and ficha_num not in mapping:
+                mapping[ficha_num] = raw_name
+    return mapping
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _load_ficha_name_map() -> dict[str, str]:
+    for path in _candidate_fichas_paths():
+        try:
+            if path.exists() and path.is_file() and path.stat().st_size > 0:
+                local_df = pd.read_excel(path)
+                mapped = _build_ficha_name_map_from_df(local_df)
+                if mapped:
+                    return mapped
+        except Exception:
+            continue
+
+    file_id = _fichas_drive_file_id() or _find_drive_file_id_by_names(
+        ["fichas_ctni_con_enlace.xlsx", "fichas_ctni.xlsx"]
+    )
+    if not file_id:
+        return {}
+    raw, _ = _download_drive_file_bytes(file_id)
+    if not raw:
+        return {}
+    try:
+        drive_df = pd.read_excel(io.BytesIO(raw))
+        return _build_ficha_name_map_from_df(drive_df)
+    except Exception:
+        return {}
 
 
 def _resolve_db_path() -> Path | None:
@@ -433,6 +622,8 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["ficha"] = exploded["ficha_token"].str.replace(r"\D", "", regex=True)
     exploded = exploded[exploded["ficha"] != ""].copy()
     exploded = exploded.drop_duplicates(subset=["id", "ficha"]).reset_index(drop=True)
+    ficha_name_map = _load_ficha_name_map()
+    exploded["nombre_ficha"] = exploded["ficha"].astype(str).map(ficha_name_map).fillna("")
 
     grouped = exploded.groupby("ficha", dropna=False)
     ficha_metrics = pd.DataFrame(
@@ -450,6 +641,7 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     else:
         ficha_metrics["ultima_fecha"] = ""
 
+    ficha_metrics["nombre_ficha"] = ficha_metrics["ficha"].astype(str).map(ficha_name_map).fillna("")
     ficha_metrics["afinidad_negocio"] = 0.5
     ficha_metrics["barreras_regulatorias"] = 0.5
 
@@ -531,6 +723,7 @@ def _add_ficha_to_study(row: pd.Series) -> bool:
     current.append(
         {
             "ficha": ficha,
+            "nombre_ficha": str(row.get("nombre_ficha", "")).strip(),
             "score_inicial": float(row.get("score_total", 0.0)),
             "clasificacion": str(row.get("clasificacion", "")),
             "actos": int(row.get("actos", 0)),
@@ -629,6 +822,7 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
         ranked_df[
             [
                 "ficha",
+                "nombre_ficha",
                 "score_total",
                 "clasificacion",
                 "actos",
@@ -711,6 +905,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         st.caption("Ranking completo de fichas detectadas en actos (ordenado por score).")
         ranking_cols = [
             "ficha",
+            "nombre_ficha",
             "score_total",
             "clasificacion",
             "actos",
@@ -744,6 +939,14 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
                 st.success(f"Ficha {selected_action_ficha} enviada a 'Fichas en seg.'")
             else:
                 st.info(f"Ficha {selected_action_ficha} ya estaba en seguimiento.")
+        selected_name = (
+            view_df.loc[view_df["ficha"].astype(str) == str(selected_action_ficha), "nombre_ficha"]
+            .astype(str)
+            .head(1)
+            .tolist()
+        )
+        if selected_name and selected_name[0].strip():
+            st.caption(f"Nombre de ficha: {selected_name[0]}")
 
     with sub3:
         selected = st.session_state.get("intel_selected_ficha")
@@ -757,6 +960,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             return ranked_df
 
         row = row.iloc[0]
+        nombre_ficha = str(row.get("nombre_ficha", "")).strip()
         detail_score = pd.DataFrame(
             [
                 ["frecuencia", row["f_actos"], weights["actos"]],
@@ -770,7 +974,13 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             columns=["factor", "valor_norm", "peso"],
         )
         detail_score["contribucion"] = detail_score["valor_norm"] * detail_score["peso"]
-        st.markdown(f"#### Score de ficha {selected}: {row['score_total']:.2f} ({row['clasificacion']})")
+        if nombre_ficha:
+            st.markdown(
+                f"#### Score de ficha {selected} - {nombre_ficha}: "
+                f"{row['score_total']:.2f} ({row['clasificacion']})"
+            )
+        else:
+            st.markdown(f"#### Score de ficha {selected}: {row['score_total']:.2f} ({row['clasificacion']})")
         st.dataframe(detail_score, use_container_width=True, hide_index=True)
 
         st.markdown("#### Actos asociados")
@@ -779,6 +989,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         show_cols = [
             "id",
             "ficha_token",
+            "nombre_ficha",
             "titulo",
             "entidad",
             "fecha",
@@ -806,6 +1017,7 @@ def _render_tab_seguimiento_ct() -> None:
     df_seg = pd.DataFrame(fichas_estudio)
     show_cols = [
         "ficha",
+        "nombre_ficha",
         "score_inicial",
         "clasificacion",
         "actos",
