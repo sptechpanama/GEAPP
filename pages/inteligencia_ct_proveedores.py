@@ -421,6 +421,16 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
             "rs",
         ],
     )
+    riesgo_col = _resolve_column_by_alias(
+        columns,
+        [
+            "clase de riesgo",
+            "clase riesgo",
+            "riesgo",
+            "nivel de riesgo",
+            "risk class",
+        ],
+    )
     if not ficha_col:
         return {}
 
@@ -430,22 +440,32 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
         selected_cols.append(nombre_col)
     if registro_col and registro_col not in selected_cols:
         selected_cols.append(registro_col)
+    if riesgo_col and riesgo_col not in selected_cols:
+        selected_cols.append(riesgo_col)
 
     for _, row in df[selected_cols].iterrows():
         raw_name = str(row.get(nombre_col, "")).strip() if nombre_col else ""
         if raw_name.lower() in {"nan", "none", "null"}:
             raw_name = ""
+        raw_risk = str(row.get(riesgo_col, "")).strip() if riesgo_col else ""
+        if raw_risk.lower() in {"nan", "none", "null"}:
+            raw_risk = ""
         rs_required = _is_registro_sanitario_required(row.get(registro_col, "")) if registro_col else False
         tokens = _extract_ficha_tokens(row.get(ficha_col, ""))
         for token in tokens:
             ficha_num = re.sub(r"\D", "", token or "")
             if not ficha_num:
                 continue
-            current = mapping.setdefault(ficha_num, {"nombre_ficha": "", "rs_requerido": False})
+            current = mapping.setdefault(
+                ficha_num,
+                {"nombre_ficha": "", "rs_requerido": False, "clase_riesgo": ""},
+            )
             if raw_name and not str(current.get("nombre_ficha", "")).strip():
                 current["nombre_ficha"] = raw_name
             if rs_required:
                 current["rs_requerido"] = True
+            if raw_risk and not str(current.get("clase_riesgo", "")).strip():
+                current["clase_riesgo"] = raw_risk
     return mapping
 
 
@@ -679,6 +699,9 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["nombre_ficha"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("nombre_ficha", "") or "")
     )
+    exploded["clase_riesgo"] = exploded["ficha"].astype(str).map(
+        lambda x: str((ficha_reference_map.get(str(x)) or {}).get("clase_riesgo", "") or "")
+    )
     exploded["rs_requerido"] = exploded["ficha"].astype(str).map(
         lambda x: bool((ficha_reference_map.get(str(x)) or {}).get("rs_requerido", False))
     )
@@ -695,9 +718,8 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
             "ficha": grouped["ficha"].first(),
             "actos": grouped["id"].nunique(),
             "monto_historico": grouped["monto_estimado"].sum(),
-            "entidades_distintas": grouped["entidad"].nunique(),
             "ganadores_distintos": grouped["ganador"].apply(lambda s: s[s.str.strip() != ""].nunique()),
-            "competencia_promedio": grouped["num_participantes_num"].mean(),
+            "proponentes_promedio": grouped["num_participantes_num"].mean(),
         }
     ).reset_index(drop=True)
     if "fecha_adjudicacion" in exploded.columns:
@@ -708,8 +730,9 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     ficha_metrics["nombre_ficha"] = ficha_metrics["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("nombre_ficha", "") or "")
     )
-    ficha_metrics["afinidad_negocio"] = 0.5
-    ficha_metrics["barreras_regulatorias"] = 0.5
+    ficha_metrics["clase_riesgo"] = ficha_metrics["ficha"].astype(str).map(
+        lambda x: str((ficha_reference_map.get(str(x)) or {}).get("clase_riesgo", "") or "")
+    )
 
     return ficha_metrics, exploded, db_path
 
@@ -736,13 +759,41 @@ def _classify_score(score: float) -> str:
 def _default_weights() -> dict[str, float]:
     return {
         "actos": 20.0,
-        "monto": 20.0,
-        "entidades": 15.0,
-        "ganadores": 10.0,
-        "competencia": 10.0,
-        "afinidad": 15.0,
-        "barreras": 10.0,
+        "monto": 25.0,
+        "ganadores": 20.0,
+        "proponentes": 20.0,
+        "riesgo": 15.0,
     }
+
+
+def _risk_to_score(value: object) -> float:
+    norm = _normalize_column_key(value)
+    if not norm:
+        return 0.5
+    tokens = set(norm.split())
+    if "clase" in tokens:
+        tokens.discard("clase")
+    if ("iv" in tokens) or ("4" in tokens) or ("alto" in tokens and "moderado" not in tokens) or ("critico" in tokens):
+        return 0.2
+    if ("iii" in tokens) or ("3" in tokens):
+        return 0.4
+    if ("ii" in tokens) or ("2" in tokens) or ("moderado" in tokens) or ("medio" in tokens):
+        return 0.7
+    if ("i" in tokens) or ("1" in tokens) or ("bajo" in tokens):
+        return 1.0
+    return 0.5
+
+
+def _normalize_weights(stored: dict[str, float] | None, defaults: dict[str, float]) -> dict[str, float]:
+    stored = stored or {}
+    normalized: dict[str, float] = {}
+    for key, default_val in defaults.items():
+        raw = stored.get(key, default_val)
+        try:
+            normalized[key] = float(raw)
+        except Exception:
+            normalized[key] = float(default_val)
+    return normalized
 
 
 def _score_fichas(ficha_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataFrame:
@@ -751,22 +802,17 @@ def _score_fichas(ficha_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataF
     df = ficha_df.copy()
     df["f_actos"] = _minmax(df["actos"])
     df["f_monto"] = _minmax(df["monto_historico"])
-    df["f_entidades"] = _minmax(df["entidades_distintas"])
     df["f_ganadores"] = _minmax(df["ganadores_distintos"])
-    df["f_competencia"] = _minmax(df["competencia_promedio"])
-    df["f_afinidad"] = _minmax(df["afinidad_negocio"])
-    df["f_barreras"] = _minmax(df["barreras_regulatorias"])
+    df["f_proponentes"] = _minmax(df["proponentes_promedio"])
+    df["f_riesgo"] = df["clase_riesgo"].map(_risk_to_score)
 
-    barreras_component = 1.0 - df["f_barreras"]
     total_weight = sum(weights.values()) or 1.0
     weighted = (
         weights["actos"] * df["f_actos"]
         + weights["monto"] * df["f_monto"]
-        + weights["entidades"] * df["f_entidades"]
         + weights["ganadores"] * df["f_ganadores"]
-        + weights["competencia"] * df["f_competencia"]
-        + weights["afinidad"] * df["f_afinidad"]
-        + weights["barreras"] * barreras_component
+        + weights["proponentes"] * df["f_proponentes"]
+        + weights["riesgo"] * df["f_riesgo"]
     )
     df["score_total"] = (100.0 * weighted / total_weight).round(2)
     df["clasificacion"] = df["score_total"].map(_classify_score)
@@ -790,6 +836,7 @@ def _add_ficha_to_study(row: pd.Series) -> bool:
         {
             "ficha": ficha,
             "nombre_ficha": str(row.get("nombre_ficha", "")).strip(),
+            "clase_riesgo": str(row.get("clase_riesgo", "")).strip(),
             "score_inicial": float(row.get("score_total", 0.0)),
             "clasificacion": str(row.get("clasificacion", "")),
             "actos": int(row.get("actos", 0)),
@@ -889,13 +936,13 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
             [
                 "ficha",
                 "nombre_ficha",
+                "clase_riesgo",
                 "score_total",
                 "clasificacion",
                 "actos",
                 "monto_historico",
-                "entidades_distintas",
                 "ganadores_distintos",
-                "competencia_promedio",
+                "proponentes_promedio",
             ]
         ].head(15),
         use_container_width=True,
@@ -907,9 +954,9 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
     sub1, sub2, sub3 = st.tabs(["Scoring", "Resultados", "Detalle ficha"])
     default_weights = _default_weights()
 
-    if "intel_weights" not in st.session_state:
-        st.session_state["intel_weights"] = default_weights.copy()
-    weights = st.session_state["intel_weights"]
+    stored_weights = st.session_state.get("intel_weights", {})
+    weights = _normalize_weights(stored_weights, default_weights)
+    st.session_state["intel_weights"] = weights
 
     if ficha_metrics_df.empty:
         with sub1:
@@ -925,11 +972,11 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         c1, c2, c3 = st.columns(3)
         weights["actos"] = c1.slider("Peso frecuencia", 0.0, 100.0, float(weights["actos"]), 1.0)
         weights["monto"] = c1.slider("Peso monto historico", 0.0, 100.0, float(weights["monto"]), 1.0)
-        weights["entidades"] = c2.slider("Peso entidades", 0.0, 100.0, float(weights["entidades"]), 1.0)
         weights["ganadores"] = c2.slider("Peso ganadores distintos", 0.0, 100.0, float(weights["ganadores"]), 1.0)
-        weights["competencia"] = c3.slider("Peso competencia", 0.0, 100.0, float(weights["competencia"]), 1.0)
-        weights["afinidad"] = c3.slider("Peso afinidad negocio", 0.0, 100.0, float(weights["afinidad"]), 1.0)
-        weights["barreras"] = st.slider("Peso barreras regulatorias/tecnicas", 0.0, 100.0, float(weights["barreras"]), 1.0)
+        weights["proponentes"] = c2.slider(
+            "Peso proponentes promedio por acto", 0.0, 100.0, float(weights["proponentes"]), 1.0
+        )
+        weights["riesgo"] = c3.slider("Peso clase de riesgo", 0.0, 100.0, float(weights["riesgo"]), 1.0)
         st.session_state["intel_weights"] = weights
 
         total_weights = sum(weights.values())
@@ -972,13 +1019,13 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         ranking_cols = [
             "ficha",
             "nombre_ficha",
+            "clase_riesgo",
             "score_total",
             "clasificacion",
             "actos",
             "monto_historico",
-            "entidades_distintas",
             "ganadores_distintos",
-            "competencia_promedio",
+            "proponentes_promedio",
         ]
         view_df = ranked_df.sort_values(
             ["score_total", "actos", "monto_historico"],
@@ -1031,11 +1078,9 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             [
                 ["frecuencia", row["f_actos"], weights["actos"]],
                 ["monto_historico", row["f_monto"], weights["monto"]],
-                ["entidades", row["f_entidades"], weights["entidades"]],
                 ["ganadores", row["f_ganadores"], weights["ganadores"]],
-                ["competencia", row["f_competencia"], weights["competencia"]],
-                ["afinidad", row["f_afinidad"], weights["afinidad"]],
-                ["barreras (inverso)", 1.0 - row["f_barreras"], weights["barreras"]],
+                ["proponentes_promedio", row["f_proponentes"], weights["proponentes"]],
+                ["clase_riesgo", row["f_riesgo"], weights["riesgo"]],
             ],
             columns=["factor", "valor_norm", "peso"],
         )
@@ -1056,6 +1101,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             "id",
             "ficha_token",
             "nombre_ficha",
+            "clase_riesgo",
             "titulo",
             "entidad",
             "fecha",
@@ -1084,6 +1130,7 @@ def _render_tab_seguimiento_ct() -> None:
     show_cols = [
         "ficha",
         "nombre_ficha",
+        "clase_riesgo",
         "score_inicial",
         "clasificacion",
         "actos",
@@ -1273,8 +1320,10 @@ def _render_architecture_notes() -> None:
 st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 
-if "intel_weights" not in st.session_state:
-    st.session_state["intel_weights"] = _default_weights().copy()
+st.session_state["intel_weights"] = _normalize_weights(
+    st.session_state.get("intel_weights", {}),
+    _default_weights(),
+)
 
 ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe()
 ranked_df = _score_fichas(ficha_metrics_df, st.session_state["intel_weights"])
