@@ -850,20 +850,32 @@ def _default_weights() -> dict[str, float]:
 
 
 def _risk_to_score(value: object) -> float:
+    # Reglas solicitadas:
+    # A = 100% del peso (1.00)
+    # B = 66% del peso (0.66)
+    # C = 33% del peso (0.33)
+    # D = 0% del peso (0.00)
+    # "No aplica" se trata como A.
     norm = _normalize_column_key(value)
     if not norm:
         return 0.5
+
     tokens = set(norm.split())
     if "clase" in tokens:
         tokens.discard("clase")
-    if ("iv" in tokens) or ("4" in tokens) or ("alto" in tokens and "moderado" not in tokens) or ("critico" in tokens):
-        return 0.2
-    if ("iii" in tokens) or ("3" in tokens):
-        return 0.4
-    if ("ii" in tokens) or ("2" in tokens) or ("moderado" in tokens) or ("medio" in tokens):
-        return 0.7
-    if ("i" in tokens) or ("1" in tokens) or ("bajo" in tokens):
+
+    if "no aplica" in norm or "na" == norm or "n a" == norm or "n/a" in str(value or "").lower():
         return 1.0
+
+    if "a" in tokens or "i" in tokens or "1" in tokens or "bajo" in tokens:
+        return 1.0
+    if "b" in tokens or "ii" in tokens or "2" in tokens or ("bajo" in tokens and "moderado" in tokens):
+        return 0.66
+    if "c" in tokens or "iii" in tokens or "3" in tokens or ("alto" in tokens and "moderado" in tokens):
+        return 0.33
+    if "d" in tokens or "iv" in tokens or "4" in tokens or "alto" in tokens or "critico" in tokens:
+        return 0.0
+
     return 0.5
 
 
