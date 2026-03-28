@@ -61,15 +61,15 @@ def _placeholder_block(title: str, text: str, columns: list[str] | None = None) 
 
 def _render_sidebar() -> None:
     st.sidebar.markdown("### 🎛️ Filtros globales")
-    st.sidebar.selectbox("CT", ["Todos"], index=0)
-    st.sidebar.selectbox("Estado CT", ["Todos"], index=0)
+    st.sidebar.selectbox("Ficha técnica", ["Todas"], index=0)
+    st.sidebar.selectbox("Estado ficha", ["Todos"], index=0)
     st.sidebar.selectbox("Prioridad", ["Todas"], index=0)
     st.sidebar.selectbox("Proveedor", ["Todos"], index=0)
     st.sidebar.selectbox("País", ["Todos"], index=0)
-    st.sidebar.selectbox("Clasificación comercial", ["Todas"], index=0)
+    st.sidebar.selectbox("Clasificación de contacto", ["Todas"], index=0)
     st.sidebar.checkbox("Solo con contacto encontrado", value=False)
     st.sidebar.checkbox("Solo con seguimiento vencido", value=False)
-    st.sidebar.checkbox("Solo con proveedor aprobado", value=False)
+    st.sidebar.checkbox("Solo ficha viable con proveedor en conversación", value=False)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ Acciones rápidas")
@@ -83,41 +83,41 @@ def _render_sidebar() -> None:
 def _render_kpis() -> None:
     st.markdown("### 📌 Centro de control")
     cols = st.columns(5)
-    cols[0].metric("CT detectados", "—")
-    cols[1].metric("CT en seguimiento", "—")
-    cols[2].metric("CT en estudio", "—")
-    cols[3].metric("Proveedores externos", "—")
-    cols[4].metric("Seguimientos vencidos", "—")
+    cols[0].metric("Fichas detectadas con actos en DB", "—")
+    cols[1].metric("Fichas en seguimiento", "—")
+    cols[2].metric("Fichas en estudio", "—")
+    cols[3].metric("Seguimientos vencidos", "—")
+    cols[4].metric("Correos por enviar", "—")
 
     cols2 = st.columns(5)
-    cols2[0].metric("CT activos con proveedor útil", "—")
-    cols2[1].metric("CT sin proveedor", "—")
-    cols2[2].metric("CT no rentable", "—")
-    cols2[3].metric("Contactos pendientes", "—")
-    cols2[4].metric("Correos por enviar", "—")
+    cols2[0].metric("Ficha viable con proveedor en conversación", "—")
+    cols2[1].metric("Ficha en estudio pendiente de contactar", "—")
+    cols2[2].metric("Ficha en estudio sin encontrar proveedor", "—")
+    cols2[3].metric("Ficha contactada no rentable", "—")
+    cols2[4].metric("Justificaciones no rentables pendientes", "—")
 
 
 def _render_tab_dashboard() -> None:
     st.markdown("### Dashboard Ejecutivo")
     _placeholder_block(
         "Resumen ejecutivo",
-        "Aquí se mostrará un resumen textual automático del estado general del embudo comercial CT.",
+        "Aquí se mostrará un resumen textual automático del estado general del embudo comercial por ficha.",
     )
     _placeholder_block(
         "Alertas y tareas del día",
-        "Aquí se mostrarán alertas (vencimientos, CT sin avance, contactos pendientes) y tareas recomendadas.",
-        ["tipo_alerta", "ct", "proveedor", "prioridad", "fecha_limite", "accion_sugerida"],
+        "Aquí se mostrarán alertas (vencimientos, fichas sin avance, contactos pendientes) y tareas recomendadas.",
+        ["tipo_alerta", "ficha", "proveedor", "prioridad", "fecha_limite", "accion_sugerida"],
     )
     _placeholder_block(
-        "Top CT por score",
-        "Aquí se mostrará el ranking principal de CT para atacar hoy.",
-        ["ct", "descripcion", "score_total", "clasificacion", "estado"],
+        "Top fichas por score",
+        "Aquí se mostrará el ranking principal de fichas para atacar hoy.",
+        ["ficha", "descripcion", "score_total", "clasificacion", "estado"],
     )
 
 
 def _render_tab_deteccion_ct() -> None:
-    st.markdown("### Detección automática de CT")
-    sub1, sub2, sub3 = st.tabs(["Scoring", "Resultados", "Detalle CT"])
+    st.markdown("### Detección automática de fichas")
+    sub1, sub2, sub3 = st.tabs(["Scoring", "Resultados", "Detalle ficha"])
 
     with sub1:
         st.markdown("#### Ajuste de pesos del score")
@@ -138,10 +138,10 @@ def _render_tab_deteccion_ct() -> None:
 
     with sub2:
         _placeholder_block(
-            "Tabla principal de detección CT",
-            "Aquí se mostrarán los CT detectados con score y clasificación visual.",
+            "Tabla principal de detección de fichas",
+            "Aquí se mostrarán las fichas detectadas con score y clasificación visual.",
             [
-                "ct",
+                "ficha",
                 "descripcion",
                 "frecuencia_actos",
                 "monto_historico",
@@ -158,28 +158,28 @@ def _render_tab_deteccion_ct() -> None:
 
     with sub3:
         _placeholder_block(
-            "Descomposición del score por CT",
-            "Aquí se mostrará el detalle de cada factor del score para el CT seleccionado.",
-            ["ct", "factor", "valor_normalizado", "peso", "contribucion_score"],
+            "Descomposición del score por ficha",
+            "Aquí se mostrará el detalle de cada factor del score para la ficha seleccionada.",
+            ["ficha", "factor", "valor_normalizado", "peso", "contribucion_score"],
         )
 
 
 def _render_tab_seguimiento_ct() -> None:
-    st.markdown("### CT en seguimiento")
+    st.markdown("### Fichas en seguimiento")
     _placeholder_block(
-        "Pipeline de CT",
-        "Aquí se visualizará el pipeline manual de CT seleccionados para seguimiento.",
-        ["ct", "descripcion", "score_inicial", "prioridad_manual", "estado", "fecha_ingreso", "notas"],
+        "Pipeline de fichas",
+        "Aquí se visualizará el pipeline manual de fichas seleccionadas para seguimiento.",
+        ["ficha", "descripcion", "score_inicial", "prioridad_manual", "estado", "fecha_ingreso", "notas"],
     )
     st.caption("Estados sugeridos: pendiente, en estudio, listo para proveedores, pausado, descartado.")
 
 
 def _render_tab_estudio_profundo() -> None:
-    st.markdown("### Estudio profundo por CT")
-    st.selectbox("Selecciona CT para estudio", ["(sin datos en Fase 1)"], index=0)
+    st.markdown("### Estudio profundo por ficha")
+    st.selectbox("Selecciona ficha para estudio", ["(sin datos en Fase 1)"], index=0)
     _placeholder_block(
         "Acto por acto",
-        "Aquí se mostrará el detalle completo de actos asociados al CT seleccionado.",
+        "Aquí se mostrará el detalle completo de actos asociados a la ficha seleccionada.",
         [
             "fecha_publicacion",
             "fecha_adjudicacion",
@@ -211,7 +211,7 @@ def _render_tab_proveedores_historicos_ia() -> None:
     st.markdown("### Proveedores históricos + IA")
     _placeholder_block(
         "Tabla histórica por proveedor",
-        "Aquí se mostrarán solo proveedores con al menos una adjudicación en el CT seleccionado.",
+        "Aquí se mostrarán solo proveedores con al menos una adjudicación en la ficha seleccionada.",
         [
             "proveedor",
             "participaciones",
@@ -232,38 +232,12 @@ def _render_tab_proveedores_historicos_ia() -> None:
     )
 
 
-def _render_tab_proveedores_externos() -> None:
-    st.markdown("### Proveedores externos")
-    _placeholder_block(
-        "Formulario y registro",
-        "Aquí se capturarán proveedores externos por CT y su perfil comercial.",
-        [
-            "proveedor",
-            "fuente",
-            "pais",
-            "enlace",
-            "producto",
-            "marca",
-            "modelo",
-            "pais_origen",
-            "valor_agregado",
-            "clasificacion_comercial",
-            "moq",
-            "precio_visible",
-            "email",
-            "whatsapp",
-            "sitio_web",
-            "observaciones",
-        ],
-    )
-
-
 def _render_tab_contacto_correos() -> None:
     st.markdown("### Contacto y correos")
     _placeholder_block(
         "Generador de correo inicial",
-        "Aquí se generará el correo inicial usando variables del proveedor, CT y producto.",
-        ["proveedor", "ct", "asunto", "cuerpo_correo", "canal_sugerido"],
+        "Aquí se generará el correo inicial usando variables del proveedor, ficha y producto.",
+        ["proveedor", "ficha", "asunto", "cuerpo_correo", "canal_sugerido"],
     )
     st.caption("Acciones visuales previstas: copiar correo, abrir mailto, abrir WhatsApp, marcar enviado.")
 
@@ -274,7 +248,7 @@ def _render_tab_seguimiento_contacto() -> None:
         "Matriz de seguimiento",
         "Aquí se mostrará estado por proveedor/contacto/canal y días desde último contacto.",
         [
-            "ct",
+            "ficha",
             "proveedor",
             "canal_usado",
             "fecha_primer_contacto",
@@ -294,25 +268,40 @@ def _render_tab_seguimiento_contacto() -> None:
 
 
 def _render_tab_resultado_final() -> None:
-    st.markdown("### Resultado final por CT")
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    st.markdown("### Resultado final por ficha")
+    row1_col1, row1_col2 = st.columns(2)
+    with row1_col1:
         _placeholder_block(
-            "CT activo con proveedor útil",
-            "Aquí se listarán CT viables y listos para operar.",
-            ["ct", "proveedor", "marca", "modelo", "pais_origen", "email", "whatsapp", "estado_contacto", "precio", "observaciones"],
+            "Ficha viable con proveedor en conversación",
+            "Aquí se listarán fichas viables con contacto activo y proveedor útil.",
+            ["ficha", "proveedor", "marca", "modelo", "pais_origen", "email", "whatsapp", "estado_contacto", "precio", "observaciones"],
         )
-    with col2:
+    with row1_col2:
         _placeholder_block(
-            "CT sin proveedor conseguido",
-            "Aquí se listarán CT con intentos agotados sin proveedor confirmado.",
-            ["ct", "intentos", "canales_usados", "observaciones"],
+            "Ficha en estudio pendiente de contactar proveedor",
+            "Aquí se listarán fichas que requieren primer contacto o siguiente acción inmediata.",
+            ["ficha", "prioridad", "proveedor_objetivo", "canal_recomendado", "observaciones"],
         )
-    with col3:
+
+    row2_col1, row2_col2 = st.columns(2)
+    with row2_col1:
         _placeholder_block(
-            "CT con proveedor pero no rentable",
-            "Aquí se listarán CT descartados por precio/margen no viable.",
-            ["ct", "proveedor", "precio_obtenido", "rango_objetivo", "diferencia_%", "motivo_descarte"],
+            "Ficha en estudio sin encontrar proveedor",
+            "Aquí se listarán fichas con intentos agotados sin proveedor confirmado.",
+            ["ficha", "intentos_realizados", "canales_usados", "motivo_actual", "proximo_paso"],
+        )
+    with row2_col2:
+        _placeholder_block(
+            "Ficha contactada no rentable",
+            "Aquí se mostrará justificación económica con proveedores contactados y razones.",
+            [
+                "ficha",
+                "proveedores_contactados",
+                "precio_obtenido",
+                "rango_objetivo",
+                "diferencia_%",
+                "razones_no_rentable",
+            ],
         )
 
 
@@ -343,13 +332,12 @@ tabs = st.tabs(
     [
         "Dashboard",
         "Detección CT",
-        "CT en seguimiento",
-        "Estudio profundo por CT",
+        "Fichas en seguimiento",
+        "Estudio profundo por ficha",
         "Proveedores históricos + IA",
-        "Proveedores externos",
         "Contacto y correos",
         "Seguimiento de contacto",
-        "Resultado final por CT",
+        "Resultado final por ficha",
     ]
 )
 
@@ -364,11 +352,8 @@ with tabs[3]:
 with tabs[4]:
     _render_tab_proveedores_historicos_ia()
 with tabs[5]:
-    _render_tab_proveedores_externos()
-with tabs[6]:
     _render_tab_contacto_correos()
-with tabs[7]:
+with tabs[6]:
     _render_tab_seguimiento_contacto()
-with tabs[8]:
+with tabs[7]:
     _render_tab_resultado_final()
-
