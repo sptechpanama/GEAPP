@@ -75,6 +75,33 @@ CTNI_CONSULTA_URL = "https://ctni.minsa.gob.pa/Home/ConsultarFichas"
 CTNI_LOAD_FICHAS_URL = "https://ctni.minsa.gob.pa/Home/LoadFichas"
 INTEL_WEIGHTS_PROFILE_VERSION = "defaults_38_32_12_10_8_v1"
 INTEL_STUDY_DB_PATH = APP_ROOT / "data" / "inteligencia_ct_estudios.db"
+INTEL_TRACKING_WORKSHEET = "ct_fichas_seguimiento"
+INTEL_TRACKING_COLUMNS = [
+    "ficha",
+    "nombre_ficha",
+    "clase_riesgo",
+    "enlace_minsa",
+    "score_inicial",
+    "clasificacion",
+    "actos",
+    "actos_solo_ficha",
+    "actos_con_otras_fichas",
+    "monto_historico",
+    "proponentes_promedio",
+    "revision_proponentes",
+    "top1_ganador",
+    "top1_pct_ganadas",
+    "top2_ganador",
+    "top2_pct_ganadas",
+    "top3_ganador",
+    "top3_pct_ganadas",
+    "estado",
+    "fecha_ingreso",
+    "notas",
+    "created_at",
+    "updated_at",
+]
+INTEL_BOOL_TRUE = {"1", "true", "si", "sí", "yes", "y", "t", "x", "on"}
 
 RUN_STATUS_PENDING = "pendiente_consultas"
 RUN_STATUS_COMPLETED = "completada"
@@ -1414,6 +1441,12 @@ def _score_fichas(ficha_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataF
 
 
 def _ensure_study_state() -> list[dict]:
+    if not st.session_state.get("intel_tracking_loaded", False):
+        records, backend, status = _load_tracking_records_persistent()
+        st.session_state["intel_fichas_estudio"] = records
+        st.session_state["intel_tracking_backend"] = backend
+        st.session_state["intel_tracking_status"] = status
+        st.session_state["intel_tracking_loaded"] = True
     if "intel_fichas_estudio" not in st.session_state:
         st.session_state["intel_fichas_estudio"] = []
     return st.session_state["intel_fichas_estudio"]
@@ -1442,6 +1475,7 @@ def _add_ficha_to_study(row: pd.Series) -> bool:
         return False
     if any(str(item.get("ficha", "")).strip() == ficha for item in current):
         return False
+    now_iso = _utc_now_iso()
     current.append(
         {
             "ficha": ficha,
@@ -1465,9 +1499,14 @@ def _add_ficha_to_study(row: pd.Series) -> bool:
             "estado": "pendiente de estudio profundo",
             "fecha_ingreso": date.today().isoformat(),
             "notas": "",
+            "created_at": now_iso,
+            "updated_at": now_iso,
         }
     )
-    st.session_state["intel_fichas_estudio"] = current
+    st.session_state["intel_fichas_estudio"] = _normalize_tracking_records(current)
+    ok, msg = _persist_tracking_records(st.session_state["intel_fichas_estudio"])
+    st.session_state["intel_tracking_status"] = msg
+    st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
     return True
 
 
@@ -1494,6 +1533,218 @@ def _json_dumps(value: object) -> str:
         return json.dumps(value, ensure_ascii=False)
     except Exception:
         return "[]"
+
+
+def _intel_sheet_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+
+    if not isinstance(app_cfg, dict):
+        return ""
+
+    for key in ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"):
+        value = app_cfg.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _as_bool(value: object) -> bool:
+    text = _clean_text(value).lower()
+    return text in INTEL_BOOL_TRUE
+
+
+def _normalize_tracking_record(record: dict[str, object]) -> dict[str, object]:
+    now_iso = _utc_now_iso()
+    out: dict[str, object] = {key: "" for key in INTEL_TRACKING_COLUMNS}
+    out["ficha"] = _clean_text(record.get("ficha"))
+    out["nombre_ficha"] = _clean_text(record.get("nombre_ficha"))
+    out["clase_riesgo"] = _clean_text(record.get("clase_riesgo"))
+    out["enlace_minsa"] = _clean_text(record.get("enlace_minsa"))
+    out["score_inicial"] = round(_safe_float(record.get("score_inicial")), 4)
+    out["clasificacion"] = _clean_text(record.get("clasificacion"))
+    out["actos"] = _safe_int(record.get("actos"))
+    out["actos_solo_ficha"] = _safe_int(record.get("actos_solo_ficha"))
+    out["actos_con_otras_fichas"] = _safe_int(record.get("actos_con_otras_fichas"))
+    out["monto_historico"] = round(_safe_float(record.get("monto_historico")), 6)
+    out["proponentes_promedio"] = round(_safe_float(record.get("proponentes_promedio")), 6)
+    raw_revision = record.get("revision_proponentes", False)
+    if isinstance(raw_revision, str):
+        out["revision_proponentes"] = _as_bool(raw_revision)
+    else:
+        out["revision_proponentes"] = bool(raw_revision)
+    out["top1_ganador"] = _clean_text(record.get("top1_ganador"))
+    out["top1_pct_ganadas"] = round(_safe_float(record.get("top1_pct_ganadas")), 4)
+    out["top2_ganador"] = _clean_text(record.get("top2_ganador"))
+    out["top2_pct_ganadas"] = round(_safe_float(record.get("top2_pct_ganadas")), 4)
+    out["top3_ganador"] = _clean_text(record.get("top3_ganador"))
+    out["top3_pct_ganadas"] = round(_safe_float(record.get("top3_pct_ganadas")), 4)
+    out["estado"] = _clean_text(record.get("estado")) or "pendiente de estudio profundo"
+    out["fecha_ingreso"] = _clean_text(record.get("fecha_ingreso")) or date.today().isoformat()
+    out["notas"] = _clean_text(record.get("notas"))
+    out["created_at"] = _clean_text(record.get("created_at")) or now_iso
+    out["updated_at"] = _clean_text(record.get("updated_at")) or now_iso
+    return out
+
+
+def _normalize_tracking_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    by_ficha: dict[str, dict[str, object]] = {}
+    for raw in records or []:
+        norm = _normalize_tracking_record(raw or {})
+        ficha = str(norm.get("ficha", "")).strip()
+        if not ficha:
+            continue
+        prev = by_ficha.get(ficha)
+        if prev is None:
+            by_ficha[ficha] = norm
+            continue
+        prev_updated = str(prev.get("updated_at", "") or "")
+        curr_updated = str(norm.get("updated_at", "") or "")
+        by_ficha[ficha] = norm if curr_updated >= prev_updated else prev
+
+    normalized = list(by_ficha.values())
+    normalized.sort(key=lambda r: (str(r.get("fecha_ingreso", "")), str(r.get("ficha", ""))))
+    return normalized
+
+
+def _tracking_records_to_df(records: list[dict[str, object]]) -> pd.DataFrame:
+    normalized = _normalize_tracking_records(records)
+    if not normalized:
+        return pd.DataFrame(columns=INTEL_TRACKING_COLUMNS)
+    df = pd.DataFrame(normalized)
+    for col in INTEL_TRACKING_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    return df[INTEL_TRACKING_COLUMNS]
+
+
+def _read_tracking_records_from_sqlite() -> list[dict[str, object]]:
+    try:
+        _ensure_study_db()
+        with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+            df = pd.read_sql_query(
+                "SELECT * FROM seguimiento_fichas ORDER BY datetime(fecha_ingreso) ASC, ficha ASC",
+                conn,
+            )
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    records = df.to_dict(orient="records")
+    return _normalize_tracking_records(records)
+
+
+def _write_tracking_records_to_sqlite(records: list[dict[str, object]]) -> None:
+    _ensure_study_db()
+    normalized = _normalize_tracking_records(records)
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        conn.execute("DELETE FROM seguimiento_fichas")
+        if normalized:
+            rows = [
+                tuple(rec.get(col, "") for col in INTEL_TRACKING_COLUMNS)
+                for rec in normalized
+            ]
+            placeholders = ",".join(["?"] * len(INTEL_TRACKING_COLUMNS))
+            conn.executemany(
+                f"INSERT INTO seguimiento_fichas ({','.join(INTEL_TRACKING_COLUMNS)}) VALUES ({placeholders})",
+                rows,
+            )
+        conn.commit()
+
+
+def _read_tracking_records_from_sheets() -> tuple[list[dict[str, object]], str]:
+    sheet_id = _intel_sheet_id()
+    if not sheet_id:
+        return [], "SHEET_ID no configurado para seguimiento."
+    try:
+        from gspread.exceptions import WorksheetNotFound
+        from sheets import get_client, read_worksheet, write_worksheet
+    except Exception as exc:
+        return [], f"Modulo Sheets no disponible: {exc}"
+
+    try:
+        client, _ = get_client()
+        sh = client.open_by_key(sheet_id)
+        try:
+            sh.worksheet(INTEL_TRACKING_WORKSHEET)
+        except WorksheetNotFound:
+            sh.add_worksheet(title=INTEL_TRACKING_WORKSHEET, rows=200, cols=max(len(INTEL_TRACKING_COLUMNS), 10))
+            write_worksheet(
+                client,
+                sheet_id,
+                INTEL_TRACKING_WORKSHEET,
+                pd.DataFrame(columns=INTEL_TRACKING_COLUMNS),
+            )
+        df = read_worksheet(client, sheet_id, INTEL_TRACKING_WORKSHEET)
+        for col in INTEL_TRACKING_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        records = df[INTEL_TRACKING_COLUMNS].to_dict(orient="records")
+        return _normalize_tracking_records(records), ""
+    except Exception as exc:
+        return [], str(exc)
+
+
+def _write_tracking_records_to_sheets(records: list[dict[str, object]]) -> str:
+    sheet_id = _intel_sheet_id()
+    if not sheet_id:
+        return "SHEET_ID no configurado para seguimiento."
+    try:
+        from gspread.exceptions import WorksheetNotFound
+        from sheets import get_client, write_worksheet
+    except Exception as exc:
+        return f"Modulo Sheets no disponible: {exc}"
+
+    try:
+        client, _ = get_client()
+        sh = client.open_by_key(sheet_id)
+        try:
+            sh.worksheet(INTEL_TRACKING_WORKSHEET)
+        except WorksheetNotFound:
+            sh.add_worksheet(title=INTEL_TRACKING_WORKSHEET, rows=200, cols=max(len(INTEL_TRACKING_COLUMNS), 10))
+        df = _tracking_records_to_df(records)
+        write_worksheet(client, sheet_id, INTEL_TRACKING_WORKSHEET, df)
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
+def _load_tracking_records_persistent() -> tuple[list[dict[str, object]], str, str]:
+    sqlite_records = _read_tracking_records_from_sqlite()
+    sheet_records, sheet_error = _read_tracking_records_from_sheets()
+    merged = _normalize_tracking_records(sqlite_records + sheet_records)
+
+    if merged and merged != sqlite_records:
+        _write_tracking_records_to_sqlite(merged)
+
+    backend = "sqlite"
+    status = "Seguimiento cargado desde SQLite local."
+    if not sheet_error:
+        backend = "sheets+sqlite"
+        status = "Seguimiento cargado desde Sheets y sincronizado localmente."
+        if merged and merged != sheet_records:
+            sync_err = _write_tracking_records_to_sheets(merged)
+            if sync_err:
+                status = f"Seguimiento cargado (local) pero Sheets no sincronizo: {sync_err}"
+    elif sheet_error:
+        status = f"Seguimiento cargado localmente (Sheets no disponible: {sheet_error})"
+
+    return merged, backend, status
+
+
+def _persist_tracking_records(records: list[dict[str, object]]) -> tuple[bool, str]:
+    normalized = _normalize_tracking_records(records)
+    try:
+        _write_tracking_records_to_sqlite(normalized)
+    except Exception as exc:
+        return False, f"No se pudo guardar seguimiento en SQLite: {exc}"
+
+    sheet_error = _write_tracking_records_to_sheets(normalized)
+    if sheet_error:
+        return False, f"Guardado en local (SQLite). Sheets no disponible: {sheet_error}"
+    return True, "Guardado en Sheets y SQLite."
 
 
 def _ensure_study_db() -> None:
@@ -1598,9 +1849,39 @@ def _ensure_study_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS seguimiento_fichas (
+                ficha TEXT PRIMARY KEY,
+                nombre_ficha TEXT,
+                clase_riesgo TEXT,
+                enlace_minsa TEXT,
+                score_inicial REAL,
+                clasificacion TEXT,
+                actos INTEGER,
+                actos_solo_ficha INTEGER,
+                actos_con_otras_fichas INTEGER,
+                monto_historico REAL,
+                proponentes_promedio REAL,
+                revision_proponentes INTEGER DEFAULT 0,
+                top1_ganador TEXT,
+                top1_pct_ganadas REAL,
+                top2_ganador TEXT,
+                top2_pct_ganadas REAL,
+                top3_ganador TEXT,
+                top3_pct_ganadas REAL,
+                estado TEXT,
+                fecha_ingreso TEXT,
+                notas TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_runs_ficha ON estudio_runs(ficha)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_detalle_run ON estudio_detalle(run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_consultas_run ON estudio_consultas(run_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seguimiento_fichas_estado ON seguimiento_fichas(estado)")
         conn.commit()
 
 
@@ -2877,6 +3158,9 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
 def _render_tab_seguimiento_ct() -> None:
     st.markdown("### Fichas en seg.")
     fichas_estudio = _ensure_study_state()
+    tracking_status = str(st.session_state.get("intel_tracking_status", "") or "").strip()
+    if tracking_status:
+        st.caption(f"Persistencia seguimiento: {tracking_status}")
     if not fichas_estudio:
         st.info("Todavia no has enviado fichas a seguimiento desde 'Detecc. fichas'.")
         return
@@ -2937,16 +3221,24 @@ def _render_tab_seguimiento_ct() -> None:
         key="intel_seg_state",
     )
     if c3.button("Actualizar estado"):
+        now_iso = _utc_now_iso()
         for item in fichas_estudio:
             if str(item.get("ficha", "")) == str(target):
                 item["estado"] = new_state
-        st.session_state["intel_fichas_estudio"] = fichas_estudio
+                item["updated_at"] = now_iso
+        st.session_state["intel_fichas_estudio"] = _normalize_tracking_records(fichas_estudio)
+        ok, msg = _persist_tracking_records(st.session_state["intel_fichas_estudio"])
+        st.session_state["intel_tracking_status"] = msg
+        st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
         st.success(f"Estado actualizado para ficha {target}.")
 
     if st.button("Quitar ficha seleccionada"):
         st.session_state["intel_fichas_estudio"] = [
             x for x in fichas_estudio if str(x.get("ficha", "")) != str(target)
         ]
+        ok, msg = _persist_tracking_records(st.session_state["intel_fichas_estudio"])
+        st.session_state["intel_tracking_status"] = msg
+        st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
         st.success(f"Ficha {target} removida de seguimiento.")
         st.rerun()
 
