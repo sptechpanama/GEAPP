@@ -754,6 +754,13 @@ def _winner_price_from_row(row: pd.Series) -> float:
     return _parse_number(row.get("precio_referencia", 0))
 
 
+def _default_minsa_ficha_link(ficha_value: object) -> str:
+    ficha_num = re.sub(r"\D", "", str(ficha_value or ""))
+    if not ficha_num:
+        return ""
+    return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={ficha_num}&idparam=0"
+
+
 def _build_top_winners_by_ficha(exploded: pd.DataFrame) -> pd.DataFrame:
     if exploded.empty or "ficha" not in exploded.columns or "id" not in exploded.columns:
         return pd.DataFrame()
@@ -860,6 +867,10 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["enlace_minsa"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
     )
+    exploded["enlace_minsa"] = exploded.apply(
+        lambda r: str(r.get("enlace_minsa", "")).strip() or _default_minsa_ficha_link(r.get("ficha")),
+        axis=1,
+    )
     exploded["rs_requerido"] = exploded["ficha"].astype(str).map(
         lambda x: bool((ficha_reference_map.get(str(x)) or {}).get("rs_requerido", False))
     )
@@ -906,6 +917,10 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     )
     ficha_metrics["enlace_minsa"] = ficha_metrics["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
+    )
+    ficha_metrics["enlace_minsa"] = ficha_metrics.apply(
+        lambda r: str(r.get("enlace_minsa", "")).strip() or _default_minsa_ficha_link(r.get("ficha")),
+        axis=1,
     )
 
     winners_df = _build_top_winners_by_ficha(exploded)
@@ -1149,10 +1164,12 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
     )
 
     st.markdown("#### Top fichas por score (captacion)")
+    dash_view = ranked_df.copy()
+    dash_view["ver_ficha_minsa"] = dash_view["enlace_minsa"]
     dash_cols = [
         "ficha",
         "nombre_ficha",
-        "enlace_minsa",
+        "ver_ficha_minsa",
         "clase_riesgo",
         "score_total",
         "clasificacion",
@@ -1169,13 +1186,13 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
         "top3_ganador",
         "top3_pct_ganadas",
     ]
-    show_dash_cols = [c for c in dash_cols if c in ranked_df.columns]
+    show_dash_cols = [c for c in dash_cols if c in dash_view.columns]
     st.dataframe(
-        ranked_df[show_dash_cols].head(15),
+        dash_view[show_dash_cols].head(15),
         use_container_width=True,
         hide_index=True,
         column_config={
-            "enlace_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Abrir ficha"),
+            "ver_ficha_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Ver ficha"),
         },
     )
 
@@ -1254,7 +1271,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         ranking_cols = [
             "ficha",
             "nombre_ficha",
-            "enlace_minsa",
+            "ver_ficha_minsa",
             "clase_riesgo",
             "score_total",
             "clasificacion",
@@ -1276,13 +1293,14 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             ascending=[False, False, False],
             kind="stable",
         ).reset_index(drop=True)
+        view_df["ver_ficha_minsa"] = view_df["enlace_minsa"]
         show_rank_cols = [c for c in ranking_cols if c in view_df.columns]
         st.dataframe(
             view_df[show_rank_cols],
             use_container_width=True,
             hide_index=True,
             column_config={
-                "enlace_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Abrir ficha"),
+                "ver_ficha_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Ver ficha"),
             },
         )
 
@@ -1425,12 +1443,16 @@ def _render_tab_seguimiento_ct() -> None:
         "notas",
     ]
     cols = [c for c in show_cols if c in df_seg.columns]
+    df_seg_view = df_seg.copy()
+    if "enlace_minsa" in df_seg_view.columns:
+        df_seg_view["ver_ficha_minsa"] = df_seg_view["enlace_minsa"]
+        cols = ["ver_ficha_minsa" if c == "enlace_minsa" else c for c in cols]
     st.dataframe(
-        df_seg[cols],
+        df_seg_view[cols],
         use_container_width=True,
         hide_index=True,
         column_config={
-            "enlace_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Abrir ficha"),
+            "ver_ficha_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Ver ficha"),
         },
     )
 
