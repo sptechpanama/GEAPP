@@ -106,6 +106,65 @@ def _clean_text(value: object) -> str:
     return text
 
 
+def _canonical_party_name(value: object) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"^[\*\#\-\s]+", "", text)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = text.upper()
+    text = text.replace("&", " Y ")
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+
+    tokens = text.split(" ")
+    merged: list[str] = []
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "S" and idx + 1 < len(tokens) and tokens[idx + 1] == "A":
+            merged.append("SA")
+            idx += 2
+            continue
+        merged.append(token)
+        idx += 1
+    return " ".join(merged).strip()
+
+
+def _compute_proponentes_por_acto(df: pd.DataFrame) -> pd.Series:
+    proponent_cols = [
+        col for col in df.columns if re.fullmatch(r"Proponente\s+\d+", str(col).strip(), flags=re.IGNORECASE)
+    ]
+    if not proponent_cols:
+        return pd.Series([0] * len(df), index=df.index, dtype="int64")
+
+    # Cache local para evitar normalizar miles de veces los mismos nombres.
+    norm_cache: dict[str, str] = {}
+
+    def _norm_cached(raw_value: object) -> str:
+        raw = _clean_text(raw_value)
+        if not raw:
+            return ""
+        if raw in norm_cache:
+            return norm_cache[raw]
+        normalized = _canonical_party_name(raw)
+        norm_cache[raw] = normalized
+        return normalized
+
+    counts: list[int] = []
+    for row_values in df[proponent_cols].itertuples(index=False, name=None):
+        seen: set[str] = set()
+        for value in row_values:
+            normalized = _norm_cached(value)
+            if normalized:
+                seen.add(normalized)
+        counts.append(len(seen))
+
+    return pd.Series(counts, index=df.index, dtype="int64")
+
+
 def _normalize_column_key(value: object) -> str:
     text = str(value or "").strip().lower()
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
@@ -936,25 +995,49 @@ def _winner_price_from_row(row: pd.Series) -> float:
 def _build_top_winners_by_ficha(exploded: pd.DataFrame) -> pd.DataFrame:
     if exploded.empty or "ficha" not in exploded.columns or "id" not in exploded.columns:
         return pd.DataFrame()
+    if "ganador_norm" not in exploded.columns:
+        return pd.DataFrame()
 
-    base = exploded[["ficha", "id", "ganador"]].copy()
+    winner_display_col = "ganador"
+    if winner_display_col not in exploded.columns:
+        winner_display_col = "ganador_norm"
+
+    base = exploded[["ficha", "id", "ganador_norm", winner_display_col]].copy()
     base["ficha"] = base["ficha"].astype(str).str.strip()
-    base["ganador"] = base["ganador"].fillna("").astype(str).str.strip()
-    base = base[(base["ficha"] != "")].drop_duplicates(subset=["ficha", "id", "ganador"])
+    base["ganador_norm"] = base["ganador_norm"].fillna("").astype(str).str.strip()
+    base[winner_display_col] = base[winner_display_col].fillna("").astype(str).str.strip()
+    base = base[(base["ficha"] != "")].drop_duplicates(subset=["ficha", "id", "ganador_norm"])
     if base.empty:
         return pd.DataFrame()
 
     total_actos = base.groupby("ficha", dropna=False)["id"].nunique().rename("actos_total")
+
+    display_map = (
+        base[base["ganador_norm"] != ""]
+        .groupby(["ficha", "ganador_norm", winner_display_col], dropna=False)
+        .size()
+        .reset_index(name="freq")
+        .sort_values(["ficha", "ganador_norm", "freq"], ascending=[True, True, False], kind="stable")
+        .drop_duplicates(subset=["ficha", "ganador_norm"], keep="first")
+        .rename(columns={winner_display_col: "ganador_display"})
+    )
+
     wins = (
-        base[base["ganador"] != ""]
-        .groupby(["ficha", "ganador"], dropna=False)["id"]
+        base[base["ganador_norm"] != ""]
+        .groupby(["ficha", "ganador_norm"], dropna=False)["id"]
         .nunique()
         .reset_index(name="victorias")
     )
     if wins.empty:
         return pd.DataFrame()
 
-    wins = wins.sort_values(["ficha", "victorias", "ganador"], ascending=[True, False, True]).reset_index(drop=True)
+    wins = wins.merge(display_map[["ficha", "ganador_norm", "ganador_display"]], on=["ficha", "ganador_norm"], how="left")
+    wins["ganador_display"] = wins["ganador_display"].fillna("").astype(str)
+    wins = wins.sort_values(
+        ["ficha", "victorias", "ganador_display"],
+        ascending=[True, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
     wins["rank"] = wins.groupby("ficha").cumcount() + 1
     wins = wins[wins["rank"] <= 3].copy()
     wins = wins.merge(total_actos.reset_index(), on="ficha", how="left")
@@ -967,7 +1050,7 @@ def _build_top_winners_by_ficha(exploded: pd.DataFrame) -> pd.DataFrame:
             rank = int(item.get("rank", 0))
             if rank <= 0 or rank > 3:
                 continue
-            payload[f"top{rank}_ganador"] = str(item.get("ganador", "") or "")
+            payload[f"top{rank}_ganador"] = str(item.get("ganador_display", "") or "")
             payload[f"top{rank}_pct_ganadas"] = float(item.get("pct_ganadas", 0.0))
             payload[f"top{rank}_victorias"] = int(item.get("victorias", 0))
         rows.append(payload)
@@ -1008,6 +1091,18 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     work["num_participantes_num"] = work.get("num_participantes", 0).map(_parse_number)
     work["entidad"] = work.get("entidad", "").fillna("").astype(str).str.strip()
     work["ganador"] = work.get("razon_social", "").fillna("").astype(str).str.strip()
+    if "nombre_comercial" in work.columns:
+        no_winner_mask = work["ganador"].astype(str).str.strip() == ""
+        work.loc[no_winner_mask, "ganador"] = (
+            work.loc[no_winner_mask, "nombre_comercial"].fillna("").astype(str).str.strip()
+        )
+    work["ganador_norm"] = work["ganador"].map(_canonical_party_name)
+    work["proponentes_en_acto"] = _compute_proponentes_por_acto(work)
+    fallback_participantes = (
+        pd.to_numeric(work.get("num_participantes_num", 0), errors="coerce").fillna(0).round().clip(lower=0).astype(int)
+    )
+    missing_mask = work["proponentes_en_acto"] <= 0
+    work.loc[missing_mask, "proponentes_en_acto"] = fallback_participantes[missing_mask]
 
     exploded = work.explode("ficha_tokens").rename(columns={"ficha_tokens": "ficha_token"})
     exploded["ficha_token"] = exploded["ficha_token"].astype(str).str.strip()
@@ -1077,8 +1172,8 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
             "ficha": grouped["ficha"].first(),
             "actos": grouped["id"].nunique(),  # todos los actos donde aparece la ficha
             "monto_historico": grouped["monto_estimado"].sum(),
-            "ganadores_distintos": grouped["ganador"].apply(lambda s: s[s.str.strip() != ""].nunique()),
-            "proponentes_promedio": grouped["num_participantes_num"].mean(),
+            "ganadores_distintos": grouped["ganador_norm"].apply(lambda s: s[s.astype(str).str.strip() != ""].nunique()),
+            "proponentes_promedio": grouped["proponentes_en_acto"].mean(),
         }
     ).reset_index(drop=True)
     ficha_metrics["actos_solo_ficha"] = ficha_metrics["ficha"].map(actos_solo).fillna(0).astype(int)
@@ -1649,7 +1744,13 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
 
         st.markdown("#### Actos asociados")
         acts = ficha_acts_df[ficha_acts_df["ficha"].astype(str) == str(selected)].copy()
-        acts = acts.rename(columns={"ganador": "proveedor_ganador", "num_participantes": "participantes"})
+        acts = acts.rename(
+            columns={
+                "ganador": "proveedor_ganador",
+                "num_participantes": "participantes",
+                "proponentes_en_acto": "proponentes_detectados",
+            }
+        )
         show_cols = [
             "id",
             "ficha_token",
@@ -1663,6 +1764,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             "fecha_adjudicacion",
             "proveedor_ganador",
             "participantes",
+            "proponentes_detectados",
             "monto_estimado",
             "enlace",
         ]
@@ -1670,7 +1772,15 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         price_cols = [c for c in acts.columns if c.startswith("Precio Proponente ")]
         show_cols.extend(proponent_cols + price_cols)
         present_cols = [c for c in show_cols if c in acts.columns]
-        st.dataframe(acts[present_cols].head(500), use_container_width=True, hide_index=True)
+        column_config: dict[str, object] = {}
+        if "enlace" in present_cols:
+            column_config["enlace"] = st.column_config.LinkColumn("Enlace Panamá Compra", display_text="Ver acto")
+        st.dataframe(
+            acts[present_cols].head(500),
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+        )
 
     return ranked_df
 
