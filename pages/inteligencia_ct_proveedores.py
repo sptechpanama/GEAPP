@@ -69,6 +69,7 @@ FICHA_TOKEN_RE = re.compile(r"\b\d{3,8}\*?\b")
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
 CTNI_CONSULTA_URL = "https://ctni.minsa.gob.pa/Home/ConsultarFichas"
 CTNI_LOAD_FICHAS_URL = "https://ctni.minsa.gob.pa/Home/LoadFichas"
+INTEL_WEIGHTS_PROFILE_VERSION = "defaults_40_35_10_5_5_v1"
 
 
 def _normalize_text(value: object) -> str:
@@ -1191,6 +1192,19 @@ def _normalize_weights(stored: dict[str, float] | None, defaults: dict[str, floa
     return normalized
 
 
+def _ensure_default_weights_profile() -> dict[str, float]:
+    defaults = _default_weights()
+    profile_version = str(st.session_state.get("intel_weights_profile_version", "") or "")
+    if profile_version != INTEL_WEIGHTS_PROFILE_VERSION:
+        st.session_state["intel_weights"] = defaults.copy()
+        st.session_state["intel_weights_profile_version"] = INTEL_WEIGHTS_PROFILE_VERSION
+        return defaults.copy()
+
+    normalized = _normalize_weights(st.session_state.get("intel_weights", {}), defaults)
+    st.session_state["intel_weights"] = normalized
+    return normalized
+
+
 def _score_fichas(ficha_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataFrame:
     if ficha_df.empty:
         return ficha_df
@@ -1403,9 +1417,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
     sub1, sub2, sub3 = st.tabs(["Scoring", "Resultados", "Detalle ficha"])
     default_weights = _default_weights()
 
-    stored_weights = st.session_state.get("intel_weights", {})
-    weights = _normalize_weights(stored_weights, default_weights)
-    st.session_state["intel_weights"] = weights
+    weights = _ensure_default_weights_profile()
 
     if ficha_metrics_df.empty:
         with sub1:
@@ -1883,10 +1895,7 @@ def _render_architecture_notes() -> None:
 st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 
-st.session_state["intel_weights"] = _normalize_weights(
-    st.session_state.get("intel_weights", {}),
-    _default_weights(),
-)
+_ensure_default_weights_profile()
 
 ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe()
 ranked_df = _score_fichas(ficha_metrics_df, st.session_state["intel_weights"])
