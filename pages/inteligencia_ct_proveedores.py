@@ -1141,11 +1141,11 @@ def _classify_score(score: float) -> str:
 
 def _default_weights() -> dict[str, float]:
     return {
-        "actos": 20.0,
-        "monto": 25.0,
-        "ganadores": 20.0,
-        "proponentes": 20.0,
-        "riesgo": 15.0,
+        "actos": 35.0,
+        "monto": 40.0,
+        "ganadores": 10.0,
+        "proponentes": 5.0,
+        "riesgo": 5.0,
     }
 
 
@@ -1419,26 +1419,52 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
     with sub1:
         st.markdown("#### Ajuste de pesos del score")
         c1, c2, c3 = st.columns(3)
-        weights["actos"] = c1.slider("Peso frecuencia", 0.0, 100.0, float(weights["actos"]), 1.0)
-        weights["monto"] = c1.slider("Peso monto historico", 0.0, 100.0, float(weights["monto"]), 1.0)
-        weights["ganadores"] = c2.slider("Peso ganadores distintos", 0.0, 100.0, float(weights["ganadores"]), 1.0)
-        weights["proponentes"] = c2.slider(
-            "Peso proponentes promedio por acto", 0.0, 100.0, float(weights["proponentes"]), 1.0
+        weights["actos"] = c1.slider(
+            "Peso frecuencia (numero de actos)",
+            0.0,
+            100.0,
+            float(weights["actos"]),
+            1.0,
         )
-        weights["riesgo"] = c3.slider("Peso clase de riesgo", 0.0, 100.0, float(weights["riesgo"]), 1.0)
+        weights["monto"] = c1.slider(
+            "Peso monto historico (dinero)",
+            0.0,
+            100.0,
+            float(weights["monto"]),
+            1.0,
+        )
+        weights["ganadores"] = c2.slider(
+            "Peso ganadores distintos (competencia)",
+            0.0,
+            100.0,
+            float(weights["ganadores"]),
+            1.0,
+        )
+        weights["proponentes"] = c2.slider(
+            "Peso proponentes por acto (competencia)",
+            0.0,
+            100.0,
+            float(weights["proponentes"]),
+            1.0,
+        )
+        weights["riesgo"] = c3.slider(
+            "Peso clase de riesgo (complejidad)",
+            0.0,
+            100.0,
+            float(weights["riesgo"]),
+            1.0,
+        )
         st.session_state["intel_weights"] = weights
 
         total_weights = sum(weights.values())
-        st.caption(f"Suma de pesos: {total_weights:.1f} (debe ser 100)")
-        if abs(total_weights - 100.0) > 0.001:
-            st.error("La suma de pesos debe ser exactamente 100 para calcular el score.")
+        st.caption(
+            f"Suma de pesos: {total_weights:.1f}. "
+            "El score se normaliza automaticamente con la suma actual."
+        )
 
         b1, b2, b3, b4 = st.columns(4)
         if b1.button("Recalcular"):
-            if abs(total_weights - 100.0) > 0.001:
-                st.warning("No se recalcula: ajusta los pesos para sumar 100.")
-            else:
-                st.success("Scoring recalculado con los pesos actuales.")
+            st.success("Scoring recalculado con los pesos actuales.")
         if b2.button("Restaurar default"):
             st.session_state["intel_weights"] = default_weights.copy()
             st.rerun()
@@ -1453,13 +1479,6 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
                 st.session_state["intel_weights"] = weights
                 st.rerun()
         b4.button("Guardar config (fase 2)", disabled=True)
-
-    if abs(sum(weights.values()) - 100.0) > 0.001:
-        with sub2:
-            st.warning("Ajusta los pesos para sumar 100 y ver el ranking.")
-        with sub3:
-            st.info("Ajusta pesos para habilitar detalle por ficha.")
-        return pd.DataFrame()
 
     ranked_df = _score_fichas(ficha_metrics_df, weights)
     discarded = set(_ensure_discarded_state())
