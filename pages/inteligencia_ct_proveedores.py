@@ -92,11 +92,46 @@ def _parse_number(value: object) -> float:
         return 0.0
 
 
+def _clean_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in {"nan", "none", "null", "n/a", "<na>"}:
+        return ""
+    return text
+
+
 def _normalize_column_key(value: object) -> str:
     text = str(value or "").strip().lower()
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_minsa_link(value: object) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+
+    url_match = re.search(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)
+    if url_match:
+        return url_match.group(0).rstrip(".,);")
+
+    path_match = re.search(
+        r"/Utilities/LoadFicha/\?idficha=\d+[^\s\"'<>]*",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if path_match:
+        path = path_match.group(0)
+        return f"https://ctni.minsa.gob.pa{path}"
+
+    id_match = re.search(r"idficha\s*=\s*(\d+)", text, flags=re.IGNORECASE)
+    if id_match:
+        return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={id_match.group(1)}&idparam=0"
+
+    return ""
 
 
 def _resolve_column_by_alias(columns: list[str], aliases: list[str]) -> str:
@@ -486,8 +521,7 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
         raw_link = str(row.get(enlace_col, "")).strip() if enlace_col else ""
         if raw_link.lower() in {"nan", "none", "null"}:
             raw_link = ""
-        if raw_link and not raw_link.lower().startswith(("http://", "https://")):
-            raw_link = ""
+        raw_link = _normalize_minsa_link(raw_link)
         rs_required = _is_registro_sanitario_required(row.get(registro_col, "")) if registro_col else False
         tokens = _extract_ficha_tokens(row.get(ficha_col, ""))
         for token in tokens:
@@ -754,13 +788,6 @@ def _winner_price_from_row(row: pd.Series) -> float:
     return _parse_number(row.get("precio_referencia", 0))
 
 
-def _default_minsa_ficha_link(ficha_value: object) -> str:
-    ficha_num = re.sub(r"\D", "", str(ficha_value or ""))
-    if not ficha_num:
-        return ""
-    return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={ficha_num}&idparam=0"
-
-
 def _build_top_winners_by_ficha(exploded: pd.DataFrame) -> pd.DataFrame:
     if exploded.empty or "ficha" not in exploded.columns or "id" not in exploded.columns:
         return pd.DataFrame()
@@ -867,10 +894,7 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["enlace_minsa"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
     )
-    exploded["enlace_minsa"] = exploded.apply(
-        lambda r: str(r.get("enlace_minsa", "")).strip() or _default_minsa_ficha_link(r.get("ficha")),
-        axis=1,
-    )
+    exploded["enlace_minsa"] = exploded["enlace_minsa"].map(_normalize_minsa_link)
     exploded["rs_requerido"] = exploded["ficha"].astype(str).map(
         lambda x: bool((ficha_reference_map.get(str(x)) or {}).get("rs_requerido", False))
     )
@@ -918,10 +942,7 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     ficha_metrics["enlace_minsa"] = ficha_metrics["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
     )
-    ficha_metrics["enlace_minsa"] = ficha_metrics.apply(
-        lambda r: str(r.get("enlace_minsa", "")).strip() or _default_minsa_ficha_link(r.get("ficha")),
-        axis=1,
-    )
+    ficha_metrics["enlace_minsa"] = ficha_metrics["enlace_minsa"].map(_normalize_minsa_link)
 
     winners_df = _build_top_winners_by_ficha(exploded)
     if not winners_df.empty:
