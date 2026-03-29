@@ -132,6 +132,14 @@ def _normalize_minsa_link(value: object) -> str:
     if id_match:
         return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={id_match.group(1)}&idparam=0"
 
+    print_match = re.search(r"print\s*\(\s*(\d+)\s*\)", text, flags=re.IGNORECASE)
+    if print_match:
+        return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={print_match.group(1)}&idparam=0"
+
+    id_match_2 = re.search(r"IdFicha\s*=\s*(\d+)", text, flags=re.IGNORECASE)
+    if id_match_2:
+        return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={id_match_2.group(1)}&idparam=0"
+
     return ""
 
 
@@ -448,6 +456,47 @@ def _find_drive_file_id_by_names(names: list[str]) -> str:
         return ""
 
 
+def _table_exists_sqlite(db_path: Path, table_name: str) -> bool:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower(?)",
+                (table_name,),
+            ).fetchone()
+            return bool(row)
+    except Exception:
+        return False
+
+
+def _load_reference_df_from_backend() -> pd.DataFrame:
+    # 1) SQLite local/runtime
+    db_path = _resolve_db_path()
+    sqlite_tables = ["fichas_tecnicas", "fichas_ctni", "criterios_tecnicos"]
+    if db_path and db_path.exists():
+        for table in sqlite_tables:
+            if _table_exists_sqlite(db_path, table):
+                try:
+                    with sqlite3.connect(db_path) as conn:
+                        return pd.read_sql_query(f"SELECT * FROM {table}", conn)
+                except Exception:
+                    continue
+
+    # 2) Postgres/Supabase
+    db_url = _supabase_db_url()
+    if db_url:
+        pg_tables = ["fichas_tecnicas", "fichas_ctni", "criterios_tecnicos"]
+        for table in pg_tables:
+            try:
+                engine = create_engine(db_url, pool_pre_ping=True)
+                with engine.connect() as conn:
+                    df = pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
+                    if not df.empty:
+                        return df
+            except Exception:
+                continue
+    return pd.DataFrame()
+
+
 def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, object]]:
     if df.empty:
         return {}
@@ -504,6 +553,8 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
             "link minsa",
             "url",
             "enlace",
+            "acciones",
+            "accion",
         ],
     )
     if not ficha_col:
@@ -531,6 +582,11 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
         if raw_link.lower() in {"nan", "none", "null"}:
             raw_link = ""
         raw_link = _normalize_minsa_link(raw_link)
+        if not raw_link:
+            for cell_val in row.tolist():
+                raw_link = _normalize_minsa_link(cell_val)
+                if raw_link:
+                    break
         rs_required = _is_registro_sanitario_required(row.get(registro_col, "")) if registro_col else False
         tokens = _extract_ficha_tokens(row.get(ficha_col, ""))
         for token in tokens:
@@ -633,6 +689,16 @@ def _load_ficha_reference_map() -> dict[str, dict[str, object]]:
                     merged_map = _merge_reference_maps(merged_map, mapped)
             except Exception:
                 pass
+
+    # 5) Tabla de referencia en DB (sqlite/postgres), util para completar enlaces faltantes.
+    try:
+        backend_df = _load_reference_df_from_backend()
+        if not backend_df.empty:
+            mapped = _build_ficha_reference_map_from_df(backend_df)
+            if mapped:
+                merged_map = _merge_reference_maps(merged_map, mapped)
+    except Exception:
+        pass
 
     return merged_map
 
@@ -1183,7 +1249,7 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
             ranked_df["enlace_minsa"]
             .fillna("")
             .astype(str)
-            .str.contains(r"/Utilities/LoadFicha/\\?idficha=", case=False, regex=True)
+            .str.contains(r"/Utilities/LoadFicha/\?idficha=", case=False, regex=True)
             .sum()
         )
         st.caption(
