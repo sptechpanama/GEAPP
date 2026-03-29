@@ -9,6 +9,7 @@ from datetime import date, datetime
 import io
 import os
 import unicodedata
+from html import unescape
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -1651,6 +1652,206 @@ def _extract_estudio_dates(row: pd.Series) -> dict[str, str]:
     }
 
 
+def _recompute_days_act_to_oc(dates: dict[str, str]) -> dict[str, str]:
+    d_cele = _parse_any_date(dates.get("fecha_celebracion", ""))
+    d_oc = _parse_any_date(dates.get("fecha_orden_compra", ""))
+    if not pd.isna(d_cele) and not pd.isna(d_oc):
+        dates["dias_acto_a_oc"] = float((d_oc - d_cele).days)
+    else:
+        dates["dias_acto_a_oc"] = 0.0
+    return dates
+
+
+def _extract_labeled_value(lines: list[str], labels: list[str]) -> str:
+    if not lines:
+        return ""
+    label_norms = [_normalize_column_key(lbl) for lbl in labels]
+    for idx, line in enumerate(lines):
+        norm = _normalize_column_key(line)
+        for lbl in label_norms:
+            if not lbl:
+                continue
+            if norm.startswith(lbl):
+                # Caso: "Etiqueta: valor"
+                parts = re.split(r":|-", line, maxsplit=1)
+                if len(parts) > 1:
+                    val = _clean_text(parts[1])
+                    if val:
+                        return val
+                # Caso: etiqueta en línea y valor en línea siguiente
+                if idx + 1 < len(lines):
+                    next_val = _clean_text(lines[idx + 1])
+                    if next_val and _normalize_column_key(next_val) != lbl:
+                        return next_val
+    return ""
+
+
+def _extract_dates_from_text(text: str, context_labels: list[str]) -> str:
+    if not text:
+        return ""
+    # Busca una fecha cercana a una etiqueta contextual.
+    for lbl in context_labels:
+        pattern = re.compile(
+            rf"{re.escape(lbl)}[^0-9]{{0,30}}(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}})",
+            flags=re.IGNORECASE,
+        )
+        m = pattern.search(text)
+        if m:
+            return _clean_text(m.group(1))
+    return ""
+
+
+def _normalize_html_to_lines(html_text: str) -> list[str]:
+    if not html_text:
+        return []
+    work = re.sub(r"(?is)<script.*?>.*?</script>", " ", html_text)
+    work = re.sub(r"(?is)<style.*?>.*?</style>", " ", work)
+    work = re.sub(r"(?i)<br\\s*/?>", "\n", work)
+    work = re.sub(r"(?i)</(p|div|tr|li|h\\d)>", "\n", work)
+    work = re.sub(r"(?is)<[^>]+>", " ", work)
+    work = unescape(work)
+    lines = [re.sub(r"\s+", " ", x).strip() for x in work.splitlines()]
+    return [x for x in lines if x]
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_acto_html(url: str) -> str:
+    try:
+        response = requests.get(
+            url,
+            timeout=25,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            },
+        )
+        response.raise_for_status()
+        return str(response.text or "")
+    except Exception:
+        return ""
+
+
+def _get_openai_api_key() -> str:
+    key = _clean_text(os.getenv("OPENAI_API_KEY"))
+    if key:
+        return key
+    try:
+        key = _clean_text(st.secrets.get("OPENAI_API_KEY", ""))
+    except Exception:
+        key = ""
+    return key
+
+
+def _parse_json_block(text: str) -> dict[str, object]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", raw, flags=re.S)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+
+def _ai_extract_fields_from_text(
+    text_excerpt: str,
+    ficha: str,
+    ficha_name: str,
+    acto_nombre: str,
+) -> dict[str, object]:
+    api_key = _get_openai_api_key()
+    if not api_key or not text_excerpt:
+        return {}
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception:
+        return {}
+    try:
+        client = OpenAI(api_key=api_key)
+        prompt = (
+            "Extrae solo datos si aparecen explícitos. No inventes. "
+            "Responde JSON con claves: marca, modelo, pais_origen, fecha_celebracion, "
+            "fecha_orden_compra, fecha_publicacion, fecha_adjudicacion, "
+            "precio_unitario_participacion, precio_unitario_referencia, cantidad, certeza, evidencia. "
+            f"Ficha: {ficha} | Nombre ficha: {ficha_name} | Acto: {acto_nombre}. "
+            "Si falta algo deja cadena vacía."
+        )
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=[
+                {"role": "system", "content": "Eres extractor estricto de datos públicos. Nunca inventes."},
+                {"role": "user", "content": prompt + "\n\nContenido:\n" + text_excerpt[:12000]},
+            ],
+            max_output_tokens=800,
+        )
+        output_text = _clean_text(getattr(response, "output_text", ""))
+        return _parse_json_block(output_text)
+    except Exception:
+        return {}
+
+
+def _extract_live_fields_from_acto_url(
+    acto_url: str,
+    ficha: str,
+    ficha_name: str,
+    acto_nombre: str,
+) -> dict[str, object]:
+    if not acto_url:
+        return {}
+    html_text = _fetch_acto_html(acto_url)
+    if not html_text:
+        return {}
+    lines = _normalize_html_to_lines(html_text)
+    text_flat = " | ".join(lines)
+
+    extracted = {
+        "marca": _extract_labeled_value(lines, ["Marca", "Marca ofertada"]),
+        "modelo": _extract_labeled_value(lines, ["Modelo", "N° de Catálogo o Modelo", "N de catalogo o modelo"]),
+        "pais_origen": _extract_labeled_value(lines, ["País de origen", "Pais de origen", "Origen"]),
+        "precio_unitario_participacion": _extract_labeled_value(
+            lines, ["Precio unitario", "Precio ofertado unitario", "Precio de participación"]
+        ),
+        "precio_unitario_referencia": _extract_labeled_value(
+            lines, ["Precio unitario de referencia", "Precio de referencia"]
+        ),
+        "cantidad": _extract_labeled_value(lines, ["Cantidad"]),
+        "fecha_celebracion": _extract_dates_from_text(text_flat, ["fecha de celebración", "fecha celebracion", "celebración"]),
+        "fecha_orden_compra": _extract_dates_from_text(text_flat, ["orden de compra", "fecha oc", "fecha de oc"]),
+        "fecha_publicacion": _extract_dates_from_text(text_flat, ["fecha de publicación", "fecha publicacion"]),
+        "fecha_adjudicacion": _extract_dates_from_text(text_flat, ["fecha de adjudicación", "fecha adjudicacion"]),
+        "evidencia": "",
+    }
+
+    missing_core = [
+        k for k in ("marca", "modelo", "pais_origen", "fecha_celebracion", "precio_unitario_participacion")
+        if not _clean_text(extracted.get(k, ""))
+    ]
+    if missing_core:
+        ai_payload = _ai_extract_fields_from_text(text_flat[:15000], ficha, ficha_name, acto_nombre)
+        for key in (
+            "marca",
+            "modelo",
+            "pais_origen",
+            "fecha_celebracion",
+            "fecha_orden_compra",
+            "fecha_publicacion",
+            "fecha_adjudicacion",
+            "precio_unitario_participacion",
+            "precio_unitario_referencia",
+            "cantidad",
+            "evidencia",
+        ):
+            if not _clean_text(extracted.get(key, "")):
+                extracted[key] = _clean_text(ai_payload.get(key, ""))
+    return extracted
+
+
 def _build_study_payload(
     ficha: str,
     ficha_name: str,
@@ -1678,6 +1879,27 @@ def _build_study_payload(
         marca_base = _pick_alias_value(row, ["marca", "marca_item", "marca ofertada"])
         modelo_base = _pick_alias_value(row, ["modelo", "modelo_item", "n° de catalogo o modelo", "n de catalogo o modelo"])
         pais_base = _pick_alias_value(row, ["pais_origen", "pais de origen", "origen"])
+        live_fields = _extract_live_fields_from_acto_url(acto_url, ficha, ficha_name, acto_nombre) if acto_url else {}
+
+        if not marca_base:
+            marca_base = _clean_text(live_fields.get("marca", ""))
+        if not modelo_base:
+            modelo_base = _clean_text(live_fields.get("modelo", ""))
+        if not pais_base:
+            pais_base = _clean_text(live_fields.get("pais_origen", ""))
+        if _clean_text(dates.get("fecha_celebracion", "")) == "":
+            dates["fecha_celebracion"] = _clean_text(live_fields.get("fecha_celebracion", ""))
+        if _clean_text(dates.get("fecha_orden_compra", "")) == "":
+            dates["fecha_orden_compra"] = _clean_text(live_fields.get("fecha_orden_compra", ""))
+        if _clean_text(dates.get("fecha_publicacion", "")) == "":
+            dates["fecha_publicacion"] = _clean_text(live_fields.get("fecha_publicacion", ""))
+        if _clean_text(dates.get("fecha_adjudicacion", "")) == "":
+            dates["fecha_adjudicacion"] = _clean_text(live_fields.get("fecha_adjudicacion", ""))
+        dates = _recompute_days_act_to_oc(dates)
+        if precio_ref <= 0:
+            precio_ref = _parse_number(live_fields.get("precio_unitario_referencia", 0))
+        if cantidad <= 0:
+            cantidad = _parse_number(live_fields.get("cantidad", 0))
 
         proponent_candidates: list[tuple[str, float]] = []
         available_prices: list[float] = []
@@ -1695,6 +1917,10 @@ def _build_study_payload(
 
         if not proponent_candidates and proveedor_ganador:
             proponent_candidates.append((proveedor_ganador, _parse_number(row.get("monto_estimado", 0))))
+        if len(proponent_candidates) == 1 and _parse_number(proponent_candidates[0][1]) <= 0:
+            live_part_price = _parse_number(live_fields.get("precio_unitario_participacion", 0))
+            if live_part_price > 0:
+                proponent_candidates[0] = (proponent_candidates[0][0], live_part_price)
 
         if int(_safe_int(row.get("fichas_en_acto", 1))) > 1:
             consultas_rows.append(
@@ -1798,7 +2024,7 @@ def _build_study_payload(
                     "fecha_adjudicacion": dates["fecha_adjudicacion"],
                     "fecha_orden_compra": dates["fecha_orden_compra"],
                     "dias_acto_a_oc": dates["dias_acto_a_oc"],
-                    "observaciones": " | ".join(observ),
+                    "observaciones": " | ".join([x for x in (observ + [_clean_text(live_fields.get("evidencia", ""))]) if _clean_text(x)]),
                     "estado_revision": "pendiente" if requiere_revision else "ok",
                     "nivel_certeza": certeza,
                     "requiere_revision": requiere_revision,
