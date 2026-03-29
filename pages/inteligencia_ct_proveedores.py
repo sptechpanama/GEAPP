@@ -66,6 +66,7 @@ authenticator.logout("Cerrar sesión", location="sidebar")
 
 FICHA_TOKEN_RE = re.compile(r"\b\d{3,8}\*?\b")
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
+CTNI_CONSULTA_URL = "https://ctni.minsa.gob.pa/Home/ConsultarFichas"
 
 
 def _normalize_text(value: object) -> str:
@@ -132,6 +133,14 @@ def _normalize_minsa_link(value: object) -> str:
         return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={id_match.group(1)}&idparam=0"
 
     return ""
+
+
+def _safe_minsa_link(value: object) -> str:
+    direct = _normalize_minsa_link(value)
+    if direct:
+        return direct
+    # Fallback seguro: lleva al portal oficial de consulta (sin idficha inválido).
+    return CTNI_CONSULTA_URL
 
 
 def _resolve_column_by_alias(columns: list[str], aliases: list[str]) -> str:
@@ -894,7 +903,7 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["enlace_minsa"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
     )
-    exploded["enlace_minsa"] = exploded["enlace_minsa"].map(_normalize_minsa_link)
+    exploded["enlace_minsa"] = exploded["enlace_minsa"].map(_safe_minsa_link)
     exploded["rs_requerido"] = exploded["ficha"].astype(str).map(
         lambda x: bool((ficha_reference_map.get(str(x)) or {}).get("rs_requerido", False))
     )
@@ -942,7 +951,7 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     ficha_metrics["enlace_minsa"] = ficha_metrics["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
     )
-    ficha_metrics["enlace_minsa"] = ficha_metrics["enlace_minsa"].map(_normalize_minsa_link)
+    ficha_metrics["enlace_minsa"] = ficha_metrics["enlace_minsa"].map(_safe_minsa_link)
 
     winners_df = _build_top_winners_by_ficha(exploded)
     if not winners_df.empty:
@@ -1169,6 +1178,18 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
         st.caption(f"Estado fuente: {db_status}")
     if risk_status:
         st.caption(risk_status)
+    if not ranked_df.empty and "enlace_minsa" in ranked_df.columns:
+        direct_links = (
+            ranked_df["enlace_minsa"]
+            .fillna("")
+            .astype(str)
+            .str.contains(r"/Utilities/LoadFicha/\\?idficha=", case=False, regex=True)
+            .sum()
+        )
+        st.caption(
+            f"Enlaces MINSA: {int(direct_links):,} directos, "
+            f"{int(len(ranked_df) - int(direct_links)):,} con fallback a consulta CTNI."
+        )
     if ranked_df.empty:
         st.warning("No hay fichas detectadas en la base para construir el dashboard.")
         return
