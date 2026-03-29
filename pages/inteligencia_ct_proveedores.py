@@ -1602,16 +1602,17 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         if discarded:
             st.caption(f"Fichas descartadas ocultas: {len(discarded)}")
         ranking_cols = [
+            "N°",
             "ficha",
             "nombre_ficha",
             "ver_ficha_minsa",
-            "clase_riesgo",
             "score_total",
             "clasificacion",
             "actos",
             "actos_solo_ficha",
             "actos_con_otras_fichas",
             "monto_historico",
+            "clase_riesgo",
             "ganadores_distintos",
             "proponentes_promedio",
             "top1_ganador",
@@ -1626,6 +1627,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             ascending=[False, False, False],
             kind="stable",
         ).reset_index(drop=True)
+        view_df["N°"] = view_df.index + 1
         view_df["ver_ficha_minsa"] = view_df["enlace_minsa"]
         show_rank_cols = [c for c in ranking_cols if c in view_df.columns]
         st.dataframe(
