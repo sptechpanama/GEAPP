@@ -70,7 +70,7 @@ FICHA_TOKEN_RE = re.compile(r"\b\d{3,8}\*?\b")
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
 CTNI_CONSULTA_URL = "https://ctni.minsa.gob.pa/Home/ConsultarFichas"
 CTNI_LOAD_FICHAS_URL = "https://ctni.minsa.gob.pa/Home/LoadFichas"
-INTEL_WEIGHTS_PROFILE_VERSION = "defaults_40_35_10_5_5_v1"
+INTEL_WEIGHTS_PROFILE_VERSION = "defaults_38_32_12_10_8_v1"
 
 
 def _normalize_text(value: object) -> str:
@@ -1302,11 +1302,11 @@ def _classify_score(score: float) -> str:
 
 def _default_weights() -> dict[str, float]:
     return {
-        "actos": 35.0,
-        "monto": 40.0,
-        "ganadores": 10.0,
-        "proponentes": 5.0,
-        "riesgo": 5.0,
+        "actos": 32.0,
+        "monto": 38.0,
+        "ganadores": 12.0,
+        "proponentes": 10.0,
+        "riesgo": 8.0,
     }
 
 
