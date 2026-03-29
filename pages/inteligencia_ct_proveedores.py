@@ -1095,7 +1095,7 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
             merged_text = work[fallback_cols].fillna("").astype(str).agg(" ".join, axis=1)
             work["ficha_tokens"] = merged_text.map(_extract_ficha_tokens)
 
-    # Ventana temporal de 12 meses (prioriza fecha_adjudicacion y usa fallback con otras fechas).
+    # Cobertura temporal informativa (sin filtrar): prioriza fecha_adjudicacion y usa fallback.
     date_candidates = [c for c in ("fecha_adjudicacion", "fecha", "fecha_publicacion", "publicacion") if c in work.columns]
     if date_candidates:
         parsed_cols: list[str] = []
@@ -1106,15 +1106,23 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
         work["fecha_referencia"] = work[parsed_cols[0]]
         for parsed_col in parsed_cols[1:]:
             work["fecha_referencia"] = work["fecha_referencia"].fillna(work[parsed_col])
-        cutoff = pd.Timestamp.today().normalize() - pd.DateOffset(months=12)
-        total_before_window = len(work)
-        work = work[work["fecha_referencia"].notna() & (work["fecha_referencia"] >= cutoff)].copy()
-        st.session_state["intel_time_window_status"] = (
-            f"Ventana 12 meses aplicada: {len(work):,} de {total_before_window:,} registros."
-        )
+        valid_dates = work["fecha_referencia"].dropna()
+        if not valid_dates.empty:
+            start = valid_dates.min().date().isoformat()
+            end = valid_dates.max().date().isoformat()
+            st.session_state["intel_time_window_status"] = (
+                f"Historico completo (sin filtro temporal): {len(work):,} registros. "
+                f"Cobertura fecha ref: {start} -> {end}."
+            )
+        else:
+            st.session_state["intel_time_window_status"] = (
+                f"Historico completo (sin filtro temporal): {len(work):,} registros. "
+                "No se pudieron parsear fechas de referencia."
+            )
     else:
         st.session_state["intel_time_window_status"] = (
-            "Sin columnas de fecha reconocidas; se uso todo el historico disponible."
+            f"Historico completo (sin filtro temporal): {len(work):,} registros. "
+            "Sin columnas de fecha reconocidas."
         )
 
     work = work[work["ficha_tokens"].map(len) > 0].copy()
@@ -1800,6 +1808,11 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             st.info("No hay detalle para la ficha seleccionada.")
             return ranked_df
 
+        top_pos = 0
+        top_matches = ranked_df.index[ranked_df["ficha"].astype(str) == str(selected)].tolist()
+        if top_matches:
+            top_pos = int(top_matches[0]) + 1
+
         row = row.iloc[0]
         nombre_ficha = str(row.get("nombre_ficha", "")).strip()
         detail_score = pd.DataFrame(
@@ -1815,11 +1828,14 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         detail_score["contribucion"] = detail_score["valor_norm"] * detail_score["peso"]
         if nombre_ficha:
             st.markdown(
-                f"#### Score de ficha {selected} - {nombre_ficha}: "
+                f"#### Top #{top_pos} | Score de ficha {selected} - {nombre_ficha}: "
                 f"{row['score_total']:.2f} ({row['clasificacion']})"
             )
         else:
-            st.markdown(f"#### Score de ficha {selected}: {row['score_total']:.2f} ({row['clasificacion']})")
+            st.markdown(
+                f"#### Top #{top_pos} | Score de ficha {selected}: "
+                f"{row['score_total']:.2f} ({row['clasificacion']})"
+            )
         st.caption(
             f"Actos totales: {int(row.get('actos', 0))} | "
             f"Solo esa ficha: {int(row.get('actos_solo_ficha', 0))} | "
