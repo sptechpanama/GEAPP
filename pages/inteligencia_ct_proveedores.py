@@ -159,7 +159,6 @@ def _load_ctni_num_to_id_map() -> dict[str, str]:
     start = 0
     length = 1000
     draw = 1
-    total = None
     max_pages = 40
     pages = 0
 
@@ -184,11 +183,6 @@ def _load_ctni_num_to_id_map() -> dict[str, str]:
             break
 
         data = body.get("data", []) or []
-        if total is None:
-            try:
-                total = int(body.get("recordsTotal", len(data)))
-            except Exception:
-                total = len(data)
 
         for row in data:
             ficha_num = re.sub(r"\D", "", str((row or {}).get("numFicha", "") or ""))
@@ -201,7 +195,7 @@ def _load_ctni_num_to_id_map() -> dict[str, str]:
         draw += 1
         if not data:
             break
-        if total is not None and start >= total:
+        if len(data) < length:
             break
 
     return out
