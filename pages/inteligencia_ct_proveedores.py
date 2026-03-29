@@ -1220,6 +1220,22 @@ def _ensure_study_state() -> list[dict]:
     return st.session_state["intel_fichas_estudio"]
 
 
+def _ensure_discarded_state() -> list[str]:
+    if "intel_fichas_descartadas" not in st.session_state:
+        st.session_state["intel_fichas_descartadas"] = []
+    # normaliza a lista de strings únicos
+    raw = st.session_state.get("intel_fichas_descartadas", [])
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        key = str(item or "").strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    st.session_state["intel_fichas_descartadas"] = out
+    return out
+
+
 def _add_ficha_to_study(row: pd.Series) -> bool:
     current = _ensure_study_state()
     ficha = str(row.get("ficha", "")).strip()
@@ -1446,6 +1462,9 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         return pd.DataFrame()
 
     ranked_df = _score_fichas(ficha_metrics_df, weights)
+    discarded = set(_ensure_discarded_state())
+    if discarded:
+        ranked_df = ranked_df[~ranked_df["ficha"].astype(str).isin(discarded)].reset_index(drop=True)
 
     with sub2:
         st.caption("Ranking completo de fichas detectadas en actos (ordenado por score).")
@@ -1454,6 +1473,8 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             "Actos_solo_ficha = actos donde solo aparece esa ficha. "
             "Actos_con_otras_fichas = actos donde comparte con otras fichas."
         )
+        if discarded:
+            st.caption(f"Fichas descartadas ocultas: {len(discarded)}")
         ranking_cols = [
             "ficha",
             "nombre_ficha",
@@ -1490,6 +1511,13 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             },
         )
 
+        if view_df.empty:
+            st.info("No hay fichas para mostrar (todas pueden estar descartadas).")
+            if discarded and st.button("Restaurar fichas descartadas"):
+                st.session_state["intel_fichas_descartadas"] = []
+                st.rerun()
+            return ranked_df
+
         st.markdown("#### Acciones sobre ficha seleccionada")
         ficha_opts = view_df["ficha"].astype(str).tolist()
         selected_action_ficha = st.selectbox(
@@ -1498,7 +1526,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             index=0 if ficha_opts else None,
             key="intel_action_ficha",
         )
-        a1, a2 = st.columns(2)
+        a1, a2, a3 = st.columns(3)
         if a1.button("Ver actos de ficha", disabled=not bool(selected_action_ficha)):
             st.session_state["intel_selected_ficha"] = str(selected_action_ficha)
             st.rerun()
@@ -1508,6 +1536,22 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
                 st.success(f"Ficha {selected_action_ficha} enviada a 'Fichas en seg.'")
             else:
                 st.info(f"Ficha {selected_action_ficha} ya estaba en seguimiento.")
+        if a3.button("Descartar ficha", disabled=not bool(selected_action_ficha)):
+            discarded_now = _ensure_discarded_state()
+            ficha_key = str(selected_action_ficha or "").strip()
+            if ficha_key and ficha_key not in discarded_now:
+                discarded_now.append(ficha_key)
+                st.session_state["intel_fichas_descartadas"] = discarded_now
+                st.success(f"Ficha {ficha_key} descartada. Ya no se mostrará en detección.")
+                if str(st.session_state.get("intel_selected_ficha", "")) == ficha_key:
+                    st.session_state["intel_selected_ficha"] = ""
+                st.rerun()
+            else:
+                st.info("Esa ficha ya estaba descartada.")
+
+        if discarded and st.button("Restaurar fichas descartadas"):
+            st.session_state["intel_fichas_descartadas"] = []
+            st.rerun()
         selected_name = (
             view_df.loc[view_df["ficha"].astype(str) == str(selected_action_ficha), "nombre_ficha"]
             .astype(str)
