@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
 import bcrypt
+import requests
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -67,6 +68,7 @@ authenticator.logout("Cerrar sesión", location="sidebar")
 FICHA_TOKEN_RE = re.compile(r"\b\d{3,8}\*?\b")
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
 CTNI_CONSULTA_URL = "https://ctni.minsa.gob.pa/Home/ConsultarFichas"
+CTNI_LOAD_FICHAS_URL = "https://ctni.minsa.gob.pa/Home/LoadFichas"
 
 
 def _normalize_text(value: object) -> str:
@@ -149,6 +151,79 @@ def _safe_minsa_link(value: object) -> str:
         return direct
     # Fallback seguro: lleva al portal oficial de consulta (sin idficha inválido).
     return CTNI_CONSULTA_URL
+
+
+@st.cache_data(show_spinner=False, ttl=43200)
+def _load_ctni_num_to_id_map() -> dict[str, str]:
+    out: dict[str, str] = {}
+    start = 0
+    length = 1000
+    draw = 1
+    total = None
+    max_pages = 40
+    pages = 0
+
+    while pages < max_pages:
+        payload = {
+            "draw": str(draw),
+            "start": str(start),
+            "length": str(length),
+            "All": "1",
+            "IdSubComite": "0",
+            "IdSubGrupo": "0",
+            "IdTipoProducto": "0",
+            "Especialidad": "0",
+            "IdCriterio": "0",
+            "Filtro": "",
+        }
+        try:
+            response = requests.post(CTNI_LOAD_FICHAS_URL, data=payload, timeout=30)
+            response.raise_for_status()
+            body = response.json()
+        except Exception:
+            break
+
+        data = body.get("data", []) or []
+        if total is None:
+            try:
+                total = int(body.get("recordsTotal", len(data)))
+            except Exception:
+                total = len(data)
+
+        for row in data:
+            ficha_num = re.sub(r"\D", "", str((row or {}).get("numFicha", "") or ""))
+            id_ficha = str((row or {}).get("id", "") or "").strip()
+            if ficha_num and id_ficha and ficha_num not in out:
+                out[ficha_num] = id_ficha
+
+        pages += 1
+        start += length
+        draw += 1
+        if not data:
+            break
+        if total is not None and start >= total:
+            break
+
+    return out
+
+
+def _is_specific_minsa_link(url: str) -> bool:
+    text = str(url or "").strip()
+    if not text:
+        return False
+    return bool(re.search(r"/Utilities/LoadFicha/\?idficha=\d+", text, flags=re.IGNORECASE))
+
+
+def _specific_minsa_link(ficha_value: object, raw_link: object, num_to_id_map: dict[str, str]) -> str:
+    direct = _normalize_minsa_link(raw_link)
+    if _is_specific_minsa_link(direct):
+        return direct
+    ficha_num = re.sub(r"\D", "", str(ficha_value or ""))
+    if ficha_num:
+        id_ficha = str((num_to_id_map or {}).get(ficha_num, "") or "").strip()
+        if id_ficha:
+            return f"https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha={id_ficha}&idparam=0"
+    return _safe_minsa_link(direct)
 
 
 def _resolve_column_by_alias(columns: list[str], aliases: list[str]) -> str:
@@ -956,9 +1031,14 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
         for payload in ficha_reference_map.values()
         if str((payload or {}).get("clase_riesgo", "") or "").strip()
     )
+    direct_link_count = sum(
+        1
+        for payload in ficha_reference_map.values()
+        if _is_specific_minsa_link(str((payload or {}).get("enlace_minsa", "") or ""))
+    )
     st.session_state["intel_risk_map_status"] = (
         f"Mapeo de fichas cargado: {len(ficha_reference_map):,} fichas, "
-        f"{risk_count:,} con clase de riesgo."
+        f"{risk_count:,} con clase de riesgo, {direct_link_count:,} con enlace directo."
     )
     exploded["nombre_ficha"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("nombre_ficha", "") or "")
@@ -969,7 +1049,12 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["enlace_minsa"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
     )
-    exploded["enlace_minsa"] = exploded["enlace_minsa"].map(_safe_minsa_link)
+    ctni_id_map = _load_ctni_num_to_id_map()
+    link_by_ficha: dict[str, str] = {}
+    for ficha_key in exploded["ficha"].astype(str).dropna().unique().tolist():
+        raw_link = str((ficha_reference_map.get(str(ficha_key)) or {}).get("enlace_minsa", "") or "")
+        link_by_ficha[str(ficha_key)] = _specific_minsa_link(ficha_key, raw_link, ctni_id_map)
+    exploded["enlace_minsa"] = exploded["ficha"].astype(str).map(link_by_ficha).fillna(CTNI_CONSULTA_URL)
     exploded["rs_requerido"] = exploded["ficha"].astype(str).map(
         lambda x: bool((ficha_reference_map.get(str(x)) or {}).get("rs_requerido", False))
     )
@@ -1015,9 +1100,8 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("clase_riesgo", "") or "")
     )
     ficha_metrics["enlace_minsa"] = ficha_metrics["ficha"].astype(str).map(
-        lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
+        lambda x: str(link_by_ficha.get(str(x), CTNI_CONSULTA_URL) or CTNI_CONSULTA_URL)
     )
-    ficha_metrics["enlace_minsa"] = ficha_metrics["enlace_minsa"].map(_safe_minsa_link)
 
     winners_df = _build_top_winners_by_ficha(exploded)
     if not winners_df.empty:
