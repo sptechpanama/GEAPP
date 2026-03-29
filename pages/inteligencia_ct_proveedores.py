@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import math
 from datetime import date
 import io
 import os
@@ -170,6 +171,19 @@ def _normalize_column_key(value: object) -> str:
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_any_date(value: object) -> pd.Timestamp:
+    text = _clean_text(value)
+    if not text:
+        return pd.NaT
+    try:
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+        if pd.isna(parsed):
+            parsed = pd.to_datetime(text, errors="coerce")
+        return parsed
+    except Exception:
+        return pd.NaT
 
 
 def _normalize_minsa_link(value: object) -> str:
@@ -1080,6 +1094,29 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
         if fallback_cols:
             merged_text = work[fallback_cols].fillna("").astype(str).agg(" ".join, axis=1)
             work["ficha_tokens"] = merged_text.map(_extract_ficha_tokens)
+
+    # Ventana temporal de 12 meses (prioriza fecha_adjudicacion y usa fallback con otras fechas).
+    date_candidates = [c for c in ("fecha_adjudicacion", "fecha", "fecha_publicacion", "publicacion") if c in work.columns]
+    if date_candidates:
+        parsed_cols: list[str] = []
+        for col in date_candidates:
+            parsed_col = f"__parsed_{col}"
+            work[parsed_col] = work[col].map(_parse_any_date)
+            parsed_cols.append(parsed_col)
+        work["fecha_referencia"] = work[parsed_cols[0]]
+        for parsed_col in parsed_cols[1:]:
+            work["fecha_referencia"] = work["fecha_referencia"].fillna(work[parsed_col])
+        cutoff = pd.Timestamp.today().normalize() - pd.DateOffset(months=12)
+        total_before_window = len(work)
+        work = work[work["fecha_referencia"].notna() & (work["fecha_referencia"] >= cutoff)].copy()
+        st.session_state["intel_time_window_status"] = (
+            f"Ventana 12 meses aplicada: {len(work):,} de {total_before_window:,} registros."
+        )
+    else:
+        st.session_state["intel_time_window_status"] = (
+            "Sin columnas de fecha reconocidas; se uso todo el historico disponible."
+        )
+
     work = work[work["ficha_tokens"].map(len) > 0].copy()
     if work.empty:
         st.session_state["intel_db_status"] = (
@@ -1176,6 +1213,15 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
             "proponentes_promedio": grouped["proponentes_en_acto"].mean(),
         }
     ).reset_index(drop=True)
+    ficha_metrics["pct_actos_proponentes_cero"] = (
+        grouped["proponentes_en_acto"]
+        .apply(lambda s: float((pd.to_numeric(s, errors="coerce").fillna(0.0) <= 0).mean() * 100.0))
+        .reset_index(drop=True)
+        .round(2)
+    )
+    ficha_metrics["revision_proponentes"] = (
+        pd.to_numeric(ficha_metrics["proponentes_promedio"], errors="coerce").fillna(0.0) <= 0
+    )
     ficha_metrics["actos_solo_ficha"] = ficha_metrics["ficha"].map(actos_solo).fillna(0).astype(int)
     ficha_metrics["actos_con_otras_fichas"] = ficha_metrics["ficha"].map(actos_multi).fillna(0).astype(int)
     if "fecha_adjudicacion" in exploded.columns:
@@ -1223,6 +1269,25 @@ def _minmax(series: pd.Series) -> pd.Series:
     if smax <= smin:
         return pd.Series([0.0] * len(numeric), index=numeric.index)
     return (numeric - smin) / (smax - smin)
+
+
+def _winsorize_upper(series: pd.Series, quantile: float = 0.95) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce").fillna(0.0)
+    if numeric.empty:
+        return numeric
+    cap = float(numeric.quantile(quantile))
+    return numeric.clip(lower=0.0, upper=cap)
+
+
+def _feature_high_is_better(series: pd.Series, use_log: bool = False) -> pd.Series:
+    transformed = _winsorize_upper(series, quantile=0.95)
+    if use_log:
+        transformed = transformed.map(lambda v: math.log1p(max(float(v), 0.0)))
+    return _minmax(transformed)
+
+
+def _feature_low_is_better(series: pd.Series, use_log: bool = False) -> pd.Series:
+    return 1.0 - _feature_high_is_better(series, use_log=use_log)
 
 
 def _classify_score(score: float) -> str:
@@ -1304,11 +1369,19 @@ def _score_fichas(ficha_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataF
     if ficha_df.empty:
         return ficha_df
     df = ficha_df.copy()
-    df["f_actos"] = _minmax(df["actos"])
-    df["f_monto"] = _minmax(df["monto_historico"])
-    df["f_ganadores"] = _minmax(df["ganadores_distintos"])
-    df["f_proponentes"] = _minmax(df["proponentes_promedio"])
+    # Opcion 2: winsorizacion p95 + log1p + minmax.
+    # Direccion de negocio:
+    # - actos, monto: mas alto = mejor
+    # - ganadores_distintos, proponentes_promedio: mas bajo = mejor
+    df["f_actos"] = _feature_high_is_better(df["actos"], use_log=True)
+    df["f_monto"] = _feature_high_is_better(df["monto_historico"], use_log=True)
+    df["f_ganadores"] = _feature_low_is_better(df["ganadores_distintos"], use_log=False)
+    df["f_proponentes"] = _feature_low_is_better(df["proponentes_promedio"], use_log=False)
     df["f_riesgo"] = df["clase_riesgo"].map(_risk_to_score)
+    if "revision_proponentes" not in df.columns:
+        df["revision_proponentes"] = (
+            pd.to_numeric(df.get("proponentes_promedio", 0), errors="coerce").fillna(0.0) <= 0
+        )
 
     total_weight = sum(weights.values()) or 1.0
     weighted = (
@@ -1364,6 +1437,8 @@ def _add_ficha_to_study(row: pd.Series) -> bool:
             "actos_solo_ficha": int(row.get("actos_solo_ficha", 0)),
             "actos_con_otras_fichas": int(row.get("actos_con_otras_fichas", 0)),
             "monto_historico": float(row.get("monto_historico", 0.0)),
+            "proponentes_promedio": float(row.get("proponentes_promedio", 0.0)),
+            "revision_proponentes": bool(row.get("revision_proponentes", False)),
             "top1_ganador": str(row.get("top1_ganador", "")).strip(),
             "top1_pct_ganadas": float(row.get("top1_pct_ganadas", 0.0)),
             "top2_ganador": str(row.get("top2_ganador", "")).strip(),
@@ -1443,10 +1518,13 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
     st.markdown("### Dashboard Ejecutivo")
     db_status = str(st.session_state.get("intel_db_status", "")).strip()
     risk_status = str(st.session_state.get("intel_risk_map_status", "")).strip()
+    time_window_status = str(st.session_state.get("intel_time_window_status", "")).strip()
     if db_status:
         st.caption(f"Estado fuente: {db_status}")
     if risk_status:
         st.caption(risk_status)
+    if time_window_status:
+        st.caption(time_window_status)
     if not ranked_df.empty and "enlace_minsa" in ranked_df.columns:
         direct_links = (
             ranked_df["enlace_minsa"]
@@ -1489,6 +1567,7 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
         "monto_historico",
         "ganadores_distintos",
         "proponentes_promedio",
+        "revision_proponentes",
         "clase_riesgo",
         "top1_ganador",
         "top1_pct_ganadas",
@@ -1504,6 +1583,10 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
         hide_index=True,
         column_config={
             "ver_ficha_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Ver ficha"),
+            "revision_proponentes": st.column_config.CheckboxColumn(
+                "Rev. prop. (dato)",
+                help="Marcado cuando proponentes promedio es 0 y requiere revision de calidad de dato.",
+            ),
         },
     )
 
@@ -1525,6 +1608,10 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
 
     with sub1:
         st.markdown("#### Ajuste de pesos del score")
+        st.caption(
+            "Transformacion activa: winsorizacion p95 + log1p (actos/monto) + normalizacion min-max. "
+            "Ganadores y proponentes se invierten (menos es mejor)."
+        )
         c1, c2, c3 = st.columns(3)
         weights["actos"] = c1.slider(
             "Peso frecuencia (numero de actos)",
@@ -1614,6 +1701,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             "monto_historico",
             "ganadores_distintos",
             "proponentes_promedio",
+            "revision_proponentes",
             "clase_riesgo",
             "top1_ganador",
             "top1_pct_ganadas",
@@ -1636,6 +1724,10 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             hide_index=True,
             column_config={
                 "ver_ficha_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Ver ficha"),
+                "revision_proponentes": st.column_config.CheckboxColumn(
+                    "Rev. prop. (dato)",
+                    help="Marcado cuando proponentes promedio es 0 y requiere revision de calidad de dato.",
+                ),
             },
         )
 
@@ -1731,7 +1823,8 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         st.caption(
             f"Actos totales: {int(row.get('actos', 0))} | "
             f"Solo esa ficha: {int(row.get('actos_solo_ficha', 0))} | "
-            f"Con otras fichas: {int(row.get('actos_con_otras_fichas', 0))}"
+            f"Con otras fichas: {int(row.get('actos_con_otras_fichas', 0))} | "
+            f"Actos con 0 proponentes: {float(row.get('pct_actos_proponentes_cero', 0.0)):.2f}%"
         )
         link_minsa = str(row.get("enlace_minsa", "") or "").strip()
         if link_minsa:
@@ -1805,6 +1898,8 @@ def _render_tab_seguimiento_ct() -> None:
         "actos_solo_ficha",
         "actos_con_otras_fichas",
         "monto_historico",
+        "proponentes_promedio",
+        "revision_proponentes",
         "top1_ganador",
         "top1_pct_ganadas",
         "top2_ganador",
@@ -1826,6 +1921,10 @@ def _render_tab_seguimiento_ct() -> None:
         hide_index=True,
         column_config={
             "ver_ficha_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Ver ficha"),
+            "revision_proponentes": st.column_config.CheckboxColumn(
+                "Rev. prop. (dato)",
+                help="Marcado cuando proponentes promedio es 0 y requiere revision de calidad de dato.",
+            ),
         },
     )
 
