@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import math
-from datetime import date
+import uuid
+from datetime import date, datetime
 import io
 import os
 import unicodedata
@@ -71,6 +73,12 @@ FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
 CTNI_CONSULTA_URL = "https://ctni.minsa.gob.pa/Home/ConsultarFichas"
 CTNI_LOAD_FICHAS_URL = "https://ctni.minsa.gob.pa/Home/LoadFichas"
 INTEL_WEIGHTS_PROFILE_VERSION = "defaults_38_32_12_10_8_v1"
+INTEL_STUDY_DB_PATH = APP_ROOT / "data" / "inteligencia_ct_estudios.db"
+
+RUN_STATUS_PENDING = "pendiente_consultas"
+RUN_STATUS_COMPLETED = "completada"
+RUN_STATUS_COMPLETED_OBS = "completada_con_observaciones"
+RUN_STATUS_UPDATED = "actualizada"
 
 
 def _normalize_text(value: object) -> str:
@@ -1461,6 +1469,751 @@ def _add_ficha_to_study(row: pd.Series) -> bool:
     st.session_state["intel_fichas_estudio"] = current
     return True
 
+
+def _utc_now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return 0
+
+
+def _json_dumps(value: object) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return "[]"
+
+
+def _ensure_study_db() -> None:
+    INTEL_STUDY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS estudio_runs (
+                run_id TEXT PRIMARY KEY,
+                ficha TEXT NOT NULL,
+                nombre_ficha TEXT,
+                estado_run TEXT NOT NULL,
+                fecha_inicio TEXT,
+                fecha_fin TEXT,
+                fuente_db TEXT,
+                version_modelo TEXT,
+                total_items INTEGER DEFAULT 0,
+                total_consultas INTEGER DEFAULT 0,
+                consultas_resueltas INTEGER DEFAULT 0,
+                resumen_ia TEXT,
+                notas TEXT,
+                is_current INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS estudio_detalle (
+                detail_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                ficha TEXT NOT NULL,
+                nombre_ficha TEXT,
+                acto_id TEXT,
+                acto_nombre TEXT,
+                acto_url TEXT,
+                entidad TEXT,
+                renglon_texto TEXT,
+                proveedor TEXT,
+                proveedor_ganador TEXT,
+                es_ganador INTEGER DEFAULT 0,
+                marca TEXT,
+                modelo TEXT,
+                pais_origen TEXT,
+                cantidad REAL,
+                precio_unitario_participacion REAL,
+                precio_unitario_referencia REAL,
+                fecha_publicacion TEXT,
+                fecha_celebracion TEXT,
+                fecha_adjudicacion TEXT,
+                fecha_orden_compra TEXT,
+                dias_acto_a_oc REAL,
+                observaciones TEXT,
+                estado_revision TEXT DEFAULT 'pendiente',
+                nivel_certeza REAL DEFAULT 0.0,
+                requiere_revision INTEGER DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS estudio_consultas (
+                consulta_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                ficha TEXT NOT NULL,
+                detail_id TEXT,
+                acto_id TEXT,
+                campo_dudoso TEXT,
+                evidencia TEXT,
+                opciones_json TEXT,
+                respuesta_seleccionada TEXT,
+                valor_manual TEXT,
+                estado TEXT DEFAULT 'pendiente',
+                obligatoria INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS estudio_resumen_ficha (
+                ficha TEXT PRIMARY KEY,
+                run_id_vigente TEXT,
+                estado_estudio TEXT,
+                ultima_actualizacion TEXT,
+                total_actos INTEGER DEFAULT 0,
+                total_renglones INTEGER DEFAULT 0,
+                empresas_ganadoras INTEGER DEFAULT 0,
+                marcas_json TEXT,
+                modelos_json TEXT,
+                paises_json TEXT,
+                precio_participacion_prom REAL,
+                precio_participacion_min REAL,
+                fecha_precio_min TEXT,
+                precio_participacion_max REAL,
+                fecha_precio_max TEXT,
+                precio_referencia_prom REAL,
+                top_menor_precio_json TEXT,
+                resumen_ia TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_runs_ficha ON estudio_runs(ficha)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_detalle_run ON estudio_detalle(run_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_consultas_run ON estudio_consultas(run_id)")
+        conn.commit()
+
+
+def _pick_alias_value(row: pd.Series, aliases: list[str]) -> str:
+    if row is None:
+        return ""
+    for alias in aliases:
+        if alias in row.index:
+            value = _clean_text(row.get(alias))
+            if value:
+                return value
+    normalized_cols = {_normalize_column_key(c): c for c in row.index.tolist()}
+    for alias in aliases:
+        hit = normalized_cols.get(_normalize_column_key(alias))
+        if hit:
+            value = _clean_text(row.get(hit))
+            if value:
+                return value
+    return ""
+
+
+def _extract_estudio_dates(row: pd.Series) -> dict[str, str]:
+    fecha_publicacion = _pick_alias_value(row, ["fecha_publicacion", "publicacion", "fecha"])
+    fecha_celebracion = _pick_alias_value(row, ["fecha_celebracion", "celebracion", "fecha_acto"])
+    fecha_adjudicacion = _pick_alias_value(row, ["fecha_adjudicacion", "adjudicacion"])
+    fecha_oc = _pick_alias_value(
+        row,
+        [
+            "fecha_orden_compra",
+            "fecha orden compra",
+            "orden_compra_fecha",
+            "fecha_oc",
+            "fecha de orden de compra",
+            "fecha_posterior",
+        ],
+    )
+
+    d_cele = _parse_any_date(fecha_celebracion)
+    d_oc = _parse_any_date(fecha_oc)
+    dias = 0.0
+    if not pd.isna(d_cele) and not pd.isna(d_oc):
+        dias = float((d_oc - d_cele).days)
+    return {
+        "fecha_publicacion": fecha_publicacion,
+        "fecha_celebracion": fecha_celebracion,
+        "fecha_adjudicacion": fecha_adjudicacion,
+        "fecha_orden_compra": fecha_oc,
+        "dias_acto_a_oc": dias,
+    }
+
+
+def _build_study_payload(
+    ficha: str,
+    ficha_name: str,
+    acts_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if acts_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    detail_rows: list[dict[str, object]] = []
+    consultas_rows: list[dict[str, object]] = []
+
+    for _, row in acts_df.iterrows():
+        acto_id = str(row.get("id", "") or "").strip()
+        acto_nombre = _clean_text(row.get("titulo")) or f"Acto {acto_id}"
+        acto_url = _clean_text(row.get("enlace"))
+        entidad = _clean_text(row.get("entidad"))
+        renglon_texto = " | ".join(
+            [t for t in [_clean_text(row.get("item_1")), _clean_text(row.get("item_2")), _clean_text(row.get("descripcion"))] if t]
+        )
+        dates = _extract_estudio_dates(row)
+        proveedor_ganador = _clean_text(row.get("ganador")) or _clean_text(row.get("razon_social"))
+        proveedor_ganador_norm = _canonical_party_name(proveedor_ganador)
+        precio_ref = _parse_number(row.get("precio_referencia", 0))
+        cantidad = _parse_number(row.get("cantidad", 0))
+        marca_base = _pick_alias_value(row, ["marca", "marca_item", "marca ofertada"])
+        modelo_base = _pick_alias_value(row, ["modelo", "modelo_item", "n° de catalogo o modelo", "n de catalogo o modelo"])
+        pais_base = _pick_alias_value(row, ["pais_origen", "pais de origen", "origen"])
+
+        proponent_candidates: list[tuple[str, float]] = []
+        available_prices: list[float] = []
+        for idx in range(1, 15):
+            p_col = f"Proponente {idx}"
+            price_col = f"Precio Proponente {idx}"
+            if p_col in row.index:
+                p_name = _clean_text(row.get(p_col))
+                if not p_name:
+                    continue
+                p_price = _parse_number(row.get(price_col, 0))
+                if p_price > 0:
+                    available_prices.append(p_price)
+                proponent_candidates.append((p_name, p_price))
+
+        if not proponent_candidates and proveedor_ganador:
+            proponent_candidates.append((proveedor_ganador, _parse_number(row.get("monto_estimado", 0))))
+
+        if int(_safe_int(row.get("fichas_en_acto", 1))) > 1:
+            consultas_rows.append(
+                {
+                    "consulta_id": str(uuid.uuid4()),
+                    "ficha": ficha,
+                    "detail_id": "",
+                    "acto_id": acto_id,
+                    "campo_dudoso": "renglon_correspondencia_ficha",
+                    "evidencia": renglon_texto or acto_nombre,
+                    "opciones_json": _json_dumps(
+                        [
+                            {"label": "Confirmar asociación por ficha detectada", "value": "confirmar_asociacion"},
+                            {"label": "Excluir este acto para la ficha", "value": "excluir_acto"},
+                            {"label": "Resolver manualmente", "value": "manual"},
+                        ]
+                    ),
+                    "respuesta_seleccionada": "",
+                    "valor_manual": "",
+                    "estado": "pendiente",
+                    "obligatoria": 1,
+                }
+            )
+
+        for proponente, precio_uni in proponent_candidates:
+            detail_id = str(uuid.uuid4())
+            proponente_norm = _canonical_party_name(proponente)
+            es_ganador = 1 if proponente_norm and proponente_norm == proveedor_ganador_norm else 0
+            requiere_revision = 0
+            certeza = 0.9
+            observ = []
+
+            if precio_uni <= 0:
+                requiere_revision = 1
+                certeza = min(certeza, 0.55)
+                observ.append("Precio unitario de participación no identificado.")
+                opciones_precio = [{"label": f"${p:,.2f}", "value": f"{p:.6f}"} for p in sorted(set(available_prices)) if p > 0]
+                opciones_precio.append({"label": "Dejar vacío", "value": "vacio"})
+                consultas_rows.append(
+                    {
+                        "consulta_id": str(uuid.uuid4()),
+                        "ficha": ficha,
+                        "detail_id": detail_id,
+                        "acto_id": acto_id,
+                        "campo_dudoso": "precio_unitario_participacion",
+                        "evidencia": f"Proveedor: {proponente}. Precios detectados: {', '.join([str(round(x,2)) for x in available_prices]) or 'ninguno'}",
+                        "opciones_json": _json_dumps(opciones_precio),
+                        "respuesta_seleccionada": "",
+                        "valor_manual": "",
+                        "estado": "pendiente",
+                        "obligatoria": 1,
+                    }
+                )
+
+            if not pais_base:
+                requiere_revision = 1
+                certeza = min(certeza, 0.65)
+                observ.append("País de origen no explícito (puede requerir búsqueda externa).")
+                consultas_rows.append(
+                    {
+                        "consulta_id": str(uuid.uuid4()),
+                        "ficha": ficha,
+                        "detail_id": detail_id,
+                        "acto_id": acto_id,
+                        "campo_dudoso": "pais_origen",
+                        "evidencia": f"Proveedor: {proponente}. Marca: {marca_base or '-'} Modelo: {modelo_base or '-'}",
+                        "opciones_json": _json_dumps(
+                            [
+                                {"label": "Dejar vacío", "value": "vacio"},
+                                {"label": "Ingresar manual", "value": "manual"},
+                            ]
+                        ),
+                        "respuesta_seleccionada": "",
+                        "valor_manual": "",
+                        "estado": "pendiente",
+                        "obligatoria": 0,
+                    }
+                )
+
+            detail_rows.append(
+                {
+                    "detail_id": detail_id,
+                    "ficha": ficha,
+                    "nombre_ficha": ficha_name,
+                    "acto_id": acto_id,
+                    "acto_nombre": acto_nombre,
+                    "acto_url": acto_url,
+                    "entidad": entidad,
+                    "renglon_texto": renglon_texto,
+                    "proveedor": proponente,
+                    "proveedor_ganador": proveedor_ganador,
+                    "es_ganador": es_ganador,
+                    "marca": marca_base,
+                    "modelo": modelo_base,
+                    "pais_origen": pais_base,
+                    "cantidad": cantidad,
+                    "precio_unitario_participacion": precio_uni,
+                    "precio_unitario_referencia": precio_ref,
+                    "fecha_publicacion": dates["fecha_publicacion"],
+                    "fecha_celebracion": dates["fecha_celebracion"],
+                    "fecha_adjudicacion": dates["fecha_adjudicacion"],
+                    "fecha_orden_compra": dates["fecha_orden_compra"],
+                    "dias_acto_a_oc": dates["dias_acto_a_oc"],
+                    "observaciones": " | ".join(observ),
+                    "estado_revision": "pendiente" if requiere_revision else "ok",
+                    "nivel_certeza": certeza,
+                    "requiere_revision": requiere_revision,
+                }
+            )
+
+    return pd.DataFrame(detail_rows), pd.DataFrame(consultas_rows)
+
+
+def _compute_study_summary(ficha: str, run_id: str, detail_df: pd.DataFrame, estado: str, resumen_ia: str) -> dict[str, object]:
+    if detail_df.empty:
+        return {
+            "ficha": ficha,
+            "run_id_vigente": run_id,
+            "estado_estudio": estado,
+            "ultima_actualizacion": _utc_now_iso(),
+            "total_actos": 0,
+            "total_renglones": 0,
+            "empresas_ganadoras": 0,
+            "marcas_json": "[]",
+            "modelos_json": "[]",
+            "paises_json": "[]",
+            "precio_participacion_prom": 0.0,
+            "precio_participacion_min": 0.0,
+            "fecha_precio_min": "",
+            "precio_participacion_max": 0.0,
+            "fecha_precio_max": "",
+            "precio_referencia_prom": 0.0,
+            "top_menor_precio_json": "[]",
+            "resumen_ia": resumen_ia,
+        }
+
+    valid = detail_df.copy()
+    if "estado_revision" in valid.columns:
+        valid = valid[valid["estado_revision"].astype(str).str.lower() != "excluido"].copy()
+    valid_price = valid[pd.to_numeric(valid["precio_unitario_participacion"], errors="coerce").fillna(0.0) > 0].copy()
+    valid_ref = valid[pd.to_numeric(valid["precio_unitario_referencia"], errors="coerce").fillna(0.0) > 0].copy()
+
+    precio_prom = float(pd.to_numeric(valid_price["precio_unitario_participacion"], errors="coerce").mean()) if not valid_price.empty else 0.0
+    precio_min = float(pd.to_numeric(valid_price["precio_unitario_participacion"], errors="coerce").min()) if not valid_price.empty else 0.0
+    precio_max = float(pd.to_numeric(valid_price["precio_unitario_participacion"], errors="coerce").max()) if not valid_price.empty else 0.0
+
+    fecha_min = ""
+    fecha_max = ""
+    if not valid_price.empty:
+        idx_min = pd.to_numeric(valid_price["precio_unitario_participacion"], errors="coerce").idxmin()
+        idx_max = pd.to_numeric(valid_price["precio_unitario_participacion"], errors="coerce").idxmax()
+        fecha_min = _clean_text(valid_price.loc[idx_min, "fecha_adjudicacion"]) or _clean_text(valid_price.loc[idx_min, "fecha_publicacion"])
+        fecha_max = _clean_text(valid_price.loc[idx_max, "fecha_adjudicacion"]) or _clean_text(valid_price.loc[idx_max, "fecha_publicacion"])
+
+    top_menor_precio = []
+    if not valid_price.empty:
+        agg = (
+            valid_price.groupby(["proveedor", "marca"], dropna=False)["precio_unitario_participacion"]
+            .mean()
+            .reset_index(name="precio_prom")
+            .sort_values("precio_prom", ascending=True)
+            .head(10)
+        )
+        top_menor_precio = agg.to_dict(orient="records")
+
+    marcas = sorted([x for x in valid["marca"].fillna("").astype(str).str.strip().unique().tolist() if x])
+    modelos = sorted([x for x in valid["modelo"].fillna("").astype(str).str.strip().unique().tolist() if x])
+    paises = sorted([x for x in valid["pais_origen"].fillna("").astype(str).str.strip().unique().tolist() if x])
+    empresas_ganadoras = int(valid[valid["es_ganador"] == 1]["proveedor"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+    ref_prom = float(pd.to_numeric(valid_ref["precio_unitario_referencia"], errors="coerce").mean()) if not valid_ref.empty else 0.0
+
+    return {
+        "ficha": ficha,
+        "run_id_vigente": run_id,
+        "estado_estudio": estado,
+        "ultima_actualizacion": _utc_now_iso(),
+        "total_actos": int(valid["acto_id"].astype(str).nunique()),
+        "total_renglones": int(len(valid)),
+        "empresas_ganadoras": empresas_ganadoras,
+        "marcas_json": _json_dumps(marcas),
+        "modelos_json": _json_dumps(modelos),
+        "paises_json": _json_dumps(paises),
+        "precio_participacion_prom": round(precio_prom, 6),
+        "precio_participacion_min": round(precio_min, 6),
+        "fecha_precio_min": fecha_min,
+        "precio_participacion_max": round(precio_max, 6),
+        "fecha_precio_max": fecha_max,
+        "precio_referencia_prom": round(ref_prom, 6),
+        "top_menor_precio_json": _json_dumps(top_menor_precio),
+        "resumen_ia": resumen_ia,
+    }
+
+
+def _build_ai_study_summary(ficha: str, ficha_name: str, detail_df: pd.DataFrame, summary_payload: dict[str, object]) -> str:
+    if detail_df.empty:
+        return f"Ficha {ficha} ({ficha_name}): no se detectaron renglones para estudio en el histórico disponible."
+
+    total_rows = int(summary_payload.get("total_renglones", 0) or 0)
+    total_acts = int(summary_payload.get("total_actos", 0) or 0)
+    empresas = int(summary_payload.get("empresas_ganadoras", 0) or 0)
+    pmin = float(summary_payload.get("precio_participacion_min", 0.0) or 0.0)
+    pprom = float(summary_payload.get("precio_participacion_prom", 0.0) or 0.0)
+    pmax = float(summary_payload.get("precio_participacion_max", 0.0) or 0.0)
+    review_count = int(pd.to_numeric(detail_df.get("requiere_revision", 0), errors="coerce").fillna(0).sum())
+
+    return (
+        f"Ficha {ficha} ({ficha_name}): {total_rows} renglones en {total_acts} actos. "
+        f"Empresas ganadoras históricas: {empresas}. "
+        f"Precio unitario participación min/prom/max: ${pmin:,.2f} / ${pprom:,.2f} / ${pmax:,.2f}. "
+        f"Registros con revisión pendiente: {review_count}."
+    )
+
+
+def _save_study_run(
+    ficha: str,
+    ficha_name: str,
+    detail_df: pd.DataFrame,
+    consultas_df: pd.DataFrame,
+    db_source: str,
+    notes: str = "",
+) -> str:
+    _ensure_study_db()
+    run_id = str(uuid.uuid4())
+    now = _utc_now_iso()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        conn.execute("UPDATE estudio_runs SET is_current=0 WHERE ficha=?", (ficha,))
+        conn.execute(
+            """
+            INSERT INTO estudio_runs (
+                run_id, ficha, nombre_ficha, estado_run, fecha_inicio, fecha_fin, fuente_db, version_modelo,
+                total_items, total_consultas, consultas_resueltas, resumen_ia, notas, is_current, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                ficha,
+                ficha_name,
+                RUN_STATUS_PENDING if not consultas_df.empty else RUN_STATUS_COMPLETED,
+                now,
+                now,
+                db_source,
+                "v1_estudio_fichas",
+                int(len(detail_df)),
+                int(len(consultas_df)),
+                0,
+                "",
+                notes,
+                1,
+                now,
+                now,
+            ),
+        )
+
+        if not detail_df.empty:
+            d = detail_df.copy()
+            d["run_id"] = run_id
+            d.to_sql("estudio_detalle", conn, if_exists="append", index=False)
+        if not consultas_df.empty:
+            q = consultas_df.copy()
+            q["run_id"] = run_id
+            q["created_at"] = now
+            q["updated_at"] = now
+            q.to_sql("estudio_consultas", conn, if_exists="append", index=False)
+
+        summary_payload = _compute_study_summary(
+            ficha=ficha,
+            run_id=run_id,
+            detail_df=detail_df,
+            estado=RUN_STATUS_PENDING if not consultas_df.empty else RUN_STATUS_COMPLETED,
+            resumen_ia="",
+        )
+        summary_payload["resumen_ia"] = _build_ai_study_summary(ficha, ficha_name, detail_df, summary_payload)
+        conn.execute(
+            """
+            INSERT INTO estudio_resumen_ficha (
+                ficha, run_id_vigente, estado_estudio, ultima_actualizacion, total_actos, total_renglones, empresas_ganadoras,
+                marcas_json, modelos_json, paises_json, precio_participacion_prom, precio_participacion_min, fecha_precio_min,
+                precio_participacion_max, fecha_precio_max, precio_referencia_prom, top_menor_precio_json, resumen_ia
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ficha) DO UPDATE SET
+                run_id_vigente=excluded.run_id_vigente,
+                estado_estudio=excluded.estado_estudio,
+                ultima_actualizacion=excluded.ultima_actualizacion,
+                total_actos=excluded.total_actos,
+                total_renglones=excluded.total_renglones,
+                empresas_ganadoras=excluded.empresas_ganadoras,
+                marcas_json=excluded.marcas_json,
+                modelos_json=excluded.modelos_json,
+                paises_json=excluded.paises_json,
+                precio_participacion_prom=excluded.precio_participacion_prom,
+                precio_participacion_min=excluded.precio_participacion_min,
+                fecha_precio_min=excluded.fecha_precio_min,
+                precio_participacion_max=excluded.precio_participacion_max,
+                fecha_precio_max=excluded.fecha_precio_max,
+                precio_referencia_prom=excluded.precio_referencia_prom,
+                top_menor_precio_json=excluded.top_menor_precio_json,
+                resumen_ia=excluded.resumen_ia
+            """,
+            (
+                summary_payload["ficha"],
+                summary_payload["run_id_vigente"],
+                summary_payload["estado_estudio"],
+                summary_payload["ultima_actualizacion"],
+                summary_payload["total_actos"],
+                summary_payload["total_renglones"],
+                summary_payload["empresas_ganadoras"],
+                summary_payload["marcas_json"],
+                summary_payload["modelos_json"],
+                summary_payload["paises_json"],
+                summary_payload["precio_participacion_prom"],
+                summary_payload["precio_participacion_min"],
+                summary_payload["fecha_precio_min"],
+                summary_payload["precio_participacion_max"],
+                summary_payload["fecha_precio_max"],
+                summary_payload["precio_referencia_prom"],
+                summary_payload["top_menor_precio_json"],
+                summary_payload["resumen_ia"],
+            ),
+        )
+        conn.execute(
+            "UPDATE estudio_runs SET resumen_ia=?, updated_at=? WHERE run_id=?",
+            (summary_payload["resumen_ia"], now, run_id),
+        )
+        conn.commit()
+    return run_id
+
+
+def _load_runs_df() -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT run_id, ficha, nombre_ficha, estado_run, fecha_inicio, fecha_fin, total_items,
+                   total_consultas, consultas_resueltas, is_current, updated_at
+            FROM estudio_runs
+            ORDER BY datetime(updated_at) DESC
+            """,
+            conn,
+        )
+
+
+def _load_run_detail_df(run_id: str) -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM estudio_detalle WHERE run_id=? ORDER BY acto_id, proveedor",
+            conn,
+            params=(run_id,),
+        )
+
+
+def _load_run_queries_df(run_id: str) -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM estudio_consultas WHERE run_id=? ORDER BY estado, acto_id, campo_dudoso",
+            conn,
+            params=(run_id,),
+        )
+
+
+def _load_resumen_estudiadas_df() -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT r.*, s.nombre_ficha
+            FROM estudio_resumen_ficha r
+            LEFT JOIN estudio_runs s ON r.run_id_vigente = s.run_id
+            ORDER BY datetime(r.ultima_actualizacion) DESC
+            """,
+            conn,
+        )
+
+
+def _apply_query_resolution(run_id: str, responses: list[dict[str, str]]) -> None:
+    _ensure_study_db()
+    now = _utc_now_iso()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        for item in responses:
+            consulta_id = str(item.get("consulta_id", "")).strip()
+            if not consulta_id:
+                continue
+            respuesta = str(item.get("respuesta_seleccionada", "")).strip()
+            valor_manual = str(item.get("valor_manual", "")).strip()
+            estado = "resuelta" if (respuesta or valor_manual) else "pendiente"
+
+            conn.execute(
+                """
+                UPDATE estudio_consultas
+                SET respuesta_seleccionada=?, valor_manual=?, estado=?, updated_at=?
+                WHERE consulta_id=? AND run_id=?
+                """,
+                (respuesta, valor_manual, estado, now, consulta_id, run_id),
+            )
+
+            query_row = conn.execute(
+                "SELECT campo_dudoso, detail_id, acto_id FROM estudio_consultas WHERE consulta_id=?",
+                (consulta_id,),
+            ).fetchone()
+            if not query_row:
+                continue
+            campo_dudoso, detail_id, acto_id = query_row
+            campo_dudoso = str(campo_dudoso or "").strip().lower()
+
+            if campo_dudoso == "renglon_correspondencia_ficha" and respuesta == "excluir_acto":
+                conn.execute(
+                    """
+                    UPDATE estudio_detalle
+                    SET estado_revision='excluido', requiere_revision=1,
+                        observaciones=COALESCE(observaciones,'') || ' | Excluido por validación manual'
+                    WHERE run_id=? AND acto_id=?
+                    """,
+                    (run_id, str(acto_id or "")),
+                )
+            elif campo_dudoso == "precio_unitario_participacion" and detail_id:
+                candidate = valor_manual or respuesta
+                if str(candidate).strip().lower() != "vacio":
+                    parsed = _parse_number(candidate)
+                    if parsed > 0:
+                        conn.execute(
+                            """
+                            UPDATE estudio_detalle
+                            SET precio_unitario_participacion=?, requiere_revision=0,
+                                estado_revision='ok', nivel_certeza=0.9
+                            WHERE detail_id=? AND run_id=?
+                            """,
+                            (parsed, detail_id, run_id),
+                        )
+            elif campo_dudoso == "pais_origen" and detail_id:
+                candidate = valor_manual or respuesta
+                if str(candidate).strip().lower() not in {"", "vacio", "manual"}:
+                    conn.execute(
+                        """
+                        UPDATE estudio_detalle
+                        SET pais_origen=?, requiere_revision=0, estado_revision='ok'
+                        WHERE detail_id=? AND run_id=?
+                        """,
+                        (candidate, detail_id, run_id),
+                    )
+
+        pending_count = conn.execute(
+            "SELECT COUNT(*) FROM estudio_consultas WHERE run_id=? AND obligatoria=1 AND estado!='resuelta'",
+            (run_id,),
+        ).fetchone()[0]
+        resolved_count = conn.execute(
+            "SELECT COUNT(*) FROM estudio_consultas WHERE run_id=? AND estado='resuelta'",
+            (run_id,),
+        ).fetchone()[0]
+
+        detail_df = pd.read_sql_query("SELECT * FROM estudio_detalle WHERE run_id=?", conn, params=(run_id,))
+        run_row = conn.execute("SELECT ficha, nombre_ficha FROM estudio_runs WHERE run_id=?", (run_id,)).fetchone()
+        if run_row:
+            ficha, nombre = run_row
+            status = RUN_STATUS_PENDING if int(pending_count) > 0 else RUN_STATUS_COMPLETED
+            unresolved_review = int(pd.to_numeric(detail_df.get("requiere_revision", 0), errors="coerce").fillna(0).sum())
+            if status == RUN_STATUS_COMPLETED and unresolved_review > 0:
+                status = RUN_STATUS_COMPLETED_OBS
+
+            summary_payload = _compute_study_summary(str(ficha), run_id, detail_df, status, "")
+            summary_payload["resumen_ia"] = _build_ai_study_summary(str(ficha), str(nombre or ""), detail_df, summary_payload)
+
+            conn.execute(
+                """
+                UPDATE estudio_runs
+                SET estado_run=?, consultas_resueltas=?, resumen_ia=?, fecha_fin=?, updated_at=?
+                WHERE run_id=?
+                """,
+                (status, int(resolved_count), summary_payload["resumen_ia"], now, now, run_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO estudio_resumen_ficha (
+                    ficha, run_id_vigente, estado_estudio, ultima_actualizacion, total_actos, total_renglones, empresas_ganadoras,
+                    marcas_json, modelos_json, paises_json, precio_participacion_prom, precio_participacion_min, fecha_precio_min,
+                    precio_participacion_max, fecha_precio_max, precio_referencia_prom, top_menor_precio_json, resumen_ia
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ficha) DO UPDATE SET
+                    run_id_vigente=excluded.run_id_vigente,
+                    estado_estudio=excluded.estado_estudio,
+                    ultima_actualizacion=excluded.ultima_actualizacion,
+                    total_actos=excluded.total_actos,
+                    total_renglones=excluded.total_renglones,
+                    empresas_ganadoras=excluded.empresas_ganadoras,
+                    marcas_json=excluded.marcas_json,
+                    modelos_json=excluded.modelos_json,
+                    paises_json=excluded.paises_json,
+                    precio_participacion_prom=excluded.precio_participacion_prom,
+                    precio_participacion_min=excluded.precio_participacion_min,
+                    fecha_precio_min=excluded.fecha_precio_min,
+                    precio_participacion_max=excluded.precio_participacion_max,
+                    fecha_precio_max=excluded.fecha_precio_max,
+                    precio_referencia_prom=excluded.precio_referencia_prom,
+                    top_menor_precio_json=excluded.top_menor_precio_json,
+                    resumen_ia=excluded.resumen_ia
+                """,
+                (
+                    summary_payload["ficha"],
+                    summary_payload["run_id_vigente"],
+                    summary_payload["estado_estudio"],
+                    summary_payload["ultima_actualizacion"],
+                    summary_payload["total_actos"],
+                    summary_payload["total_renglones"],
+                    summary_payload["empresas_ganadoras"],
+                    summary_payload["marcas_json"],
+                    summary_payload["modelos_json"],
+                    summary_payload["paises_json"],
+                    summary_payload["precio_participacion_prom"],
+                    summary_payload["precio_participacion_min"],
+                    summary_payload["fecha_precio_min"],
+                    summary_payload["precio_participacion_max"],
+                    summary_payload["fecha_precio_max"],
+                    summary_payload["precio_referencia_prom"],
+                    summary_payload["top_menor_precio_json"],
+                    summary_payload["resumen_ia"],
+                ),
+            )
+        conn.commit()
+
 def _empty_table(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
@@ -1972,38 +2725,268 @@ def _render_tab_seguimiento_ct() -> None:
         st.rerun()
 
 
-def _render_tab_estudio_profundo() -> None:
-    st.markdown("### Estudio profundo por ficha")
-    st.selectbox("Selecciona ficha para estudio", ["(sin datos en Fase 1)"], index=0)
-    _placeholder_block(
-        "Acto por acto",
-        "Aquí se mostrará el detalle completo de actos asociados a la ficha seleccionada.",
+def _render_tab_estudio_profundo(
+    ficha_acts_df: pd.DataFrame,
+    ranked_df: pd.DataFrame,
+    db_path: str,
+) -> None:
+    st.markdown("### Estudio de fichas")
+    _ensure_study_db()
+
+    tab_pend, tab_run, tab_cons, tab_done, tab_ver = st.tabs(
         [
-            "fecha_publicacion",
-            "fecha_adjudicacion",
-            "dias_pub_a_adj",
-            "tiempo_entrega",
-            "entidad",
-            "proveedor_participante",
-            "proveedor_ganador",
-            "marca",
-            "modelo",
-            "pais_origen",
-            "precio_unitario_ofertado",
-            "precio_unitario_ganador",
-            "cantidad",
-            "monto_total",
-        ],
-    )
-    _placeholder_block(
-        "KPIs consolidados y variación de precios",
-        "Aquí se mostrarán promedio/min/max de adjudicación, marcas/paises frecuentes y variación % de precios.",
-    )
-    _placeholder_block(
-        "Gráficos de análisis",
-        "Aquí se mostrarán barras de precios por proveedor, frecuencia de victorias, marcas y países.",
+            "Pendientes de estudio",
+            "Ejecuci?n de estudio",
+            "Consultas finales",
+            "Fichas estudiadas",
+            "Versiones y actualizaci?n",
+        ]
     )
 
+    with tab_pend:
+        seg = pd.DataFrame(_ensure_study_state())
+        if seg.empty:
+            st.info("No hay fichas en seguimiento. Env?alas desde Detecc. fichas.")
+        else:
+            st.caption("Selecciona una ficha en seguimiento para correr estudio hist?rico completo.")
+            cols = [c for c in ["ficha", "nombre_ficha", "estado", "clasificacion", "score_inicial"] if c in seg.columns]
+            st.dataframe(seg[cols], use_container_width=True, hide_index=True)
+
+            ficha_opts = seg["ficha"].astype(str).tolist()
+            target_ficha = st.selectbox("Ficha a estudiar", ficha_opts, key="intel_study_target_ficha")
+            target_row = seg[seg["ficha"].astype(str) == str(target_ficha)].head(1)
+            target_name = str(target_row.iloc[0].get("nombre_ficha", "") if not target_row.empty else "")
+            run_notes = st.text_area("Notas del estudio (opcional)", key="intel_study_notes", height=80)
+            if st.button("Iniciar estudio de ficha", type="primary"):
+                acts = ficha_acts_df[ficha_acts_df["ficha"].astype(str) == str(target_ficha)].copy()
+                detail_df, queries_df = _build_study_payload(str(target_ficha), target_name, acts)
+                run_id = _save_study_run(
+                    ficha=str(target_ficha),
+                    ficha_name=target_name,
+                    detail_df=detail_df,
+                    consultas_df=queries_df,
+                    db_source=db_path,
+                    notes=run_notes,
+                )
+                st.session_state["intel_selected_run_id"] = run_id
+                st.success(
+                    f"Estudio iniciado para ficha {target_ficha}. "
+                    f"Detalle: {len(detail_df)} filas | Consultas finales: {len(queries_df)}."
+                )
+                st.rerun()
+
+    runs_df = _load_runs_df()
+
+    with tab_run:
+        if runs_df.empty:
+            st.info("A?n no hay corridas de estudio.")
+        else:
+            st.caption("Corridas registradas (persistentes).")
+            st.dataframe(runs_df, use_container_width=True, hide_index=True)
+            run_options = runs_df["run_id"].astype(str).tolist()
+            default_run = str(st.session_state.get("intel_selected_run_id", "") or "")
+            default_idx = run_options.index(default_run) if default_run in run_options else 0
+            selected_run = st.selectbox("Run a visualizar", run_options, index=default_idx, key="intel_study_run_view")
+            st.session_state["intel_selected_run_id"] = selected_run
+            detail_df = _load_run_detail_df(selected_run)
+            if detail_df.empty:
+                st.warning("Sin detalle para este run.")
+            else:
+                show_cols = [
+                    "ficha",
+                    "acto_id",
+                    "acto_nombre",
+                    "acto_url",
+                    "entidad",
+                    "proveedor",
+                    "proveedor_ganador",
+                    "marca",
+                    "modelo",
+                    "pais_origen",
+                    "cantidad",
+                    "precio_unitario_participacion",
+                    "precio_unitario_referencia",
+                    "fecha_publicacion",
+                    "fecha_celebracion",
+                    "fecha_adjudicacion",
+                    "fecha_orden_compra",
+                    "dias_acto_a_oc",
+                    "nivel_certeza",
+                    "requiere_revision",
+                    "estado_revision",
+                    "observaciones",
+                ]
+                present = [c for c in show_cols if c in detail_df.columns]
+                col_cfg = {}
+                if "acto_url" in present:
+                    col_cfg["acto_url"] = st.column_config.LinkColumn("Enlace acto", display_text="Abrir acto")
+                if "requiere_revision" in present:
+                    col_cfg["requiere_revision"] = st.column_config.CheckboxColumn("Rev.")
+                st.dataframe(detail_df[present], use_container_width=True, hide_index=True, column_config=col_cfg)
+
+                st.markdown("#### Gr?fica: todos los precios unitarios de participaci?n")
+                price_df = detail_df.copy()
+                price_df["precio_unitario_participacion"] = pd.to_numeric(
+                    price_df["precio_unitario_participacion"], errors="coerce"
+                ).fillna(0.0)
+                price_df = price_df[price_df["precio_unitario_participacion"] > 0].copy()
+                if price_df.empty:
+                    st.info("No hay precios unitarios positivos para graficar.")
+                else:
+                    price_df["label_barra"] = (
+                        price_df["proveedor"].fillna("").astype(str).str.slice(0, 35)
+                        + " | Acto "
+                        + price_df["acto_id"].fillna("").astype(str)
+                    )
+                    st.bar_chart(
+                        price_df.set_index("label_barra")["precio_unitario_participacion"],
+                        use_container_width=True,
+                    )
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Precio unitario m?nimo", f"${price_df['precio_unitario_participacion'].min():,.2f}")
+                    m2.metric("Precio unitario promedio", f"${price_df['precio_unitario_participacion'].mean():,.2f}")
+                    m3.metric("Precio unitario m?ximo", f"${price_df['precio_unitario_participacion'].max():,.2f}")
+
+                    agg = (
+                        price_df.groupby("proveedor", dropna=False)
+                        .agg(
+                            precio_min=("precio_unitario_participacion", "min"),
+                            precio_prom=("precio_unitario_participacion", "mean"),
+                            precio_max=("precio_unitario_participacion", "max"),
+                        )
+                        .reset_index()
+                        .sort_values("precio_prom", ascending=True)
+                    )
+                    min_date = (
+                        price_df.sort_values("precio_unitario_participacion", ascending=True)
+                        .drop_duplicates(subset=["proveedor"], keep="first")[["proveedor", "fecha_adjudicacion", "fecha_publicacion"]]
+                        .rename(columns={"fecha_adjudicacion": "fecha_precio_min_adj", "fecha_publicacion": "fecha_precio_min_pub"})
+                    )
+                    max_date = (
+                        price_df.sort_values("precio_unitario_participacion", ascending=False)
+                        .drop_duplicates(subset=["proveedor"], keep="first")[["proveedor", "fecha_adjudicacion", "fecha_publicacion"]]
+                        .rename(columns={"fecha_adjudicacion": "fecha_precio_max_adj", "fecha_publicacion": "fecha_precio_max_pub"})
+                    )
+                    agg = agg.merge(min_date, on="proveedor", how="left").merge(max_date, on="proveedor", how="left")
+                    st.markdown("#### Resumen por proveedor (min / prom / max + fechas)")
+                    st.dataframe(agg, use_container_width=True, hide_index=True)
+
+    with tab_cons:
+        if runs_df.empty:
+            st.info("Sin runs para consultas.")
+        else:
+            pending_runs = runs_df[runs_df["estado_run"].astype(str) == RUN_STATUS_PENDING].copy()
+            if pending_runs.empty:
+                st.success("No hay consultas finales pendientes.")
+            else:
+                run_options = pending_runs["run_id"].astype(str).tolist()
+                selected_run = st.selectbox("Run pendiente", run_options, key="intel_pending_run")
+                queries_df = _load_run_queries_df(selected_run)
+                if queries_df.empty:
+                    st.info("Este run no tiene consultas registradas.")
+                else:
+                    st.caption("Resuelve solo las ambig?edades reales detectadas al final del proceso.")
+                    pending_df = queries_df[queries_df["estado"].astype(str) != "resuelta"].copy()
+                    resolved_df = queries_df[queries_df["estado"].astype(str) == "resuelta"].copy()
+                    st.write(f"Pendientes: {len(pending_df)} | Resueltas: {len(resolved_df)}")
+
+                    responses = []
+                    for i, row in pending_df.reset_index(drop=True).iterrows():
+                        consulta_id = str(row.get("consulta_id", ""))
+                        with st.expander(
+                            f"Consulta {i+1} | Acto {row.get('acto_id', '')} | Campo: {row.get('campo_dudoso', '')}",
+                            expanded=(i < 3),
+                        ):
+                            st.caption(f"Evidencia: {row.get('evidencia', '')}")
+                            options_payload = []
+                            try:
+                                options_payload = json.loads(str(row.get("opciones_json", "[]") or "[]"))
+                            except Exception:
+                                options_payload = []
+                            option_labels = [str(x.get("label", "")) for x in options_payload if str(x.get("label", "")).strip()]
+                            label_to_value = {str(x.get("label", "")): str(x.get("value", "")) for x in options_payload}
+                            selected_label = st.selectbox(
+                                f"Opci?n sugerida ({i+1})",
+                                [""] + option_labels,
+                                key=f"intel_query_opt_{consulta_id}",
+                            )
+                            manual_value = st.text_input(
+                                f"Valor manual ({i+1})",
+                                key=f"intel_query_manual_{consulta_id}",
+                                placeholder="Opcional, solo si ninguna opci?n aplica",
+                            )
+                            responses.append(
+                                {
+                                    "consulta_id": consulta_id,
+                                    "respuesta_seleccionada": label_to_value.get(selected_label, ""),
+                                    "valor_manual": manual_value.strip(),
+                                }
+                            )
+
+                    csave, cfinal = st.columns(2)
+                    if csave.button("Guardar progreso"):
+                        _apply_query_resolution(selected_run, responses)
+                        st.success("Progreso guardado.")
+                        st.rerun()
+                    if cfinal.button("Resolver y completar run"):
+                        _apply_query_resolution(selected_run, responses)
+                        st.success("Consultas procesadas. Se recalcul? resumen y estado del estudio.")
+                        st.rerun()
+
+    with tab_done:
+        resumen_df = _load_resumen_estudiadas_df()
+        if resumen_df.empty:
+            st.info("No hay fichas estudiadas todav?a.")
+        else:
+            st.dataframe(resumen_df, use_container_width=True, hide_index=True)
+            ficha_opts = resumen_df["ficha"].astype(str).tolist()
+            selected_ficha = st.selectbox("Ficha estudiada", ficha_opts, key="intel_done_ficha")
+            row = resumen_df[resumen_df["ficha"].astype(str) == str(selected_ficha)].head(1)
+            if not row.empty:
+                row = row.iloc[0]
+                st.markdown(f"**Resumen IA:** {row.get('resumen_ia', '')}")
+                st.caption(
+                    f"Total actos: {int(_safe_int(row.get('total_actos', 0)))} | "
+                    f"Total renglones: {int(_safe_int(row.get('total_renglones', 0)))} | "
+                    f"Empresas ganadoras: {int(_safe_int(row.get('empresas_ganadoras', 0)))}"
+                )
+                st.caption(
+                    f"Precio participaci?n min/prom/max: "
+                    f"${_safe_float(row.get('precio_participacion_min', 0.0)):,.2f} / "
+                    f"${_safe_float(row.get('precio_participacion_prom', 0.0)):,.2f} / "
+                    f"${_safe_float(row.get('precio_participacion_max', 0.0)):,.2f}"
+                )
+                run_id = str(row.get("run_id_vigente", "") or "")
+                if run_id:
+                    detail_df = _load_run_detail_df(run_id)
+                    if not detail_df.empty:
+                        st.markdown("#### Detalle persistido acto/rengl?n")
+                        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+    with tab_ver:
+        if runs_df.empty:
+            st.info("Sin runs para versionado.")
+        else:
+            st.caption("Puedes re-ejecutar una ficha; el sistema guarda nueva versi?n y mantiene hist?rico.")
+            st.dataframe(runs_df, use_container_width=True, hide_index=True)
+            ficha_opts = sorted(runs_df["ficha"].astype(str).unique().tolist())
+            chosen = st.selectbox("Ficha para reestudio", ficha_opts, key="intel_restudy_ficha")
+            if st.button("Reestudiar ficha seleccionada"):
+                acts = ficha_acts_df[ficha_acts_df["ficha"].astype(str) == str(chosen)].copy()
+                ref_row = ranked_df[ranked_df["ficha"].astype(str) == str(chosen)].head(1)
+                ficha_name = str(ref_row.iloc[0].get("nombre_ficha", "") if not ref_row.empty else "")
+                detail_df, queries_df = _build_study_payload(str(chosen), ficha_name, acts)
+                new_run = _save_study_run(
+                    ficha=str(chosen),
+                    ficha_name=ficha_name,
+                    detail_df=detail_df,
+                    consultas_df=queries_df,
+                    db_source=db_path,
+                    notes="Reestudio manual",
+                )
+                st.session_state["intel_selected_run_id"] = new_run
+                st.success(f"Nueva versi?n creada para ficha {chosen}: {new_run}")
+                st.rerun()
 
 def _render_tab_proveedores_historicos_ia() -> None:
     st.markdown("### Proveedores históricos + IA")
@@ -2136,7 +3119,7 @@ tabs = st.tabs(
         "Dashboard",
         "Detecc. fichas",
         "Fichas en seg.",
-        "Estudio ficha",
+        "Estudio de fichas",
         "Prov. hist. + IA",
         "Contacto y correos",
         "Seg. contacto",
@@ -2151,7 +3134,7 @@ with tabs[1]:
 with tabs[2]:
     _render_tab_seguimiento_ct()
 with tabs[3]:
-    _render_tab_estudio_profundo()
+    _render_tab_estudio_profundo(ficha_acts_df, ranked_df, db_path)
 with tabs[4]:
     _render_tab_proveedores_historicos_ia()
 with tabs[5]:
