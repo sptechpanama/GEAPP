@@ -450,6 +450,18 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
             "risk class",
         ],
     )
+    enlace_col = _resolve_column_by_alias(
+        columns,
+        [
+            "enlace_ficha_tecnica",
+            "enlace ficha tecnica",
+            "enlace ficha",
+            "enlace minsa",
+            "link minsa",
+            "url",
+            "enlace",
+        ],
+    )
     if not ficha_col:
         return {}
 
@@ -461,6 +473,8 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
         selected_cols.append(registro_col)
     if riesgo_col and riesgo_col not in selected_cols:
         selected_cols.append(riesgo_col)
+    if enlace_col and enlace_col not in selected_cols:
+        selected_cols.append(enlace_col)
 
     for _, row in df[selected_cols].iterrows():
         raw_name = str(row.get(nombre_col, "")).strip() if nombre_col else ""
@@ -469,6 +483,11 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
         raw_risk = str(row.get(riesgo_col, "")).strip() if riesgo_col else ""
         if raw_risk.lower() in {"nan", "none", "null"}:
             raw_risk = ""
+        raw_link = str(row.get(enlace_col, "")).strip() if enlace_col else ""
+        if raw_link.lower() in {"nan", "none", "null"}:
+            raw_link = ""
+        if raw_link and not raw_link.lower().startswith(("http://", "https://")):
+            raw_link = ""
         rs_required = _is_registro_sanitario_required(row.get(registro_col, "")) if registro_col else False
         tokens = _extract_ficha_tokens(row.get(ficha_col, ""))
         for token in tokens:
@@ -477,7 +496,7 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
                 continue
             current = mapping.setdefault(
                 ficha_num,
-                {"nombre_ficha": "", "rs_requerido": False, "clase_riesgo": ""},
+                {"nombre_ficha": "", "rs_requerido": False, "clase_riesgo": "", "enlace_minsa": ""},
             )
             if raw_name and not str(current.get("nombre_ficha", "")).strip():
                 current["nombre_ficha"] = raw_name
@@ -485,6 +504,8 @@ def _build_ficha_reference_map_from_df(df: pd.DataFrame) -> dict[str, dict[str, 
                 current["rs_requerido"] = True
             if raw_risk and not str(current.get("clase_riesgo", "")).strip():
                 current["clase_riesgo"] = raw_risk
+            if raw_link and not str(current.get("enlace_minsa", "")).strip():
+                current["enlace_minsa"] = raw_link
     return mapping
 
 
@@ -498,16 +519,19 @@ def _merge_reference_maps(
             continue
         current = merged.setdefault(
             str(ficha),
-            {"nombre_ficha": "", "rs_requerido": False, "clase_riesgo": ""},
+            {"nombre_ficha": "", "rs_requerido": False, "clase_riesgo": "", "enlace_minsa": ""},
         )
         name_val = str(payload.get("nombre_ficha", "") or "").strip()
         risk_val = str(payload.get("clase_riesgo", "") or "").strip()
+        link_val = str(payload.get("enlace_minsa", "") or "").strip()
         rs_val = bool(payload.get("rs_requerido", False))
 
         if name_val and not str(current.get("nombre_ficha", "")).strip():
             current["nombre_ficha"] = name_val
         if risk_val and not str(current.get("clase_riesgo", "")).strip():
             current["clase_riesgo"] = risk_val
+        if link_val and not str(current.get("enlace_minsa", "")).strip():
+            current["enlace_minsa"] = link_val
         if rs_val:
             current["rs_requerido"] = True
     return merged
@@ -730,6 +754,49 @@ def _winner_price_from_row(row: pd.Series) -> float:
     return _parse_number(row.get("precio_referencia", 0))
 
 
+def _build_top_winners_by_ficha(exploded: pd.DataFrame) -> pd.DataFrame:
+    if exploded.empty or "ficha" not in exploded.columns or "id" not in exploded.columns:
+        return pd.DataFrame()
+
+    base = exploded[["ficha", "id", "ganador"]].copy()
+    base["ficha"] = base["ficha"].astype(str).str.strip()
+    base["ganador"] = base["ganador"].fillna("").astype(str).str.strip()
+    base = base[(base["ficha"] != "")].drop_duplicates(subset=["ficha", "id", "ganador"])
+    if base.empty:
+        return pd.DataFrame()
+
+    total_actos = base.groupby("ficha", dropna=False)["id"].nunique().rename("actos_total")
+    wins = (
+        base[base["ganador"] != ""]
+        .groupby(["ficha", "ganador"], dropna=False)["id"]
+        .nunique()
+        .reset_index(name="victorias")
+    )
+    if wins.empty:
+        return pd.DataFrame()
+
+    wins = wins.sort_values(["ficha", "victorias", "ganador"], ascending=[True, False, True]).reset_index(drop=True)
+    wins["rank"] = wins.groupby("ficha").cumcount() + 1
+    wins = wins[wins["rank"] <= 3].copy()
+    wins = wins.merge(total_actos.reset_index(), on="ficha", how="left")
+    wins["pct_ganadas"] = (100.0 * wins["victorias"] / wins["actos_total"].clip(lower=1)).round(2)
+
+    rows: list[dict[str, object]] = []
+    for ficha, chunk in wins.groupby("ficha", dropna=False):
+        payload: dict[str, object] = {"ficha": ficha}
+        for _, item in chunk.iterrows():
+            rank = int(item.get("rank", 0))
+            if rank <= 0 or rank > 3:
+                continue
+            payload[f"top{rank}_ganador"] = str(item.get("ganador", "") or "")
+            payload[f"top{rank}_pct_ganadas"] = float(item.get("pct_ganadas", 0.0))
+            payload[f"top{rank}_victorias"] = int(item.get("victorias", 0))
+        rows.append(payload)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     base_df, db_path = _load_actos_db_df()
@@ -769,6 +836,11 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["ficha"] = exploded["ficha_token"].str.replace(r"\D", "", regex=True)
     exploded = exploded[exploded["ficha"] != ""].copy()
     exploded = exploded.drop_duplicates(subset=["id", "ficha"]).reset_index(drop=True)
+    fichas_por_acto = exploded.groupby("id", dropna=False)["ficha"].nunique()
+    exploded["fichas_en_acto"] = exploded["id"].map(fichas_por_acto).fillna(0).astype(int)
+    exploded["acto_tipo_ficha"] = exploded["fichas_en_acto"].map(
+        lambda n: "solo_esa_ficha" if int(n) <= 1 else "con_otras_fichas"
+    )
     ficha_reference_map = _load_ficha_reference_map()
     risk_count = sum(
         1
@@ -785,6 +857,9 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     exploded["clase_riesgo"] = exploded["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("clase_riesgo", "") or "")
     )
+    exploded["enlace_minsa"] = exploded["ficha"].astype(str).map(
+        lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
+    )
     exploded["rs_requerido"] = exploded["ficha"].astype(str).map(
         lambda x: bool((ficha_reference_map.get(str(x)) or {}).get("rs_requerido", False))
     )
@@ -796,15 +871,28 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
         return pd.DataFrame(), pd.DataFrame(), db_path
 
     grouped = exploded.groupby("ficha", dropna=False)
+    base_unique = exploded[["ficha", "id", "fichas_en_acto"]].drop_duplicates()
+    actos_solo = (
+        base_unique[base_unique["fichas_en_acto"] <= 1]
+        .groupby("ficha", dropna=False)["id"]
+        .nunique()
+    )
+    actos_multi = (
+        base_unique[base_unique["fichas_en_acto"] > 1]
+        .groupby("ficha", dropna=False)["id"]
+        .nunique()
+    )
     ficha_metrics = pd.DataFrame(
         {
             "ficha": grouped["ficha"].first(),
-            "actos": grouped["id"].nunique(),
+            "actos": grouped["id"].nunique(),  # todos los actos donde aparece la ficha
             "monto_historico": grouped["monto_estimado"].sum(),
             "ganadores_distintos": grouped["ganador"].apply(lambda s: s[s.str.strip() != ""].nunique()),
             "proponentes_promedio": grouped["num_participantes_num"].mean(),
         }
     ).reset_index(drop=True)
+    ficha_metrics["actos_solo_ficha"] = ficha_metrics["ficha"].map(actos_solo).fillna(0).astype(int)
+    ficha_metrics["actos_con_otras_fichas"] = ficha_metrics["ficha"].map(actos_multi).fillna(0).astype(int)
     if "fecha_adjudicacion" in exploded.columns:
         ficha_metrics["ultima_fecha"] = grouped["fecha_adjudicacion"].max().reset_index(drop=True)
     else:
@@ -816,6 +904,29 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     ficha_metrics["clase_riesgo"] = ficha_metrics["ficha"].astype(str).map(
         lambda x: str((ficha_reference_map.get(str(x)) or {}).get("clase_riesgo", "") or "")
     )
+    ficha_metrics["enlace_minsa"] = ficha_metrics["ficha"].astype(str).map(
+        lambda x: str((ficha_reference_map.get(str(x)) or {}).get("enlace_minsa", "") or "")
+    )
+
+    winners_df = _build_top_winners_by_ficha(exploded)
+    if not winners_df.empty:
+        ficha_metrics = ficha_metrics.merge(winners_df, on="ficha", how="left")
+    for idx in (1, 2, 3):
+        g_col = f"top{idx}_ganador"
+        p_col = f"top{idx}_pct_ganadas"
+        v_col = f"top{idx}_victorias"
+        if g_col not in ficha_metrics.columns:
+            ficha_metrics[g_col] = ""
+        else:
+            ficha_metrics[g_col] = ficha_metrics[g_col].fillna("").astype(str)
+        if p_col not in ficha_metrics.columns:
+            ficha_metrics[p_col] = 0.0
+        else:
+            ficha_metrics[p_col] = pd.to_numeric(ficha_metrics[p_col], errors="coerce").fillna(0.0).round(2)
+        if v_col not in ficha_metrics.columns:
+            ficha_metrics[v_col] = 0
+        else:
+            ficha_metrics[v_col] = pd.to_numeric(ficha_metrics[v_col], errors="coerce").fillna(0).astype(int)
 
     return ficha_metrics, exploded, db_path
 
@@ -932,10 +1043,19 @@ def _add_ficha_to_study(row: pd.Series) -> bool:
             "ficha": ficha,
             "nombre_ficha": str(row.get("nombre_ficha", "")).strip(),
             "clase_riesgo": str(row.get("clase_riesgo", "")).strip(),
+            "enlace_minsa": str(row.get("enlace_minsa", "")).strip(),
             "score_inicial": float(row.get("score_total", 0.0)),
             "clasificacion": str(row.get("clasificacion", "")),
             "actos": int(row.get("actos", 0)),
+            "actos_solo_ficha": int(row.get("actos_solo_ficha", 0)),
+            "actos_con_otras_fichas": int(row.get("actos_con_otras_fichas", 0)),
             "monto_historico": float(row.get("monto_historico", 0.0)),
+            "top1_ganador": str(row.get("top1_ganador", "")).strip(),
+            "top1_pct_ganadas": float(row.get("top1_pct_ganadas", 0.0)),
+            "top2_ganador": str(row.get("top2_ganador", "")).strip(),
+            "top2_pct_ganadas": float(row.get("top2_pct_ganadas", 0.0)),
+            "top3_ganador": str(row.get("top3_ganador", "")).strip(),
+            "top3_pct_ganadas": float(row.get("top3_pct_ganadas", 0.0)),
             "estado": "pendiente de estudio profundo",
             "fecha_ingreso": date.today().isoformat(),
             "notas": "",
@@ -1029,22 +1149,34 @@ def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
     )
 
     st.markdown("#### Top fichas por score (captacion)")
+    dash_cols = [
+        "ficha",
+        "nombre_ficha",
+        "enlace_minsa",
+        "clase_riesgo",
+        "score_total",
+        "clasificacion",
+        "actos",
+        "actos_solo_ficha",
+        "actos_con_otras_fichas",
+        "monto_historico",
+        "ganadores_distintos",
+        "proponentes_promedio",
+        "top1_ganador",
+        "top1_pct_ganadas",
+        "top2_ganador",
+        "top2_pct_ganadas",
+        "top3_ganador",
+        "top3_pct_ganadas",
+    ]
+    show_dash_cols = [c for c in dash_cols if c in ranked_df.columns]
     st.dataframe(
-        ranked_df[
-            [
-                "ficha",
-                "nombre_ficha",
-                "clase_riesgo",
-                "score_total",
-                "clasificacion",
-                "actos",
-                "monto_historico",
-                "ganadores_distintos",
-                "proponentes_promedio",
-            ]
-        ].head(15),
+        ranked_df[show_dash_cols].head(15),
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "enlace_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Abrir ficha"),
+        },
     )
 
 def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.DataFrame) -> pd.DataFrame:
@@ -1114,23 +1246,45 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
 
     with sub2:
         st.caption("Ranking completo de fichas detectadas en actos (ordenado por score).")
+        st.caption(
+            "Actos = todos los actos donde aparece la ficha. "
+            "Actos_solo_ficha = actos donde solo aparece esa ficha. "
+            "Actos_con_otras_fichas = actos donde comparte con otras fichas."
+        )
         ranking_cols = [
             "ficha",
             "nombre_ficha",
+            "enlace_minsa",
             "clase_riesgo",
             "score_total",
             "clasificacion",
             "actos",
+            "actos_solo_ficha",
+            "actos_con_otras_fichas",
             "monto_historico",
             "ganadores_distintos",
             "proponentes_promedio",
+            "top1_ganador",
+            "top1_pct_ganadas",
+            "top2_ganador",
+            "top2_pct_ganadas",
+            "top3_ganador",
+            "top3_pct_ganadas",
         ]
         view_df = ranked_df.sort_values(
             ["score_total", "actos", "monto_historico"],
             ascending=[False, False, False],
             kind="stable",
         ).reset_index(drop=True)
-        st.dataframe(view_df[ranking_cols], use_container_width=True, hide_index=True)
+        show_rank_cols = [c for c in ranking_cols if c in view_df.columns]
+        st.dataframe(
+            view_df[show_rank_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "enlace_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Abrir ficha"),
+            },
+        )
 
         st.markdown("#### Acciones sobre ficha seleccionada")
         ficha_opts = view_df["ficha"].astype(str).tolist()
@@ -1158,6 +1312,14 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
         )
         if selected_name and selected_name[0].strip():
             st.caption(f"Nombre de ficha: {selected_name[0]}")
+        selected_link = (
+            view_df.loc[view_df["ficha"].astype(str) == str(selected_action_ficha), "enlace_minsa"]
+            .astype(str)
+            .head(1)
+            .tolist()
+        )
+        if selected_link and selected_link[0].strip():
+            st.link_button("Ver ficha tecnica en MINSA", selected_link[0], use_container_width=False)
 
     with sub3:
         selected = st.session_state.get("intel_selected_ficha")
@@ -1190,6 +1352,20 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             )
         else:
             st.markdown(f"#### Score de ficha {selected}: {row['score_total']:.2f} ({row['clasificacion']})")
+        st.caption(
+            f"Actos totales: {int(row.get('actos', 0))} | "
+            f"Solo esa ficha: {int(row.get('actos_solo_ficha', 0))} | "
+            f"Con otras fichas: {int(row.get('actos_con_otras_fichas', 0))}"
+        )
+        link_minsa = str(row.get("enlace_minsa", "") or "").strip()
+        if link_minsa:
+            st.link_button("Abrir ficha tecnica en MINSA", link_minsa, use_container_width=False)
+        st.caption(
+            "Ganadores top: "
+            f"1) {str(row.get('top1_ganador', '') or '-')} ({float(row.get('top1_pct_ganadas', 0.0)):.2f}%) | "
+            f"2) {str(row.get('top2_ganador', '') or '-')} ({float(row.get('top2_pct_ganadas', 0.0)):.2f}%) | "
+            f"3) {str(row.get('top3_ganador', '') or '-')} ({float(row.get('top3_pct_ganadas', 0.0)):.2f}%)"
+        )
         st.dataframe(detail_score, use_container_width=True, hide_index=True)
 
         st.markdown("#### Actos asociados")
@@ -1200,6 +1376,8 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             "ficha_token",
             "nombre_ficha",
             "clase_riesgo",
+            "fichas_en_acto",
+            "acto_tipo_ficha",
             "titulo",
             "entidad",
             "fecha",
@@ -1228,17 +1406,33 @@ def _render_tab_seguimiento_ct() -> None:
     show_cols = [
         "ficha",
         "nombre_ficha",
+        "enlace_minsa",
         "clase_riesgo",
         "score_inicial",
         "clasificacion",
         "actos",
+        "actos_solo_ficha",
+        "actos_con_otras_fichas",
         "monto_historico",
+        "top1_ganador",
+        "top1_pct_ganadas",
+        "top2_ganador",
+        "top2_pct_ganadas",
+        "top3_ganador",
+        "top3_pct_ganadas",
         "estado",
         "fecha_ingreso",
         "notas",
     ]
     cols = [c for c in show_cols if c in df_seg.columns]
-    st.dataframe(df_seg[cols], use_container_width=True, hide_index=True)
+    st.dataframe(
+        df_seg[cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "enlace_minsa": st.column_config.LinkColumn("Enlace MINSA", display_text="Abrir ficha"),
+        },
+    )
 
     c1, c2, c3 = st.columns([1.4, 1.8, 1.0])
     target = c1.selectbox("Ficha a gestionar", df_seg["ficha"].astype(str).tolist(), key="intel_seg_target")
