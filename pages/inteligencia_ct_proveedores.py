@@ -4936,9 +4936,8 @@ def _render_tab_estudio_profundo(
                     if req_error:
                         st.error(req_error)
 
-                    c_sync, c_auto = st.columns([1.0, 1.0])
-                    sync_now = c_sync.button("Sincronizar resultado remoto", key="intel_sync_remote_now")
-                    auto_refresh = c_auto.checkbox("Auto-actualizar cada 5s", key="intel_study_auto_refresh")
+                    sync_now = st.button("Sincronizar resultado remoto", key="intel_sync_remote_now")
+                    st.caption("Auto-actualizacion activa cada 5 segundos mientras el run este en proceso.")
 
                     synced_id = _clean_text(st.session_state.get("intel_study_request_synced_id", ""))
                     if sync_now or (status == "done" and synced_id != current_request_id):
@@ -4957,7 +4956,7 @@ def _render_tab_estudio_profundo(
                         else:
                             st.warning(msg)
 
-                    if auto_refresh and status in {"pending", "enqueued", "running"}:
+                    if status in {"pending", "enqueued", "running"}:
                         import time
 
                         time.sleep(5)
