@@ -2095,6 +2095,121 @@ def _read_remote_study_data(request_id: str) -> tuple[pd.DataFrame, pd.DataFrame
     return run_row, detail, ""
 
 
+def _is_desierto_value(value: object) -> bool:
+    txt = _normalize_column_key(_clean_text(value))
+    return "desierto" in txt
+
+
+def _normalize_remote_detail_df(detail_df: pd.DataFrame) -> pd.DataFrame:
+    if detail_df is None or detail_df.empty:
+        return detail_df.copy() if isinstance(detail_df, pd.DataFrame) else pd.DataFrame()
+
+    df = detail_df.copy()
+    for col in [
+        "ficha",
+        "nombre_ficha",
+        "detail_id",
+        "acto_id",
+        "acto_nombre",
+        "acto_url",
+        "entidad",
+        "renglon_texto",
+        "proveedor",
+        "proveedor_ganador",
+        "marca",
+        "modelo",
+        "pais_origen",
+        "fecha_publicacion",
+        "fecha_celebracion",
+        "fecha_adjudicacion",
+        "fecha_orden_compra",
+        "tipo_flujo",
+        "fuente_precio",
+        "fuente_fecha",
+        "enlace_evidencia",
+        "unidad_medida",
+        "observaciones",
+        "estado_revision",
+    ]:
+        if col in df.columns:
+            df[col] = df[col].map(_clean_text)
+
+    if "acto_url" in df.columns:
+        df["acto_url"] = df["acto_url"].map(_to_absolute_panamacompra_url)
+    if "enlace_evidencia" in df.columns:
+        df["enlace_evidencia"] = df["enlace_evidencia"].map(_to_absolute_panamacompra_url)
+    if "acto_url" in df.columns and "enlace_evidencia" in df.columns:
+        empty_ev = df["enlace_evidencia"].astype(str).str.strip() == ""
+        df.loc[empty_ev, "enlace_evidencia"] = df.loc[empty_ev, "acto_url"]
+
+    numeric_cols = [
+        "cantidad",
+        "dias_acto_a_oc",
+        "dias_acto_a_oc_mas_entrega",
+        "tiempo_entrega_dias",
+        "nivel_certeza",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].map(lambda x: round(_safe_float(x, 0.0), 6))
+
+    if "requiere_revision" in df.columns:
+        df["requiere_revision"] = df["requiere_revision"].map(
+            lambda x: 1 if _as_bool(x) or _safe_int(x) > 0 else 0
+        )
+
+    if "es_ganador" in df.columns:
+        df["es_ganador"] = df["es_ganador"].map(lambda x: 1 if _as_bool(x) or _safe_int(x) > 0 else 0)
+
+    for col in ["precio_unitario_participacion", "precio_unitario_referencia"]:
+        if col not in df.columns:
+            continue
+
+        def _norm_price(v: object) -> object:
+            if _is_desierto_value(v):
+                return "desierto"
+            txt = _clean_text(v)
+            if not txt:
+                return ""
+            num = _safe_float(txt, 0.0)
+            if num > 0:
+                return round(num, 6)
+            # Preserva ceros explícitos (0, 0.0, 0,00) y evita romper textos no vacíos.
+            if txt in {"0", "0.0", "0,0", "0,00", "0.0000"}:
+                return 0.0
+            return txt
+
+        df[col] = df[col].map(_norm_price)
+
+    # Reglas robustas para corridas desiertas:
+    # - unit y fecha OC deben quedar "desierto"
+    # - referencia: numérica si existe; de lo contrario "desierto"
+    # - no requiere revisión
+    if "precio_unitario_participacion" in df.columns and "fecha_orden_compra" in df.columns:
+        for idx, row in df.iterrows():
+            is_desierto_row = (
+                _is_desierto_value(row.get("estado_revision", ""))
+                or _is_desierto_value(row.get("precio_unitario_participacion", ""))
+                or _is_desierto_value(row.get("fecha_orden_compra", ""))
+            )
+            if not is_desierto_row:
+                continue
+            df.at[idx, "precio_unitario_participacion"] = "desierto"
+            df.at[idx, "fecha_orden_compra"] = "desierto"
+            if "precio_unitario_referencia" in df.columns:
+                pref_val = row.get("precio_unitario_referencia", "")
+                pref_num = _safe_float(pref_val, 0.0)
+                df.at[idx, "precio_unitario_referencia"] = round(pref_num, 6) if pref_num > 0 else "desierto"
+            if "estado_revision" in df.columns:
+                df.at[idx, "estado_revision"] = "desierto"
+            if "requiere_revision" in df.columns:
+                df.at[idx, "requiere_revision"] = 0
+            if "nivel_certeza" in df.columns:
+                df.at[idx, "nivel_certeza"] = max(_safe_float(row.get("nivel_certeza", 0.0), 0.0), 0.99)
+
+    return df
+
+
 def _sync_remote_run_to_local(
     request_id: str,
     fallback_ficha: str,
@@ -2191,6 +2306,7 @@ def _sync_remote_run_to_local(
         if col not in detail_df.columns:
             detail_df[col] = ""
     detail_df = detail_df[keep_cols].copy()
+    detail_df = _normalize_remote_detail_df(detail_df)
     detail_df["ficha"] = detail_df["ficha"].astype(str).replace("", ficha)
     detail_df["nombre_ficha"] = detail_df["nombre_ficha"].astype(str).replace("", ficha_name)
     detail_df["detail_id"] = detail_df["detail_id"].astype(str)
@@ -4956,7 +5072,10 @@ def _render_tab_estudio_profundo(
                         else:
                             st.warning(msg)
 
-                    if status in {"pending", "enqueued", "running"}:
+                    auto_refresh = status in {"pending", "enqueued", "running"} or (
+                        status == "done" and synced_id != current_request_id
+                    )
+                    if auto_refresh:
                         import time
 
                         time.sleep(5)
@@ -4979,6 +5098,17 @@ def _render_tab_estudio_profundo(
             if detail_df.empty:
                 st.warning("Sin detalle para este run.")
             else:
+                desierto_count = int(
+                    (
+                        detail_df.get("estado_revision", pd.Series(dtype=str)).astype(str).str.lower().str.contains("desierto")
+                        | detail_df.get("precio_unitario_participacion", pd.Series(dtype=str)).astype(str).str.lower().str.contains("desierto")
+                        | detail_df.get("fecha_orden_compra", pd.Series(dtype=str)).astype(str).str.lower().str.contains("desierto")
+                    ).sum()
+                )
+                st.caption(
+                    f"Detalle cargado: {len(detail_df)} renglones | "
+                    f"Registros marcados como desierto: {desierto_count}"
+                )
                 show_cols = [
                     "ficha",
                     "acto_id",
