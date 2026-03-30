@@ -1928,12 +1928,24 @@ def _sheet_id_candidates(kind: str) -> list[str]:
 
 
 def _open_sheet_with_fallback(client, candidates: list[str], purpose: str) -> tuple[str, object]:
+    # Cachea el ultimo sheet_id valido por proposito para evitar lecturas extras
+    # de metadata al probar multiples IDs en cada polling.
+    cache_key = f"intel_sheet_cache_{purpose}"
+    cached_sid = _clean_text(st.session_state.get(cache_key, ""))
+    if cached_sid:
+        try:
+            sh = client.open_by_key(cached_sid)
+            return cached_sid, sh
+        except Exception:
+            st.session_state.pop(cache_key, None)
+
     attempted: list[str] = []
     last_exc: Exception | None = None
     for sid in _uniq_nonempty(candidates):
         attempted.append(sid)
         try:
             sh = client.open_by_key(sid)
+            st.session_state[cache_key] = sid
             return sid, sh
         except Exception as exc:
             last_exc = exc
@@ -2057,6 +2069,16 @@ def _fetch_intel_manual_request(client, request_id: str) -> dict[str, str] | Non
         if str(row_map.get("id", "")).strip() == str(request_id).strip():
             return row_map
     return None
+
+
+def _is_sheets_quota_error(exc: Exception) -> bool:
+    txt = _normalize_column_key(str(exc))
+    return (
+        "429" in txt
+        or "quota exceeded" in txt
+        or "read requests per minute" in txt
+        or "rate_limit_exceeded" in txt
+    )
 
 
 def _read_remote_study_data(request_id: str) -> tuple[pd.DataFrame, pd.DataFrame, str]:
@@ -5009,6 +5031,9 @@ def _render_tab_estudio_profundo(
                     st.session_state["intel_study_request_ficha_name"] = target_name
                     st.session_state["intel_study_request_notes"] = _clean_text(run_notes)
                     st.session_state.pop("intel_study_request_synced_id", None)
+                    st.session_state["intel_manual_last_req_row"] = None
+                    st.session_state["intel_manual_last_poll_ts"] = 0.0
+                    st.session_state["intel_manual_poll_cooldown_until"] = 0.0
                     st.success(
                         f"Solicitud enviada al orquestador (request_id={request_id[:10]}...). "
                         "Se ejecutara en tu PC con Selenium visible."
@@ -5018,14 +5043,51 @@ def _render_tab_estudio_profundo(
 
             current_request_id = _clean_text(st.session_state.get("intel_study_request_id", ""))
             if current_request_id:
-                try:
-                    from sheets import get_client
+                now_ts = time.time()
+                poll_interval_s = 10.0
+                quota_cooldown_s = 65.0
+                last_poll_ts = float(st.session_state.get("intel_manual_last_poll_ts", 0.0) or 0.0)
+                cooldown_until = float(st.session_state.get("intel_manual_poll_cooldown_until", 0.0) or 0.0)
+                req_row = None
+                used_cached_status = False
 
-                    client_req, _ = get_client()
-                    req_row = _fetch_intel_manual_request(client_req, current_request_id)
+                try:
+                    if cooldown_until and now_ts < cooldown_until:
+                        req_row = st.session_state.get("intel_manual_last_req_row")
+                        used_cached_status = req_row is not None
+                    elif last_poll_ts and (now_ts - last_poll_ts) < poll_interval_s:
+                        req_row = st.session_state.get("intel_manual_last_req_row")
+                        used_cached_status = req_row is not None
+                    else:
+                        from sheets import get_client
+
+                        client_req, _ = get_client()
+                        req_row = _fetch_intel_manual_request(client_req, current_request_id)
+                        st.session_state["intel_manual_last_poll_ts"] = now_ts
+                        if req_row is not None:
+                            st.session_state["intel_manual_last_req_row"] = req_row
+                        st.session_state["intel_manual_poll_cooldown_until"] = 0.0
                 except Exception as exc:
-                    req_row = None
-                    st.error(f"No se pudo consultar estado de solicitud: {exc}")
+                    if _is_sheets_quota_error(exc):
+                        cooldown_until = now_ts + quota_cooldown_s
+                        st.session_state["intel_manual_poll_cooldown_until"] = cooldown_until
+                        req_row = st.session_state.get("intel_manual_last_req_row")
+                        used_cached_status = req_row is not None
+                        wait_s = int(max(1, round(cooldown_until - now_ts)))
+                        st.warning(
+                            "Google Sheets reporto limite de lectura (429). "
+                            f"Usando ultimo estado disponible y reintentando en {wait_s}s."
+                        )
+                    else:
+                        req_row = st.session_state.get("intel_manual_last_req_row")
+                        used_cached_status = req_row is not None
+                        if used_cached_status:
+                            st.warning(
+                                "No se pudo consultar estado en este intento; "
+                                "mostrando ultimo estado disponible."
+                            )
+                        else:
+                            st.error(f"No se pudo consultar estado de solicitud: {exc}")
 
                 if req_row:
                     status = _clean_text(req_row.get("status", "")).lower()
@@ -5046,6 +5108,8 @@ def _render_tab_estudio_profundo(
                     }.get(status, "Procesando...")
                     st.progress(progress_value, text=f"Request {current_request_id[:10]}... | {progress_text}")
                     st.caption(f"Estado actual: `{status or 'desconocido'}`")
+                    if used_cached_status:
+                        st.caption("Estado mostrado desde cache temporal por control de cuota.")
                     if note:
                         st.caption(note)
                     req_error = _clean_text(req_row.get("result_error", ""))
