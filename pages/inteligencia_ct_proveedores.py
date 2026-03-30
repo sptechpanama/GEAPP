@@ -5,6 +5,7 @@ import re
 import sqlite3
 import math
 import uuid
+from collections.abc import Mapping
 from datetime import date, datetime
 import io
 import os
@@ -1785,47 +1786,97 @@ def _json_dumps(value: object) -> str:
 
 
 def _intel_sheet_id() -> str:
-    try:
-        app_cfg = st.secrets.get("app", {})
-    except Exception:
-        app_cfg = {}
-
-    if not isinstance(app_cfg, dict):
-        return ""
-
     for key in ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"):
-        value = app_cfg.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
+        env_val = _clean_text(os.getenv(key, ""))
+        if env_val:
+            return env_val
+
+        try:
+            app_cfg = st.secrets.get("app", {})
+            if isinstance(app_cfg, Mapping):
+                app_val = _clean_text(app_cfg.get(key, ""))
+                if app_val:
+                    return app_val
+        except Exception:
+            pass
+
+        try:
+            root_val = _clean_text(st.secrets.get(key, ""))
+            if root_val:
+                return root_val
+        except Exception:
+            pass
     return ""
 
 
 def _pc_manual_sheet_id() -> str:
+    env_manual = _clean_text(os.getenv("PC_MANUAL_SHEET_ID", ""))
+    if env_manual:
+        return env_manual
+    env_sheet = _clean_text(os.getenv("SHEET_ID", ""))
+    if env_sheet:
+        return env_sheet
+
     try:
         app_cfg = st.secrets.get("app", {})
+        if isinstance(app_cfg, Mapping):
+            return (
+                _clean_text(app_cfg.get("PC_MANUAL_SHEET_ID", ""))
+                or _clean_text(app_cfg.get("SHEET_ID", ""))
+                or _intel_sheet_id()
+            )
     except Exception:
-        app_cfg = {}
-    if isinstance(app_cfg, dict):
-        return (
-            _clean_text(app_cfg.get("PC_MANUAL_SHEET_ID"))
-            or _clean_text(app_cfg.get("SHEET_ID"))
-            or _intel_sheet_id()
-        )
+        pass
+
+    try:
+        root_manual = _clean_text(st.secrets.get("PC_MANUAL_SHEET_ID", ""))
+        if root_manual:
+            return root_manual
+        root_sheet = _clean_text(st.secrets.get("SHEET_ID", ""))
+        if root_sheet:
+            return root_sheet
+    except Exception:
+        pass
+
     return _intel_sheet_id()
 
 
 def _pc_config_sheet_id() -> str:
+    env_cfg = _clean_text(os.getenv("PC_CONFIG_SHEET_ID", ""))
+    if env_cfg:
+        return env_cfg
+    env_manual = _clean_text(os.getenv("PC_MANUAL_SHEET_ID", ""))
+    if env_manual:
+        return env_manual
+    env_sheet = _clean_text(os.getenv("SHEET_ID", ""))
+    if env_sheet:
+        return env_sheet
+
     try:
         app_cfg = st.secrets.get("app", {})
+        if isinstance(app_cfg, Mapping):
+            return (
+                _clean_text(app_cfg.get("PC_CONFIG_SHEET_ID", ""))
+                or _clean_text(app_cfg.get("PC_MANUAL_SHEET_ID", ""))
+                or _clean_text(app_cfg.get("SHEET_ID", ""))
+                or _intel_sheet_id()
+            )
     except Exception:
-        app_cfg = {}
-    if isinstance(app_cfg, dict):
-        return (
-            _clean_text(app_cfg.get("PC_CONFIG_SHEET_ID"))
-            or _clean_text(app_cfg.get("PC_MANUAL_SHEET_ID"))
-            or _clean_text(app_cfg.get("SHEET_ID"))
-            or _intel_sheet_id()
-        )
+        pass
+
+    try:
+        root_cfg = _clean_text(st.secrets.get("PC_CONFIG_SHEET_ID", ""))
+        if root_cfg:
+            return root_cfg
+        root_manual = _clean_text(st.secrets.get("PC_MANUAL_SHEET_ID", ""))
+        if root_manual:
+            return root_manual
+        root_sheet = _clean_text(st.secrets.get("SHEET_ID", ""))
+        if root_sheet:
+            return root_sheet
+    except Exception:
+        pass
+
     return _intel_sheet_id()
 
 
