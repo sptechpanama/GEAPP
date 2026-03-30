@@ -5,6 +5,7 @@ import re
 import sqlite3
 import math
 import uuid
+import time
 from collections.abc import Mapping
 from datetime import date, datetime
 import io
@@ -5140,8 +5141,6 @@ def _render_tab_estudio_profundo(
                         status == "done" and synced_id != current_request_id
                     )
                     if auto_refresh:
-                        import time
-
                         time.sleep(5)
                         st.rerun()
 
