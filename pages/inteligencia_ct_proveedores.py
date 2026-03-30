@@ -77,6 +77,27 @@ PANAMACOMPRA_BASE_URL = "https://www.panamacompra.gob.pa/Inicio/"
 INTEL_WEIGHTS_PROFILE_VERSION = "defaults_38_32_12_10_8_v1"
 INTEL_STUDY_DB_PATH = APP_ROOT / "data" / "inteligencia_ct_estudios.db"
 INTEL_TRACKING_WORKSHEET = "ct_fichas_seguimiento"
+INTEL_REMOTE_RUNS_WORKSHEET = "intel_study_runs_remote"
+INTEL_REMOTE_DETAIL_WORKSHEET = "intel_study_detail_remote"
+PC_MANUAL_WORKSHEET = "pc_manual"
+PC_CONFIG_WORKSHEET = "pc_config"
+PC_CONFIG_HEADERS = ["name", "python", "script", "days", "times", "enabled"]
+PC_MANUAL_HEADERS = [
+    "id",
+    "job",
+    "requested_by",
+    "requested_at",
+    "status",
+    "notes",
+    "payload",
+    "result_file_id",
+    "result_file_url",
+    "result_file_name",
+    "result_error",
+]
+INTEL_ORQ_JOB_NAME = "intel_estudio_ficha"
+INTEL_ORQ_JOB_PY = r"C:\Users\rodri\scrapers_repo\.venv\Scripts\python.exe"
+INTEL_ORQ_JOB_SCRIPT = r"C:\Users\rodri\scrapers_repo\orquestador\intel_ficha_worker.py"
 INTEL_TRACKING_COLUMNS = [
     "ficha",
     "nombre_ficha",
@@ -1726,11 +1747,27 @@ def _utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
-def _safe_float(value: object) -> float:
+def _safe_float(value: object, default: float = 0.0) -> float:
     try:
+        if value is None:
+            return float(default)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return float(default)
+            # Acepta formatos locales comunes: "1.234,56" y "1234.56"
+            text = text.replace("B/.", "").replace("B/", "").replace("$", "").replace("USD", "").strip()
+            if "," in text and "." in text:
+                if text.rfind(",") > text.rfind("."):
+                    text = text.replace(".", "").replace(",", ".")
+                else:
+                    text = text.replace(",", "")
+            elif "," in text:
+                text = text.replace(",", ".")
+            return float(text)
         return float(value)
     except Exception:
-        return 0.0
+        return float(default)
 
 
 def _safe_int(value: object) -> int:
@@ -1761,6 +1798,309 @@ def _intel_sheet_id() -> str:
         if value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def _pc_manual_sheet_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    if isinstance(app_cfg, dict):
+        return (
+            _clean_text(app_cfg.get("PC_MANUAL_SHEET_ID"))
+            or _clean_text(app_cfg.get("SHEET_ID"))
+            or _intel_sheet_id()
+        )
+    return _intel_sheet_id()
+
+
+def _pc_config_sheet_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    if isinstance(app_cfg, dict):
+        return (
+            _clean_text(app_cfg.get("PC_CONFIG_SHEET_ID"))
+            or _clean_text(app_cfg.get("PC_MANUAL_SHEET_ID"))
+            or _clean_text(app_cfg.get("SHEET_ID"))
+            or _intel_sheet_id()
+        )
+    return _intel_sheet_id()
+
+
+def _current_user() -> str:
+    for key in ("username", "user", "email", "correo", "name", "nombre"):
+        value = st.session_state.get(key)
+        if value:
+            return str(value)
+    return "desconocido"
+
+
+def _excel_column_letter(index: int) -> str:
+    out: list[str] = []
+    num = max(1, int(index))
+    while num > 0:
+        num, rem = divmod(num - 1, 26)
+        out.append(chr(65 + rem))
+    return "".join(reversed(out))
+
+
+def _ensure_ws_headers(client, sheet_id: str, worksheet: str, headers: list[str]) -> None:
+    from gspread.exceptions import WorksheetNotFound
+
+    sh = client.open_by_key(sheet_id)
+    try:
+        ws = sh.worksheet(worksheet)
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title=worksheet, rows=300, cols=max(len(headers), 8))
+        ws.update("A1", [headers])
+        return
+
+    existing = [cell.strip() for cell in (ws.row_values(1) or [])]
+    if existing[: len(headers)] != headers:
+        last_col = _excel_column_letter(len(headers))
+        ws.update(f"A1:{last_col}1", [headers])
+
+
+def _ensure_intel_orquestador_job(client) -> None:
+    sheet_id = _pc_config_sheet_id()
+    if not sheet_id:
+        raise RuntimeError("No hay SHEET_ID/PC_CONFIG_SHEET_ID configurado.")
+    _ensure_ws_headers(client, sheet_id, PC_CONFIG_WORKSHEET, PC_CONFIG_HEADERS)
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(PC_CONFIG_WORKSHEET)
+    rows = ws.get_all_records() or []
+    headers = [h.strip() for h in ws.row_values(1)]
+    header_map = {h.lower(): idx + 1 for idx, h in enumerate(headers)}
+
+    for idx, row in enumerate(rows, start=2):
+        if str(row.get("name", "")).strip().lower() == INTEL_ORQ_JOB_NAME:
+            updates = {
+                "python": INTEL_ORQ_JOB_PY,
+                "script": INTEL_ORQ_JOB_SCRIPT,
+                "days": "",
+                "times": "",
+                "enabled": "si",
+            }
+            for key, value in updates.items():
+                col = header_map.get(key)
+                if not col:
+                    continue
+                current = str(row.get(key, "")).strip()
+                if current != value:
+                    ws.update_cell(idx, col, value)
+            return
+
+    row_data = {
+        "name": INTEL_ORQ_JOB_NAME,
+        "python": INTEL_ORQ_JOB_PY,
+        "script": INTEL_ORQ_JOB_SCRIPT,
+        "days": "",
+        "times": "",
+        "enabled": "si",
+    }
+    ws.append_row([row_data.get(col, "") for col in PC_CONFIG_HEADERS], value_input_option="USER_ENTERED")
+
+
+def _append_intel_manual_request(client, payload: dict[str, object]) -> str:
+    sheet_id = _pc_manual_sheet_id()
+    if not sheet_id:
+        raise RuntimeError("No hay SHEET_ID/PC_MANUAL_SHEET_ID configurado.")
+    _ensure_ws_headers(client, sheet_id, PC_MANUAL_WORKSHEET, PC_MANUAL_HEADERS)
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(PC_MANUAL_WORKSHEET)
+
+    request_id = uuid.uuid4().hex
+    now_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    payload_obj = dict(payload or {})
+    payload_obj["request_id"] = request_id
+    row_data = {
+        "id": request_id,
+        "job": INTEL_ORQ_JOB_NAME,
+        "requested_by": _current_user(),
+        "requested_at": now_local,
+        "status": "pending",
+        "notes": "",
+        "payload": json.dumps(payload_obj, ensure_ascii=False),
+        "result_file_id": "",
+        "result_file_url": "",
+        "result_file_name": "",
+        "result_error": "",
+    }
+    ws.append_row([row_data.get(h, "") for h in PC_MANUAL_HEADERS], value_input_option="USER_ENTERED")
+    return request_id
+
+
+def _fetch_intel_manual_request(client, request_id: str) -> dict[str, str] | None:
+    sheet_id = _pc_manual_sheet_id()
+    if not sheet_id:
+        return None
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(PC_MANUAL_WORKSHEET)
+    values = ws.get_all_values()
+    if not values:
+        return None
+    headers = [cell.strip() for cell in values[0]]
+    for row in values[1:]:
+        row_map = {headers[idx]: row[idx] if idx < len(row) else "" for idx in range(len(headers))}
+        if str(row_map.get("id", "")).strip() == str(request_id).strip():
+            return row_map
+    return None
+
+
+def _read_remote_study_data(request_id: str) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    try:
+        from sheets import get_client, read_worksheet
+    except Exception as exc:
+        return pd.DataFrame(), pd.DataFrame(), f"No se pudo importar modulo Sheets: {exc}"
+
+    sheet_id = _intel_sheet_id()
+    if not sheet_id:
+        return pd.DataFrame(), pd.DataFrame(), "SHEET_ID no configurado para leer resultados remotos."
+
+    try:
+        client, _ = get_client()
+        runs = read_worksheet(client, sheet_id, INTEL_REMOTE_RUNS_WORKSHEET)
+        detail = read_worksheet(client, sheet_id, INTEL_REMOTE_DETAIL_WORKSHEET)
+    except Exception as exc:
+        return pd.DataFrame(), pd.DataFrame(), f"No se pudieron leer hojas remotas de estudio: {exc}"
+
+    if runs.empty:
+        return pd.DataFrame(), pd.DataFrame(), "No hay corridas remotas en Sheets."
+    if "request_id" not in runs.columns:
+        return pd.DataFrame(), pd.DataFrame(), "La hoja de runs remotos no contiene columna request_id."
+
+    runs = runs[runs["request_id"].astype(str).str.strip() == str(request_id).strip()].copy()
+    if runs.empty:
+        return pd.DataFrame(), pd.DataFrame(), f"No hay corrida remota para request_id={request_id}."
+
+    sort_col = "fecha_fin" if "fecha_fin" in runs.columns else runs.columns[0]
+    runs = runs.sort_values(sort_col, ascending=False)
+    run_row = runs.head(1).copy()
+    run_id_remote = _clean_text(run_row.iloc[0].get("run_id_remote", ""))
+    if detail.empty:
+        return run_row, pd.DataFrame(), ""
+    if "run_id_remote" in detail.columns and run_id_remote:
+        detail = detail[detail["run_id_remote"].astype(str).str.strip() == run_id_remote].copy()
+    elif "request_id" in detail.columns:
+        detail = detail[detail["request_id"].astype(str).str.strip() == str(request_id).strip()].copy()
+    return run_row, detail, ""
+
+
+def _sync_remote_run_to_local(
+    request_id: str,
+    fallback_ficha: str,
+    fallback_nombre: str,
+    db_source: str,
+    notes: str = "",
+) -> tuple[bool, str, str]:
+    run_df, detail_df, err = _read_remote_study_data(request_id)
+    if err:
+        return False, err, ""
+    if run_df.empty:
+        return False, "Run remoto vacio.", ""
+
+    ficha = _clean_text(run_df.iloc[0].get("ficha", "")) or _clean_text(fallback_ficha)
+    ficha_name = _clean_text(run_df.iloc[0].get("nombre_ficha", "")) or _clean_text(fallback_nombre)
+    if not ficha:
+        return False, "El run remoto no contiene ficha.", ""
+
+    if detail_df.empty:
+        detail_df = pd.DataFrame(
+            columns=[
+                "detail_id",
+                "ficha",
+                "nombre_ficha",
+                "acto_id",
+                "acto_nombre",
+                "acto_url",
+                "entidad",
+                "renglon_texto",
+                "proveedor",
+                "proveedor_ganador",
+                "es_ganador",
+                "marca",
+                "modelo",
+                "pais_origen",
+                "cantidad",
+                "precio_unitario_participacion",
+                "precio_unitario_referencia",
+                "fecha_publicacion",
+                "fecha_celebracion",
+                "fecha_adjudicacion",
+                "fecha_orden_compra",
+                "dias_acto_a_oc",
+                "dias_acto_a_oc_mas_entrega",
+                "tipo_flujo",
+                "fuente_precio",
+                "fuente_fecha",
+                "enlace_evidencia",
+                "unidad_medida",
+                "tiempo_entrega_dias",
+                "observaciones",
+                "estado_revision",
+                "nivel_certeza",
+                "requiere_revision",
+            ]
+        )
+
+    keep_cols = [
+        "detail_id",
+        "ficha",
+        "nombre_ficha",
+        "acto_id",
+        "acto_nombre",
+        "acto_url",
+        "entidad",
+        "renglon_texto",
+        "proveedor",
+        "proveedor_ganador",
+        "es_ganador",
+        "marca",
+        "modelo",
+        "pais_origen",
+        "cantidad",
+        "precio_unitario_participacion",
+        "precio_unitario_referencia",
+        "fecha_publicacion",
+        "fecha_celebracion",
+        "fecha_adjudicacion",
+        "fecha_orden_compra",
+        "dias_acto_a_oc",
+        "dias_acto_a_oc_mas_entrega",
+        "tipo_flujo",
+        "fuente_precio",
+        "fuente_fecha",
+        "enlace_evidencia",
+        "unidad_medida",
+        "tiempo_entrega_dias",
+        "observaciones",
+        "estado_revision",
+        "nivel_certeza",
+        "requiere_revision",
+    ]
+    for col in keep_cols:
+        if col not in detail_df.columns:
+            detail_df[col] = ""
+    detail_df = detail_df[keep_cols].copy()
+    detail_df["ficha"] = detail_df["ficha"].astype(str).replace("", ficha)
+    detail_df["nombre_ficha"] = detail_df["nombre_ficha"].astype(str).replace("", ficha_name)
+    detail_df["detail_id"] = detail_df["detail_id"].astype(str)
+    missing_detail = detail_df["detail_id"].str.strip() == ""
+    if missing_detail.any():
+        detail_df.loc[missing_detail, "detail_id"] = [str(uuid.uuid4()) for _ in range(int(missing_detail.sum()))]
+
+    consultas_df = pd.DataFrame()
+    run_id = _save_study_run(
+        ficha=ficha,
+        ficha_name=ficha_name,
+        detail_df=detail_df,
+        consultas_df=consultas_df,
+        db_source=db_source,
+        notes=(notes or f"Sincronizado desde orquestador request_id={request_id}"),
+    )
+    return True, "Resultados del orquestador sincronizados y guardados en local.", run_id
 
 
 def _as_bool(value: object) -> bool:
@@ -4399,7 +4739,7 @@ def _render_tab_estudio_profundo(
             target_ficha = st.selectbox("Ficha a estudiar", ficha_opts, key="intel_study_target_ficha")
             target_row = seg[seg["ficha"].astype(str) == str(target_ficha)].head(1)
             target_name = str(target_row.iloc[0].get("nombre_ficha", "") if not target_row.empty else "")
-            copt1, copt2, copt3 = st.columns([1.2, 1.0, 1.0])
+            copt1, copt2 = st.columns([1.2, 1.0])
             max_queries = int(
                 copt1.slider(
                     "Max consultas finales por run",
@@ -4408,23 +4748,16 @@ def _render_tab_estudio_profundo(
                     value=INTEL_STUDY_DEFAULT_MAX_QUERIES,
                     step=1,
                     key="intel_study_max_queries",
-                    help="Limita consultas manuales a las realmente criticas.",
-                )
-            )
-            use_ai_fallback = bool(
-                copt2.checkbox(
-                    "Usar GPT solo como fallback",
-                    value=True,
-                    key="intel_study_use_ai_fallback",
-                    help="Si se desactiva, solo usa scraping formal deterministico.",
+                    help="Limite para minimizar revision manual en el estudio remoto.",
                 )
             )
             use_browser_extractor = bool(
-                copt3.checkbox(
-                    "Usar navegador local (Selenium)",
+                copt2.checkbox(
+                    label="Modo fijo: Selenium local visible",
                     value=True,
-                    key="intel_study_use_browser_extractor",
-                    help="Recomendado para PanamáCompra (SPA). Si falla, usa requests + parser formal.",
+                    key="intel_study_use_browser_extractor_forced",
+                    disabled=True,
+                    help="El estudio se ejecuta via orquestador local con Selenium visible (sin headless).",
                 )
             )
             catalog_status = str(st.session_state.get("intel_catalogo_status", "") or "").strip()
@@ -4432,33 +4765,96 @@ def _render_tab_estudio_profundo(
                 st.caption(catalog_status)
             run_notes = st.text_area("Notas del estudio (opcional)", key="intel_study_notes", height=80)
             if st.button("Iniciar estudio de ficha", type="primary"):
-                acts = ficha_acts_df[ficha_acts_df["ficha"].astype(str) == str(target_ficha)].copy()
-                detail_df, queries_df, run_stats = _build_study_payload(
-                    str(target_ficha),
-                    target_name,
-                    acts,
-                    max_queries=max_queries,
-                    use_browser_extractor=use_browser_extractor,
-                    use_ai_fallback=use_ai_fallback,
-                )
-                run_id = _save_study_run(
-                    ficha=str(target_ficha),
-                    ficha_name=target_name,
-                    detail_df=detail_df,
-                    consultas_df=queries_df,
-                    db_source=db_path,
-                    notes=run_notes,
-                )
-                st.session_state["intel_selected_run_id"] = run_id
-                st.success(
-                    f"Estudio iniciado para ficha {target_ficha}. "
-                    f"Detalle: {len(detail_df)} filas | Consultas finales: {len(queries_df)}."
-                )
-                browser_status = str(st.session_state.get("intel_study_browser_status", "") or "").strip()
-                if browser_status:
-                    st.caption(f"Extractor navegador: {browser_status}")
-                st.session_state["intel_last_study_stats"] = run_stats
-                st.rerun()
+                try:
+                    from sheets import get_client
+
+                    client, _ = get_client()
+                    _ensure_intel_orquestador_job(client)
+                    request_id = _append_intel_manual_request(
+                        client,
+                        {
+                            "ficha": str(target_ficha),
+                            "nombre_ficha": target_name,
+                            "db_path": str(db_path or ""),
+                            "max_queries": int(max_queries),
+                            "notes": _clean_text(run_notes),
+                            "headless": False,
+                        },
+                    )
+                    st.session_state["intel_study_request_id"] = request_id
+                    st.session_state["intel_study_request_ficha"] = str(target_ficha)
+                    st.session_state["intel_study_request_ficha_name"] = target_name
+                    st.session_state["intel_study_request_notes"] = _clean_text(run_notes)
+                    st.session_state.pop("intel_study_request_synced_id", None)
+                    st.success(
+                        f"Solicitud enviada al orquestador (request_id={request_id[:10]}...). "
+                        "Se ejecutara en tu PC con Selenium visible."
+                    )
+                except Exception as exc:
+                    st.error(f"No se pudo enviar solicitud al orquestador: {exc}")
+
+            current_request_id = _clean_text(st.session_state.get("intel_study_request_id", ""))
+            if current_request_id:
+                try:
+                    from sheets import get_client
+
+                    client_req, _ = get_client()
+                    req_row = _fetch_intel_manual_request(client_req, current_request_id)
+                except Exception as exc:
+                    req_row = None
+                    st.error(f"No se pudo consultar estado de solicitud: {exc}")
+
+                if req_row:
+                    status = _clean_text(req_row.get("status", "")).lower()
+                    note = _clean_text(req_row.get("notes", ""))
+                    progress_value = {
+                        "pending": 0.15,
+                        "enqueued": 0.35,
+                        "running": 0.75,
+                        "done": 1.0,
+                        "error": 1.0,
+                    }.get(status, 0.1)
+                    progress_text = {
+                        "pending": "Solicitud recibida",
+                        "enqueued": "En cola de ejecucion",
+                        "running": "Scraping local en ejecucion",
+                        "done": "Run completado",
+                        "error": "Run con error",
+                    }.get(status, "Procesando...")
+                    st.progress(progress_value, text=f"Request {current_request_id[:10]}... | {progress_text}")
+                    st.caption(f"Estado actual: `{status or 'desconocido'}`")
+                    if note:
+                        st.caption(note)
+                    req_error = _clean_text(req_row.get("result_error", ""))
+                    if req_error:
+                        st.error(req_error)
+
+                    c_sync, c_auto = st.columns([1.0, 1.0])
+                    sync_now = c_sync.button("Sincronizar resultado remoto", key="intel_sync_remote_now")
+                    auto_refresh = c_auto.checkbox("Auto-actualizar cada 5s", key="intel_study_auto_refresh")
+
+                    synced_id = _clean_text(st.session_state.get("intel_study_request_synced_id", ""))
+                    if sync_now or (status == "done" and synced_id != current_request_id):
+                        ok, msg, run_id = _sync_remote_run_to_local(
+                            request_id=current_request_id,
+                            fallback_ficha=_clean_text(st.session_state.get("intel_study_request_ficha", "")),
+                            fallback_nombre=_clean_text(st.session_state.get("intel_study_request_ficha_name", "")),
+                            db_source=str(db_path or ""),
+                            notes=_clean_text(st.session_state.get("intel_study_request_notes", "")),
+                        )
+                        if ok:
+                            st.session_state["intel_study_request_synced_id"] = current_request_id
+                            st.session_state["intel_selected_run_id"] = run_id
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.warning(msg)
+
+                    if auto_refresh and status in {"pending", "enqueued", "running"}:
+                        import time
+
+                        time.sleep(5)
+                        st.rerun()
 
     runs_df = _load_runs_df()
 
@@ -4666,29 +5062,37 @@ def _render_tab_estudio_profundo(
             ficha_opts = sorted(runs_df["ficha"].astype(str).unique().tolist())
             chosen = st.selectbox("Ficha para reestudio", ficha_opts, key="intel_restudy_ficha")
             if st.button("Reestudiar ficha seleccionada"):
-                acts = ficha_acts_df[ficha_acts_df["ficha"].astype(str) == str(chosen)].copy()
                 ref_row = ranked_df[ranked_df["ficha"].astype(str) == str(chosen)].head(1)
                 ficha_name = str(ref_row.iloc[0].get("nombre_ficha", "") if not ref_row.empty else "")
-                detail_df, queries_df, run_stats = _build_study_payload(
-                    str(chosen),
-                    ficha_name,
-                    acts,
-                    max_queries=int(st.session_state.get("intel_study_max_queries", INTEL_STUDY_DEFAULT_MAX_QUERIES)),
-                    use_browser_extractor=bool(st.session_state.get("intel_study_use_browser_extractor", True)),
-                    use_ai_fallback=bool(st.session_state.get("intel_study_use_ai_fallback", True)),
-                )
-                new_run = _save_study_run(
-                    ficha=str(chosen),
-                    ficha_name=ficha_name,
-                    detail_df=detail_df,
-                    consultas_df=queries_df,
-                    db_source=db_path,
-                    notes="Reestudio manual",
-                )
-                st.session_state["intel_selected_run_id"] = new_run
-                st.session_state["intel_last_study_stats"] = run_stats
-                st.success(f"Nueva versi?n creada para ficha {chosen}: {new_run}")
-                st.rerun()
+                try:
+                    from sheets import get_client
+
+                    client, _ = get_client()
+                    _ensure_intel_orquestador_job(client)
+                    request_id = _append_intel_manual_request(
+                        client,
+                        {
+                            "ficha": str(chosen),
+                            "nombre_ficha": ficha_name,
+                            "db_path": str(db_path or ""),
+                            "max_queries": int(
+                                st.session_state.get("intel_study_max_queries", INTEL_STUDY_DEFAULT_MAX_QUERIES)
+                            ),
+                            "notes": "Reestudio manual",
+                            "headless": False,
+                        },
+                    )
+                    st.session_state["intel_study_request_id"] = request_id
+                    st.session_state["intel_study_request_ficha"] = str(chosen)
+                    st.session_state["intel_study_request_ficha_name"] = ficha_name
+                    st.session_state["intel_study_request_notes"] = "Reestudio manual"
+                    st.session_state.pop("intel_study_request_synced_id", None)
+                    st.success(
+                        f"Reestudio encolado en orquestador (request_id={request_id[:10]}...). "
+                        "Sincroniza cuando el estado cambie a done."
+                    )
+                except Exception as exc:
+                    st.error(f"No se pudo enviar reestudio al orquestador: {exc}")
 
 def _render_tab_proveedores_historicos_ia() -> None:
     st.markdown("### Proveedores históricos + IA")
