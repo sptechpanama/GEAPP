@@ -5362,7 +5362,15 @@ def _render_tab_estudio_profundo(
         if resumen_df.empty:
             st.info("No hay fichas estudiadas todav?a.")
         else:
-            st.dataframe(resumen_df, use_container_width=True, hide_index=True)
+            resumen_view = resumen_df.copy()
+            if "ficha" in resumen_view.columns:
+                def _fmt_ficha_row(row: pd.Series) -> str:
+                    ficha_val = _clean_text(row.get("ficha", ""))
+                    nombre_val = _clean_text(row.get("nombre_ficha", ""))
+                    return f"{ficha_val} - {nombre_val}" if ficha_val and nombre_val else ficha_val
+
+                resumen_view["ficha"] = resumen_view.apply(_fmt_ficha_row, axis=1)
+            st.dataframe(resumen_view, use_container_width=True, hide_index=True)
             ficha_opts = resumen_df["ficha"].astype(str).tolist()
             ficha_labels = _build_ficha_label_map(resumen_df, ficha_col="ficha", nombre_col="nombre_ficha")
             selected_ficha = st.selectbox(
