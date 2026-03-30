@@ -1787,6 +1787,26 @@ def _json_dumps(value: object) -> str:
         return "[]"
 
 
+def _build_ficha_label_map(
+    df: pd.DataFrame,
+    ficha_col: str = "ficha",
+    nombre_col: str = "nombre_ficha",
+) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    if df is None or df.empty or ficha_col not in df.columns:
+        return labels
+    for _, row in df.iterrows():
+        ficha = _clean_text(row.get(ficha_col, ""))
+        if not ficha:
+            continue
+        nombre = _clean_text(row.get(nombre_col, "")) if nombre_col in df.columns else ""
+        if nombre:
+            labels[ficha] = f"{ficha} - {nombre}"
+        elif ficha not in labels:
+            labels[ficha] = ficha
+    return labels
+
+
 def _intel_sheet_id() -> str:
     for key in ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"):
         env_val = _clean_text(os.getenv(key, ""))
@@ -4708,11 +4728,13 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
 
         st.markdown("#### Acciones sobre ficha seleccionada")
         ficha_opts = view_df["ficha"].astype(str).tolist()
+        ficha_labels = _build_ficha_label_map(view_df, ficha_col="ficha", nombre_col="nombre_ficha")
         selected_action_ficha = st.selectbox(
             "Selecciona ficha",
             ficha_opts,
             index=0 if ficha_opts else None,
             key="intel_action_ficha",
+            format_func=lambda x: ficha_labels.get(str(x), str(x)),
         )
         a1, a2, a3 = st.columns(3)
         if a1.button("Ver actos de ficha", disabled=not bool(selected_action_ficha)):
@@ -4908,7 +4930,14 @@ def _render_tab_seguimiento_ct() -> None:
     )
 
     c1, c2, c3 = st.columns([1.4, 1.8, 1.0])
-    target = c1.selectbox("Ficha a gestionar", df_seg["ficha"].astype(str).tolist(), key="intel_seg_target")
+    ficha_target_opts = df_seg["ficha"].astype(str).tolist()
+    ficha_target_labels = _build_ficha_label_map(df_seg, ficha_col="ficha", nombre_col="nombre_ficha")
+    target = c1.selectbox(
+        "Ficha a gestionar",
+        ficha_target_opts,
+        key="intel_seg_target",
+        format_func=lambda x: ficha_target_labels.get(str(x), str(x)),
+    )
     new_state = c2.selectbox(
         "Nuevo estado",
         [
@@ -4982,7 +5011,13 @@ def _render_tab_estudio_profundo(
             st.dataframe(seg[cols], use_container_width=True, hide_index=True)
 
             ficha_opts = seg["ficha"].astype(str).tolist()
-            target_ficha = st.selectbox("Ficha a estudiar", ficha_opts, key="intel_study_target_ficha")
+            ficha_labels = _build_ficha_label_map(seg, ficha_col="ficha", nombre_col="nombre_ficha")
+            target_ficha = st.selectbox(
+                "Ficha a estudiar",
+                ficha_opts,
+                key="intel_study_target_ficha",
+                format_func=lambda x: ficha_labels.get(str(x), str(x)),
+            )
             target_row = seg[seg["ficha"].astype(str) == str(target_ficha)].head(1)
             target_name = str(target_row.iloc[0].get("nombre_ficha", "") if not target_row.empty else "")
             copt1, copt2 = st.columns([1.2, 1.0])
@@ -5329,7 +5364,13 @@ def _render_tab_estudio_profundo(
         else:
             st.dataframe(resumen_df, use_container_width=True, hide_index=True)
             ficha_opts = resumen_df["ficha"].astype(str).tolist()
-            selected_ficha = st.selectbox("Ficha estudiada", ficha_opts, key="intel_done_ficha")
+            ficha_labels = _build_ficha_label_map(resumen_df, ficha_col="ficha", nombre_col="nombre_ficha")
+            selected_ficha = st.selectbox(
+                "Ficha estudiada",
+                ficha_opts,
+                key="intel_done_ficha",
+                format_func=lambda x: ficha_labels.get(str(x), str(x)),
+            )
             row = resumen_df[resumen_df["ficha"].astype(str) == str(selected_ficha)].head(1)
             if not row.empty:
                 row = row.iloc[0]
@@ -5359,7 +5400,13 @@ def _render_tab_estudio_profundo(
             st.caption("Puedes re-ejecutar una ficha; se reemplaza por la nueva corrida vigente.")
             st.dataframe(runs_df, use_container_width=True, hide_index=True)
             ficha_opts = sorted(runs_df["ficha"].astype(str).unique().tolist())
-            chosen = st.selectbox("Ficha para reestudio", ficha_opts, key="intel_restudy_ficha")
+            ficha_labels = _build_ficha_label_map(runs_df, ficha_col="ficha", nombre_col="nombre_ficha")
+            chosen = st.selectbox(
+                "Ficha para reestudio",
+                ficha_opts,
+                key="intel_restudy_ficha",
+                format_func=lambda x: ficha_labels.get(str(x), str(x)),
+            )
             if st.button("Reestudiar ficha seleccionada"):
                 ref_row = ranked_df[ranked_df["ficha"].astype(str) == str(chosen)].head(1)
                 ficha_name = str(ref_row.iloc[0].get("nombre_ficha", "") if not ref_row.empty else "")
