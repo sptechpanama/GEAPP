@@ -73,6 +73,7 @@ FICHA_TOKEN_RE = re.compile(r"\b\d{3,8}\*?\b")
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
 CTNI_CONSULTA_URL = "https://ctni.minsa.gob.pa/Home/ConsultarFichas"
 CTNI_LOAD_FICHAS_URL = "https://ctni.minsa.gob.pa/Home/LoadFichas"
+PANAMACOMPRA_BASE_URL = "https://www.panamacompra.gob.pa/Inicio/"
 INTEL_WEIGHTS_PROFILE_VERSION = "defaults_38_32_12_10_8_v1"
 INTEL_STUDY_DB_PATH = APP_ROOT / "data" / "inteligencia_ct_estudios.db"
 INTEL_TRACKING_WORKSHEET = "ct_fichas_seguimiento"
@@ -421,6 +422,35 @@ def _candidate_criterios_paths() -> list[Path]:
     return unique
 
 
+def _candidate_oferentes_catalogos_paths() -> list[Path]:
+    raw_candidates = [
+        APP_ROOT / "oferentes_catalogos.xlsx",
+        APP_ROOT / "oferentes_catalogos.csv",
+        APP_ROOT / "oferentes_Catálogos.xlsx",
+        APP_ROOT / "data" / "oferentes_catalogos.xlsx",
+        APP_ROOT / "data" / "oferentes_catalogos.csv",
+        APP_ROOT / "data" / "oferentes_Catálogos.xlsx",
+        Path.cwd() / "oferentes_catalogos.xlsx",
+        Path.cwd() / "oferentes_catalogos.csv",
+        Path.cwd() / "oferentes_Catálogos.xlsx",
+        Path.cwd() / "data" / "oferentes_catalogos.xlsx",
+        Path.cwd() / "data" / "oferentes_catalogos.csv",
+        Path.cwd() / "data" / "oferentes_Catálogos.xlsx",
+        Path(r"C:\Users\rodri\scrapers_repo\minsa_scraper\outputs\oferentes_catalogos.xlsx"),
+        Path(r"C:\Users\rodri\scrapers_repo\minsa_scraper\outputs\oferentes_catalogos.csv"),
+        Path(r"C:\Users\rodri\scrapers_repo\minsa_scraper\outputs\oferentes_Catálogos.xlsx"),
+    ]
+    unique: list[Path] = []
+    for path in raw_candidates:
+        try:
+            normalized = path.expanduser().resolve()
+        except Exception:
+            normalized = path.expanduser()
+        if normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
 def _candidate_db_paths() -> list[Path]:
     raw_candidates = [
         Path(DB_PATH),
@@ -471,6 +501,30 @@ def _panamacompra_drive_file_id() -> str:
         "DRIVE_PANAMACOMPRA_FILE_ID",
         "DRIVE_PANAMACOMPRA_DB_FILE_ID",
         "DRIVE_DB_PANAMACOMPRA_FILE_ID",
+    ):
+        value = os.environ.get(key)
+        if value and str(value).strip():
+            return _normalize_drive_file_id(str(value).strip())
+    return ""
+
+
+def _oferentes_catalogos_drive_file_id() -> str:
+    try:
+        app_cfg = st.secrets.get("app", {})
+    except Exception:
+        app_cfg = {}
+    for key in (
+        "DRIVE_OFERENTES_CATALOGOS_FILE_ID",
+        "DRIVE_OFERENTES_CATALOGO_FILE_ID",
+        "DRIVE_OFERENTES_FILE_ID",
+    ):
+        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
+        if value and str(value).strip():
+            return _normalize_drive_file_id(str(value).strip())
+    for key in (
+        "DRIVE_OFERENTES_CATALOGOS_FILE_ID",
+        "DRIVE_OFERENTES_CATALOGO_FILE_ID",
+        "DRIVE_OFERENTES_FILE_ID",
     ):
         value = os.environ.get(key)
         if value and str(value).strip():
@@ -882,6 +936,162 @@ def _load_ficha_reference_map() -> dict[str, dict[str, object]]:
         pass
 
     return merged_map
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _load_oferentes_catalogos_df() -> pd.DataFrame:
+    # 1) Local files
+    for path in _candidate_oferentes_catalogos_paths():
+        try:
+            if not (path.exists() and path.is_file() and path.stat().st_size > 0):
+                continue
+            if path.suffix.lower() == ".csv":
+                df = pd.read_csv(path)
+            else:
+                df = pd.read_excel(path)
+            if not df.empty:
+                st.session_state["intel_catalogo_status"] = f"Catalogo cargado local: {path}"
+                return df
+        except Exception:
+            continue
+
+    # 2) Drive (fallback)
+    file_id = _oferentes_catalogos_drive_file_id() or _find_drive_file_id_by_names(
+        ["oferentes_catalogos.xlsx", "oferentes_catalogos.csv", "oferentes_Catálogos.xlsx"]
+    )
+    if file_id:
+        raw, mode = _download_drive_file_bytes(file_id)
+        if raw:
+            try:
+                # Intenta excel primero; luego csv.
+                try:
+                    df = pd.read_excel(io.BytesIO(raw))
+                except Exception:
+                    df = pd.read_csv(io.BytesIO(raw))
+                if not df.empty:
+                    st.session_state["intel_catalogo_status"] = f"Catalogo cargado desde Drive ({mode})."
+                    return df
+            except Exception:
+                pass
+
+    st.session_state["intel_catalogo_status"] = "Catalogo de oferentes no disponible (local/Drive)."
+    return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _build_catalog_provider_map() -> tuple[dict[tuple[str, str], dict[str, str]], dict[str, dict[str, str]]]:
+    df = _load_oferentes_catalogos_df()
+    if df.empty:
+        return {}, {}
+
+    cols = list(df.columns)
+    proveedor_col = _resolve_column_by_alias(cols, ["Oferente", "Oferente::Oferente", "razon social", "proveedor"])
+    ficha_col = _resolve_column_by_alias(
+        cols,
+        [
+            "N° Ficha CTNI",
+            "No Ficha CTNI",
+            "N Ficha CTNI",
+            "Numero Ficha",
+            "Número Ficha",
+            "ficha",
+        ],
+    )
+    marca_col = _resolve_column_by_alias(cols, ["Marca", "Catálogo::Marca"])
+    modelo_col = _resolve_column_by_alias(
+        cols,
+        [
+            "Modelo / Sitio Web",
+            "Modelo",
+            "N° de Catálogo o Modelo, Sitio Web",
+            "N de Catalogo o Modelo",
+            "Catálogo::N° de Catálogo o Modelo, Sitio Web",
+        ],
+    )
+    pais_col = _resolve_column_by_alias(cols, ["País Origen", "Pais Origen", "Catálogo::País Origen", "pais de origen"])
+
+    if not proveedor_col:
+        return {}, {}
+
+    use_cols = [proveedor_col]
+    for col in (ficha_col, marca_col, modelo_col, pais_col):
+        if col and col not in use_cols:
+            use_cols.append(col)
+    work = df[use_cols].copy()
+    work["proveedor_norm"] = work[proveedor_col].map(_canonical_party_name)
+    work = work[work["proveedor_norm"].astype(str).str.strip() != ""].copy()
+    if work.empty:
+        return {}, {}
+
+    if ficha_col:
+        work["ficha_norm"] = (
+            work[ficha_col]
+            .astype(str)
+            .map(lambda v: re.sub(r"\D", "", _clean_text(v)))
+            .fillna("")
+        )
+    else:
+        work["ficha_norm"] = ""
+
+    def _mode_or_first(series: pd.Series) -> str:
+        s = series.astype(str).map(_clean_text)
+        s = s[s != ""]
+        if s.empty:
+            return ""
+        mode = s.mode()
+        if not mode.empty:
+            return str(mode.iloc[0])
+        return str(s.iloc[0])
+
+    key_map: dict[tuple[str, str], dict[str, str]] = {}
+    provider_map: dict[str, dict[str, str]] = {}
+
+    for prov_norm, part in work.groupby("proveedor_norm", dropna=False):
+        prov_key = str(prov_norm or "").strip()
+        if not prov_key:
+            continue
+        provider_map[prov_key] = {
+            "marca": _mode_or_first(part[marca_col]) if marca_col else "",
+            "modelo": _mode_or_first(part[modelo_col]) if modelo_col else "",
+            "pais_origen": _mode_or_first(part[pais_col]) if pais_col else "",
+        }
+
+        if ficha_col:
+            by_ficha = part.copy()
+            by_ficha = by_ficha[by_ficha["ficha_norm"].astype(str).str.strip() != ""]
+            for ficha_norm, chunk in by_ficha.groupby("ficha_norm", dropna=False):
+                ficha_key = str(ficha_norm or "").strip()
+                if not ficha_key:
+                    continue
+                key_map[(ficha_key, prov_key)] = {
+                    "marca": _mode_or_first(chunk[marca_col]) if marca_col else "",
+                    "modelo": _mode_or_first(chunk[modelo_col]) if modelo_col else "",
+                    "pais_origen": _mode_or_first(chunk[pais_col]) if pais_col else "",
+                }
+
+    return key_map, provider_map
+
+
+def _lookup_catalog_provider_payload(ficha: str, proveedor: str) -> dict[str, str]:
+    ficha_norm = re.sub(r"\D", "", str(ficha or ""))
+    prov_norm = _canonical_party_name(proveedor)
+    if not ficha_norm or not prov_norm:
+        return {"marca": "", "modelo": "", "pais_origen": ""}
+
+    key_map, provider_map = _build_catalog_provider_map()
+    payload = key_map.get((ficha_norm, prov_norm))
+    if payload:
+        return {
+            "marca": _clean_text(payload.get("marca", "")),
+            "modelo": _clean_text(payload.get("modelo", "")),
+            "pais_origen": _clean_text(payload.get("pais_origen", "")),
+        }
+    payload = provider_map.get(prov_norm, {})
+    return {
+        "marca": _clean_text(payload.get("marca", "")),
+        "modelo": _clean_text(payload.get("modelo", "")),
+        "pais_origen": _clean_text(payload.get("pais_origen", "")),
+    }
 
 
 def _resolve_db_path() -> Path | None:
@@ -1800,6 +2010,13 @@ def _ensure_study_db() -> None:
                 fecha_adjudicacion TEXT,
                 fecha_orden_compra TEXT,
                 dias_acto_a_oc REAL,
+                dias_acto_a_oc_mas_entrega REAL,
+                tipo_flujo TEXT,
+                fuente_precio TEXT,
+                fuente_fecha TEXT,
+                enlace_evidencia TEXT,
+                unidad_medida TEXT,
+                tiempo_entrega_dias REAL,
                 observaciones TEXT,
                 estado_revision TEXT DEFAULT 'pendiente',
                 nivel_certeza REAL DEFAULT 0.0,
@@ -1884,6 +2101,24 @@ def _ensure_study_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_detalle_run ON estudio_detalle(run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_consultas_run ON estudio_consultas(run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_seguimiento_fichas_estado ON seguimiento_fichas(estado)")
+
+        # Backward compatibility: agrega columnas nuevas si la DB ya existía.
+        existing_cols = {
+            str(row[1] or "").strip().lower()
+            for row in conn.execute("PRAGMA table_info(estudio_detalle)").fetchall()
+        }
+        required_cols = [
+            ("dias_acto_a_oc_mas_entrega", "REAL"),
+            ("tipo_flujo", "TEXT"),
+            ("fuente_precio", "TEXT"),
+            ("fuente_fecha", "TEXT"),
+            ("enlace_evidencia", "TEXT"),
+            ("unidad_medida", "TEXT"),
+            ("tiempo_entrega_dias", "REAL"),
+        ]
+        for col_name, col_type in required_cols:
+            if col_name.lower() not in existing_cols:
+                conn.execute(f"ALTER TABLE estudio_detalle ADD COLUMN {col_name} {col_type}")
         conn.commit()
 
 
@@ -1920,6 +2155,17 @@ def _extract_estudio_dates(row: pd.Series) -> dict[str, str]:
             "fecha_posterior",
         ],
     )
+    tiempo_entrega_dias = _extract_delivery_days(
+        _pick_alias_value(
+            row,
+            [
+                "termino_entrega",
+                "término_entrega",
+                "tiempo_entrega",
+                "tiempo de entrega",
+            ],
+        )
+    )
 
     d_cele = _parse_any_date(fecha_celebracion)
     d_oc = _parse_any_date(fecha_oc)
@@ -1932,6 +2178,8 @@ def _extract_estudio_dates(row: pd.Series) -> dict[str, str]:
         "fecha_adjudicacion": fecha_adjudicacion,
         "fecha_orden_compra": fecha_oc,
         "dias_acto_a_oc": dias,
+        "tiempo_entrega_dias": float(tiempo_entrega_dias),
+        "dias_acto_a_oc_mas_entrega": float(dias + max(0.0, float(tiempo_entrega_dias))),
     }
 
 
@@ -1942,6 +2190,8 @@ def _recompute_days_act_to_oc(dates: dict[str, str]) -> dict[str, str]:
         dates["dias_acto_a_oc"] = float((d_oc - d_cele).days)
     else:
         dates["dias_acto_a_oc"] = 0.0
+    entrega = float(_safe_float(dates.get("tiempo_entrega_dias", 0.0), 0.0))
+    dates["dias_acto_a_oc_mas_entrega"] = float(_safe_float(dates.get("dias_acto_a_oc", 0.0), 0.0) + max(0.0, entrega))
     return dates
 
 
@@ -1982,6 +2232,74 @@ def _extract_dates_from_text(text: str, context_labels: list[str]) -> str:
         if m:
             return _clean_text(m.group(1))
     return ""
+
+
+def _extract_all_date_tokens(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    return re.findall(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", raw)
+
+
+def _latest_date_token(text: str) -> str:
+    tokens = _extract_all_date_tokens(text)
+    if not tokens:
+        return ""
+    parsed: list[tuple[pd.Timestamp, str]] = []
+    for token in tokens:
+        d = _parse_any_date(token)
+        if not pd.isna(d):
+            parsed.append((d, token))
+    if not parsed:
+        return _clean_text(tokens[-1])
+    parsed.sort(key=lambda x: x[0])
+    return _clean_text(parsed[-1][1])
+
+
+def _extract_date_by_labels(lines: list[str], labels: list[str]) -> str:
+    if not lines:
+        return ""
+    label_norms = [_normalize_column_key(x) for x in labels if _normalize_column_key(x)]
+    for idx, line in enumerate(lines):
+        norm = _normalize_column_key(line)
+        if not norm:
+            continue
+        if any(lbl in norm for lbl in label_norms):
+            # 1) fecha en la misma línea
+            token = _latest_date_token(line)
+            if token:
+                return token
+            # 2) fecha en la siguiente línea
+            if idx + 1 < len(lines):
+                token = _latest_date_token(lines[idx + 1])
+                if token:
+                    return token
+    return ""
+
+
+def _extract_delivery_days(value: object) -> float:
+    text = _clean_text(value).lower()
+    if not text:
+        return 0.0
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(dias|d[ií]as)", text)
+    if not m:
+        return 0.0
+    return float(_parse_number(m.group(1)))
+
+
+def _to_absolute_panamacompra_url(raw_href: object) -> str:
+    href = _clean_text(raw_href)
+    if not href:
+        return ""
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    if href.startswith("#/"):
+        return f"{PANAMACOMPRA_BASE_URL}{href}"
+    if href.startswith("/Inicio/#/"):
+        return f"https://www.panamacompra.gob.pa{href}"
+    if href.startswith("/#/"):
+        return f"{PANAMACOMPRA_BASE_URL}{href[1:]}"
+    return href
 
 
 def _normalize_html_to_lines(html_text: str) -> list[str]:
@@ -2217,6 +2535,339 @@ def _append_query_limited(
     return True
 
 
+def _build_selenium_driver(headless: bool = True) -> tuple[object | None, str]:
+    try:
+        from selenium import webdriver  # type: ignore
+        from selenium.webdriver.chrome.service import Service as ChromeService  # type: ignore
+        from webdriver_manager.chrome import ChromeDriverManager  # type: ignore
+    except Exception as exc:
+        return None, f"selenium_unavailable:{exc}"
+
+    try:
+        chrome_options = webdriver.ChromeOptions()
+        if headless:
+            chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--lang=es-PA")
+        chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(50)
+        return driver, "ok"
+    except Exception as exc:
+        return None, f"driver_init_error:{exc}"
+
+
+def _driver_open_and_get_html(driver: object, url: str, timeout: int = 35) -> str:
+    if not driver or not url:
+        return ""
+    try:
+        from selenium.webdriver.common.by import By  # type: ignore
+        from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
+        from selenium.webdriver.support import expected_conditions as EC  # type: ignore
+
+        driver.get(url)
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "app-root")))
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        try:
+            WebDriverWait(driver, min(timeout, 25)).until(
+                lambda d: any(
+                    token in _normalize_column_key(getattr(d.find_element(By.TAG_NAME, "body"), "text", ""))
+                    for token in (
+                        "informacion del proponente",
+                        "aviso de convocatoria",
+                        "procesos relacionados",
+                        "archivos de la compra menor",
+                        "cuadro de propuestas",
+                    )
+                )
+            )
+        except Exception:
+            # Si no aparecen tokens, igual retorna el page_source actual.
+            pass
+        return str(getattr(driver, "page_source", "") or "")
+    except Exception:
+        return ""
+
+
+def _extract_href_from_html(html_text: str, contains: str, exclude: str = "") -> str:
+    if not html_text:
+        return ""
+    pattern = re.compile(r'href=["\']([^"\']+)["\']', flags=re.IGNORECASE)
+    for href in pattern.findall(html_text):
+        href_clean = _clean_text(href)
+        if not href_clean:
+            continue
+        if contains.lower() not in href_clean.lower():
+            continue
+        if exclude and exclude.lower() in href_clean.lower():
+            continue
+        return _to_absolute_panamacompra_url(href_clean)
+    return ""
+
+
+def _extract_provider_from_info_tables(html_text: str) -> str:
+    if not html_text:
+        return ""
+    try:
+        tables = pd.read_html(io.StringIO(html_text))
+    except Exception:
+        tables = []
+    for table in tables:
+        if table.empty or len(table.columns) < 2:
+            continue
+        first_col = table.columns[0]
+        second_col = table.columns[1]
+        for _, row in table[[first_col, second_col]].fillna("").iterrows():
+            label = _normalize_column_key(row[first_col])
+            value = _clean_text(row[second_col])
+            if not value:
+                continue
+            if "nombre comercial" in label:
+                return value
+            if "razon social" in label:
+                return value
+    return ""
+
+
+def _extract_unit_data_from_html_tables(html_text: str, ficha: str) -> dict[str, object]:
+    out = {
+        "precio_unitario_participacion": 0.0,
+        "precio_unitario_referencia": 0.0,
+        "cantidad": 0.0,
+        "unidad_medida": "",
+        "precio_total_referencia": 0.0,
+    }
+    if not html_text:
+        return out
+
+    ficha_token = str(ficha or "").strip()
+    try:
+        tables = pd.read_html(io.StringIO(html_text))
+    except Exception:
+        tables = []
+
+    for table in tables:
+        if table.empty:
+            continue
+        df = table.copy()
+        df.columns = [str(c).strip() for c in df.columns]
+        norm_cols = {_normalize_column_key(c): c for c in df.columns}
+        col_price = ""
+        col_ref = ""
+        col_qty = ""
+        col_um = ""
+        col_desc = ""
+        for norm_col, raw_col in norm_cols.items():
+            if not col_price and "precio unitario" in norm_col:
+                col_price = raw_col
+            if not col_ref and ("precio referencia" in norm_col or ("precio" in norm_col and "referencia" in norm_col)):
+                col_ref = raw_col
+            if not col_qty and "cantidad" in norm_col:
+                col_qty = raw_col
+            if not col_um and "unidad de medida" in norm_col:
+                col_um = raw_col
+            if not col_desc and (
+                "descripcion" in norm_col
+                or "especificaciones del comprador" in norm_col
+                or "especificaciones del proponente" in norm_col
+            ):
+                col_desc = raw_col
+
+        if not (col_price or col_ref):
+            continue
+
+        selected_idx = 0
+        if ficha_token and col_desc:
+            match_mask = df[col_desc].astype(str).str.contains(str(ficha_token), case=False, regex=False, na=False)
+            if match_mask.any():
+                selected_idx = int(df[match_mask].index[0])
+        row = df.loc[selected_idx] if selected_idx in df.index else df.iloc[0]
+
+        if col_price and float(out["precio_unitario_participacion"]) <= 0:
+            unit = _parse_number(row.get(col_price, 0))
+            if unit > 0:
+                out["precio_unitario_participacion"] = float(unit)
+        if col_qty and float(out["cantidad"]) <= 0:
+            qty = _parse_number(row.get(col_qty, 0))
+            if qty > 0:
+                out["cantidad"] = float(qty)
+        if col_um and not _clean_text(out["unidad_medida"]):
+            out["unidad_medida"] = _clean_text(row.get(col_um, ""))
+        if col_ref and float(out["precio_unitario_referencia"]) <= 0:
+            ref_raw = _parse_number(row.get(col_ref, 0))
+            if ref_raw > 0:
+                out["precio_total_referencia"] = float(ref_raw)
+                qty_ref = float(out["cantidad"]) if float(out["cantidad"]) > 0 else _parse_number(row.get(col_qty, 0))
+                if qty_ref > 0:
+                    out["precio_unitario_referencia"] = float(ref_raw / qty_ref)
+                else:
+                    out["precio_unitario_referencia"] = float(ref_raw)
+    return out
+
+
+def _extract_oc_date_from_docs_tables(html_text: str) -> str:
+    if not html_text:
+        return ""
+    best: pd.Timestamp | None = None
+    best_raw = ""
+    try:
+        tables = pd.read_html(io.StringIO(html_text))
+    except Exception:
+        tables = []
+    for table in tables:
+        if table.empty:
+            continue
+        df = table.copy()
+        df.columns = [str(c).strip() for c in df.columns]
+        norm_cols = {_normalize_column_key(c): c for c in df.columns}
+        col_tipo = ""
+        col_desc = ""
+        col_fecha = ""
+        for norm_col, raw_col in norm_cols.items():
+            if not col_tipo and norm_col == "tipo":
+                col_tipo = raw_col
+            if not col_desc and norm_col == "descripcion":
+                col_desc = raw_col
+            if not col_fecha and norm_col == "fecha":
+                col_fecha = raw_col
+        if not col_fecha:
+            continue
+        for _, row in df.fillna("").iterrows():
+            tipo = _normalize_column_key(row.get(col_tipo, "")) if col_tipo else ""
+            desc = _normalize_column_key(row.get(col_desc, "")) if col_desc else ""
+            if "orden de compra" not in f"{tipo} {desc}":
+                continue
+            date_raw = _latest_date_token(str(row.get(col_fecha, "")))
+            d = _parse_any_date(date_raw)
+            if pd.isna(d):
+                continue
+            if best is None or d > best:
+                best = d
+                best_raw = date_raw
+    return _clean_text(best_raw)
+
+
+def _extract_act_date_from_page(lines: list[str]) -> str:
+    labels_priority = [
+        "fecha y hora de apertura de propuestas",
+        "fecha y hora presentacion de propuestas",
+        "fecha y hora presentacion de cotizaciones",
+        "fecha y hora presentación de propuestas",
+        "fecha y hora presentación de cotizaciones",
+        "fecha de celebracion",
+        "fecha de celebración",
+    ]
+    return _extract_date_by_labels(lines, labels_priority)
+
+
+def _extract_cuadro_lowest_offer_from_driver(driver: object, cuadro_url: str, ficha: str) -> dict[str, object]:
+    out = {
+        "proveedor": "",
+        "precio_unitario_participacion": 0.0,
+        "cantidad": 0.0,
+        "unidad_medida": "",
+        "evidencia": "",
+    }
+    if not driver or not cuadro_url:
+        return out
+    try:
+        from selenium.webdriver.common.by import By  # type: ignore
+        from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
+        from selenium.webdriver.support import expected_conditions as EC  # type: ignore
+    except Exception:
+        return out
+
+    try:
+        driver.get(cuadro_url)
+        WebDriverWait(driver, 35).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
+        tables = driver.find_elements(By.CSS_SELECTOR, "table.caption-top")
+        if not tables:
+            return out
+
+        candidates: list[dict[str, object]] = []
+        ficha_token = str(ficha or "").strip()
+
+        for tb in tables:
+            provider = ""
+            try:
+                provider = _clean_text(tb.find_element(By.XPATH, "./caption//a[1]").text)
+            except Exception:
+                provider = ""
+
+            headers = [_normalize_column_key(x.text) for x in tb.find_elements(By.CSS_SELECTOR, "thead th")]
+            if not headers:
+                continue
+            idx_price = next((i for i, h in enumerate(headers) if "precio unitario" in h), -1)
+            idx_qty = next((i for i, h in enumerate(headers) if "cantidad propuesta" in h or h == "cantidad"), -1)
+            idx_um = next((i for i, h in enumerate(headers) if "unidad de medida" in h), -1)
+            idx_desc = next((i for i, h in enumerate(headers) if "descripcion del bien" in h or "especificaciones del comprador" in h), -1)
+
+            if idx_price < 0:
+                continue
+
+            rows = tb.find_elements(By.CSS_SELECTOR, "tbody tr")
+            chosen_cells = None
+            for row in rows:
+                cells = row.find_elements(By.CSS_SELECTOR, "th,td")
+                if not cells:
+                    continue
+                if ficha_token and idx_desc >= 0 and idx_desc < len(cells):
+                    if ficha_token in _clean_text(cells[idx_desc].text):
+                        chosen_cells = cells
+                        break
+                if chosen_cells is None:
+                    chosen_cells = cells
+            if not chosen_cells:
+                continue
+
+            unit_price = _parse_number(chosen_cells[idx_price].text if idx_price < len(chosen_cells) else 0)
+            qty = _parse_number(chosen_cells[idx_qty].text if idx_qty >= 0 and idx_qty < len(chosen_cells) else 0)
+            um = _clean_text(chosen_cells[idx_um].text) if idx_um >= 0 and idx_um < len(chosen_cells) else ""
+
+            total = 0.0
+            try:
+                total_rows = tb.find_elements(By.CSS_SELECTOR, "tfoot tr")
+                for tr in total_rows:
+                    row_text = _normalize_column_key(tr.text)
+                    if "total" in row_text:
+                        cells = tr.find_elements(By.CSS_SELECTOR, "th,td")
+                        if cells:
+                            total = max(total, _parse_number(cells[-1].text))
+            except Exception:
+                total = 0.0
+
+            if unit_price > 0:
+                candidates.append(
+                    {
+                        "proveedor": provider,
+                        "precio_unitario_participacion": float(unit_price),
+                        "cantidad": float(qty) if qty > 0 else 0.0,
+                        "unidad_medida": um,
+                        "total": float(total),
+                    }
+                )
+
+        if not candidates:
+            return out
+
+        candidates.sort(
+            key=lambda x: (
+                0 if float(x.get("total", 0.0) or 0.0) > 0 else 1,
+                float(x.get("total", 0.0) or 0.0) if float(x.get("total", 0.0) or 0.0) > 0 else float(x.get("precio_unitario_participacion", 0.0) or 0.0),
+            )
+        )
+        chosen = candidates[0]
+        out.update(chosen)
+        out["evidencia"] = f"cuadro_min_total|{_clean_text(chosen.get('proveedor', ''))}|{float(chosen.get('total', 0.0) or 0.0):.2f}"
+        return out
+    except Exception:
+        return out
+
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def _fetch_acto_html(url: str) -> str:
     try:
@@ -2304,62 +2955,148 @@ def _extract_live_fields_from_acto_url(
     ficha: str,
     ficha_name: str,
     acto_nombre: str,
+    driver: object | None = None,
     use_ai_fallback: bool = True,
 ) -> dict[str, object]:
     if not acto_url:
         return {}
-    html_text = _fetch_acto_html(acto_url)
+    url = _to_absolute_panamacompra_url(acto_url)
+    html_text = _driver_open_and_get_html(driver, url) if driver is not None else _fetch_acto_html(url)
     if not html_text:
         return {}
+
     lines = _normalize_html_to_lines(html_text)
     text_flat = " | ".join(lines)
     table_fields = _extract_table_candidates_from_html(html_text)
+    has_info = "informacion del proponente" in _normalize_column_key(text_flat)
 
+    # Base común para ambos tipos
     extracted = {
-        "marca": _extract_labeled_value(lines, ["Marca", "Marca ofertada"]) or _clean_text(table_fields.get("marca", "")),
-        "modelo": _extract_labeled_value(lines, ["Modelo", "N° de Catálogo o Modelo", "N de catalogo o modelo"]) or _clean_text(table_fields.get("modelo", "")),
-        "pais_origen": _extract_labeled_value(lines, ["País de origen", "Pais de origen", "Origen"]) or _clean_text(table_fields.get("pais_origen", "")),
-        "precio_unitario_participacion": _extract_labeled_value(
-            lines, ["Precio unitario", "Precio ofertado unitario", "Precio de participación"]
-        )
-        or _clean_text(table_fields.get("precio_unitario_participacion", "")),
-        "precio_unitario_referencia": _extract_labeled_value(
-            lines, ["Precio unitario de referencia", "Precio de referencia"]
-        )
-        or _clean_text(table_fields.get("precio_unitario_referencia", "")),
-        "cantidad": _extract_labeled_value(lines, ["Cantidad"]) or _clean_text(table_fields.get("cantidad", "")),
-        "fecha_celebracion": _extract_dates_from_text(text_flat, ["fecha de celebración", "fecha celebracion", "celebración"])
-        or _clean_text(table_fields.get("fecha_celebracion", "")),
-        "fecha_orden_compra": _extract_dates_from_text(text_flat, ["orden de compra", "fecha oc", "fecha de oc"])
-        or _clean_text(table_fields.get("fecha_orden_compra", "")),
-        "fecha_publicacion": _extract_dates_from_text(text_flat, ["fecha de publicación", "fecha publicacion"])
-        or _clean_text(table_fields.get("fecha_publicacion", "")),
-        "fecha_adjudicacion": _extract_dates_from_text(text_flat, ["fecha de adjudicación", "fecha adjudicacion"])
-        or _clean_text(table_fields.get("fecha_adjudicacion", "")),
+        "tipo_flujo": "tipo_1_info_proponente" if has_info else "tipo_2_cuadro_propuestas",
+        "proveedor": "",
+        "precio_unitario_participacion": 0.0,
+        "precio_unitario_referencia": 0.0,
+        "cantidad": 0.0,
+        "unidad_medida": "",
+        "fecha_celebracion": "",
+        "fecha_orden_compra": "",
+        "fecha_publicacion": _extract_date_by_labels(lines, ["fecha de publicacion", "fecha de publicación"]),
+        "fecha_adjudicacion": _extract_date_by_labels(lines, ["fecha de adjudicacion", "fecha de adjudicación"]),
+        "tiempo_entrega_dias": 0.0,
+        "fuente_precio": "",
+        "fuente_fecha": "",
+        "enlace_evidencia": url,
         "evidencia": "",
     }
 
-    missing_core = [
-        k for k in ("marca", "modelo", "pais_origen", "fecha_celebracion", "precio_unitario_participacion")
-        if not _clean_text(extracted.get(k, ""))
-    ]
-    if missing_core and use_ai_fallback:
-        ai_payload = _ai_extract_fields_from_text(text_flat[:15000], ficha, ficha_name, acto_nombre)
-        for key in (
-            "marca",
-            "modelo",
-            "pais_origen",
-            "fecha_celebracion",
-            "fecha_orden_compra",
-            "fecha_publicacion",
-            "fecha_adjudicacion",
-            "precio_unitario_participacion",
-            "precio_unitario_referencia",
-            "cantidad",
-            "evidencia",
-        ):
-            if not _clean_text(extracted.get(key, "")):
-                extracted[key] = _clean_text(ai_payload.get(key, ""))
+    extracted["tiempo_entrega_dias"] = _extract_delivery_days(text_flat)
+
+    # Información de tablas del propio acto (cuando exista)
+    unit_payload = _extract_unit_data_from_html_tables(html_text, ficha)
+    if float(unit_payload.get("precio_unitario_participacion", 0.0) or 0.0) > 0:
+        extracted["precio_unitario_participacion"] = float(unit_payload["precio_unitario_participacion"])
+    if float(unit_payload.get("precio_unitario_referencia", 0.0) or 0.0) > 0:
+        extracted["precio_unitario_referencia"] = float(unit_payload["precio_unitario_referencia"])
+    if float(unit_payload.get("cantidad", 0.0) or 0.0) > 0:
+        extracted["cantidad"] = float(unit_payload["cantidad"])
+    extracted["unidad_medida"] = _clean_text(unit_payload.get("unidad_medida", ""))
+
+    # Fecha OC desde anexos/documentos
+    extracted["fecha_orden_compra"] = _extract_oc_date_from_docs_tables(html_text) or _extract_date_by_labels(
+        lines,
+        ["fecha de orden de compra", "orden de compra", "fecha oc"],
+    )
+
+    if has_info:
+        # Tipo 1: proveedor + precios desde mismo acto.
+        extracted["proveedor"] = _extract_provider_from_info_tables(html_text)
+        if float(extracted.get("precio_unitario_participacion", 0.0) or 0.0) > 0:
+            extracted["fuente_precio"] = "acto_info_proponente"
+        if float(extracted.get("precio_unitario_referencia", 0.0) or 0.0) > 0:
+            extracted["fuente_precio"] = extracted["fuente_precio"] or "acto_info_proponente"
+
+        # Fecha del acto: proceso original.
+        original_link = _extract_href_from_html(html_text, "/proceso-original/")
+        if original_link and driver is not None:
+            original_html = _driver_open_and_get_html(driver, original_link)
+        elif original_link:
+            original_html = _fetch_acto_html(original_link)
+        else:
+            original_html = ""
+        original_lines = _normalize_html_to_lines(original_html)
+        extracted["fecha_celebracion"] = _extract_act_date_from_page(original_lines) if original_lines else ""
+        if extracted["fecha_celebracion"]:
+            extracted["fuente_fecha"] = "proceso_original"
+            extracted["enlace_evidencia"] = original_link or extracted["enlace_evidencia"]
+        else:
+            fallback_date = _extract_act_date_from_page(lines)
+            if fallback_date:
+                extracted["fecha_celebracion"] = fallback_date
+                extracted["fuente_fecha"] = extracted["fuente_fecha"] or "acto_fallback"
+    else:
+        # Tipo 2: fecha en acto + precio por cuadro de propuestas.
+        extracted["fecha_celebracion"] = _extract_act_date_from_page(lines)
+        if extracted["fecha_celebracion"]:
+            extracted["fuente_fecha"] = "acto_apertura"
+
+        cuadro_link = _extract_href_from_html(html_text, "/cuadro-de-propuestas/", exclude="/ver-propuesta/")
+        if cuadro_link and driver is not None:
+            cuadro_data = _extract_cuadro_lowest_offer_from_driver(driver, cuadro_link, ficha)
+            extracted["proveedor"] = _clean_text(cuadro_data.get("proveedor", ""))
+            if float(cuadro_data.get("precio_unitario_participacion", 0.0) or 0.0) > 0:
+                extracted["precio_unitario_participacion"] = float(cuadro_data["precio_unitario_participacion"])
+                extracted["fuente_precio"] = "cuadro_propuestas_min_total"
+                extracted["enlace_evidencia"] = cuadro_link
+            if float(cuadro_data.get("cantidad", 0.0) or 0.0) > 0:
+                extracted["cantidad"] = float(cuadro_data["cantidad"])
+            if _clean_text(cuadro_data.get("unidad_medida", "")):
+                extracted["unidad_medida"] = _clean_text(cuadro_data["unidad_medida"])
+            extracted["evidencia"] = _clean_text(cuadro_data.get("evidencia", ""))
+        elif cuadro_link:
+            cuadro_html = _fetch_acto_html(cuadro_link)
+            if cuadro_html:
+                unit_payload_cuadro = _extract_unit_data_from_html_tables(cuadro_html, ficha)
+                if float(unit_payload_cuadro.get("precio_unitario_participacion", 0.0) or 0.0) > 0:
+                    extracted["precio_unitario_participacion"] = float(unit_payload_cuadro["precio_unitario_participacion"])
+                    extracted["fuente_precio"] = "cuadro_propuestas_parser"
+                    extracted["enlace_evidencia"] = cuadro_link
+                if float(unit_payload_cuadro.get("cantidad", 0.0) or 0.0) > 0:
+                    extracted["cantidad"] = float(unit_payload_cuadro["cantidad"])
+                if _clean_text(unit_payload_cuadro.get("unidad_medida", "")):
+                    extracted["unidad_medida"] = _clean_text(unit_payload_cuadro["unidad_medida"])
+
+    # Fallback estricto opcional (solo fechas/precios/cantidad, no marca-modelo-pais).
+    if use_ai_fallback:
+        core_missing = (
+            float(extracted.get("precio_unitario_participacion", 0.0) or 0.0) <= 0
+            and not _clean_text(extracted.get("fecha_celebracion", ""))
+        )
+        if core_missing:
+            ai_payload = _ai_extract_fields_from_text(text_flat[:12000], ficha, ficha_name, acto_nombre)
+            if float(extracted.get("precio_unitario_participacion", 0.0) or 0.0) <= 0:
+                extracted["precio_unitario_participacion"] = _parse_number(ai_payload.get("precio_unitario_participacion", 0))
+                if float(extracted.get("precio_unitario_participacion", 0.0) or 0.0) > 0:
+                    extracted["fuente_precio"] = extracted["fuente_precio"] or "ai_fallback"
+            if float(extracted.get("precio_unitario_referencia", 0.0) or 0.0) <= 0:
+                extracted["precio_unitario_referencia"] = _parse_number(ai_payload.get("precio_unitario_referencia", 0))
+            if float(extracted.get("cantidad", 0.0) or 0.0) <= 0:
+                extracted["cantidad"] = _parse_number(ai_payload.get("cantidad", 0))
+            if not _clean_text(extracted.get("fecha_celebracion", "")):
+                extracted["fecha_celebracion"] = _clean_text(ai_payload.get("fecha_celebracion", ""))
+                if extracted["fecha_celebracion"]:
+                    extracted["fuente_fecha"] = extracted["fuente_fecha"] or "ai_fallback"
+
+    # fallback final con parser formal de tablas
+    if float(extracted.get("precio_unitario_participacion", 0.0) or 0.0) <= 0:
+        extracted["precio_unitario_participacion"] = _parse_number(table_fields.get("precio_unitario_participacion", 0))
+    if float(extracted.get("precio_unitario_referencia", 0.0) or 0.0) <= 0:
+        extracted["precio_unitario_referencia"] = _parse_number(table_fields.get("precio_unitario_referencia", 0))
+    if float(extracted.get("cantidad", 0.0) or 0.0) <= 0:
+        extracted["cantidad"] = _parse_number(table_fields.get("cantidad", 0))
+    if not _clean_text(extracted.get("fecha_celebracion", "")):
+        extracted["fecha_celebracion"] = _clean_text(table_fields.get("fecha_celebracion", ""))
+    if not _clean_text(extracted.get("fecha_orden_compra", "")):
+        extracted["fecha_orden_compra"] = _clean_text(table_fields.get("fecha_orden_compra", ""))
     return extracted
 
 
@@ -2368,6 +3105,7 @@ def _build_study_payload(
     ficha_name: str,
     acts_df: pd.DataFrame,
     max_queries: int = INTEL_STUDY_DEFAULT_MAX_QUERIES,
+    use_browser_extractor: bool = True,
     use_ai_fallback: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
     if acts_df.empty:
@@ -2382,6 +3120,9 @@ def _build_study_payload(
                 "auto_resolved_price": 0,
                 "auto_resolved_country": 0,
                 "auto_resolved_brand_model": 0,
+                "tipo1_detectados": 0,
+                "tipo2_detectados": 0,
+                "runs_con_browser": 0,
             },
         )
 
@@ -2390,6 +3131,7 @@ def _build_study_payload(
     consultas_rows: list[dict[str, object]] = []
     query_keys: set[str] = set()
     provider_defaults = _load_provider_historical_defaults(ficha)
+    _ = _build_catalog_provider_map()  # warm cache
     stats = {
         "acts_processed": 0,
         "detail_rows": 0,
@@ -2398,224 +3140,245 @@ def _build_study_payload(
         "auto_resolved_price": 0,
         "auto_resolved_country": 0,
         "auto_resolved_brand_model": 0,
+        "tipo1_detectados": 0,
+        "tipo2_detectados": 0,
+        "runs_con_browser": 0,
     }
 
-    for _, row in acts_df.iterrows():
-        stats["acts_processed"] += 1
-        acto_id = str(row.get("id", "") or "").strip()
-        acto_nombre = _clean_text(row.get("titulo")) or f"Acto {acto_id}"
-        acto_url = _clean_text(row.get("enlace"))
-        entidad = _clean_text(row.get("entidad"))
-        renglon_texto = " | ".join(
-            [t for t in [_clean_text(row.get("item_1")), _clean_text(row.get("item_2")), _clean_text(row.get("descripcion"))] if t]
-        )
-        dates = _extract_estudio_dates(row)
-        proveedor_ganador = _clean_text(row.get("ganador")) or _clean_text(row.get("razon_social"))
-        proveedor_ganador_norm = _canonical_party_name(proveedor_ganador)
-        precio_ref = _parse_number(row.get("precio_referencia", 0))
-        cantidad = _parse_number(row.get("cantidad", 0))
-        marca_base = _pick_alias_value(row, ["marca", "marca_item", "marca ofertada"])
-        modelo_base = _pick_alias_value(row, ["modelo", "modelo_item", "n° de catalogo o modelo", "n de catalogo o modelo"])
-        pais_base = _pick_alias_value(row, ["pais_origen", "pais de origen", "origen"])
-        live_fields = (
-            _extract_live_fields_from_acto_url(
-                acto_url,
-                ficha,
-                ficha_name,
-                acto_nombre,
-                use_ai_fallback=bool(use_ai_fallback),
+    driver = None
+    if use_browser_extractor:
+        driver, mode = _build_selenium_driver(headless=True)
+        if driver is not None:
+            stats["runs_con_browser"] = 1
+        st.session_state["intel_study_browser_status"] = mode
+
+    try:
+        for _, row in acts_df.iterrows():
+            stats["acts_processed"] += 1
+            acto_id = str(row.get("id", "") or "").strip()
+            acto_nombre = _clean_text(row.get("titulo")) or f"Acto {acto_id}"
+            acto_url = _clean_text(row.get("enlace"))
+            entidad = _clean_text(row.get("entidad"))
+            renglon_texto = " | ".join(
+                [t for t in [_clean_text(row.get("item_1")), _clean_text(row.get("item_2")), _clean_text(row.get("descripcion"))] if t]
             )
-            if acto_url
-            else {}
-        )
-        match_conf = _renglon_match_confidence(ficha, ficha_name, renglon_texto, acto_nombre)
+            dates = _extract_estudio_dates(row)
+            proveedor_ganador = _clean_text(row.get("ganador")) or _clean_text(row.get("razon_social"))
+            proveedor_ganador_norm = _canonical_party_name(proveedor_ganador)
+            precio_ref = _parse_number(row.get("precio_referencia", 0))
+            cantidad = _parse_number(row.get("cantidad", 0))
+            unidad_medida_base = _pick_alias_value(row, ["unidad_medida", "unidad de medida"])
 
-        if not marca_base:
-            marca_base = _clean_text(live_fields.get("marca", ""))
-        if not modelo_base:
-            modelo_base = _clean_text(live_fields.get("modelo", ""))
-        if not pais_base:
-            pais_base = _clean_text(live_fields.get("pais_origen", ""))
-        if _clean_text(dates.get("fecha_celebracion", "")) == "":
-            dates["fecha_celebracion"] = _clean_text(live_fields.get("fecha_celebracion", ""))
-        if _clean_text(dates.get("fecha_orden_compra", "")) == "":
-            dates["fecha_orden_compra"] = _clean_text(live_fields.get("fecha_orden_compra", ""))
-        if _clean_text(dates.get("fecha_publicacion", "")) == "":
-            dates["fecha_publicacion"] = _clean_text(live_fields.get("fecha_publicacion", ""))
-        if _clean_text(dates.get("fecha_adjudicacion", "")) == "":
-            dates["fecha_adjudicacion"] = _clean_text(live_fields.get("fecha_adjudicacion", ""))
-        dates = _recompute_days_act_to_oc(dates)
-        if precio_ref <= 0:
-            precio_ref = _parse_number(live_fields.get("precio_unitario_referencia", 0))
-        if cantidad <= 0:
-            cantidad = _parse_number(live_fields.get("cantidad", 0))
-
-        proponent_candidates: list[tuple[str, float]] = []
-        available_prices: list[float] = []
-        for idx in range(1, 15):
-            p_col = f"Proponente {idx}"
-            price_col = f"Precio Proponente {idx}"
-            if p_col in row.index:
-                p_name = _clean_text(row.get(p_col))
-                if not p_name:
-                    continue
-                p_price = _parse_number(row.get(price_col, 0))
-                if p_price > 0:
-                    available_prices.append(p_price)
-                proponent_candidates.append((p_name, p_price))
-
-        if not proponent_candidates and proveedor_ganador:
-            proponent_candidates.append((proveedor_ganador, _parse_number(row.get("monto_estimado", 0))))
-        if len(proponent_candidates) == 1 and _parse_number(proponent_candidates[0][1]) <= 0:
-            live_part_price = _parse_number(live_fields.get("precio_unitario_participacion", 0))
-            if live_part_price > 0:
-                proponent_candidates[0] = (proponent_candidates[0][0], live_part_price)
-                stats["auto_resolved_price"] += 1
-
-        if int(_safe_int(row.get("fichas_en_acto", 1))) > 1 and match_conf < 0.60:
-            consultas_rows.append(
-                {
-                    "consulta_id": str(uuid.uuid4()),
-                    "ficha": ficha,
-                    "detail_id": "",
-                    "acto_id": acto_id,
-                    "campo_dudoso": "renglon_correspondencia_ficha",
-                    "evidencia": renglon_texto or acto_nombre,
-                    "opciones_json": _json_dumps(
-                        [
-                            {"label": "Confirmar asociación por ficha detectada", "value": "confirmar_asociacion"},
-                            {"label": "Excluir este acto para la ficha", "value": "excluir_acto"},
-                            {"label": "Resolver manualmente", "value": "manual"},
-                        ]
-                    ),
-                    "respuesta_seleccionada": "",
-                    "valor_manual": "",
-                    "estado": "pendiente",
-                    "obligatoria": 1,
-                }
-            )
-
-        for proponente, precio_uni in proponent_candidates:
-            detail_id = str(uuid.uuid4())
-            proponente_norm = _canonical_party_name(proponente)
-            es_ganador = 1 if proponente_norm and proponente_norm == proveedor_ganador_norm else 0
-            provider_default = provider_defaults.get(proponente_norm, {})
-            requiere_revision = 0
-            certeza = 0.9
-            observ = []
-
-            marca_item = marca_base
-            modelo_item = modelo_base
-            pais_item = pais_base
-            if not marca_item and _clean_text(provider_default.get("marca", "")):
-                marca_item = _clean_text(provider_default.get("marca", ""))
-                stats["auto_resolved_brand_model"] += 1
-            if not modelo_item and _clean_text(provider_default.get("modelo", "")):
-                modelo_item = _clean_text(provider_default.get("modelo", ""))
-                stats["auto_resolved_brand_model"] += 1
-            if not pais_item and _clean_text(provider_default.get("pais_origen", "")):
-                pais_item = _clean_text(provider_default.get("pais_origen", ""))
-                stats["auto_resolved_country"] += 1
-
-            if precio_uni <= 0:
-                live_price = _parse_number(live_fields.get("precio_unitario_participacion", 0))
-                if live_price > 0:
-                    precio_uni = live_price
-                    stats["auto_resolved_price"] += 1
-                elif len(set([round(x, 6) for x in available_prices if x > 0])) == 1:
-                    precio_uni = float([x for x in available_prices if x > 0][0])
-                    stats["auto_resolved_price"] += 1
-                else:
-                    hist_price = _safe_float(provider_default.get("precio_prom", 0.0))
-                    if hist_price > 0:
-                        precio_uni = hist_price
-                        certeza = min(certeza, 0.78)
-                        observ.append("Precio imputado por promedio historico del proveedor.")
-                        stats["auto_resolved_price"] += 1
-
-            if precio_uni <= 0 and es_ganador == 1:
-                requiere_revision = 1
-                certeza = min(certeza, 0.55)
-                observ.append("Precio unitario de participación no identificado.")
-                opciones_precio = [{"label": f"${p:,.2f}", "value": f"{p:.6f}"} for p in sorted(set(available_prices)) if p > 0]
-                opciones_precio.append({"label": "Dejar vacío", "value": "vacio"})
-                consultas_rows.append(
-                    {
-                        "consulta_id": str(uuid.uuid4()),
-                        "ficha": ficha,
-                        "detail_id": detail_id,
-                        "acto_id": acto_id,
-                        "campo_dudoso": "precio_unitario_participacion",
-                        "evidencia": f"Proveedor: {proponente}. Precios detectados: {', '.join([str(round(x,2)) for x in available_prices]) or 'ninguno'}",
-                        "opciones_json": _json_dumps(opciones_precio),
-                        "respuesta_seleccionada": "",
-                        "valor_manual": "",
-                        "estado": "pendiente",
-                        "obligatoria": 1,
-                    }
+            live_fields = (
+                _extract_live_fields_from_acto_url(
+                    acto_url,
+                    ficha,
+                    ficha_name,
+                    acto_nombre,
+                    driver=driver,
+                    use_ai_fallback=bool(use_ai_fallback),
                 )
+                if acto_url
+                else {}
+            )
+            match_conf = _renglon_match_confidence(ficha, ficha_name, renglon_texto, acto_nombre)
 
-            if not pais_item and es_ganador == 1:
-                requiere_revision = 1
-                certeza = min(certeza, 0.65)
-                observ.append("País de origen no explícito (puede requerir búsqueda externa).")
-                consultas_rows.append(
+            tipo_flujo = _clean_text(live_fields.get("tipo_flujo", ""))
+            if tipo_flujo.startswith("tipo_1"):
+                stats["tipo1_detectados"] += 1
+            elif tipo_flujo.startswith("tipo_2"):
+                stats["tipo2_detectados"] += 1
+
+            if _clean_text(dates.get("fecha_celebracion", "")) == "":
+                dates["fecha_celebracion"] = _clean_text(live_fields.get("fecha_celebracion", ""))
+            if _clean_text(dates.get("fecha_orden_compra", "")) == "":
+                dates["fecha_orden_compra"] = _clean_text(live_fields.get("fecha_orden_compra", ""))
+            if _clean_text(dates.get("fecha_publicacion", "")) == "":
+                dates["fecha_publicacion"] = _clean_text(live_fields.get("fecha_publicacion", ""))
+            if _clean_text(dates.get("fecha_adjudicacion", "")) == "":
+                dates["fecha_adjudicacion"] = _clean_text(live_fields.get("fecha_adjudicacion", ""))
+
+            tiempo_entrega_live = _safe_float(live_fields.get("tiempo_entrega_dias", 0.0), 0.0)
+            if tiempo_entrega_live > 0 and _safe_float(dates.get("tiempo_entrega_dias", 0.0), 0.0) <= 0:
+                dates["tiempo_entrega_dias"] = float(tiempo_entrega_live)
+
+            dates = _recompute_days_act_to_oc(dates)
+            if precio_ref <= 0:
+                precio_ref = _parse_number(live_fields.get("precio_unitario_referencia", 0))
+            if cantidad <= 0:
+                cantidad = _parse_number(live_fields.get("cantidad", 0))
+            if not unidad_medida_base:
+                unidad_medida_base = _clean_text(live_fields.get("unidad_medida", ""))
+
+            proponent_candidates: list[tuple[str, float]] = []
+            available_prices: list[float] = []
+            for idx in range(1, 15):
+                p_col = f"Proponente {idx}"
+                price_col = f"Precio Proponente {idx}"
+                if p_col in row.index:
+                    p_name = _clean_text(row.get(p_col))
+                    if not p_name:
+                        continue
+                    p_price = _parse_number(row.get(price_col, 0))
+                    if p_price > 0:
+                        available_prices.append(p_price)
+                    proponent_candidates.append((p_name, p_price))
+
+            if not proponent_candidates and _clean_text(live_fields.get("proveedor", "")):
+                proponent_candidates.append(
+                    (
+                        _clean_text(live_fields.get("proveedor", "")),
+                        _parse_number(live_fields.get("precio_unitario_participacion", 0)),
+                    )
+                )
+            if not proponent_candidates and proveedor_ganador:
+                proponent_candidates.append((proveedor_ganador, _parse_number(row.get("monto_estimado", 0))))
+            if len(proponent_candidates) == 1 and _parse_number(proponent_candidates[0][1]) <= 0:
+                live_part_price = _parse_number(live_fields.get("precio_unitario_participacion", 0))
+                if live_part_price > 0:
+                    proponent_candidates[0] = (proponent_candidates[0][0], live_part_price)
+                    stats["auto_resolved_price"] += 1
+
+            if int(_safe_int(row.get("fichas_en_acto", 1))) > 1 and match_conf < 0.60:
+                _append_query_limited(
+                    consultas_rows,
+                    query_keys,
                     {
+                        "_key": f"{acto_id}|renglon_correspondencia_ficha|",
                         "consulta_id": str(uuid.uuid4()),
                         "ficha": ficha,
-                        "detail_id": detail_id,
+                        "detail_id": "",
                         "acto_id": acto_id,
-                        "campo_dudoso": "pais_origen",
-                        "evidencia": f"Proveedor: {proponente}. Marca: {marca_item or '-'} Modelo: {modelo_item or '-'}",
+                        "campo_dudoso": "renglon_correspondencia_ficha",
+                        "evidencia": renglon_texto or acto_nombre,
                         "opciones_json": _json_dumps(
                             [
-                                {"label": "Dejar vacío", "value": "vacio"},
-                                {"label": "Ingresar manual", "value": "manual"},
+                                {"label": "Confirmar asociación por ficha detectada", "value": "confirmar_asociacion"},
+                                {"label": "Excluir este acto para la ficha", "value": "excluir_acto"},
+                                {"label": "Resolver manualmente", "value": "manual"},
                             ]
                         ),
                         "respuesta_seleccionada": "",
                         "valor_manual": "",
                         "estado": "pendiente",
-                        "obligatoria": 0,
-                    }
+                        "obligatoria": 1,
+                    },
+                    max_queries=max_queries,
                 )
 
-            if match_conf < 0.45 and es_ganador == 1:
-                requiere_revision = 1
-                certeza = min(certeza, 0.60)
-                observ.append("Asociacion ficha-renglon con baja confianza.")
+            for proponente, precio_uni in proponent_candidates:
+                detail_id = str(uuid.uuid4())
+                proponente_norm = _canonical_party_name(proponente)
+                es_ganador = 1 if proponente_norm and proponente_norm == proveedor_ganador_norm else 0
+                provider_default = provider_defaults.get(proponente_norm, {})
+                requiere_revision = 0
+                certeza = 0.9
+                observ = []
 
-            detail_rows.append(
-                {
-                    "detail_id": detail_id,
-                    "ficha": ficha,
-                    "nombre_ficha": ficha_name,
-                    "acto_id": acto_id,
-                    "acto_nombre": acto_nombre,
-                    "acto_url": acto_url,
-                    "entidad": entidad,
-                    "renglon_texto": renglon_texto,
-                    "proveedor": proponente,
-                    "proveedor_ganador": proveedor_ganador,
-                    "es_ganador": es_ganador,
-                    "marca": marca_item,
-                    "modelo": modelo_item,
-                    "pais_origen": pais_item,
-                    "cantidad": cantidad,
-                    "precio_unitario_participacion": precio_uni,
-                    "precio_unitario_referencia": precio_ref,
-                    "fecha_publicacion": dates["fecha_publicacion"],
-                    "fecha_celebracion": dates["fecha_celebracion"],
-                    "fecha_adjudicacion": dates["fecha_adjudicacion"],
-                    "fecha_orden_compra": dates["fecha_orden_compra"],
-                    "dias_acto_a_oc": dates["dias_acto_a_oc"],
-                    "observaciones": " | ".join([x for x in (observ + [_clean_text(live_fields.get("evidencia", ""))]) if _clean_text(x)]),
-                    "estado_revision": "pendiente" if requiere_revision else "ok",
-                    "nivel_certeza": certeza,
-                    "requiere_revision": requiere_revision,
-                }
-            )
-            stats["detail_rows"] += 1
+                catalog_payload = _lookup_catalog_provider_payload(ficha, proponente)
+                marca_item = _clean_text(catalog_payload.get("marca", ""))
+                modelo_item = _clean_text(catalog_payload.get("modelo", ""))
+                pais_item = _clean_text(catalog_payload.get("pais_origen", ""))
+                if marca_item or modelo_item:
+                    stats["auto_resolved_brand_model"] += 1
+                if pais_item:
+                    stats["auto_resolved_country"] += 1
+
+                if precio_uni <= 0:
+                    live_price = _parse_number(live_fields.get("precio_unitario_participacion", 0))
+                    if live_price > 0:
+                        precio_uni = live_price
+                        stats["auto_resolved_price"] += 1
+                    elif len(set([round(x, 6) for x in available_prices if x > 0])) == 1:
+                        precio_uni = float([x for x in available_prices if x > 0][0])
+                        stats["auto_resolved_price"] += 1
+                    else:
+                        hist_price = _safe_float(provider_default.get("precio_prom", 0.0))
+                        if hist_price > 0:
+                            precio_uni = hist_price
+                            certeza = min(certeza, 0.78)
+                            observ.append("Precio imputado por promedio historico del proveedor.")
+                            stats["auto_resolved_price"] += 1
+
+                if precio_uni <= 0 and es_ganador == 1:
+                    requiere_revision = 1
+                    certeza = min(certeza, 0.55)
+                    observ.append("Precio unitario de participación no identificado.")
+                    opciones_precio = [{"label": f"${p:,.2f}", "value": f"{p:.6f}"} for p in sorted(set(available_prices)) if p > 0]
+                    opciones_precio.append({"label": "Dejar vacío", "value": "vacio"})
+                    _append_query_limited(
+                        consultas_rows,
+                        query_keys,
+                        {
+                            "_key": f"{acto_id}|{detail_id}|precio_unitario_participacion",
+                            "consulta_id": str(uuid.uuid4()),
+                            "ficha": ficha,
+                            "detail_id": detail_id,
+                            "acto_id": acto_id,
+                            "campo_dudoso": "precio_unitario_participacion",
+                            "evidencia": f"Proveedor: {proponente}. Precios detectados: {', '.join([str(round(x,2)) for x in available_prices]) or 'ninguno'}",
+                            "opciones_json": _json_dumps(opciones_precio),
+                            "respuesta_seleccionada": "",
+                            "valor_manual": "",
+                            "estado": "pendiente",
+                            "obligatoria": 1,
+                        },
+                        max_queries=max_queries,
+                    )
+
+                if not pais_item and es_ganador == 1:
+                    certeza = min(certeza, 0.70)
+                    observ.append("País de origen no encontrado en catálogo para proveedor+ficha.")
+
+                if match_conf < 0.45 and es_ganador == 1:
+                    requiere_revision = 1
+                    certeza = min(certeza, 0.60)
+                    observ.append("Asociacion ficha-renglon con baja confianza.")
+
+                detail_rows.append(
+                    {
+                        "detail_id": detail_id,
+                        "ficha": ficha,
+                        "nombre_ficha": ficha_name,
+                        "acto_id": acto_id,
+                        "acto_nombre": acto_nombre,
+                        "acto_url": acto_url,
+                        "entidad": entidad,
+                        "renglon_texto": renglon_texto,
+                        "proveedor": proponente,
+                        "proveedor_ganador": proveedor_ganador,
+                        "es_ganador": es_ganador,
+                        "marca": marca_item,
+                        "modelo": modelo_item,
+                        "pais_origen": pais_item,
+                        "cantidad": float(cantidad) if float(cantidad) > 0 else _parse_number(live_fields.get("cantidad", 0)),
+                        "precio_unitario_participacion": float(precio_uni),
+                        "precio_unitario_referencia": float(precio_ref),
+                        "fecha_publicacion": dates["fecha_publicacion"],
+                        "fecha_celebracion": dates["fecha_celebracion"],
+                        "fecha_adjudicacion": dates["fecha_adjudicacion"],
+                        "fecha_orden_compra": dates["fecha_orden_compra"],
+                        "dias_acto_a_oc": dates["dias_acto_a_oc"],
+                        "dias_acto_a_oc_mas_entrega": dates.get("dias_acto_a_oc_mas_entrega", 0.0),
+                        "tipo_flujo": tipo_flujo,
+                        "fuente_precio": _clean_text(live_fields.get("fuente_precio", "")),
+                        "fuente_fecha": _clean_text(live_fields.get("fuente_fecha", "")),
+                        "enlace_evidencia": _clean_text(live_fields.get("enlace_evidencia", "")) or acto_url,
+                        "unidad_medida": unidad_medida_base,
+                        "tiempo_entrega_dias": float(_safe_float(dates.get("tiempo_entrega_dias", 0.0), 0.0)),
+                        "observaciones": " | ".join([x for x in (observ + [_clean_text(live_fields.get("evidencia", ""))]) if _clean_text(x)]),
+                        "estado_revision": "pendiente" if requiere_revision else "ok",
+                        "nivel_certeza": certeza,
+                        "requiere_revision": requiere_revision,
+                    }
+                )
+                stats["detail_rows"] += 1
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
     detail_df = pd.DataFrame(detail_rows)
     consultas_df = pd.DataFrame(consultas_rows)
@@ -2769,6 +3532,14 @@ def _save_study_run(
     run_id = str(uuid.uuid4())
     now = _utc_now_iso()
     with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        # Política solicitada: conservar solo la última corrida por ficha.
+        old_rows = conn.execute("SELECT run_id FROM estudio_runs WHERE ficha=?", (ficha,)).fetchall()
+        old_run_ids = [str(r[0]) for r in old_rows if str(r[0] or "").strip()]
+        if old_run_ids:
+            placeholders = ",".join(["?"] * len(old_run_ids))
+            conn.execute(f"DELETE FROM estudio_detalle WHERE run_id IN ({placeholders})", tuple(old_run_ids))
+            conn.execute(f"DELETE FROM estudio_consultas WHERE run_id IN ({placeholders})", tuple(old_run_ids))
+            conn.execute("DELETE FROM estudio_runs WHERE ficha=?", (ficha,))
         conn.execute("UPDATE estudio_runs SET is_current=0 WHERE ficha=?", (ficha,))
         conn.execute(
             """
@@ -2879,6 +3650,7 @@ def _load_runs_df() -> pd.DataFrame:
             SELECT run_id, ficha, nombre_ficha, estado_run, fecha_inicio, fecha_fin, total_items,
                    total_consultas, consultas_resueltas, is_current, updated_at
             FROM estudio_runs
+            WHERE COALESCE(is_current, 1) = 1
             ORDER BY datetime(updated_at) DESC
             """,
             conn,
@@ -3611,6 +4383,8 @@ def _render_tab_estudio_profundo(
                 f"precio={int(last_stats.get('auto_resolved_price', 0))}, "
                 f"pais={int(last_stats.get('auto_resolved_country', 0))}, "
                 f"marca/modelo={int(last_stats.get('auto_resolved_brand_model', 0))}, "
+                f"tipo1={int(last_stats.get('tipo1_detectados', 0))}, "
+                f"tipo2={int(last_stats.get('tipo2_detectados', 0))}, "
                 f"consultas omitidas por limite={int(last_stats.get('queries_skipped_limit', 0))}."
             )
         seg = pd.DataFrame(_ensure_study_state())
@@ -3625,7 +4399,7 @@ def _render_tab_estudio_profundo(
             target_ficha = st.selectbox("Ficha a estudiar", ficha_opts, key="intel_study_target_ficha")
             target_row = seg[seg["ficha"].astype(str) == str(target_ficha)].head(1)
             target_name = str(target_row.iloc[0].get("nombre_ficha", "") if not target_row.empty else "")
-            copt1, copt2 = st.columns([1.2, 1.0])
+            copt1, copt2, copt3 = st.columns([1.2, 1.0, 1.0])
             max_queries = int(
                 copt1.slider(
                     "Max consultas finales por run",
@@ -3645,6 +4419,17 @@ def _render_tab_estudio_profundo(
                     help="Si se desactiva, solo usa scraping formal deterministico.",
                 )
             )
+            use_browser_extractor = bool(
+                copt3.checkbox(
+                    "Usar navegador local (Selenium)",
+                    value=True,
+                    key="intel_study_use_browser_extractor",
+                    help="Recomendado para PanamáCompra (SPA). Si falla, usa requests + parser formal.",
+                )
+            )
+            catalog_status = str(st.session_state.get("intel_catalogo_status", "") or "").strip()
+            if catalog_status:
+                st.caption(catalog_status)
             run_notes = st.text_area("Notas del estudio (opcional)", key="intel_study_notes", height=80)
             if st.button("Iniciar estudio de ficha", type="primary"):
                 acts = ficha_acts_df[ficha_acts_df["ficha"].astype(str) == str(target_ficha)].copy()
@@ -3653,6 +4438,7 @@ def _render_tab_estudio_profundo(
                     target_name,
                     acts,
                     max_queries=max_queries,
+                    use_browser_extractor=use_browser_extractor,
                     use_ai_fallback=use_ai_fallback,
                 )
                 run_id = _save_study_run(
@@ -3668,6 +4454,9 @@ def _render_tab_estudio_profundo(
                     f"Estudio iniciado para ficha {target_ficha}. "
                     f"Detalle: {len(detail_df)} filas | Consultas finales: {len(queries_df)}."
                 )
+                browser_status = str(st.session_state.get("intel_study_browser_status", "") or "").strip()
+                if browser_status:
+                    st.caption(f"Extractor navegador: {browser_status}")
                 st.session_state["intel_last_study_stats"] = run_stats
                 st.rerun()
 
@@ -3693,13 +4482,18 @@ def _render_tab_estudio_profundo(
                     "acto_id",
                     "acto_nombre",
                     "acto_url",
+                    "enlace_evidencia",
                     "entidad",
+                    "tipo_flujo",
+                    "fuente_precio",
+                    "fuente_fecha",
                     "proveedor",
                     "proveedor_ganador",
                     "marca",
                     "modelo",
                     "pais_origen",
                     "cantidad",
+                    "unidad_medida",
                     "precio_unitario_participacion",
                     "precio_unitario_referencia",
                     "fecha_publicacion",
@@ -3707,6 +4501,8 @@ def _render_tab_estudio_profundo(
                     "fecha_adjudicacion",
                     "fecha_orden_compra",
                     "dias_acto_a_oc",
+                    "tiempo_entrega_dias",
+                    "dias_acto_a_oc_mas_entrega",
                     "nivel_certeza",
                     "requiere_revision",
                     "estado_revision",
@@ -3716,6 +4512,8 @@ def _render_tab_estudio_profundo(
                 col_cfg = {}
                 if "acto_url" in present:
                     col_cfg["acto_url"] = st.column_config.LinkColumn("Enlace acto", display_text="Abrir acto")
+                if "enlace_evidencia" in present:
+                    col_cfg["enlace_evidencia"] = st.column_config.LinkColumn("Enlace evidencia", display_text="Abrir")
                 if "requiere_revision" in present:
                     col_cfg["requiere_revision"] = st.column_config.CheckboxColumn("Rev.")
                 st.dataframe(detail_df[present], use_container_width=True, hide_index=True, column_config=col_cfg)
@@ -3863,7 +4661,7 @@ def _render_tab_estudio_profundo(
         if runs_df.empty:
             st.info("Sin runs para versionado.")
         else:
-            st.caption("Puedes re-ejecutar una ficha; el sistema guarda nueva versi?n y mantiene hist?rico.")
+            st.caption("Puedes re-ejecutar una ficha; se reemplaza por la nueva corrida vigente.")
             st.dataframe(runs_df, use_container_width=True, hide_index=True)
             ficha_opts = sorted(runs_df["ficha"].astype(str).unique().tolist())
             chosen = st.selectbox("Ficha para reestudio", ficha_opts, key="intel_restudy_ficha")
@@ -3876,6 +4674,7 @@ def _render_tab_estudio_profundo(
                     ficha_name,
                     acts,
                     max_queries=int(st.session_state.get("intel_study_max_queries", INTEL_STUDY_DEFAULT_MAX_QUERIES)),
+                    use_browser_extractor=bool(st.session_state.get("intel_study_use_browser_extractor", True)),
                     use_ai_fallback=bool(st.session_state.get("intel_study_use_ai_fallback", True)),
                 )
                 new_run = _save_study_run(
