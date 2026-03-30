@@ -82,6 +82,7 @@ INTEL_REMOTE_RUNS_WORKSHEET = "intel_study_runs_remote"
 INTEL_REMOTE_DETAIL_WORKSHEET = "intel_study_detail_remote"
 PC_MANUAL_WORKSHEET = "pc_manual"
 PC_CONFIG_WORKSHEET = "pc_config"
+PC_SHEET_ID_DEFAULT = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
 PC_CONFIG_HEADERS = ["name", "python", "script", "days", "times", "enabled"]
 PC_MANUAL_HEADERS = [
     "id",
@@ -1880,6 +1881,70 @@ def _pc_config_sheet_id() -> str:
     return _intel_sheet_id()
 
 
+def _uniq_nonempty(values: list[object]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _clean_text(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _sheet_id_candidates(kind: str) -> list[str]:
+    key_map = {
+        "config": ["PC_CONFIG_SHEET_ID", "PC_MANUAL_SHEET_ID", "SHEET_ID"],
+        "manual": ["PC_MANUAL_SHEET_ID", "SHEET_ID", "PC_CONFIG_SHEET_ID"],
+        "intel": ["SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"],
+    }
+    keys = key_map.get(kind, key_map["intel"])
+    vals: list[object] = []
+
+    # 1) env vars
+    for key in keys:
+        vals.append(os.getenv(key, ""))
+
+    # 2) secrets.app
+    try:
+        app_cfg = st.secrets.get("app", {})
+        if isinstance(app_cfg, Mapping):
+            for key in keys:
+                vals.append(app_cfg.get(key, ""))
+    except Exception:
+        pass
+
+    # 3) secrets root
+    try:
+        for key in keys:
+            vals.append(st.secrets.get(key, ""))
+    except Exception:
+        pass
+
+    # 4) funciones existentes + default conocido
+    vals.extend([_pc_config_sheet_id(), _pc_manual_sheet_id(), _intel_sheet_id(), PC_SHEET_ID_DEFAULT])
+    return _uniq_nonempty(vals)
+
+
+def _open_sheet_with_fallback(client, candidates: list[str], purpose: str) -> tuple[str, object]:
+    attempted: list[str] = []
+    last_exc: Exception | None = None
+    for sid in _uniq_nonempty(candidates):
+        attempted.append(sid)
+        try:
+            sh = client.open_by_key(sid)
+            return sid, sh
+        except Exception as exc:
+            last_exc = exc
+            continue
+    attempted_str = ", ".join(attempted) if attempted else "(sin candidatos)"
+    raise RuntimeError(
+        f"No se pudo abrir hoja de {purpose}. IDs probados: {attempted_str}. "
+        f"Ultimo error: {last_exc}"
+    )
+
+
 def _current_user() -> str:
     for key in ("username", "user", "email", "correo", "name", "nombre"):
         value = st.session_state.get(key)
@@ -1915,9 +1980,7 @@ def _ensure_ws_headers(client, sheet_id: str, worksheet: str, headers: list[str]
 
 
 def _ensure_intel_orquestador_job(client) -> None:
-    sheet_id = _pc_config_sheet_id()
-    if not sheet_id:
-        raise RuntimeError("No hay SHEET_ID/PC_CONFIG_SHEET_ID configurado.")
+    sheet_id, sh = _open_sheet_with_fallback(client, _sheet_id_candidates("config"), "pc_config")
     _ensure_ws_headers(client, sheet_id, PC_CONFIG_WORKSHEET, PC_CONFIG_HEADERS)
     sh = client.open_by_key(sheet_id)
     ws = sh.worksheet(PC_CONFIG_WORKSHEET)
@@ -1955,9 +2018,7 @@ def _ensure_intel_orquestador_job(client) -> None:
 
 
 def _append_intel_manual_request(client, payload: dict[str, object]) -> str:
-    sheet_id = _pc_manual_sheet_id()
-    if not sheet_id:
-        raise RuntimeError("No hay SHEET_ID/PC_MANUAL_SHEET_ID configurado.")
+    sheet_id, _ = _open_sheet_with_fallback(client, _sheet_id_candidates("manual"), "pc_manual")
     _ensure_ws_headers(client, sheet_id, PC_MANUAL_WORKSHEET, PC_MANUAL_HEADERS)
     sh = client.open_by_key(sheet_id)
     ws = sh.worksheet(PC_MANUAL_WORKSHEET)
@@ -1984,9 +2045,7 @@ def _append_intel_manual_request(client, payload: dict[str, object]) -> str:
 
 
 def _fetch_intel_manual_request(client, request_id: str) -> dict[str, str] | None:
-    sheet_id = _pc_manual_sheet_id()
-    if not sheet_id:
-        return None
+    sheet_id, _ = _open_sheet_with_fallback(client, _sheet_id_candidates("manual"), "pc_manual")
     sh = client.open_by_key(sheet_id)
     ws = sh.worksheet(PC_MANUAL_WORKSHEET)
     values = ws.get_all_values()
@@ -2006,12 +2065,9 @@ def _read_remote_study_data(request_id: str) -> tuple[pd.DataFrame, pd.DataFrame
     except Exception as exc:
         return pd.DataFrame(), pd.DataFrame(), f"No se pudo importar modulo Sheets: {exc}"
 
-    sheet_id = _intel_sheet_id()
-    if not sheet_id:
-        return pd.DataFrame(), pd.DataFrame(), "SHEET_ID no configurado para leer resultados remotos."
-
     try:
         client, _ = get_client()
+        sheet_id, _ = _open_sheet_with_fallback(client, _sheet_id_candidates("intel"), "estudio remoto")
         runs = read_worksheet(client, sheet_id, INTEL_REMOTE_RUNS_WORKSHEET)
         detail = read_worksheet(client, sheet_id, INTEL_REMOTE_DETAIL_WORKSHEET)
     except Exception as exc:
