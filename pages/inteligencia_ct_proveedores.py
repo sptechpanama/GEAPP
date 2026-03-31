@@ -134,6 +134,7 @@ RUN_STATUS_COMPLETED_OBS = "completada_con_observaciones"
 RUN_STATUS_UPDATED = "actualizada"
 INTEL_STUDY_DEFAULT_MAX_QUERIES = 12
 INTEL_STUDY_MAX_QUERIES_HARD = 40
+INTEL_STUDY_SQL_CACHE_TTL = 120
 
 
 def _normalize_text(value: object) -> str:
@@ -288,6 +289,14 @@ def _safe_minsa_link(value: object) -> str:
         return direct
     # Fallback seguro: lleva al portal oficial de consulta (sin idficha inválido).
     return CTNI_CONSULTA_URL
+
+
+def _get_study_data_rev() -> int:
+    return int(st.session_state.get("intel_study_data_rev", 0) or 0)
+
+
+def _bump_study_data_rev() -> None:
+    st.session_state["intel_study_data_rev"] = _get_study_data_rev() + 1
 
 
 @st.cache_data(show_spinner=False, ttl=43200)
@@ -1208,7 +1217,7 @@ def _load_actos_postgres_df() -> tuple[pd.DataFrame, str]:
         return pd.DataFrame(), "postgres"
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=1800)
 def _load_actos_db_df() -> tuple[pd.DataFrame, str]:
     db_path = _resolve_db_path()
     if db_path is None:
@@ -1345,7 +1354,7 @@ def _build_top_winners_by_ficha(exploded: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=1800)
 def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     base_df, db_path = _load_actos_db_df()
     if base_df.empty:
@@ -4245,10 +4254,12 @@ def _save_study_run(
             (summary_payload["resumen_ia"], now, run_id),
         )
         conn.commit()
+    _bump_study_data_rev()
     return run_id
 
 
-def _load_runs_df() -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_runs_df_cached(_rev: int) -> pd.DataFrame:
     _ensure_study_db()
     with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
         return pd.read_sql_query(
@@ -4263,7 +4274,12 @@ def _load_runs_df() -> pd.DataFrame:
         )
 
 
-def _load_run_detail_df(run_id: str) -> pd.DataFrame:
+def _load_runs_df() -> pd.DataFrame:
+    return _load_runs_df_cached(_get_study_data_rev())
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_run_detail_df_cached(run_id: str, _rev: int) -> pd.DataFrame:
     _ensure_study_db()
     with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
         return pd.read_sql_query(
@@ -4273,7 +4289,12 @@ def _load_run_detail_df(run_id: str) -> pd.DataFrame:
         )
 
 
-def _load_run_queries_df(run_id: str) -> pd.DataFrame:
+def _load_run_detail_df(run_id: str) -> pd.DataFrame:
+    return _load_run_detail_df_cached(str(run_id or ""), _get_study_data_rev())
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_run_queries_df_cached(run_id: str, _rev: int) -> pd.DataFrame:
     _ensure_study_db()
     with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
         return pd.read_sql_query(
@@ -4283,7 +4304,12 @@ def _load_run_queries_df(run_id: str) -> pd.DataFrame:
         )
 
 
-def _load_resumen_estudiadas_df() -> pd.DataFrame:
+def _load_run_queries_df(run_id: str) -> pd.DataFrame:
+    return _load_run_queries_df_cached(str(run_id or ""), _get_study_data_rev())
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_resumen_estudiadas_df_cached(_rev: int) -> pd.DataFrame:
     _ensure_study_db()
     with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
         return pd.read_sql_query(
@@ -4295,6 +4321,10 @@ def _load_resumen_estudiadas_df() -> pd.DataFrame:
             """,
             conn,
         )
+
+
+def _load_resumen_estudiadas_df() -> pd.DataFrame:
+    return _load_resumen_estudiadas_df_cached(_get_study_data_rev())
 
 
 def _apply_query_resolution(run_id: str, responses: list[dict[str, str]]) -> None:
@@ -4440,6 +4470,7 @@ def _apply_query_resolution(run_id: str, responses: list[dict[str, str]]) -> Non
                 ),
             )
         conn.commit()
+    _bump_study_data_rev()
 
 def _empty_table(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
@@ -5172,9 +5203,7 @@ def _render_tab_estudio_profundo(
                         else:
                             st.warning(msg)
 
-                    auto_refresh = status in {"pending", "enqueued", "running"} or (
-                        status == "done" and synced_id != current_request_id
-                    )
+                    auto_refresh = status in {"pending", "enqueued", "running"}
                     if auto_refresh:
                         time.sleep(5)
                         st.rerun()
