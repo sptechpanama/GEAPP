@@ -136,6 +136,60 @@ INTEL_STUDY_DEFAULT_MAX_QUERIES = 12
 INTEL_STUDY_MAX_QUERIES_HARD = 40
 INTEL_STUDY_SQL_CACHE_TTL = 120
 
+AP_STATE_STUDIED_NO_ANALYSIS = "estudiada_sin_analisis_proveedores"
+AP_STATE_PENDING_JSON = "pendiente_json_proveedores"
+AP_STATE_COMPLETED = "analisis_proveedores_completado"
+AP_STATE_UPDATED = "analisis_proveedores_actualizado"
+
+AP_HIST_COLUMNS = [
+    "proveedor",
+    "marca",
+    "modelo",
+    "pais_origen",
+    "cantidad_actos_ganados",
+    "precio_promedio_historico",
+    "precio_minimo_historico",
+    "precio_maximo_historico",
+    "telefono",
+    "contacto_email",
+    "contacto_whatsapp",
+    "canal_contacto_mas_probable",
+    "correo_inicial_listo",
+    "whatsapp_inicial_listo",
+    "observaciones",
+]
+AP_GAMA_COLUMNS = [
+    "proveedor_o_fabricante",
+    "marca",
+    "modelo",
+    "pais_origen",
+    "sitio_web",
+    "telefono",
+    "contacto_email",
+    "contacto_whatsapp",
+    "canal_contacto_mas_probable",
+    "razon_clasificacion",
+    "correo_inicial_listo",
+    "whatsapp_inicial_listo",
+    "observaciones",
+]
+AP_PRECIO_COLUMNS = [
+    "proveedor_o_fabricante",
+    "marca",
+    "modelo",
+    "pais_origen",
+    "sitio_web",
+    "telefono",
+    "contacto_email",
+    "contacto_whatsapp",
+    "canal_contacto_mas_probable",
+    "rango_precio_referencial",
+    "razon_clasificacion",
+    "correo_inicial_listo",
+    "whatsapp_inicial_listo",
+    "observaciones",
+]
+
 
 def _normalize_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
@@ -2716,6 +2770,124 @@ def _ensure_study_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_detalle_run ON estudio_detalle(run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_estudio_consultas_run ON estudio_consultas(run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_seguimiento_fichas_estado ON seguimiento_fichas(estado)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analisis_proveedores_contexto (
+                ficha TEXT PRIMARY KEY,
+                run_id_estudio TEXT,
+                nombre_ficha TEXT,
+                enlace_ficha_tecnica TEXT,
+                descripcion_producto TEXT,
+                palabras_clave TEXT,
+                marcas_detectadas_historicamente TEXT,
+                modelos_detectados_historicamente TEXT,
+                paises_detectados_historicamente TEXT,
+                proveedores_historicos_detectados TEXT,
+                resumen_estudio_breve TEXT,
+                contexto_texto TEXT,
+                prompt_texto TEXT,
+                estado_analisis TEXT,
+                analisis_id_activo TEXT,
+                fecha_contexto_generado TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analisis_proveedores_version (
+                analisis_id TEXT PRIMARY KEY,
+                ficha TEXT NOT NULL,
+                version_num INTEGER DEFAULT 1,
+                metadata_consulta_json TEXT,
+                contexto_ficha_json TEXT,
+                resumen_ejecutivo TEXT,
+                json_raw TEXT,
+                estado_version TEXT,
+                fecha_carga TEXT,
+                fecha_ultima_actualizacion TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                is_active INTEGER DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analisis_proveedores_hist_panama (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analisis_id TEXT NOT NULL,
+                ficha TEXT NOT NULL,
+                proveedor TEXT,
+                marca TEXT,
+                modelo TEXT,
+                pais_origen TEXT,
+                cantidad_actos_ganados REAL,
+                precio_promedio_historico REAL,
+                precio_minimo_historico REAL,
+                precio_maximo_historico REAL,
+                telefono TEXT,
+                contacto_email TEXT,
+                contacto_whatsapp TEXT,
+                canal_contacto_mas_probable TEXT,
+                correo_inicial_listo TEXT,
+                whatsapp_inicial_listo TEXT,
+                observaciones TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analisis_proveedores_mejor_gama (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analisis_id TEXT NOT NULL,
+                ficha TEXT NOT NULL,
+                proveedor_o_fabricante TEXT,
+                marca TEXT,
+                modelo TEXT,
+                pais_origen TEXT,
+                sitio_web TEXT,
+                telefono TEXT,
+                contacto_email TEXT,
+                contacto_whatsapp TEXT,
+                canal_contacto_mas_probable TEXT,
+                razon_clasificacion TEXT,
+                correo_inicial_listo TEXT,
+                whatsapp_inicial_listo TEXT,
+                observaciones TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analisis_proveedores_mejor_precio (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analisis_id TEXT NOT NULL,
+                ficha TEXT NOT NULL,
+                proveedor_o_fabricante TEXT,
+                marca TEXT,
+                modelo TEXT,
+                pais_origen TEXT,
+                sitio_web TEXT,
+                telefono TEXT,
+                contacto_email TEXT,
+                contacto_whatsapp TEXT,
+                canal_contacto_mas_probable TEXT,
+                rango_precio_referencial TEXT,
+                razon_clasificacion TEXT,
+                correo_inicial_listo TEXT,
+                whatsapp_inicial_listo TEXT,
+                observaciones TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_contexto_estado ON analisis_proveedores_contexto(estado_analisis)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_version_ficha ON analisis_proveedores_version(ficha)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_version_active ON analisis_proveedores_version(ficha, is_active)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_hist_analisis ON analisis_proveedores_hist_panama(analisis_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_gama_analisis ON analisis_proveedores_mejor_gama(analisis_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_precio_analisis ON analisis_proveedores_mejor_precio(analisis_id)")
 
         # Backward compatibility: agrega columnas nuevas si la DB ya existía.
         existing_cols = {
@@ -2734,6 +2906,21 @@ def _ensure_study_db() -> None:
         for col_name, col_type in required_cols:
             if col_name.lower() not in existing_cols:
                 conn.execute(f"ALTER TABLE estudio_detalle ADD COLUMN {col_name} {col_type}")
+
+        ap_ctx_cols = {
+            str(row[1] or "").strip().lower()
+            for row in conn.execute("PRAGMA table_info(analisis_proveedores_contexto)").fetchall()
+        }
+        ap_ctx_required = [
+            ("analisis_id_activo", "TEXT"),
+            ("fecha_contexto_generado", "TEXT"),
+            ("estado_analisis", "TEXT"),
+            ("prompt_texto", "TEXT"),
+        ]
+        for col_name, col_type in ap_ctx_required:
+            if col_name.lower() not in ap_ctx_cols:
+                conn.execute(f"ALTER TABLE analisis_proveedores_contexto ADD COLUMN {col_name} {col_type}")
+
         conn.commit()
 
 
@@ -4472,6 +4659,603 @@ def _apply_query_resolution(run_id: str, responses: list[dict[str, str]]) -> Non
         conn.commit()
     _bump_study_data_rev()
 
+def _loads_json_obj(raw: object) -> dict[str, object]:
+    text = _clean_text(raw)
+    if not text:
+        return {}
+    try:
+        loaded = json.loads(text)
+        if isinstance(loaded, dict):
+            return loaded
+    except Exception:
+        pass
+    parsed = _parse_json_block(text)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _loads_json_list(raw: object) -> list[object]:
+    text = _clean_text(raw)
+    if not text:
+        return []
+    try:
+        loaded = json.loads(text)
+        if isinstance(loaded, list):
+            return loaded
+    except Exception:
+        pass
+    return []
+
+
+def _to_clean_str_list(raw: object, max_items: int = 50) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    values: list[object]
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, str):
+        lst = _loads_json_list(raw)
+        if lst:
+            values = lst
+        else:
+            values = re.split(r"[|,;\n]", raw)
+    else:
+        values = [raw]
+    for item in values:
+        txt = _clean_text(item)
+        if not txt or txt in seen:
+            continue
+        seen.add(txt)
+        out.append(txt)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _extract_keywords_context(*parts: object, max_items: int = 20) -> list[str]:
+    joined = " ".join([_clean_text(p) for p in parts if _clean_text(p)])
+    if not joined:
+        return []
+    tokens = re.findall(r"[A-Za-zÁÉÍÓÚÑáéíóúñ0-9]{4,}", joined)
+    stop = {
+        "para",
+        "con",
+        "del",
+        "los",
+        "las",
+        "por",
+        "que",
+        "ficha",
+        "tecnica",
+        "juego",
+        "unidad",
+        "baja",
+        "alta",
+    }
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        tk = token.strip()
+        if not tk:
+            continue
+        key = _normalize_column_key(tk)
+        if key in stop or key in seen:
+            continue
+        seen.add(key)
+        out.append(tk.upper())
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _build_ficha_lookup_maps(ranked_df: pd.DataFrame) -> tuple[dict[str, str], dict[str, str]]:
+    name_map: dict[str, str] = {}
+    link_map: dict[str, str] = {}
+    if not ranked_df.empty:
+        for _, row in ranked_df.iterrows():
+            ficha = _clean_text(row.get("ficha"))
+            if not ficha:
+                continue
+            if ficha not in name_map:
+                name_map[ficha] = _clean_text(row.get("nombre_ficha"))
+            if ficha not in link_map:
+                link_map[ficha] = _clean_text(row.get("enlace_minsa"))
+    ref_map = _load_ficha_reference_map()
+    for ficha, payload in (ref_map or {}).items():
+        key = _clean_text(ficha)
+        if not key:
+            continue
+        if key not in name_map:
+            name_map[key] = _clean_text((payload or {}).get("nombre_ficha", ""))
+        if key not in link_map:
+            link_map[key] = _clean_text((payload or {}).get("enlace_minsa", ""))
+    for key, link in list(link_map.items()):
+        link_map[key] = _safe_minsa_link(link)
+    return name_map, link_map
+
+
+def _build_context_payload_from_study(
+    ficha: str,
+    nombre_ficha: str,
+    enlace_ficha: str,
+    resumen_row: pd.Series,
+    detail_df: pd.DataFrame,
+) -> dict[str, object]:
+    marcas = _to_clean_str_list(resumen_row.get("marcas_json", "[]"))
+    modelos = _to_clean_str_list(resumen_row.get("modelos_json", "[]"))
+    paises = _to_clean_str_list(resumen_row.get("paises_json", "[]"))
+    resumen_ia = _clean_text(resumen_row.get("resumen_ia", ""))
+
+    proveedores_hist: list[str] = []
+    if not detail_df.empty:
+        if "proveedor_ganador" in detail_df.columns:
+            proveedores_hist.extend(
+                [
+                    _clean_text(x)
+                    for x in detail_df["proveedor_ganador"].dropna().astype(str).tolist()
+                    if _clean_text(x)
+                ]
+            )
+        if not proveedores_hist and "proveedor" in detail_df.columns:
+            proveedores_hist.extend(
+                [
+                    _clean_text(x)
+                    for x in detail_df["proveedor"].dropna().astype(str).tolist()
+                    if _clean_text(x)
+                ]
+            )
+    proveedores_hist = _to_clean_str_list(proveedores_hist)
+
+    descripcion = _clean_text(nombre_ficha)
+    if not detail_df.empty and "renglon_texto" in detail_df.columns:
+        cand = (
+            detail_df["renglon_texto"]
+            .fillna("")
+            .astype(str)
+            .map(_clean_text)
+            .loc[lambda s: s != ""]
+            .head(1)
+            .tolist()
+        )
+        if cand:
+            descripcion = cand[0]
+    palabras = _extract_keywords_context(
+        nombre_ficha,
+        descripcion,
+        " ".join(marcas),
+        " ".join(modelos),
+        " ".join(proveedores_hist),
+    )
+
+    contexto = {
+        "ficha_id": ficha,
+        "nombre_ficha": nombre_ficha,
+        "enlace_ficha_tecnica": enlace_ficha or CTNI_CONSULTA_URL,
+        "descripcion_producto": descripcion,
+        "palabras_clave": palabras,
+        "marcas_detectadas_historicamente": marcas,
+        "modelos_detectados_historicamente": modelos,
+        "paises_detectados_historicamente": paises,
+        "proveedores_historicos_detectados": proveedores_hist,
+        "resumen_breve_estudio_historico": resumen_ia,
+    }
+    return contexto
+
+
+def _build_prompt_for_chatgpt(contexto: dict[str, object]) -> str:
+    ficha_id = _clean_text(contexto.get("ficha_id", ""))
+    link = _safe_minsa_link(contexto.get("enlace_ficha_tecnica", ""))
+    json_context = json.dumps(contexto, ensure_ascii=False, indent=2)
+    return (
+        "Use SOLO el contexto suministrado para estructurar un analisis de proveedores.\n"
+        "Responde UNICAMENTE JSON valido (sin markdown) con esta estructura minima:\n"
+        "{\n"
+        '  "metadata_consulta": {...},\n'
+        '  "contexto_ficha": {"ficha_id":"...","nombre_ficha":"...","enlace_ficha_tecnica":"..."},\n'
+        '  "proveedores_historicos_panama": [ ... ],\n'
+        '  "proveedores_externos_clasificados": {"mejor_gama":[...], "mejor_precio":[...]},\n'
+        '  "resumen_ejecutivo": "..." \n'
+        "}\n"
+        "Reglas:\n"
+        "- incluir entre 5 y 10 proveedores externos adicionales confiables cuando sea posible.\n"
+        "- por cada proveedor incluir telefono, contacto_email, contacto_whatsapp, canal_contacto_mas_probable,\n"
+        "  correo_inicial_listo y whatsapp_inicial_listo.\n"
+        "- El correo_inicial_listo DEBE iniciar exactamente con:\n"
+        "\"My name is Rodrigo Sánchez and I represent RIR Medical Engineering, a company based in Panama focused on supplying medical products to hospitals and public institutions.\"\n"
+        f"- El correo y whatsapp deben referenciar la ficha {ficha_id} y el enlace {link}.\n"
+        "- Cerrar correo con:\n"
+        "\"If so, we would appreciate receiving your quotation, as we are interested in distributing your products in Panama.\"\n"
+        "- WhatsApp corto, directo y con solicitud de cumplimiento + cotizacion.\n\n"
+        f"CONTEXTO:\n{json_context}"
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_ap_context_df_cached(_rev: int) -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM analisis_proveedores_contexto ORDER BY datetime(updated_at) DESC, ficha ASC",
+            conn,
+        )
+
+
+def _load_ap_context_df() -> pd.DataFrame:
+    return _load_ap_context_df_cached(_get_study_data_rev())
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_ap_active_versions_df_cached(_rev: int) -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT *
+            FROM analisis_proveedores_version
+            WHERE COALESCE(is_active, 1)=1
+            ORDER BY datetime(updated_at) DESC, ficha ASC
+            """,
+            conn,
+        )
+
+
+def _load_ap_active_versions_df() -> pd.DataFrame:
+    return _load_ap_active_versions_df_cached(_get_study_data_rev())
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_ap_versions_df_cached(_rev: int) -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT *
+            FROM analisis_proveedores_version
+            ORDER BY ficha ASC, version_num DESC, datetime(updated_at) DESC
+            """,
+            conn,
+        )
+
+
+def _load_ap_versions_df() -> pd.DataFrame:
+    return _load_ap_versions_df_cached(_get_study_data_rev())
+
+
+def _ensure_provider_analysis_contexts(resumen_df: pd.DataFrame, ranked_df: pd.DataFrame) -> tuple[int, int]:
+    _ensure_study_db()
+    if resumen_df.empty:
+        return 0, 0
+
+    name_map, link_map = _build_ficha_lookup_maps(ranked_df)
+    now = _utc_now_iso()
+    created = 0
+    updated = 0
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        existing_ctx_df = pd.read_sql_query("SELECT * FROM analisis_proveedores_contexto", conn)
+        existing_ctx: dict[str, dict[str, object]] = {}
+        if not existing_ctx_df.empty:
+            existing_ctx = {
+                _clean_text(r.get("ficha", "")): r
+                for r in existing_ctx_df.to_dict(orient="records")
+                if _clean_text(r.get("ficha", ""))
+            }
+
+        active_versions_df = pd.read_sql_query(
+            "SELECT ficha, analisis_id, version_num FROM analisis_proveedores_version WHERE COALESCE(is_active,1)=1",
+            conn,
+        )
+        active_map: dict[str, dict[str, object]] = {}
+        if not active_versions_df.empty:
+            active_map = {
+                _clean_text(r.get("ficha", "")): r
+                for r in active_versions_df.to_dict(orient="records")
+                if _clean_text(r.get("ficha", ""))
+            }
+
+        for _, row in resumen_df.iterrows():
+            ficha = _clean_text(row.get("ficha", ""))
+            if not ficha:
+                continue
+            run_id = _clean_text(row.get("run_id_vigente", ""))
+            nombre = _clean_text(row.get("nombre_ficha", "")) or _clean_text(name_map.get(ficha, ""))
+            enlace = _safe_minsa_link(link_map.get(ficha, "") or row.get("enlace_minsa", ""))
+            detail_df = pd.DataFrame()
+            if run_id:
+                try:
+                    detail_df = pd.read_sql_query(
+                        "SELECT * FROM estudio_detalle WHERE run_id=? ORDER BY acto_id, proveedor",
+                        conn,
+                        params=(run_id,),
+                    )
+                except Exception:
+                    detail_df = _load_run_detail_df(run_id)
+            contexto_obj = _build_context_payload_from_study(ficha, nombre, enlace, row, detail_df)
+            contexto_texto = json.dumps(contexto_obj, ensure_ascii=False, indent=2)
+            prompt_texto = _build_prompt_for_chatgpt(contexto_obj)
+
+            current = existing_ctx.get(ficha, {})
+            has_active = ficha in active_map
+            prev_state = _clean_text(current.get("estado_analisis", ""))
+            if prev_state == AP_STATE_PENDING_JSON:
+                desired_state = AP_STATE_PENDING_JSON
+            elif has_active:
+                version_num = int(_safe_int(active_map[ficha].get("version_num", 1)))
+                desired_state = AP_STATE_UPDATED if version_num > 1 else AP_STATE_COMPLETED
+            else:
+                desired_state = AP_STATE_PENDING_JSON
+            active_id = _clean_text((active_map.get(ficha) or {}).get("analisis_id", ""))
+
+            if not current:
+                conn.execute(
+                    """
+                    INSERT INTO analisis_proveedores_contexto (
+                        ficha, run_id_estudio, nombre_ficha, enlace_ficha_tecnica, descripcion_producto, palabras_clave,
+                        marcas_detectadas_historicamente, modelos_detectados_historicamente, paises_detectados_historicamente,
+                        proveedores_historicos_detectados, resumen_estudio_breve, contexto_texto, prompt_texto,
+                        estado_analisis, analisis_id_activo, fecha_contexto_generado, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ficha,
+                        run_id,
+                        nombre,
+                        enlace,
+                        _clean_text(contexto_obj.get("descripcion_producto", "")),
+                        json.dumps(contexto_obj.get("palabras_clave", []), ensure_ascii=False),
+                        json.dumps(contexto_obj.get("marcas_detectadas_historicamente", []), ensure_ascii=False),
+                        json.dumps(contexto_obj.get("modelos_detectados_historicamente", []), ensure_ascii=False),
+                        json.dumps(contexto_obj.get("paises_detectados_historicamente", []), ensure_ascii=False),
+                        json.dumps(contexto_obj.get("proveedores_historicos_detectados", []), ensure_ascii=False),
+                        _clean_text(contexto_obj.get("resumen_breve_estudio_historico", "")),
+                        contexto_texto,
+                        prompt_texto,
+                        desired_state,
+                        active_id,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+                created += 1
+                continue
+
+            needs_update = False
+            if _clean_text(current.get("run_id_estudio", "")) != run_id:
+                needs_update = True
+            if _clean_text(current.get("prompt_texto", "")) == "":
+                needs_update = True
+            if _clean_text(current.get("contexto_texto", "")) == "":
+                needs_update = True
+            if _clean_text(current.get("estado_analisis", "")) != desired_state:
+                needs_update = True
+            if _clean_text(current.get("analisis_id_activo", "")) != active_id:
+                needs_update = True
+            if not needs_update:
+                continue
+
+            conn.execute(
+                """
+                UPDATE analisis_proveedores_contexto
+                SET run_id_estudio=?, nombre_ficha=?, enlace_ficha_tecnica=?, descripcion_producto=?, palabras_clave=?,
+                    marcas_detectadas_historicamente=?, modelos_detectados_historicamente=?, paises_detectados_historicamente=?,
+                    proveedores_historicos_detectados=?, resumen_estudio_breve=?, contexto_texto=?, prompt_texto=?,
+                    estado_analisis=?, analisis_id_activo=?, updated_at=?
+                WHERE ficha=?
+                """,
+                (
+                    run_id,
+                    nombre,
+                    enlace,
+                    _clean_text(contexto_obj.get("descripcion_producto", "")),
+                    json.dumps(contexto_obj.get("palabras_clave", []), ensure_ascii=False),
+                    json.dumps(contexto_obj.get("marcas_detectadas_historicamente", []), ensure_ascii=False),
+                    json.dumps(contexto_obj.get("modelos_detectados_historicamente", []), ensure_ascii=False),
+                    json.dumps(contexto_obj.get("paises_detectados_historicamente", []), ensure_ascii=False),
+                    json.dumps(contexto_obj.get("proveedores_historicos_detectados", []), ensure_ascii=False),
+                    _clean_text(contexto_obj.get("resumen_breve_estudio_historico", "")),
+                    contexto_texto,
+                    prompt_texto,
+                    desired_state,
+                    active_id,
+                    now,
+                    ficha,
+                ),
+            )
+            updated += 1
+
+        conn.commit()
+    if created or updated:
+        _bump_study_data_rev()
+    return created, updated
+
+
+def _validate_provider_analysis_json(raw_text: str, ficha_open: str) -> tuple[dict[str, object], list[str], list[str]]:
+    payload = _parse_json_block(raw_text)
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not payload:
+        errors.append("JSON inválido o vacío.")
+        return {}, errors, warnings
+
+    metadata = payload.get("metadata_consulta")
+    if not isinstance(metadata, dict):
+        errors.append("Falta `metadata_consulta` (objeto).")
+
+    contexto_ficha = payload.get("contexto_ficha")
+    if not isinstance(contexto_ficha, dict):
+        errors.append("Falta `contexto_ficha` (objeto).")
+        contexto_ficha = {}
+
+    ficha_json = _clean_text(contexto_ficha.get("ficha_id", "")) or _clean_text(payload.get("ficha_id", ""))
+    if not ficha_json:
+        errors.append("Falta `ficha_id` en el JSON.")
+    if ficha_json and _clean_text(ficha_open) and ficha_json != _clean_text(ficha_open):
+        errors.append(f"El `ficha_id` del JSON ({ficha_json}) no coincide con la ficha abierta ({ficha_open}).")
+
+    historicos = payload.get("proveedores_historicos_panama")
+    if not isinstance(historicos, list):
+        errors.append("Falta `proveedores_historicos_panama` (lista).")
+        historicos = []
+
+    externos = payload.get("proveedores_externos_clasificados")
+    if not isinstance(externos, dict):
+        errors.append("Falta `proveedores_externos_clasificados` (objeto).")
+        externos = {}
+    mejor_gama = externos.get("mejor_gama")
+    if not isinstance(mejor_gama, list):
+        errors.append("Falta `proveedores_externos_clasificados.mejor_gama` (lista).")
+        mejor_gama = []
+    mejor_precio = externos.get("mejor_precio")
+    if not isinstance(mejor_precio, list):
+        errors.append("Falta `proveedores_externos_clasificados.mejor_precio` (lista).")
+        mejor_precio = []
+
+    if "resumen_ejecutivo" not in payload:
+        errors.append("Falta `resumen_ejecutivo`.")
+
+    total_ext = len(mejor_gama) + len(mejor_precio)
+    if total_ext < 5:
+        warnings.append(
+            "Se detectaron menos de 5 proveedores externos entre gama+precio. "
+            "Se permite guardar, pero revisa cobertura."
+        )
+
+    return payload, errors, warnings
+
+
+def _rows_from_payload_list(payload_list: object, expected_cols: list[str], ficha: str, analisis_id: str) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    data = payload_list if isinstance(payload_list, list) else []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        row: dict[str, object] = {"analisis_id": analisis_id, "ficha": ficha}
+        for col in expected_cols:
+            value = item.get(col, "")
+            if col in {
+                "cantidad_actos_ganados",
+                "precio_promedio_historico",
+                "precio_minimo_historico",
+                "precio_maximo_historico",
+            }:
+                row[col] = _safe_float(value, 0.0)
+            else:
+                row[col] = _clean_text(value)
+        rows.append(row)
+    base_cols = ["analisis_id", "ficha"] + expected_cols
+    if not rows:
+        return pd.DataFrame(columns=base_cols)
+    return pd.DataFrame(rows)[base_cols]
+
+
+def _save_provider_analysis_payload(ficha: str, payload: dict[str, object]) -> tuple[str, int, str]:
+    _ensure_study_db()
+    ficha = _clean_text(ficha)
+    now = _utc_now_iso()
+    metadata = payload.get("metadata_consulta", {})
+    contexto_ficha = payload.get("contexto_ficha", {})
+    resumen_ejecutivo = _clean_text(payload.get("resumen_ejecutivo", ""))
+    externos = payload.get("proveedores_externos_clasificados", {})
+    historicos = payload.get("proveedores_historicos_panama", [])
+    mejor_gama = externos.get("mejor_gama", []) if isinstance(externos, dict) else []
+    mejor_precio = externos.get("mejor_precio", []) if isinstance(externos, dict) else []
+
+    analisis_id = str(uuid.uuid4())
+    version_num = 1
+    state_out = AP_STATE_COMPLETED
+
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version_num), 0) FROM analisis_proveedores_version WHERE ficha=?",
+            (ficha,),
+        ).fetchone()
+        prev_max = int(row[0] or 0)
+        version_num = prev_max + 1
+        state_out = AP_STATE_UPDATED if prev_max > 0 else AP_STATE_COMPLETED
+
+        conn.execute("UPDATE analisis_proveedores_version SET is_active=0 WHERE ficha=?", (ficha,))
+        conn.execute(
+            """
+            INSERT INTO analisis_proveedores_version (
+                analisis_id, ficha, version_num, metadata_consulta_json, contexto_ficha_json, resumen_ejecutivo,
+                json_raw, estado_version, fecha_carga, fecha_ultima_actualizacion, created_at, updated_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                analisis_id,
+                ficha,
+                int(version_num),
+                json.dumps(metadata, ensure_ascii=False),
+                json.dumps(contexto_ficha, ensure_ascii=False),
+                resumen_ejecutivo,
+                json.dumps(payload, ensure_ascii=False),
+                state_out,
+                now,
+                now,
+                now,
+                now,
+            ),
+        )
+
+        hist_df = _rows_from_payload_list(historicos, AP_HIST_COLUMNS, ficha, analisis_id)
+        gama_df = _rows_from_payload_list(mejor_gama, AP_GAMA_COLUMNS, ficha, analisis_id)
+        precio_df = _rows_from_payload_list(mejor_precio, AP_PRECIO_COLUMNS, ficha, analisis_id)
+        if not hist_df.empty:
+            hist_df.to_sql("analisis_proveedores_hist_panama", conn, if_exists="append", index=False)
+        if not gama_df.empty:
+            gama_df.to_sql("analisis_proveedores_mejor_gama", conn, if_exists="append", index=False)
+        if not precio_df.empty:
+            precio_df.to_sql("analisis_proveedores_mejor_precio", conn, if_exists="append", index=False)
+
+        conn.execute(
+            """
+            UPDATE analisis_proveedores_contexto
+            SET estado_analisis=?, analisis_id_activo=?, updated_at=?
+            WHERE ficha=?
+            """,
+            (state_out, analisis_id, now, ficha),
+        )
+        conn.commit()
+
+    _bump_study_data_rev()
+    return analisis_id, int(version_num), state_out
+
+
+def _mark_provider_analysis_pending(ficha: str) -> None:
+    _ensure_study_db()
+    now = _utc_now_iso()
+    ficha = _clean_text(ficha)
+    if not ficha:
+        return
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE analisis_proveedores_contexto
+            SET estado_analisis=?, updated_at=?
+            WHERE ficha=?
+            """,
+            (AP_STATE_PENDING_JSON, now, ficha),
+        )
+        conn.commit()
+    _bump_study_data_rev()
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_ap_table_by_analisis_cached(table_name: str, analisis_id: str, _rev: int) -> pd.DataFrame:
+    _ensure_study_db()
+    if not _clean_text(analisis_id):
+        return pd.DataFrame()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            f"SELECT * FROM {table_name} WHERE analisis_id=? ORDER BY id ASC",
+            conn,
+            params=(analisis_id,),
+        )
+
+
+def _load_ap_table_by_analisis(table_name: str, analisis_id: str) -> pd.DataFrame:
+    return _load_ap_table_by_analisis_cached(table_name, _clean_text(analisis_id), _get_study_data_rev())
+
+
 def _empty_table(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
@@ -5477,29 +6261,221 @@ def _render_tab_estudio_profundo(
                 except Exception as exc:
                     st.error(f"No se pudo enviar reestudio al orquestador: {exc}")
 
-def _render_tab_proveedores_historicos_ia() -> None:
-    st.markdown("### Proveedores históricos + IA")
-    _placeholder_block(
-        "Tabla histórica por proveedor",
-        "Aquí se mostrarán solo proveedores con al menos una adjudicación en la ficha seleccionada.",
+def _render_tab_analisis_proveedores(ranked_df: pd.DataFrame) -> None:
+    st.markdown("### ANALISIS_DE_PROVEEDORES")
+    _ensure_study_db()
+
+    resumen_df = _load_resumen_estudiadas_df()
+    if resumen_df.empty:
+        st.info("A?n no hay fichas estudiadas. Completa primero la etapa de estudio de fichas.")
+        return
+
+    created_ctx, updated_ctx = _ensure_provider_analysis_contexts(resumen_df, ranked_df)
+    if created_ctx or updated_ctx:
+        st.caption(
+            f"Preparaci?n autom?tica ejecutada: contextos creados={created_ctx}, actualizados={updated_ctx}."
+        )
+
+    ctx_df = _load_ap_context_df()
+    active_df = _load_ap_active_versions_df()
+    versions_df = _load_ap_versions_df()
+    if ctx_df.empty:
+        st.info("No se pudo preparar contexto para an?lisis de proveedores.")
+        return
+
+    tab_pending, tab_loaded, tab_versions = st.tabs(
         [
-            "proveedor",
-            "participaciones",
-            "victorias",
-            "%_victorias",
-            "precio_min",
-            "precio_prom",
-            "precio_max",
-            "marcas",
-            "modelos",
-            "paises_origen",
-            "entidades_donde_mas_gana",
-        ],
+            "Pendiente JSON proveedores",
+            "An?lisis proveedores cargado",
+            "Versiones y actualizaci?n",
+        ]
     )
-    _placeholder_block(
-        "Bloque IA (interpretación ejecutiva)",
-        "Aquí se mostrará el análisis IA: dominante, agresivo en precio, premium, concentración, posibilidad de entrada.",
-    )
+
+    with tab_pending:
+        pending_states = {AP_STATE_STUDIED_NO_ANALYSIS, AP_STATE_PENDING_JSON}
+        pend_df = ctx_df[
+            ctx_df.get("estado_analisis", pd.Series(dtype=str)).astype(str).isin(pending_states)
+        ].copy()
+        if pend_df.empty:
+            st.success("No hay fichas pendientes. Todas las fichas estudiadas tienen an?lisis de proveedores cargado.")
+        else:
+            pend_df = pend_df.sort_values(["updated_at", "ficha"], ascending=[False, True], kind="stable")
+            pend_df["ficha_label"] = pend_df.apply(
+                lambda r: f"{_clean_text(r.get('ficha', ''))} - {_clean_text(r.get('nombre_ficha', ''))}".strip(" -"),
+                axis=1,
+            )
+            st.dataframe(
+                pend_df[
+                    [
+                        "ficha",
+                        "nombre_ficha",
+                        "estado_analisis",
+                        "fecha_contexto_generado",
+                        "updated_at",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+            options = pend_df["ficha"].astype(str).tolist()
+            label_map = dict(zip(pend_df["ficha"].astype(str), pend_df["ficha_label"].astype(str)))
+            selected_ficha = st.selectbox(
+                "Ficha pendiente",
+                options,
+                key="ap_pending_ficha",
+                format_func=lambda x: label_map.get(str(x), str(x)),
+            )
+            selected_row = pend_df[pend_df["ficha"].astype(str) == str(selected_ficha)].head(1)
+            if selected_row.empty:
+                st.info("Selecciona una ficha pendiente.")
+            else:
+                row = selected_row.iloc[0]
+                st.caption(
+                    f"Estado: `{_clean_text(row.get('estado_analisis', ''))}` | "
+                    f"Contexto generado: {_clean_text(row.get('fecha_contexto_generado', '')) or '-'}"
+                )
+                if _clean_text(row.get("analisis_id_activo", "")):
+                    st.caption(
+                        "Esta ficha tiene un an?lisis previo activo. "
+                        "El nuevo JSON lo reemplazar? como versi?n activa."
+                    )
+
+                st.markdown("#### Contexto generado autom?ticamente")
+                st.code(_clean_text(row.get("contexto_texto", "")) or "{}", language="json")
+                st.markdown("#### Prompt listo para ChatGPT")
+                st.text_area(
+                    "Prompt generado",
+                    value=_clean_text(row.get("prompt_texto", "")),
+                    key=f"ap_prompt_{selected_ficha}",
+                    height=280,
+                )
+
+                json_input = st.text_area(
+                    "Pega aqu? el JSON devuelto por ChatGPT",
+                    key=f"ap_json_input_{selected_ficha}",
+                    height=260,
+                )
+                validate_key = f"ap_valid_payload_{selected_ficha}"
+                err_key = f"ap_valid_errors_{selected_ficha}"
+                warn_key = f"ap_valid_warnings_{selected_ficha}"
+
+                c1, c2 = st.columns([1, 1])
+                if c1.button("Validar JSON", key=f"ap_validate_{selected_ficha}"):
+                    payload, errors, warnings = _validate_provider_analysis_json(json_input, selected_ficha)
+                    st.session_state[validate_key] = payload if not errors else {}
+                    st.session_state[err_key] = errors
+                    st.session_state[warn_key] = warnings
+
+                errors = st.session_state.get(err_key, [])
+                warnings = st.session_state.get(warn_key, [])
+                for w in warnings:
+                    st.warning(w)
+                for e in errors:
+                    st.error(e)
+                payload_ok = st.session_state.get(validate_key, {})
+                can_save = isinstance(payload_ok, dict) and bool(payload_ok) and not errors
+
+                if c2.button("Guardar an?lisis", key=f"ap_save_{selected_ficha}", disabled=not can_save):
+                    analisis_id, version_num, new_state = _save_provider_analysis_payload(selected_ficha, payload_ok)
+                    st.success(
+                        f"An?lisis guardado. analisis_id={analisis_id[:8]}..., "
+                        f"versi?n={version_num}, estado={new_state}."
+                    )
+                    st.rerun()
+
+    with tab_loaded:
+        loaded_df = ctx_df[
+            ctx_df.get("estado_analisis", pd.Series(dtype=str)).astype(str).isin({AP_STATE_COMPLETED, AP_STATE_UPDATED})
+        ].copy()
+        loaded_df = loaded_df[
+            loaded_df.get("analisis_id_activo", pd.Series(dtype=str)).astype(str).str.strip() != ""
+        ].copy()
+        if loaded_df.empty:
+            st.info("A?n no hay an?lisis de proveedores cargados.")
+        else:
+            loaded_df["ficha_label"] = loaded_df.apply(
+                lambda r: f"{_clean_text(r.get('ficha', ''))} - {_clean_text(r.get('nombre_ficha', ''))}".strip(" -"),
+                axis=1,
+            )
+            options = loaded_df["ficha"].astype(str).tolist()
+            label_map = dict(zip(loaded_df["ficha"].astype(str), loaded_df["ficha_label"].astype(str)))
+            selected_ficha = st.selectbox(
+                "Ficha con an?lisis",
+                options,
+                key="ap_loaded_ficha",
+                format_func=lambda x: label_map.get(str(x), str(x)),
+            )
+            row = loaded_df[loaded_df["ficha"].astype(str) == str(selected_ficha)].head(1).iloc[0]
+            analisis_id = _clean_text(row.get("analisis_id_activo", ""))
+
+            vrow = active_df[active_df["ficha"].astype(str) == str(selected_ficha)].head(1)
+            if not vrow.empty:
+                v = vrow.iloc[0]
+                st.caption(
+                    f"Fecha de carga: {_clean_text(v.get('fecha_carga', '')) or '-'} | "
+                    f"?ltima actualizaci?n: {_clean_text(v.get('fecha_ultima_actualizacion', '')) or '-'} | "
+                    f"Versi?n: {int(_safe_int(v.get('version_num', 1)))}"
+                )
+                st.markdown("#### Resumen ejecutivo")
+                st.info(_clean_text(v.get("resumen_ejecutivo", "")) or "Sin resumen ejecutivo.")
+
+            hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", analisis_id)
+            gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", analisis_id)
+            precio_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_precio", analisis_id)
+
+            st.markdown("#### 1) Proponentes hist?ricos en Panam?")
+            show_hist = [c for c in AP_HIST_COLUMNS if c in hist_df.columns]
+            st.dataframe(
+                hist_df[show_hist] if show_hist else _empty_table(AP_HIST_COLUMNS),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("#### 2) Mejores por gama")
+            show_gama = [c for c in AP_GAMA_COLUMNS if c in gama_df.columns]
+            st.dataframe(
+                gama_df[show_gama] if show_gama else _empty_table(AP_GAMA_COLUMNS),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("#### 3) Mejores por precio")
+            show_precio = [c for c in AP_PRECIO_COLUMNS if c in precio_df.columns]
+            st.dataframe(
+                precio_df[show_precio] if show_precio else _empty_table(AP_PRECIO_COLUMNS),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if st.button("Actualizar / Reemplazar an?lisis", key=f"ap_refresh_{selected_ficha}"):
+                _mark_provider_analysis_pending(selected_ficha)
+                st.success("La ficha qued? en pendiente_json_proveedores. Ya puedes pegar una nueva versi?n.")
+                st.rerun()
+
+    with tab_versions:
+        if versions_df.empty:
+            st.info("No hay versiones guardadas de an?lisis de proveedores.")
+        else:
+            st.dataframe(versions_df, use_container_width=True, hide_index=True)
+            ficha_opts = sorted(versions_df["ficha"].astype(str).unique().tolist())
+            sel_ficha = st.selectbox("Ficha para revisar versiones", ficha_opts, key="ap_versions_ficha")
+            vf = versions_df[versions_df["ficha"].astype(str) == str(sel_ficha)].copy()
+            if vf.empty:
+                st.info("No hay versiones para esa ficha.")
+            else:
+                st.markdown("#### Historial de versiones")
+                st.dataframe(vf, use_container_width=True, hide_index=True)
+                sel_ids = vf["analisis_id"].astype(str).tolist()
+                sel_id = st.selectbox("Versi?n a inspeccionar", sel_ids, key="ap_version_id")
+                rr = vf[vf["analisis_id"].astype(str) == str(sel_id)].head(1)
+                if not rr.empty:
+                    raw = _clean_text(rr.iloc[0].get("json_raw", ""))
+                    with st.expander("JSON crudo de la versi?n", expanded=False):
+                        st.code(raw or "{}", language="json")
+                if st.button("Solicitar nueva versi?n (abrir flujo JSON)", key=f"ap_versions_refresh_{sel_ficha}"):
+                    _mark_provider_analysis_pending(sel_ficha)
+                    st.success("La ficha fue movida a pendiente_json_proveedores.")
+                    st.rerun()
 
 
 def _render_tab_contacto_correos() -> None:
@@ -5609,7 +6585,7 @@ tabs = st.tabs(
         "Detecc. fichas",
         "Fichas en seg.",
         "Estudio de fichas",
-        "Prov. hist. + IA",
+        "Análisis proveedores",
         "Contacto y correos",
         "Seg. contacto",
         "Resultado ficha",
@@ -5625,7 +6601,7 @@ with tabs[2]:
 with tabs[3]:
     _render_tab_estudio_profundo(ficha_acts_df, ranked_df, db_path)
 with tabs[4]:
-    _render_tab_proveedores_historicos_ia()
+    _render_tab_analisis_proveedores(ranked_df)
 with tabs[5]:
     _render_tab_contacto_correos()
 with tabs[6]:
