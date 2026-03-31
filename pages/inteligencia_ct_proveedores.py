@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import streamlit_authenticator as stauth
 import bcrypt
 import requests
@@ -6340,14 +6341,34 @@ def _render_tab_analisis_proveedores(ranked_df: pd.DataFrame) -> None:
                         "El nuevo JSON lo reemplazar? como versi?n activa."
                     )
 
-                st.markdown("#### Contexto generado autom?ticamente")
-                st.code(_clean_text(row.get("contexto_texto", "")) or "{}", language="json")
                 st.markdown("#### Prompt listo para ChatGPT")
+                prompt_value = _clean_text(row.get("prompt_texto", ""))
                 st.text_area(
                     "Prompt generado",
-                    value=_clean_text(row.get("prompt_texto", "")),
+                    value=prompt_value,
                     key=f"ap_prompt_{selected_ficha}",
                     height=280,
+                )
+                prompt_js = json.dumps(prompt_value, ensure_ascii=False)
+                components.html(
+                    f"""
+                    <div style="display:flex; align-items:center; gap:8px; margin:2px 0 8px 0;">
+                      <button
+                        style="background:#00a99d;color:white;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-weight:600;"
+                        onclick='navigator.clipboard.writeText({prompt_js}).then(() => {{
+                          const el = document.getElementById("copy_status");
+                          if (el) {{ el.textContent = "Prompt copiado."; }}
+                        }}).catch(() => {{
+                          const el = document.getElementById("copy_status");
+                          if (el) {{ el.textContent = "No se pudo copiar automáticamente."; }}
+                        }});'
+                      >
+                        Copiar prompt
+                      </button>
+                      <span id="copy_status" style="font-size:12px;color:#8fb9ff;"></span>
+                    </div>
+                    """,
+                    height=44,
                 )
 
                 json_input = st.text_area(
