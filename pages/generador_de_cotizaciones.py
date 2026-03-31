@@ -376,6 +376,7 @@ COT_COLUMNS = [
 COT_PREFIX = {
     "RS Engineering": "RS",
     "RIR Medical": "RIR",
+    "SP Engineering": "SP",
 }
 LP_DOC_TAB_NAME = "LP_ Doc_Generator"
 LP_DOC_TIPO = "LP Doc Generator"
@@ -392,6 +393,7 @@ CLIENT_COLUMNS = ["RowID", "ClienteID", "ClienteNombre", "Empresa"]
 CLIENT_EMPRESA_MAP = {
     "RS Engineering": "RS-SP",
     "RIR Medical": "RIR",
+    "SP Engineering": "RS-SP",
 }
 CLIENT_EMPRESA_OPTIONS = ["RS-SP", "RIR"]
 
@@ -432,9 +434,13 @@ def _resolve_base_asset(file_name: str) -> Path:
 
 TEMPLATE_RS_STANDARD = _resolve_base_asset("plantilla_cotizacion.xlsx")
 TEMPLATE_RIR_STANDARD = _resolve_base_asset("plantilla_cotizacion_rir.xlsx")
+TEMPLATE_SP_STANDARD = _resolve_base_asset("plantilla_cotizacion_sp.xlsx")
 HEADER_RS_STANDARD = _resolve_base_asset("encabezado.png")
 HEADER_RIR_STANDARD = _resolve_base_asset("encabezado_rir.png")
-SIGNATURE_STANDARD = _resolve_base_asset("firma.png")
+HEADER_SP_STANDARD = _resolve_base_asset("encabezado_sp.png")
+SIGNATURE_RS_STANDARD = _resolve_base_asset("firma.png")
+SIGNATURE_RIR_STANDARD = _resolve_base_asset("firma.png")
+SIGNATURE_SP_STANDARD = _resolve_base_asset("firma_irvin_sp.png")
 DOC_GEN_LOCAL_DIR = Path(r"C:\Users\rodri\doc_gen")
 DOC_GEN_REPO_DIR = GEAPP_ROOT / "assets" / "doc_gen_base"
 LP_DOC_FOLDER_NAME = "LP_Doc_Generator"
@@ -919,13 +925,22 @@ def _build_numero_cot(prefijo: str, secuencia: int) -> str:
 
 
 def _company_full_from_short(short_name: str) -> str:
-    if str(short_name or "").strip().upper() == "RIR":
+    short = str(short_name or "").strip().upper()
+    if short == "RIR":
         return "RIR Medical"
+    if short == "SP":
+        return "SP Engineering"
     return "RS Engineering"
 
 
 def _pc_prefijo_from_short(short_name: str) -> str:
-    code = "RIR" if str(short_name or "").strip().upper() == "RIR" else "RS"
+    short = str(short_name or "").strip().upper()
+    if short == "RIR":
+        code = "RIR"
+    elif short == "SP":
+        code = "SP"
+    else:
+        code = "RS"
     return f"{code}-PC"
 
 
@@ -1065,6 +1080,7 @@ def _get_drive_folders(drive) -> tuple[str, Dict[str, str]]:
     subfolders = {
         "RS Engineering": _find_or_create_folder(drive, "RS", base_id, drive_id=drive_id),
         "RIR Medical": _find_or_create_folder(drive, "RIR", base_id, drive_id=drive_id),
+        "SP Engineering": _find_or_create_folder(drive, "SP", base_id, drive_id=drive_id),
     }
     return base_id, subfolders
 
@@ -1751,16 +1767,26 @@ def _build_standard_quote_excel(
     numero_excel: Optional[str] = None,
     titulo_override: Optional[str] = None,
     allow_blank_ruc_dv: bool = False,
+    quote_kind: str = "estandar",
 ) -> bytes:
+    quote_kind_norm = str(quote_kind or "").strip().lower()
     if empresa == "RIR Medical":
         template_path = TEMPLATE_RIR_STANDARD
         header_path = HEADER_RIR_STANDARD
+        signature_path = SIGNATURE_RIR_STANDARD
+    elif empresa == "SP Engineering":
+        template_path = TEMPLATE_SP_STANDARD
+        header_path = HEADER_SP_STANDARD
+        signature_path = SIGNATURE_SP_STANDARD
     else:
         template_path = TEMPLATE_RS_STANDARD
         header_path = HEADER_RS_STANDARD
+        signature_path = SIGNATURE_RS_STANDARD
 
     if not template_path.exists():
         raise FileNotFoundError(f"No se encontró la plantilla: {template_path}")
+    if not signature_path.exists():
+        signature_path = SIGNATURE_RS_STANDARD
 
     wb = load_workbook(template_path)
     ws = wb["cotizacion"] if "cotizacion" in wb.sheetnames else wb[wb.sheetnames[0]]
@@ -1859,7 +1885,12 @@ def _build_standard_quote_excel(
     ws["B14"] = f"RUC: {ruc_text}   DV: {dv_text}"
     ws["E18"] = numero_visible
     ws["C19"] = title
-    ws["B21"] = title
+    if quote_kind_norm in {"estandar", "standard", "cotizacion_estandar", "privada"}:
+        intro = f"La empresa {empresa} suministra por este medio cotización para {title}."
+        ws["B21"] = intro
+        ws["B21"].alignment = Alignment(wrap_text=True, vertical="center")
+    else:
+        ws["B21"] = title
     if numero_visible != str(numero_cot or "").strip():
         ws["B12"] = str(numero_cot or "").strip()
 
@@ -1898,8 +1929,8 @@ def _build_standard_quote_excel(
         encabezado.width, encabezado.height = 590, 202
         ws.add_image(encabezado, "B2")
 
-    if SIGNATURE_STANDARD.exists():
-        firma = Image(str(SIGNATURE_STANDARD))
+    if signature_path.exists():
+        firma = Image(str(signature_path))
         firma.width, firma.height = 150, 100
         ws.add_image(firma, f"B{firma_row}")
 
@@ -2140,6 +2171,7 @@ def _save_panama_quote_to_history(
         numero_excel=numero_acto or numero_cot,
         titulo_override=titulo_resumido or None,
         allow_blank_ruc_dv=True,
+        quote_kind="panama_compra",
     )
 
     subtotal = float((items_df["cantidad"] * items_df["precio_unitario"]).sum())
@@ -2968,8 +3000,10 @@ ASSETS_DIR = os.path.join(os.path.dirname(BASE_DIR), "assets")
 # Prefer paths proporcionados, luego assets de respaldo
 RS_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RS Engineering.png")
 RIR_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RIR Medical.png")
+SP_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo SP Engineering.png")
 RS_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rs.png.png")
 RIR_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rir.png.png")
+SP_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "sp.png.png")
 BACKGROUND_PATH = os.path.join(ASSETS_DIR, "Fondo.png")
 FIRMA_PATH = os.path.join(ASSETS_DIR, "firma.png")
 BACKGROUND_B64 = _load_logo_b64(BACKGROUND_PATH)
@@ -3017,6 +3051,27 @@ COMPANIES = {
         PH Bonanza Plaza, Bella Vista<br>
         TELÉFONO: +507 68475616<br>
         Email: info@rirmedical.com
+        </div>""",
+    },
+    "SP Engineering": {
+        "color": "#0f172a",
+        "accent": "#0ea5e9",
+        "logo_b64": _load_logo_b64(SP_LOGO_PATH, SP_LOGO_FALLBACK),
+        "background_b64": BACKGROUND_B64,
+        "logo_box_width": 340,
+        "logo_box_height": 200,
+        "logo_width": 330,
+        "logo_height": 190,
+        "logo_left": 90,
+        "logo_top": 96,
+        "header_left": 430,
+        "header_top": 110,
+        "header_height": 170,
+        "content_offset_y": 160,
+        "contacto_html": """<div style='text-align:left; line-height:1.35;'>
+        PH Bonanza Plaza, Bella Vista<br>
+        TELÉFONO: +507 68475616<br>
+        EMAIL: soporte@sptechpanama.com
         </div>""",
     },
 }
@@ -4243,6 +4298,7 @@ if active_tab == "Cotizacion - Estandar":
             impuesto_pct=impuesto_pct,
             condiciones=condiciones,
             detalles_extra=detalles_extra,
+            quote_kind="estandar",
         )
         st.session_state["cot_std_excel_preview_bytes"] = excel_preview_bytes
         st.session_state["cot_std_excel_preview_name"] = excel_preview_name
@@ -4359,6 +4415,7 @@ if active_tab == "Cotizacion - Estandar":
                         impuesto_pct=impuesto_pct,
                         condiciones=condiciones,
                         detalles_extra=detalles_extra,
+                        quote_kind="estandar",
                     )
                 st.session_state["cot_std_excel_preview_bytes"] = excel_bytes
                 st.session_state["cot_std_excel_preview_name"] = excel_filename
