@@ -391,7 +391,15 @@ LP_BUDGET_FILENAME_BY_EMPRESA = {
     "RIR Medical": "LP_Doc_Generator_RIR_Presupuesto.html",
 }
 DEFAULT_COT_DRIVE_FOLDER_ID = "0AOB-QlptrUHYUk9PVA"
-CLIENT_COLUMNS = ["RowID", "ClienteID", "ClienteNombre", "Empresa"]
+CLIENT_COLUMNS = [
+    "RowID",
+    "ClienteID",
+    "ClienteNombre",
+    "Empresa",
+    "ClienteRUC",
+    "ClienteDV",
+    "UpdatedAt",
+]
 CLIENT_EMPRESA_MAP = {
     "RS Engineering": "RS-SP",
     "RIR Medical": "RIR",
@@ -875,6 +883,14 @@ def _load_cotizaciones_cached(sheet_id: str, cache_token: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False)
+def _load_clientes_full_cached(sheet_id: str, cache_token: str) -> pd.DataFrame:
+    client, _ = get_client()
+    _ensure_clientes_sheet(client, sheet_id)
+    df = read_worksheet(client, sheet_id, WS_CLIENTES)
+    return _normalize_clientes_df(df)
+
+
 def _normalize_cotizaciones_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col in COT_COLUMNS:
@@ -912,6 +928,88 @@ def _normalize_clientes_df(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = ""
     out = out[CLIENT_COLUMNS]
     return out
+
+
+def _normalize_lookup_key(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _latest_cliente_tax_from_history(
+    cotizaciones_df: pd.DataFrame,
+    *,
+    cliente_nombre: str,
+    empresa: str,
+) -> tuple[str, str]:
+    if cotizaciones_df is None or cotizaciones_df.empty:
+        return "", ""
+    cliente_key = _normalize_lookup_key(cliente_nombre)
+    if not cliente_key:
+        return "", ""
+
+    work = cotizaciones_df.copy()
+    for col in ("cliente_nombre", "empresa", "cliente_ruc", "cliente_dv", "updated_at", "created_at"):
+        if col not in work.columns:
+            work[col] = ""
+
+    work["_cliente_key"] = work["cliente_nombre"].map(_normalize_lookup_key)
+    work = work[work["_cliente_key"] == cliente_key]
+    if work.empty:
+        return "", ""
+
+    empresa_key = _normalize_lookup_key(empresa)
+    if empresa_key:
+        same_company = work[work["empresa"].map(_normalize_lookup_key) == empresa_key]
+        if not same_company.empty:
+            work = same_company
+
+    has_tax = (
+        work["cliente_ruc"].fillna("").astype(str).str.strip().ne("")
+        | work["cliente_dv"].fillna("").astype(str).str.strip().ne("")
+    )
+    if has_tax.any():
+        work = work[has_tax]
+    if work.empty:
+        return "", ""
+
+    ts_updated = pd.to_datetime(work["updated_at"], errors="coerce")
+    ts_created = pd.to_datetime(work["created_at"], errors="coerce")
+    ts_fallback = pd.to_datetime(work.get("fecha_cotizacion", pd.Series(index=work.index, dtype="object")), errors="coerce")
+    work["_sort_ts"] = ts_updated.fillna(ts_created).fillna(ts_fallback)
+    work = work.sort_values(["_sort_ts"], na_position="last")
+    row = work.iloc[-1]
+    return str(row.get("cliente_ruc") or "").strip(), str(row.get("cliente_dv") or "").strip()
+
+
+def _lookup_cliente_tax_from_catalog(
+    clientes_df: pd.DataFrame,
+    *,
+    cliente_id: str,
+    cliente_nombre: str,
+    empresa_codigo: str,
+) -> tuple[str, str]:
+    if clientes_df is None or clientes_df.empty:
+        return "", ""
+    work = _normalize_clientes_df(clientes_df)
+    if work.empty:
+        return "", ""
+
+    cid = str(cliente_id or "").strip()
+    nombre_key = _normalize_lookup_key(cliente_nombre)
+    empresa_key = _normalize_lookup_key(empresa_codigo)
+    if cid:
+        by_id = work[work["ClienteID"].astype(str).str.strip() == cid]
+        if not by_id.empty:
+            row = by_id.iloc[0]
+            return str(row.get("ClienteRUC") or "").strip(), str(row.get("ClienteDV") or "").strip()
+
+    mask = work["ClienteNombre"].map(_normalize_lookup_key) == nombre_key
+    if empresa_key:
+        mask = mask & (work["Empresa"].map(_normalize_lookup_key) == empresa_key)
+    by_name = work[mask]
+    if by_name.empty:
+        return "", ""
+    row = by_name.iloc[0]
+    return str(row.get("ClienteRUC") or "").strip(), str(row.get("ClienteDV") or "").strip()
 
 
 def _next_sequence(df: pd.DataFrame, prefijo: str) -> int:
@@ -1027,18 +1125,32 @@ def _create_cliente_in_sheet(
     sheet_id: str,
     nombre: str,
     empresa_codigo: str,
+    *,
+    cliente_ruc: str = "",
+    cliente_dv: str = "",
 ) -> tuple[str, bool]:
     _ensure_clientes_sheet(client, sheet_id)
     dfc = _normalize_clientes_df(read_worksheet(client, sheet_id, WS_CLIENTES))
     nombre_clean = nombre.strip()
     empresa_clean = empresa_codigo.strip()
+    ruc_clean = str(cliente_ruc or "").strip()
+    dv_clean = str(cliente_dv or "").strip()
+    now_iso = datetime.now().isoformat(timespec="seconds")
     if not nombre_clean:
         raise ValueError("Debes indicar el nombre del cliente.")
     dup_mask = (
         dfc["ClienteNombre"].astype(str).str.strip().str.lower() == nombre_clean.lower()
     ) & (dfc["Empresa"].astype(str).str.strip().str.upper() == empresa_clean.upper())
     if not dfc.empty and dup_mask.any():
-        row = dfc[dup_mask].iloc[0]
+        idx = dfc[dup_mask].index[0]
+        if ruc_clean or dv_clean:
+            dfc.at[idx, "ClienteRUC"] = ruc_clean
+            dfc.at[idx, "ClienteDV"] = dv_clean
+            dfc.at[idx, "UpdatedAt"] = now_iso
+            write_worksheet(client, sheet_id, WS_CLIENTES, _normalize_clientes_df(dfc))
+            _load_clientes_full_cached.clear()
+            _load_clients.clear()
+        row = dfc.loc[idx]
         return str(row.get("ClienteID", "")).strip(), False
     new_id = f"C-{uuid.uuid4().hex[:8].upper()}"
     new_row = {
@@ -1046,11 +1158,79 @@ def _create_cliente_in_sheet(
         "ClienteID": new_id,
         "ClienteNombre": nombre_clean,
         "Empresa": empresa_clean,
+        "ClienteRUC": ruc_clean,
+        "ClienteDV": dv_clean,
+        "UpdatedAt": now_iso,
     }
     dfc = pd.concat([dfc, pd.DataFrame([new_row])], ignore_index=True)
-    write_worksheet(client, sheet_id, WS_CLIENTES, dfc)
+    write_worksheet(client, sheet_id, WS_CLIENTES, _normalize_clientes_df(dfc))
+    _load_clientes_full_cached.clear()
     _load_clients.clear()
     return new_id, True
+
+
+def _upsert_cliente_tax_in_sheet(
+    client,
+    sheet_id: str,
+    *,
+    cliente_id: str,
+    cliente_nombre: str,
+    empresa_codigo: str,
+    cliente_ruc: str,
+    cliente_dv: str,
+) -> None:
+    nombre_clean = str(cliente_nombre or "").strip()
+    if not nombre_clean:
+        return
+    ruc_clean = str(cliente_ruc or "").strip()
+    dv_clean = str(cliente_dv or "").strip()
+    if not ruc_clean and not dv_clean:
+        return
+
+    _ensure_clientes_sheet(client, sheet_id)
+    dfc = _normalize_clientes_df(read_worksheet(client, sheet_id, WS_CLIENTES))
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    empresa_clean = str(empresa_codigo or "").strip()
+    cid = str(cliente_id or "").strip()
+
+    idx: Optional[int] = None
+    if cid and not dfc.empty:
+        by_id = dfc[dfc["ClienteID"].astype(str).str.strip() == cid]
+        if not by_id.empty:
+            idx = int(by_id.index[0])
+    if idx is None and not dfc.empty:
+        dup_mask = (
+            dfc["ClienteNombre"].astype(str).str.strip().str.lower() == nombre_clean.lower()
+        ) & (dfc["Empresa"].astype(str).str.strip().str.upper() == empresa_clean.upper())
+        if dup_mask.any():
+            idx = int(dfc[dup_mask].index[0])
+
+    if idx is None:
+        row_id = uuid.uuid4().hex
+        cliente_id_final = cid or f"C-{uuid.uuid4().hex[:8].upper()}"
+        new_row = {
+            "RowID": row_id,
+            "ClienteID": cliente_id_final,
+            "ClienteNombre": nombre_clean,
+            "Empresa": empresa_clean,
+            "ClienteRUC": ruc_clean,
+            "ClienteDV": dv_clean,
+            "UpdatedAt": now_iso,
+        }
+        dfc = pd.concat([dfc, pd.DataFrame([new_row])], ignore_index=True)
+    else:
+        dfc.at[idx, "ClienteNombre"] = nombre_clean
+        if empresa_clean:
+            dfc.at[idx, "Empresa"] = empresa_clean
+        if ruc_clean:
+            dfc.at[idx, "ClienteRUC"] = ruc_clean
+        if dv_clean:
+            dfc.at[idx, "ClienteDV"] = dv_clean
+        dfc.at[idx, "UpdatedAt"] = now_iso
+
+    write_worksheet(client, sheet_id, WS_CLIENTES, _normalize_clientes_df(dfc))
+    _load_clientes_full_cached.clear()
+    _load_clients.clear()
 
 
 def _get_drive_client(creds):
@@ -1766,6 +1946,17 @@ def _summarize_quote_title(items: pd.DataFrame, details: str) -> str:
     return base[:55].rstrip()
 
 
+def _company_intro_address(empresa: str) -> str:
+    name = str(empresa or "").strip()
+    if name == "RS Engineering":
+        return "PH Bonanza Plaza, Bella Vista, Panamá"
+    if name == "RIR Medical":
+        return "PH Bonanza Plaza, Bella Vista, Panamá"
+    if name in {SP_COMPANY_NAME, "SP Engineering"}:
+        return "PH Bonanza Plaza, Bella Vista, Panamá"
+    return ""
+
+
 def _build_standard_quote_excel(
     empresa: str,
     numero_cot: str,
@@ -1900,7 +2091,14 @@ def _build_standard_quote_excel(
     ws["E18"] = numero_visible
     ws["C19"] = title
     if quote_kind_norm in {"estandar", "standard", "cotizacion_estandar", "privada"}:
-        intro = f"La empresa {empresa} suministra por este medio cotización para {title}."
+        domicilio = _company_intro_address(empresa)
+        if domicilio:
+            intro = (
+                f"La empresa {empresa}, con domicilio en {domicilio}, "
+                f"suministra por este medio cotización para: {title}."
+            )
+        else:
+            intro = f"La empresa {empresa} suministra por este medio cotización para: {title}."
         ws["B21"] = intro
         ws["B21"].alignment = Alignment(wrap_text=True, vertical="center")
     else:
@@ -1913,7 +2111,16 @@ def _build_standard_quote_excel(
     lugar_entrega = condiciones.get("Lugar de entrega") or "-"
     vigencia = condiciones.get("Vigencia") or "15 días"
 
-    fila_lugar = 30 + numero_items
+    extra_lines = [line.strip() for line in str(detalles_extra or "").splitlines() if line.strip()]
+    fila_info_base = 30 + numero_items
+    if extra_lines:
+        ws[f"B{fila_info_base}"] = "Detalles adicionales:"
+        for idx, line in enumerate(extra_lines[:8], start=1):
+            ws[f"B{fila_info_base + idx}"] = line
+        fila_lugar = fila_info_base + min(len(extra_lines), 8) + 2
+    else:
+        fila_lugar = fila_info_base
+
     ws[f"B{fila_lugar - 1}"] = f"Forma de pago: {forma_pago}"
     ws[f"B{fila_lugar}"] = f"Lugar de entrega: {lugar_entrega}"
     ws[f"B{fila_lugar + 1}"] = f"Tiempo de entrega: {entrega}"
@@ -1923,15 +2130,7 @@ def _build_standard_quote_excel(
     if direccion:
         ws[f"B{fila_lugar + 5}"] = f"Dirección del cliente: {direccion}"
 
-    extra_lines = [line.strip() for line in str(detalles_extra or "").splitlines() if line.strip()]
-    extra_row = fila_lugar + 6
-    if extra_lines:
-        ws[f"B{extra_row}"] = "Observaciones:"
-        for idx, line in enumerate(extra_lines[:8], start=1):
-            ws[f"B{extra_row + idx}"] = line
-        base_firma_row = extra_row + min(len(extra_lines), 8) + 3
-    else:
-        base_firma_row = fila_lugar + 9
+    base_firma_row = fila_lugar + 9
 
     firma_row = max(38 + filas_a_insertar, base_firma_row)
     ws[f"B{firma_row - 2}"] = "Atentamente,"
@@ -2182,10 +2381,10 @@ def _save_panama_quote_to_history(
         impuesto_pct=impuesto_pct,
         condiciones=condiciones,
         detalles_extra=detalles_extra,
-        numero_excel=numero_acto or numero_cot,
+        numero_excel=numero_cot,
         titulo_override=titulo_resumido or None,
         allow_blank_ruc_dv=True,
-        quote_kind="panama_compra",
+        quote_kind="estandar",
     )
 
     subtotal = float((items_df["cantidad"] * items_df["precio_unitario"]).sum())
@@ -3104,6 +3303,8 @@ if sheet_id:
         client, creds = get_client()
         if "cotizaciones_cache_token" not in st.session_state:
             st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
+        if "clientes_cache_token" not in st.session_state:
+            st.session_state["clientes_cache_token"] = uuid.uuid4().hex
         token = st.session_state["cotizaciones_cache_token"]
         cot_df = _normalize_cotizaciones_df(_load_cotizaciones_cached(sheet_id, token))
     except Exception as exc:
@@ -3242,6 +3443,7 @@ def _apply_edit_state(row: dict) -> None:
 
 def _clear_edit_state() -> None:
     st.session_state[EDIT_KEY] = None
+    st.session_state["cot_cliente_autofill_key"] = ""
 
 
 def _apply_duplicate_state(row: dict, cotizaciones_df: pd.DataFrame) -> None:
@@ -3960,6 +4162,8 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_cliente_ruc"] = ""
     if "cot_cliente_dv" not in st.session_state:
         st.session_state["cot_cliente_dv"] = ""
+    if "cot_cliente_autofill_key" not in st.session_state:
+        st.session_state["cot_cliente_autofill_key"] = ""
     if "cot_presupuesto_factor" not in st.session_state:
         st.session_state["cot_presupuesto_factor"] = 1.3
     if "cot_presupuesto_t_inversion" not in st.session_state:
@@ -4001,6 +4205,35 @@ if active_tab == "Cotizacion - Estandar":
                 st.session_state["cot_cliente"] = cliente_nombre
                 st.session_state["cot_cliente_id"] = cliente_id
         cliente = st.text_input("Nombre del cliente", key="cot_cliente")
+        cliente_id_state = str(st.session_state.get("cot_cliente_id") or "").strip()
+
+        # Autollenado de RUC/DV usando el ultimo valor guardado para ese cliente.
+        # Solo se ejecuta cuando cambia el cliente seleccionado/escrito y no en modo edición.
+        cliente_key = f"{_normalize_lookup_key(empresa)}|{_normalize_lookup_key(cliente)}"
+        prev_cliente_key = str(st.session_state.get("cot_cliente_autofill_key") or "")
+        if not edit_row and cliente_key != prev_cliente_key:
+            auto_ruc = ""
+            auto_dv = ""
+            if str(cliente or "").strip():
+                auto_ruc, auto_dv = _latest_cliente_tax_from_history(
+                    cot_df,
+                    cliente_nombre=cliente,
+                    empresa=empresa,
+                )
+                if (not auto_ruc and not auto_dv) and not sheet_error and sheet_id and client is not None:
+                    clientes_token = st.session_state.get("clientes_cache_token", "")
+                    clientes_df = _load_clientes_full_cached(sheet_id, clientes_token)
+                    empresa_codigo = CLIENT_EMPRESA_MAP.get(empresa, CLIENT_EMPRESA_OPTIONS[0])
+                    auto_ruc, auto_dv = _lookup_cliente_tax_from_catalog(
+                        clientes_df,
+                        cliente_id=cliente_id_state,
+                        cliente_nombre=cliente,
+                        empresa_codigo=empresa_codigo,
+                    )
+            st.session_state["cot_cliente_ruc"] = auto_ruc
+            st.session_state["cot_cliente_dv"] = auto_dv
+            st.session_state["cot_cliente_autofill_key"] = cliente_key
+
         direccion = st.text_area("Dirección del cliente", height=70, key="cot_direccion")
         col_ruc, col_dv = st.columns([2, 1])
         with col_ruc:
@@ -4036,9 +4269,12 @@ if active_tab == "Cotizacion - Estandar":
                                 sheet_id,
                                 nuevo_nombre,
                                 nuevo_emp,
+                                cliente_ruc=st.session_state.get("cot_cliente_ruc", ""),
+                                cliente_dv=st.session_state.get("cot_cliente_dv", ""),
                             )
                             st.session_state["cot_cliente_pending_value"] = nuevo_nombre.strip()
                             st.session_state["cot_cliente_id"] = nuevo_id
+                            st.session_state["clientes_cache_token"] = uuid.uuid4().hex
                             if created:
                                 st.toast(f"Cliente creado: {nuevo_id}")
                             else:
@@ -4556,6 +4792,20 @@ if active_tab == "Cotizacion - Estandar":
                     df_write = pd.concat([df_write, pd.DataFrame([row])], ignore_index=True)
 
                 write_worksheet(client, sheet_id, SHEET_NAME_COT, df_write)
+                try:
+                    _upsert_cliente_tax_in_sheet(
+                        client,
+                        sheet_id,
+                        cliente_id=str(st.session_state.get("cot_cliente_id") or ""),
+                        cliente_nombre=cliente,
+                        empresa_codigo=CLIENT_EMPRESA_MAP.get(empresa, CLIENT_EMPRESA_OPTIONS[0]),
+                        cliente_ruc=cliente_ruc,
+                        cliente_dv=cliente_dv,
+                    )
+                    st.session_state["clientes_cache_token"] = uuid.uuid4().hex
+                except Exception:
+                    # No bloquear el guardado de cotizacion por fallas de sincronizacion de catalogo.
+                    pass
                 st.session_state["cotizaciones_cache_token"] = uuid.uuid4().hex
                 _clear_edit_state()
                 st.success("Cotización guardada correctamente.")
