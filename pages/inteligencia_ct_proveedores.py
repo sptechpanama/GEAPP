@@ -51,8 +51,14 @@ def _hash(pw: str) -> str:
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def _hash_for_auth_cached(pw: str) -> str:
+    # Evita recalcular bcrypt en cada rerun (costoso) sin cambiar la logica de auth.
+    return _hash(pw)
+
+
 credentials = {
-    "usernames": {u: {"name": n, "password": _hash(p)} for u, (n, p) in USERS.items()}
+    "usernames": {u: {"name": n, "password": _hash_for_auth_cached(p)} for u, (n, p) in USERS.items()}
 }
 COOKIE_NAME = "finapp_auth"
 COOKIE_KEY = "finapp_key_123"
@@ -191,6 +197,18 @@ AP_PRECIO_COLUMNS = [
     "observaciones",
 ]
 
+INTEL_STUDY_SHEETS_TABLE_MAP: dict[str, str] = {
+    "estudio_runs": "intel_estudio_runs",
+    "estudio_detalle": "intel_estudio_detalle",
+    "estudio_consultas": "intel_estudio_consultas",
+    "estudio_resumen_ficha": "intel_estudio_resumen",
+    "analisis_proveedores_contexto": "intel_ap_contexto",
+    "analisis_proveedores_version": "intel_ap_version",
+    "analisis_proveedores_hist_panama": "intel_ap_hist_panama",
+    "analisis_proveedores_mejor_gama": "intel_ap_mejor_gama",
+    "analisis_proveedores_mejor_precio": "intel_ap_mejor_precio",
+}
+
 
 def _normalize_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
@@ -251,6 +269,55 @@ def _canonical_party_name(value: object) -> str:
         merged.append(token)
         idx += 1
     return " ".join(merged).strip()
+
+
+def _normalize_ficha_identifier(value: object) -> str:
+    """
+    Normaliza el identificador de ficha evitando el error comun de convertir
+    '43358.0' en '433580' al remover no-digitos.
+    """
+    if value is None:
+        return ""
+
+    # Casos numericos puros.
+    try:
+        if isinstance(value, int):
+            return str(int(value))
+        if isinstance(value, float):
+            if math.isnan(value) or not math.isfinite(value):
+                return ""
+            int_val = int(value)
+            if abs(value - int_val) < 1e-9:
+                return str(int_val)
+            value = f"{value:.15g}"
+    except Exception:
+        pass
+
+    text = _clean_text(value)
+    if not text:
+        return ""
+
+    # Patron excel / csv: 43358.0 -> 43358
+    m = re.fullmatch(r"\s*(\d+)(?:\.0+)\s*", text)
+    if m:
+        return m.group(1)
+
+    compact = text.replace(",", "").strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", compact):
+        try:
+            num = float(compact)
+            if math.isfinite(num):
+                int_val = int(num)
+                if abs(num - int_val) < 1e-9:
+                    return str(int_val)
+        except Exception:
+            pass
+
+    tokens = FICHA_TOKEN_RE.findall(text)
+    if tokens:
+        return re.sub(r"\D", "", tokens[0])
+
+    return re.sub(r"\D", "", text)
 
 
 def _compute_proponentes_por_acto(df: pd.DataFrame) -> pd.Series:
@@ -1073,7 +1140,14 @@ def _build_catalog_provider_map() -> tuple[dict[tuple[str, str], dict[str, str]]
         return {}, {}
 
     cols = list(df.columns)
-    proveedor_col = _resolve_column_by_alias(cols, ["Oferente", "Oferente::Oferente", "razon social", "proveedor"])
+    proveedor_col = _resolve_column_by_alias(cols, ["Oferente::Oferente", "Oferente", "razon social", "proveedor"])
+    # Evita confundir "Numero de Oferente" con la razon social real del proveedor.
+    if proveedor_col and "numero" in _normalize_column_key(proveedor_col):
+        for candidate in cols:
+            norm_c = _normalize_column_key(candidate)
+            if "oferente" in norm_c and "numero" not in norm_c:
+                proveedor_col = candidate
+                break
     ficha_col = _resolve_column_by_alias(
         cols,
         [
@@ -1112,12 +1186,7 @@ def _build_catalog_provider_map() -> tuple[dict[tuple[str, str], dict[str, str]]
         return {}, {}
 
     if ficha_col:
-        work["ficha_norm"] = (
-            work[ficha_col]
-            .astype(str)
-            .map(lambda v: re.sub(r"\D", "", _clean_text(v)))
-            .fillna("")
-        )
+        work["ficha_norm"] = work[ficha_col].map(_normalize_ficha_identifier).fillna("")
     else:
         work["ficha_norm"] = ""
 
@@ -1161,7 +1230,7 @@ def _build_catalog_provider_map() -> tuple[dict[tuple[str, str], dict[str, str]]
 
 
 def _lookup_catalog_provider_payload(ficha: str, proveedor: str) -> dict[str, str]:
-    ficha_norm = re.sub(r"\D", "", str(ficha or ""))
+    ficha_norm = _normalize_ficha_identifier(ficha)
     prov_norm = _canonical_party_name(proveedor)
     if not ficha_norm or not prov_norm:
         return {"marca": "", "modelo": "", "pais_origen": ""}
@@ -2536,8 +2605,8 @@ def _write_tracking_records_to_sqlite(records: list[dict[str, object]]) -> None:
         conn.commit()
 
 
-def _read_tracking_records_from_sheets() -> tuple[list[dict[str, object]], str]:
-    sheet_id = _intel_sheet_id()
+@st.cache_data(show_spinner=False, ttl=120)
+def _read_tracking_records_from_sheets_cached(sheet_id: str) -> tuple[list[dict[str, object]], str]:
     if not sheet_id:
         return [], "SHEET_ID no configurado para seguimiento."
     try:
@@ -2569,6 +2638,11 @@ def _read_tracking_records_from_sheets() -> tuple[list[dict[str, object]], str]:
         return [], str(exc)
 
 
+def _read_tracking_records_from_sheets() -> tuple[list[dict[str, object]], str]:
+    sheet_id = _intel_sheet_id()
+    return _read_tracking_records_from_sheets_cached(sheet_id)
+
+
 def _write_tracking_records_to_sheets(records: list[dict[str, object]]) -> str:
     sheet_id = _intel_sheet_id()
     if not sheet_id:
@@ -2588,6 +2662,7 @@ def _write_tracking_records_to_sheets(records: list[dict[str, object]]) -> str:
             sh.add_worksheet(title=INTEL_TRACKING_WORKSHEET, rows=200, cols=max(len(INTEL_TRACKING_COLUMNS), 10))
         df = _tracking_records_to_df(records)
         write_worksheet(client, sheet_id, INTEL_TRACKING_WORKSHEET, df)
+        _read_tracking_records_from_sheets_cached.clear()
         return ""
     except Exception as exc:
         return str(exc)
@@ -2627,6 +2702,256 @@ def _persist_tracking_records(records: list[dict[str, object]]) -> tuple[bool, s
     if sheet_error:
         return False, f"Guardado en local (SQLite). Sheets no disponible: {sheet_error}"
     return True, "Guardado en Sheets y SQLite."
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    cols = [str(r[1]).strip() for r in rows if len(r) > 1 and str(r[1]).strip()]
+    return cols
+
+
+def _normalize_table_df(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    for col in columns:
+        if col not in work.columns:
+            work[col] = ""
+    work = work[columns].copy()
+    work = work.where(pd.notna(work), "")
+    return work
+
+
+def _safe_read_sqlite_table(
+    conn: sqlite3.Connection,
+    table_name: str,
+    columns: list[str],
+) -> pd.DataFrame:
+    try:
+        df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
+    except Exception:
+        df = pd.DataFrame(columns=columns)
+    return _normalize_table_df(df, columns)
+
+
+def _replace_sqlite_table_rows(
+    conn: sqlite3.Connection,
+    table_name: str,
+    columns: list[str],
+    df: pd.DataFrame,
+) -> None:
+    conn.execute(f"DELETE FROM {table_name}")
+    write_df = _normalize_table_df(df, columns)
+    if not write_df.empty:
+        write_df.to_sql(table_name, conn, if_exists="append", index=False)
+
+
+def _latest_timestamp_in_df(df: pd.DataFrame) -> pd.Timestamp:
+    if df is None or df.empty:
+        return pd.NaT
+    ts_cols = [
+        "updated_at",
+        "created_at",
+        "ultima_actualizacion",
+        "fecha_ultima_actualizacion",
+        "fecha_contexto_generado",
+        "fecha_carga",
+        "fecha_inicio",
+        "fecha_fin",
+    ]
+    latest = pd.NaT
+    for col in ts_cols:
+        if col not in df.columns:
+            continue
+        parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
+        if parsed.isna().all():
+            continue
+        candidate = parsed.max()
+        if pd.isna(latest) or (not pd.isna(candidate) and candidate > latest):
+            latest = candidate
+    return latest
+
+
+def _study_payload_meta(payload: dict[str, pd.DataFrame]) -> tuple[int, pd.Timestamp]:
+    rows_total = 0
+    latest = pd.NaT
+    for df in payload.values():
+        if not isinstance(df, pd.DataFrame):
+            continue
+        rows_total += int(len(df))
+        candidate = _latest_timestamp_in_df(df)
+        if pd.isna(latest) or (not pd.isna(candidate) and candidate > latest):
+            latest = candidate
+    return rows_total, latest
+
+
+def _load_study_payload_from_sqlite(table_names: list[str]) -> dict[str, pd.DataFrame]:
+    _ensure_study_db()
+    out: dict[str, pd.DataFrame] = {}
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        for table_name in table_names:
+            cols = _sqlite_table_columns(conn, table_name)
+            out[table_name] = _safe_read_sqlite_table(conn, table_name, cols)
+    return out
+
+
+def _read_study_payload_from_sheets(table_names: list[str]) -> tuple[dict[str, pd.DataFrame], str, str]:
+    try:
+        from gspread.exceptions import WorksheetNotFound
+        from sheets import get_client, read_worksheet
+    except Exception as exc:
+        return {}, "", f"Modulo Sheets no disponible: {exc}"
+
+    try:
+        client, _ = get_client()
+        sheet_id, sh = _open_sheet_with_fallback(
+            client,
+            _sheet_id_candidates("intel"),
+            "intel_estudios_persistencia",
+        )
+    except Exception as exc:
+        return {}, "", str(exc)
+
+    out: dict[str, pd.DataFrame] = {}
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        for table_name in table_names:
+            ws_name = INTEL_STUDY_SHEETS_TABLE_MAP.get(table_name, "")
+            cols = _sqlite_table_columns(conn, table_name)
+            if not ws_name:
+                out[table_name] = pd.DataFrame(columns=cols)
+                continue
+            try:
+                sh.worksheet(ws_name)
+            except WorksheetNotFound:
+                out[table_name] = pd.DataFrame(columns=cols)
+                continue
+            try:
+                df = read_worksheet(client, sheet_id, ws_name)
+            except Exception:
+                df = pd.DataFrame(columns=cols)
+            out[table_name] = _normalize_table_df(df, cols)
+    return out, sheet_id, ""
+
+
+def _write_study_payload_to_sheets(table_names: list[str]) -> tuple[bool, str]:
+    if not table_names:
+        return True, "Sin tablas para sincronizar."
+    try:
+        from sheets import get_client, write_worksheet
+    except Exception as exc:
+        return False, f"Modulo Sheets no disponible: {exc}"
+
+    try:
+        client, _ = get_client()
+        sheet_id, _ = _open_sheet_with_fallback(
+            client,
+            _sheet_id_candidates("intel"),
+            "intel_estudios_persistencia",
+        )
+    except Exception as exc:
+        return False, str(exc)
+
+    sync_tables = [t for t in table_names if t in INTEL_STUDY_SHEETS_TABLE_MAP]
+    if not sync_tables:
+        return True, "Sin tablas mapeadas para sincronizar."
+
+    try:
+        with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+            for table_name in sync_tables:
+                ws_name = INTEL_STUDY_SHEETS_TABLE_MAP[table_name]
+                cols = _sqlite_table_columns(conn, table_name)
+                _ensure_ws_headers(client, sheet_id, ws_name, cols)
+                df = _safe_read_sqlite_table(conn, table_name, cols)
+                write_worksheet(client, sheet_id, ws_name, df)
+    except Exception as exc:
+        return False, str(exc)
+    return True, f"Persistencia en Sheets completada ({len(sync_tables)} tablas)."
+
+
+def _replace_local_study_payload(payload: dict[str, pd.DataFrame], table_names: list[str]) -> None:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        for table_name in table_names:
+            cols = _sqlite_table_columns(conn, table_name)
+            df = payload.get(table_name, pd.DataFrame(columns=cols))
+            _replace_sqlite_table_rows(conn, table_name, cols, df)
+        conn.commit()
+
+
+def _sync_study_storage_with_sheets() -> tuple[bool, str]:
+    _ensure_study_db()
+    table_names = list(INTEL_STUDY_SHEETS_TABLE_MAP.keys())
+    local_payload = _load_study_payload_from_sqlite(table_names)
+    local_rows, local_latest = _study_payload_meta(local_payload)
+
+    remote_payload, _, remote_err = _read_study_payload_from_sheets(table_names)
+    if remote_err:
+        return False, f"Persistencia estudios local (Sheets no disponible): {remote_err}"
+    remote_rows, remote_latest = _study_payload_meta(remote_payload)
+
+    if local_rows <= 0 and remote_rows <= 0:
+        return True, "Persistencia estudios habilitada (sin datos aun)."
+
+    if remote_rows <= 0 < local_rows:
+        ok, msg = _write_study_payload_to_sheets(table_names)
+        if ok:
+            return True, "Estudios locales sembrados en Sheets."
+        return False, f"Estudios locales en SQLite; no se pudo sembrar en Sheets: {msg}"
+
+    if local_rows <= 0 < remote_rows:
+        _replace_local_study_payload(remote_payload, table_names)
+        _bump_study_data_rev()
+        return True, "Estudios cargados desde Sheets (persistente)."
+
+    pull_remote = False
+    push_local = False
+    if pd.isna(local_latest) and not pd.isna(remote_latest):
+        pull_remote = True
+    elif pd.isna(remote_latest) and not pd.isna(local_latest):
+        push_local = True
+    elif not pd.isna(local_latest) and not pd.isna(remote_latest):
+        if remote_latest > local_latest:
+            pull_remote = True
+        elif local_latest > remote_latest:
+            push_local = True
+        elif remote_rows > local_rows:
+            pull_remote = True
+        elif local_rows > remote_rows:
+            push_local = True
+
+    if pull_remote:
+        _replace_local_study_payload(remote_payload, table_names)
+        _bump_study_data_rev()
+        return True, "Estudios sincronizados desde Sheets."
+
+    if push_local:
+        ok, msg = _write_study_payload_to_sheets(table_names)
+        if ok:
+            return True, "Estudios sincronizados hacia Sheets."
+        return False, f"Estudios locales actualizados; fallo sync a Sheets: {msg}"
+
+    return True, "Estudios ya sincronizados entre SQLite y Sheets."
+
+
+def _persist_study_tables_after_write(table_names: list[str], reason: str = "") -> None:
+    unique_tables = list(dict.fromkeys([t for t in table_names if t in INTEL_STUDY_SHEETS_TABLE_MAP]))
+    if not unique_tables:
+        return
+    ok, msg = _write_study_payload_to_sheets(unique_tables)
+    prefix = f"{reason}: " if reason else ""
+    if ok:
+        st.session_state["intel_study_persist_status"] = prefix + msg
+        st.session_state["intel_study_persist_backend"] = "sheets+sqlite"
+    else:
+        st.session_state["intel_study_persist_status"] = prefix + f"Persistencia parcial (SQLite): {msg}"
+        st.session_state["intel_study_persist_backend"] = "sqlite"
+
+
+def _bootstrap_study_storage_once() -> None:
+    if st.session_state.get("intel_study_storage_loaded", False):
+        return
+    ok, msg = _sync_study_storage_with_sheets()
+    st.session_state["intel_study_persist_status"] = msg
+    st.session_state["intel_study_persist_backend"] = "sheets+sqlite" if ok else "sqlite"
+    st.session_state["intel_study_storage_loaded"] = True
 
 
 def _ensure_study_db() -> None:
@@ -4443,6 +4768,14 @@ def _save_study_run(
         )
         conn.commit()
     _bump_study_data_rev()
+    _persist_study_tables_after_write(
+        ["estudio_runs", "estudio_detalle", "estudio_consultas", "estudio_resumen_ficha"],
+        reason="estudio_consultas",
+    )
+    _persist_study_tables_after_write(
+        ["estudio_runs", "estudio_detalle", "estudio_consultas", "estudio_resumen_ficha"],
+        reason="estudio_fichas",
+    )
     return run_id
 
 
@@ -5154,6 +5487,10 @@ def _ensure_provider_analysis_contexts(resumen_df: pd.DataFrame, ranked_df: pd.D
         conn.commit()
     if created or updated:
         _bump_study_data_rev()
+        _persist_study_tables_after_write(
+            ["analisis_proveedores_contexto"],
+            reason="analisis_contexto",
+        )
     return created, updated
 
 
@@ -5333,6 +5670,16 @@ def _save_provider_analysis_payload(ficha: str, payload: dict[str, object]) -> t
         conn.commit()
 
     _bump_study_data_rev()
+    _persist_study_tables_after_write(
+        [
+            "analisis_proveedores_contexto",
+            "analisis_proveedores_version",
+            "analisis_proveedores_hist_panama",
+            "analisis_proveedores_mejor_gama",
+            "analisis_proveedores_mejor_precio",
+        ],
+        reason="analisis_proveedores",
+    )
     return analisis_id, int(version_num), state_out
 
 
@@ -5353,6 +5700,10 @@ def _mark_provider_analysis_pending(ficha: str) -> None:
         )
         conn.commit()
     _bump_study_data_rev()
+    _persist_study_tables_after_write(
+        ["analisis_proveedores_contexto"],
+        reason="analisis_pendiente_json",
+    )
 
 
 @st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
@@ -5935,6 +6286,9 @@ def _render_tab_estudio_profundo(
 ) -> None:
     st.markdown("### Estudio de fichas")
     _ensure_study_db()
+    persist_status = _clean_text(st.session_state.get("intel_study_persist_status", ""))
+    if persist_status:
+        st.caption(f"Persistencia estudios: {persist_status}")
 
     tab_pend, tab_run, tab_cons, tab_done, tab_ver = st.tabs(
         [
@@ -6685,6 +7039,9 @@ def _render_tab_analisis_proveedores(ranked_df: pd.DataFrame) -> None:
 def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
     st.markdown("### ANALISIS_DE_PROVEEDORES")
     _ensure_study_db()
+    persist_status = _clean_text(st.session_state.get("intel_study_persist_status", ""))
+    if persist_status:
+        st.caption(f"Persistencia estudios: {persist_status}")
 
     resumen_df = _load_resumen_estudiadas_df()
     if resumen_df.empty:
@@ -6949,6 +7306,7 @@ st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 
 _ensure_default_weights_profile()
+_bootstrap_study_storage_once()
 
 ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe()
 ranked_df = _score_fichas(ficha_metrics_df, st.session_state["intel_weights"])
@@ -6957,32 +7315,43 @@ _render_sidebar()
 _render_kpis(ranked_df)
 _render_architecture_notes()
 
-tabs = st.tabs(
-    [
-        "Dashboard",
-        "Detecc. fichas",
-        "Fichas en seg.",
-        "Estudio de fichas",
-        "Análisis proveedores",
-        "Contacto y correos",
-        "Seg. contacto",
-        "Resultado ficha",
-    ]
+TAB_OPTIONS = [
+    "Dashboard",
+    "Detecc. fichas",
+    "Fichas en seg.",
+    "Estudio de fichas",
+    "Análisis proveedores",
+    "Contacto y correos",
+    "Seg. contacto",
+    "Resultado ficha",
+]
+if st.session_state.get("intel_active_tab") not in TAB_OPTIONS:
+    st.session_state["intel_active_tab"] = TAB_OPTIONS[0]
+
+# Carga optimizada:
+# con st.tabs Streamlit ejecuta todas las pestanas en cada rerun.
+# con radio horizontal solo se renderiza la seccion activa.
+active_tab = st.radio(
+    "Secciones",
+    TAB_OPTIONS,
+    key="intel_active_tab",
+    horizontal=True,
+    label_visibility="collapsed",
 )
 
-with tabs[0]:
+if active_tab == "Dashboard":
     _render_tab_dashboard(ranked_df, db_path)
-with tabs[1]:
+elif active_tab == "Detecc. fichas":
     _render_tab_deteccion_ct(ficha_metrics_df, ficha_acts_df)
-with tabs[2]:
+elif active_tab == "Fichas en seg.":
     _render_tab_seguimiento_ct()
-with tabs[3]:
+elif active_tab == "Estudio de fichas":
     _render_tab_estudio_profundo(ficha_acts_df, ranked_df, db_path)
-with tabs[4]:
+elif active_tab == "Análisis proveedores":
     _render_tab_analisis_proveedores_v2(ranked_df)
-with tabs[5]:
+elif active_tab == "Contacto y correos":
     _render_tab_contacto_correos()
-with tabs[6]:
+elif active_tab == "Seg. contacto":
     _render_tab_seguimiento_contacto()
-with tabs[7]:
+else:
     _render_tab_resultado_final()
