@@ -373,10 +373,12 @@ COT_COLUMNS = [
     "presupuesto_drive_file_name",
     "presupuesto_drive_file_url",
 ]
+SP_COMPANY_NAME = "SP Tech Solutions S.A."
 COT_PREFIX = {
     "RS Engineering": "RS",
     "RIR Medical": "RIR",
-    "SP Engineering": "SP",
+    SP_COMPANY_NAME: "SP",
+    "SP Engineering": "SP",  # compatibilidad histórica
 }
 LP_DOC_TAB_NAME = "LP_ Doc_Generator"
 LP_DOC_TIPO = "LP Doc Generator"
@@ -393,7 +395,8 @@ CLIENT_COLUMNS = ["RowID", "ClienteID", "ClienteNombre", "Empresa"]
 CLIENT_EMPRESA_MAP = {
     "RS Engineering": "RS-SP",
     "RIR Medical": "RIR",
-    "SP Engineering": "RS-SP",
+    SP_COMPANY_NAME: "RS-SP",
+    "SP Engineering": "RS-SP",  # compatibilidad histórica
 }
 CLIENT_EMPRESA_OPTIONS = ["RS-SP", "RIR"]
 
@@ -924,12 +927,21 @@ def _build_numero_cot(prefijo: str, secuencia: int) -> str:
     return f"COT-{prefijo}-{secuencia:04d}"
 
 
+def _normalize_quote_company_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower() == "sp engineering":
+        return SP_COMPANY_NAME
+    return raw
+
+
 def _company_full_from_short(short_name: str) -> str:
     short = str(short_name or "").strip().upper()
     if short == "RIR":
         return "RIR Medical"
     if short == "SP":
-        return "SP Engineering"
+        return SP_COMPANY_NAME
     return "RS Engineering"
 
 
@@ -1077,10 +1089,12 @@ def _find_or_create_folder(
 def _get_drive_folders(drive) -> tuple[str, Dict[str, str]]:
     base_id = st.secrets.get("app", {}).get("DRIVE_COTIZACIONES_FOLDER_ID") or DEFAULT_COT_DRIVE_FOLDER_ID
     drive_id = base_id
+    sp_folder = _find_or_create_folder(drive, "SP", base_id, drive_id=drive_id)
     subfolders = {
         "RS Engineering": _find_or_create_folder(drive, "RS", base_id, drive_id=drive_id),
         "RIR Medical": _find_or_create_folder(drive, "RIR", base_id, drive_id=drive_id),
-        "SP Engineering": _find_or_create_folder(drive, "SP", base_id, drive_id=drive_id),
+        SP_COMPANY_NAME: sp_folder,
+        "SP Engineering": sp_folder,  # compatibilidad histórica
     }
     return base_id, subfolders
 
@@ -1774,7 +1788,7 @@ def _build_standard_quote_excel(
         template_path = TEMPLATE_RIR_STANDARD
         header_path = HEADER_RIR_STANDARD
         signature_path = SIGNATURE_RIR_STANDARD
-    elif empresa == "SP Engineering":
+    elif empresa in (SP_COMPANY_NAME, "SP Engineering"):
         template_path = TEMPLATE_SP_STANDARD
         header_path = HEADER_SP_STANDARD
         signature_path = SIGNATURE_SP_STANDARD
@@ -3053,7 +3067,7 @@ COMPANIES = {
         Email: info@rirmedical.com
         </div>""",
     },
-    "SP Engineering": {
+    SP_COMPANY_NAME: {
         "color": "#0f172a",
         "accent": "#0ea5e9",
         "logo_b64": _load_logo_b64(SP_LOGO_PATH, SP_LOGO_FALLBACK),
@@ -3110,7 +3124,7 @@ presupuesto_state_key = "cotizacion_presupuesto_items_data"
 
 def _apply_edit_state(row: dict) -> None:
     st.session_state[EDIT_KEY] = row
-    st.session_state["cot_empresa"] = row.get("empresa") or "RS Engineering"
+    st.session_state["cot_empresa"] = _normalize_quote_company_name(row.get("empresa")) or "RS Engineering"
     st.session_state["cot_cliente"] = row.get("cliente_nombre", "")
     st.session_state["cot_direccion"] = row.get("cliente_direccion", "")
     st.session_state["cot_cliente_ruc"] = row.get("cliente_ruc", "")
@@ -3233,7 +3247,7 @@ def _clear_edit_state() -> None:
 def _apply_duplicate_state(row: dict, cotizaciones_df: pd.DataFrame) -> None:
     _apply_edit_state(row)
     _clear_edit_state()
-    empresa_sel = st.session_state.get("cot_empresa") or row.get("empresa") or "RS Engineering"
+    empresa_sel = _normalize_quote_company_name(st.session_state.get("cot_empresa") or row.get("empresa")) or "RS Engineering"
     prefijo = COT_PREFIX.get(empresa_sel, "GEN")
     seq = _next_sequence(cotizaciones_df, prefijo)
     numero_auto = _build_numero_cot(prefijo, seq)
@@ -3968,6 +3982,12 @@ if active_tab == "Cotizacion - Estandar":
     pending_cliente = st.session_state.pop("cot_cliente_pending_value", None)
     if pending_cliente is not None:
         st.session_state["cot_cliente"] = str(pending_cliente).strip()
+    # Compatibilidad: normaliza el nombre histórico "SP Engineering" al nuevo legal.
+    st.session_state["cot_empresa"] = _normalize_quote_company_name(
+        st.session_state.get("cot_empresa")
+    ) or "RS Engineering"
+    if st.session_state["cot_empresa"] not in COMPANIES:
+        st.session_state["cot_empresa"] = "RS Engineering"
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
