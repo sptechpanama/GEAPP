@@ -4748,6 +4748,27 @@ def _extract_keywords_context(*parts: object, max_items: int = 20) -> list[str]:
     return out
 
 
+def _parse_ficha_batch_input(raw: object) -> list[str]:
+    text = _clean_text(raw)
+    if not text:
+        return []
+    chunks = [c for c in re.split(r"[,;\n]+", text) if _clean_text(c)]
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        c = _clean_text(chunk)
+        if not c:
+            continue
+        m = re.search(r"\d{3,8}", c)
+        ficha = m.group(0) if m else re.sub(r"\D", "", c)
+        ficha = _clean_text(ficha)
+        if not ficha or ficha in seen:
+            continue
+        seen.add(ficha)
+        out.append(ficha)
+    return out
+
+
 def _build_ficha_lookup_maps(ranked_df: pd.DataFrame) -> tuple[dict[str, str], dict[str, str]]:
     name_map: dict[str, str] = {}
     link_map: dict[str, str] = {}
@@ -5619,16 +5640,41 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
             key="intel_action_ficha",
             format_func=lambda x: ficha_labels.get(str(x), str(x)),
         )
+        batch_input = st.text_input(
+            "Fichas por lote (separadas por coma)",
+            key="intel_action_ficha_batch",
+            placeholder="Ej: 43358, 103169, 109726",
+            help="Si completas este campo, se procesa el lote. Si queda vacio, usa la ficha seleccionada.",
+        )
         a1, a2, a3 = st.columns(3)
         if a1.button("Ver actos de ficha", disabled=not bool(selected_action_ficha)):
             st.session_state["intel_selected_ficha"] = str(selected_action_ficha)
             st.rerun()
-        if a2.button("Pasar ficha a estudio", disabled=not bool(selected_action_ficha)):
-            full_row = ranked_df[ranked_df["ficha"].astype(str) == str(selected_action_ficha)]
-            if not full_row.empty and _add_ficha_to_study(full_row.iloc[0]):
-                st.success(f"Ficha {selected_action_ficha} enviada a 'Fichas en seg.'")
-            else:
-                st.info(f"Ficha {selected_action_ficha} ya estaba en seguimiento.")
+        if a2.button("Pasar ficha(s) a estudio", disabled=not bool(selected_action_ficha)):
+            requested = _parse_ficha_batch_input(batch_input)
+            if not requested:
+                requested = [str(selected_action_ficha)]
+            available = set(ranked_df["ficha"].astype(str).tolist())
+            valid = [f for f in requested if f in available]
+            invalid = [f for f in requested if f not in available]
+
+            added = 0
+            already = 0
+            for ficha_req in valid:
+                full_row = ranked_df[ranked_df["ficha"].astype(str) == str(ficha_req)].head(1)
+                if full_row.empty:
+                    continue
+                if _add_ficha_to_study(full_row.iloc[0]):
+                    added += 1
+                else:
+                    already += 1
+
+            if added:
+                st.success(f"{added} ficha(s) enviadas a 'Fichas en seg.'.")
+            if already:
+                st.info(f"{already} ficha(s) ya estaban en seguimiento.")
+            if invalid:
+                st.warning("No encontradas en el ranking: " + ", ".join(invalid))
         if a3.button("Descartar ficha", disabled=not bool(selected_action_ficha)):
             discarded_now = _ensure_discarded_state()
             ficha_key = str(selected_action_ficha or "").strip()
@@ -5928,35 +5974,78 @@ def _render_tab_estudio_profundo(
             if catalog_status:
                 st.caption(catalog_status)
             run_notes = st.text_area("Notas del estudio (opcional)", key="intel_study_notes", height=80)
-            if st.button("Iniciar estudio de ficha", type="primary"):
+            batch_study_input = st.text_input(
+                "Fichas a estudiar por lote (coma separada)",
+                key="intel_study_batch_fichas",
+                placeholder="Ej: 43358, 103169, 109726",
+                help=(
+                    "Si completas este campo, se encolan varias fichas en orden. "
+                    "El orquestador las ejecuta secuencialmente."
+                ),
+            )
+            if st.button("Iniciar estudio de ficha(s)", type="primary"):
                 try:
                     from sheets import get_client
 
                     client, _ = get_client()
                     _ensure_intel_orquestador_job(client)
-                    request_id = _append_intel_manual_request(
-                        client,
-                        {
-                            "ficha": str(target_ficha),
-                            "nombre_ficha": target_name,
-                            "db_path": str(db_path or ""),
-                            "max_queries": int(max_queries),
-                            "notes": _clean_text(run_notes),
-                            "headless": False,
-                        },
+
+                    requested = _parse_ficha_batch_input(batch_study_input)
+                    if not requested:
+                        requested = [str(target_ficha)]
+                    valid_set = set(seg["ficha"].astype(str).tolist())
+                    valid_fichas = [f for f in requested if f in valid_set]
+                    invalid_fichas = [f for f in requested if f not in valid_set]
+
+                    if not valid_fichas:
+                        st.error("No hay fichas validas para encolar.")
+                        return
+
+                    seg_name_map = {
+                        str(r.get("ficha", "")): _clean_text(r.get("nombre_ficha", ""))
+                        for r in seg.to_dict(orient="records")
+                    }
+
+                    request_ids: list[str] = []
+                    for ficha_req in valid_fichas:
+                        req_name = _clean_text(seg_name_map.get(str(ficha_req), "")) or target_name
+                        request_id = _append_intel_manual_request(
+                            client,
+                            {
+                                "ficha": str(ficha_req),
+                                "nombre_ficha": req_name,
+                                "db_path": str(db_path or ""),
+                                "max_queries": int(max_queries),
+                                "notes": _clean_text(run_notes),
+                                "headless": False,
+                            },
+                        )
+                        request_ids.append(request_id)
+
+                    first_id = request_ids[0]
+                    st.session_state["intel_study_request_id"] = first_id
+                    st.session_state["intel_study_request_batch_ids"] = request_ids
+                    st.session_state["intel_study_request_ficha"] = str(valid_fichas[0])
+                    st.session_state["intel_study_request_ficha_name"] = _clean_text(
+                        seg_name_map.get(str(valid_fichas[0]), "")
                     )
-                    st.session_state["intel_study_request_id"] = request_id
-                    st.session_state["intel_study_request_ficha"] = str(target_ficha)
-                    st.session_state["intel_study_request_ficha_name"] = target_name
                     st.session_state["intel_study_request_notes"] = _clean_text(run_notes)
                     st.session_state.pop("intel_study_request_synced_id", None)
                     st.session_state["intel_manual_last_req_row"] = None
                     st.session_state["intel_manual_last_poll_ts"] = 0.0
                     st.session_state["intel_manual_poll_cooldown_until"] = 0.0
-                    st.success(
-                        f"Solicitud enviada al orquestador (request_id={request_id[:10]}...). "
-                        "Se ejecutara en tu PC con Selenium visible."
-                    )
+                    if len(request_ids) == 1:
+                        st.success(
+                            f"Solicitud enviada al orquestador (request_id={first_id[:10]}...). "
+                            "Se ejecutara en tu PC con Selenium visible."
+                        )
+                    else:
+                        st.success(
+                            f"Se encolaron {len(request_ids)} fichas para estudio secuencial "
+                            f"(primer request_id={first_id[:10]}...)."
+                        )
+                    if invalid_fichas:
+                        st.warning("No encontradas en seguimiento: " + ", ".join(invalid_fichas))
                 except Exception as exc:
                     st.error(f"No se pudo enviar solicitud al orquestador: {exc}")
 
