@@ -4806,6 +4806,65 @@ def _build_context_payload_from_study(
             )
     proveedores_hist = _to_clean_str_list(proveedores_hist)
 
+    proveedores_historicos_detalle: list[dict[str, object]] = []
+    if not detail_df.empty:
+        profiles: dict[str, dict[str, object]] = {}
+        for _, drow in detail_df.iterrows():
+            prov = (
+                _clean_text(drow.get("proveedor_ganador", ""))
+                or _clean_text(drow.get("proveedor", ""))
+            )
+            if not prov:
+                continue
+            prov_key = _canonical_party_name(prov) or _normalize_column_key(prov)
+            base = profiles.setdefault(
+                prov_key,
+                {
+                    "proveedor": prov,
+                    "_marcas": set(),
+                    "_modelos": set(),
+                    "_paises": set(),
+                    "_actos": set(),
+                    "_precios": [],
+                },
+            )
+            if not _clean_text(base.get("proveedor", "")):
+                base["proveedor"] = prov
+            marca = _clean_text(drow.get("marca", ""))
+            modelo = _clean_text(drow.get("modelo", ""))
+            pais = _clean_text(drow.get("pais_origen", ""))
+            if marca:
+                base["_marcas"].add(marca)
+            if modelo:
+                base["_modelos"].add(modelo)
+            if pais:
+                base["_paises"].add(pais)
+            acto_ref = _clean_text(drow.get("acto_id", "")) or _clean_text(drow.get("acto_nombre", ""))
+            if acto_ref:
+                base["_actos"].add(acto_ref)
+            precio = _safe_float(drow.get("precio_unitario_participacion", 0.0), 0.0)
+            if precio > 0:
+                base["_precios"].append(float(precio))
+
+        for entry in profiles.values():
+            price_vals = [float(v) for v in entry.get("_precios", []) if float(v) > 0]
+            proveedores_historicos_detalle.append(
+                {
+                    "proveedor": _clean_text(entry.get("proveedor", "")),
+                    "marcas": sorted([str(x) for x in entry.get("_marcas", set()) if _clean_text(x)]),
+                    "modelos": sorted([str(x) for x in entry.get("_modelos", set()) if _clean_text(x)]),
+                    "paises_origen": sorted([str(x) for x in entry.get("_paises", set()) if _clean_text(x)]),
+                    "actos_relacionados": int(len(entry.get("_actos", set()))),
+                    "precio_unitario_min": (round(min(price_vals), 6) if price_vals else 0.0),
+                    "precio_unitario_prom": (round(sum(price_vals) / len(price_vals), 6) if price_vals else 0.0),
+                    "precio_unitario_max": (round(max(price_vals), 6) if price_vals else 0.0),
+                }
+            )
+        proveedores_historicos_detalle = sorted(
+            proveedores_historicos_detalle,
+            key=lambda x: (_normalize_column_key(x.get("proveedor", "")), x.get("proveedor", "")),
+        )
+
     descripcion = _clean_text(nombre_ficha)
     if not detail_df.empty and "renglon_texto" in detail_df.columns:
         cand = (
@@ -4837,6 +4896,7 @@ def _build_context_payload_from_study(
         "modelos_detectados_historicamente": modelos,
         "paises_detectados_historicamente": paises,
         "proveedores_historicos_detectados": proveedores_hist,
+        "proveedores_historicos_detalle": proveedores_historicos_detalle,
         "resumen_breve_estudio_historico": resumen_ia,
     }
     return contexto
@@ -4860,6 +4920,8 @@ def _build_prompt_for_chatgpt(contexto: dict[str, object]) -> str:
         "- incluir entre 5 y 10 proveedores externos adicionales confiables cuando sea posible.\n"
         "- por cada proveedor incluir telefono, contacto_email, contacto_whatsapp, canal_contacto_mas_probable,\n"
         "  correo_inicial_listo y whatsapp_inicial_listo.\n"
+        "- Usa `proveedores_historicos_detalle` para mantener asociacion proveedor-marca-modelo-pais.\n"
+        "- No mezclar marcas/paises entre proveedores distintos; si falta dato, dejar vacio.\n"
         "- El correo_inicial_listo DEBE iniciar exactamente con:\n"
         "\"My name is Rodrigo Sánchez and I represent RIR Medical Engineering, a company based in Panama focused on supplying medical products to hospitals and public institutions.\"\n"
         f"- El correo y whatsapp deben referenciar la ficha {ficha_id} y el enlace {link}.\n"
@@ -5020,11 +5082,16 @@ def _ensure_provider_analysis_contexts(resumen_df: pd.DataFrame, ranked_df: pd.D
                 continue
 
             needs_update = False
+            current_ctx_payload = _loads_json_obj(current.get("contexto_texto", ""))
             if _clean_text(current.get("run_id_estudio", "")) != run_id:
                 needs_update = True
             if _clean_text(current.get("prompt_texto", "")) == "":
                 needs_update = True
             if _clean_text(current.get("contexto_texto", "")) == "":
+                needs_update = True
+            # Fuerza regeneracion cuando el contexto guardado no trae la asociacion
+            # proveedor -> marcas/modelos/paises.
+            if "proveedores_historicos_detalle" not in current_ctx_payload:
                 needs_update = True
             if _clean_text(current.get("estado_analisis", "")) != desired_state:
                 needs_update = True
