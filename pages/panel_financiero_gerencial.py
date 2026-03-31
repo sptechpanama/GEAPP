@@ -31,7 +31,7 @@ from core.finance_v2.constants import COL_FECHA
 from ui.theme import apply_global_theme
 
 
-st.set_page_config(page_title="Finanzas 2", page_icon="\U0001f4c8", layout="wide")
+st.set_page_config(page_title="Panel Financiero Gerencial", page_icon="\U0001f4c8", layout="wide")
 apply_global_theme()
 
 if st.session_state.get("authentication_status") is not True:
@@ -103,7 +103,7 @@ def _series_to_csv_download(df: pd.DataFrame, filename: str, label: str):
     st.download_button(label, data=csv_data, file_name=filename, mime="text/csv")
 
 
-st.title("Finanzas 2")
+st.title("Panel Financiero Gerencial")
 st.caption(
     "Vista gerencial y analitica construida sobre los mismos datos de Finanzas 1. "
     "No reemplaza ni modifica el flujo operativo actual."
@@ -536,6 +536,6 @@ with tab_g:
 
 st.markdown("---")
 st.caption(
-    "Finanzas 2 prioriza lectura gerencial. Finanzas 1 se mantiene intacta para captura/operacion. "
+    "Panel Financiero Gerencial prioriza lectura gerencial. Finanzas 1 se mantiene intacta para captura/operacion. "
     "Para un modelo contable mas robusto faltaria: calendario de pagos formal, catalogo contable y clasificacion de costos directos estandarizada."
 )
