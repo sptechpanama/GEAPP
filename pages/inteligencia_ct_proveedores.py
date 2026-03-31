@@ -6748,6 +6748,49 @@ def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
     if _clean_text(row.get("analisis_id_activo", "")):
         st.info("Esta ficha ya tiene analisis cargado. Si guardas un nuevo JSON, reemplazara al actual.")
 
+    st.markdown("#### Analisis actual guardado")
+    vrow = active_df[active_df["ficha"].astype(str) == str(selected_ficha)].head(1)
+    if vrow.empty:
+        st.info("Todavia no hay analisis guardado para esta ficha.")
+    else:
+        v = vrow.iloc[0]
+        analisis_id = _clean_text(v.get("analisis_id", ""))
+        st.caption(
+            f"Fecha de carga: {_clean_text(v.get('fecha_carga', '')) or '-'} | "
+            f"Ultima actualizacion: {_clean_text(v.get('fecha_ultima_actualizacion', '')) or '-'}"
+        )
+        st.markdown("#### Resumen ejecutivo")
+        st.info(_clean_text(v.get("resumen_ejecutivo", "")) or "Sin resumen ejecutivo.")
+
+        hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", analisis_id)
+        gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", analisis_id)
+        precio_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_precio", analisis_id)
+
+        st.markdown("#### 1) Proponentes historicos en Panama")
+        show_hist = [c for c in AP_HIST_COLUMNS if c in hist_df.columns]
+        st.dataframe(
+            hist_df[show_hist] if show_hist else _empty_table(AP_HIST_COLUMNS),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("#### 2) Mejores por gama")
+        show_gama = [c for c in AP_GAMA_COLUMNS if c in gama_df.columns]
+        st.dataframe(
+            gama_df[show_gama] if show_gama else _empty_table(AP_GAMA_COLUMNS),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("#### 3) Mejores por precio")
+        show_precio = [c for c in AP_PRECIO_COLUMNS if c in precio_df.columns]
+        st.dataframe(
+            precio_df[show_precio] if show_precio else _empty_table(AP_PRECIO_COLUMNS),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("---")
     st.markdown("#### Prompt listo para ChatGPT")
     prompt_value = _clean_text(row.get("prompt_texto", ""))
     st.text_area(
@@ -6811,50 +6854,6 @@ def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
             f"version={version_num}, estado={new_state}. Se conserva solo la version mas reciente."
         )
         st.rerun()
-
-    st.markdown("---")
-    st.markdown("#### Analisis actual guardado")
-    vrow = active_df[active_df["ficha"].astype(str) == str(selected_ficha)].head(1)
-    if vrow.empty:
-        st.info("Todavia no hay analisis guardado para esta ficha.")
-        return
-
-    v = vrow.iloc[0]
-    analisis_id = _clean_text(v.get("analisis_id", ""))
-    st.caption(
-        f"Fecha de carga: {_clean_text(v.get('fecha_carga', '')) or '-'} | "
-        f"Ultima actualizacion: {_clean_text(v.get('fecha_ultima_actualizacion', '')) or '-'}"
-    )
-    st.markdown("#### Resumen ejecutivo")
-    st.info(_clean_text(v.get("resumen_ejecutivo", "")) or "Sin resumen ejecutivo.")
-
-    hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", analisis_id)
-    gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", analisis_id)
-    precio_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_precio", analisis_id)
-
-    st.markdown("#### 1) Proponentes historicos en Panama")
-    show_hist = [c for c in AP_HIST_COLUMNS if c in hist_df.columns]
-    st.dataframe(
-        hist_df[show_hist] if show_hist else _empty_table(AP_HIST_COLUMNS),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.markdown("#### 2) Mejores por gama")
-    show_gama = [c for c in AP_GAMA_COLUMNS if c in gama_df.columns]
-    st.dataframe(
-        gama_df[show_gama] if show_gama else _empty_table(AP_GAMA_COLUMNS),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.markdown("#### 3) Mejores por precio")
-    show_precio = [c for c in AP_PRECIO_COLUMNS if c in precio_df.columns]
-    st.dataframe(
-        precio_df[show_precio] if show_precio else _empty_table(AP_PRECIO_COLUMNS),
-        use_container_width=True,
-        hide_index=True,
-    )
 
 
 def _render_tab_contacto_correos() -> None:

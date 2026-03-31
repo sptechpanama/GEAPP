@@ -3909,6 +3909,10 @@ if active_tab == "Cotizacion - Estandar":
         st.session_state["cot_presupuesto_fin_tipo"] = "Dinero propio"
     if "cot_presupuesto_fin_interes" not in st.session_state:
         st.session_state["cot_presupuesto_fin_interes"] = 2.5
+    # Evita modificar cot_cliente despues de instanciar su widget.
+    pending_cliente = st.session_state.pop("cot_cliente_pending_value", None)
+    if pending_cliente is not None:
+        st.session_state["cot_cliente"] = str(pending_cliente).strip()
 
     st.subheader("Datos de la cotización")
     col_a, col_b, col_c = st.columns([1.2, 1, 1])
@@ -3958,7 +3962,7 @@ if active_tab == "Cotizacion - Estandar":
                                 nuevo_nombre,
                                 nuevo_emp,
                             )
-                            st.session_state["cot_cliente"] = nuevo_nombre.strip()
+                            st.session_state["cot_cliente_pending_value"] = nuevo_nombre.strip()
                             st.session_state["cot_cliente_id"] = nuevo_id
                             if created:
                                 st.toast(f"Cliente creado: {nuevo_id}")
