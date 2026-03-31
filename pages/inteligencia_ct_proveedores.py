@@ -5261,7 +5261,34 @@ def _save_provider_analysis_payload(ficha: str, payload: dict[str, object]) -> t
         version_num = prev_max + 1
         state_out = AP_STATE_UPDATED if prev_max > 0 else AP_STATE_COMPLETED
 
-        conn.execute("UPDATE analisis_proveedores_version SET is_active=0 WHERE ficha=?", (ficha,))
+        # Mantener SOLO la version mas reciente por ficha:
+        # antes de guardar, elimina analisis previos y sus tablas hijas.
+        prev_ids = [
+            _clean_text(r[0])
+            for r in conn.execute(
+                "SELECT analisis_id FROM analisis_proveedores_version WHERE ficha=?",
+                (ficha,),
+            ).fetchall()
+            if _clean_text(r[0])
+        ]
+        if prev_ids:
+            placeholders = ",".join(["?"] * len(prev_ids))
+            conn.execute(
+                f"DELETE FROM analisis_proveedores_hist_panama WHERE analisis_id IN ({placeholders})",
+                tuple(prev_ids),
+            )
+            conn.execute(
+                f"DELETE FROM analisis_proveedores_mejor_gama WHERE analisis_id IN ({placeholders})",
+                tuple(prev_ids),
+            )
+            conn.execute(
+                f"DELETE FROM analisis_proveedores_mejor_precio WHERE analisis_id IN ({placeholders})",
+                tuple(prev_ids),
+            )
+            conn.execute(
+                f"DELETE FROM analisis_proveedores_version WHERE analisis_id IN ({placeholders})",
+                tuple(prev_ids),
+            )
         conn.execute(
             """
             INSERT INTO analisis_proveedores_version (
@@ -6655,6 +6682,181 @@ def _render_tab_analisis_proveedores(ranked_df: pd.DataFrame) -> None:
                     st.rerun()
 
 
+def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
+    st.markdown("### ANALISIS_DE_PROVEEDORES")
+    _ensure_study_db()
+
+    resumen_df = _load_resumen_estudiadas_df()
+    if resumen_df.empty:
+        st.info("Aun no hay fichas estudiadas. Completa primero la etapa de estudio de fichas.")
+        return
+
+    created_ctx, updated_ctx = _ensure_provider_analysis_contexts(resumen_df, ranked_df)
+    if created_ctx or updated_ctx:
+        st.caption(
+            f"Preparacion automatica ejecutada: contextos creados={created_ctx}, actualizados={updated_ctx}."
+        )
+
+    ctx_df = _load_ap_context_df()
+    active_df = _load_ap_active_versions_df()
+    if ctx_df.empty:
+        st.info("No se pudo preparar contexto para analisis de proveedores.")
+        return
+
+    ctx_df = ctx_df.sort_values(["updated_at", "ficha"], ascending=[False, True], kind="stable").copy()
+    ctx_df["ficha_label"] = ctx_df.apply(
+        lambda r: f"{_clean_text(r.get('ficha', ''))} - {_clean_text(r.get('nombre_ficha', ''))}".strip(" -"),
+        axis=1,
+    )
+    ctx_df["tiene_analisis"] = (
+        ctx_df.get("analisis_id_activo", pd.Series(dtype=str)).astype(str).str.strip() != ""
+    )
+
+    st.dataframe(
+        ctx_df[
+            [
+                "ficha",
+                "nombre_ficha",
+                "estado_analisis",
+                "fecha_contexto_generado",
+                "updated_at",
+                "tiene_analisis",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    options = ctx_df["ficha"].astype(str).tolist()
+    label_map = dict(zip(ctx_df["ficha"].astype(str), ctx_df["ficha_label"].astype(str)))
+    selected_ficha = st.selectbox(
+        "Ficha (estudiada)",
+        options,
+        key="ap_editor_ficha_v2",
+        format_func=lambda x: label_map.get(str(x), str(x)),
+    )
+    selected_row = ctx_df[ctx_df["ficha"].astype(str) == str(selected_ficha)].head(1)
+    if selected_row.empty:
+        st.info("Selecciona una ficha.")
+        return
+
+    row = selected_row.iloc[0]
+    st.caption(
+        f"Estado actual: `{_clean_text(row.get('estado_analisis', ''))}` | "
+        f"Contexto generado: {_clean_text(row.get('fecha_contexto_generado', '')) or '-'}"
+    )
+    if _clean_text(row.get("analisis_id_activo", "")):
+        st.info("Esta ficha ya tiene analisis cargado. Si guardas un nuevo JSON, reemplazara al actual.")
+
+    st.markdown("#### Prompt listo para ChatGPT")
+    prompt_value = _clean_text(row.get("prompt_texto", ""))
+    st.text_area(
+        "Prompt generado",
+        value=prompt_value,
+        key=f"ap_prompt_v2_{selected_ficha}",
+        height=280,
+    )
+    prompt_js = json.dumps(prompt_value, ensure_ascii=False)
+    copy_status_id = f"copy_status_{re.sub(r'[^a-zA-Z0-9_]', '_', str(selected_ficha))}_v2"
+    components.html(
+        f"""
+        <div style="display:flex; align-items:center; gap:8px; margin:2px 0 8px 0;">
+          <button
+            style="background:#00a99d;color:white;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-weight:600;"
+            onclick='navigator.clipboard.writeText({prompt_js}).then(() => {{
+              const el = document.getElementById("{copy_status_id}");
+              if (el) {{ el.textContent = "Prompt copiado."; }}
+            }}).catch(() => {{
+              const el = document.getElementById("{copy_status_id}");
+              if (el) {{ el.textContent = "No se pudo copiar automaticamente."; }}
+            }});'
+          >
+            Copiar prompt
+          </button>
+          <span id="{copy_status_id}" style="font-size:12px;color:#8fb9ff;"></span>
+        </div>
+        """,
+        height=44,
+    )
+
+    json_input = st.text_area(
+        "Pega aqui el JSON devuelto por ChatGPT",
+        key=f"ap_json_input_v2_{selected_ficha}",
+        height=260,
+    )
+    validate_key = f"ap_valid_payload_v2_{selected_ficha}"
+    err_key = f"ap_valid_errors_v2_{selected_ficha}"
+    warn_key = f"ap_valid_warnings_v2_{selected_ficha}"
+
+    c1, c2 = st.columns([1, 1])
+    if c1.button("Validar JSON", key=f"ap_validate_v2_{selected_ficha}"):
+        payload, errors, warnings = _validate_provider_analysis_json(json_input, selected_ficha)
+        st.session_state[validate_key] = payload if not errors else {}
+        st.session_state[err_key] = errors
+        st.session_state[warn_key] = warnings
+
+    errors = st.session_state.get(err_key, [])
+    warnings = st.session_state.get(warn_key, [])
+    for w in warnings:
+        st.warning(w)
+    for e in errors:
+        st.error(e)
+    payload_ok = st.session_state.get(validate_key, {})
+    can_save = isinstance(payload_ok, dict) and bool(payload_ok) and not errors
+
+    if c2.button("Guardar analisis (reemplaza anterior)", key=f"ap_save_v2_{selected_ficha}", disabled=not can_save):
+        analisis_id, version_num, new_state = _save_provider_analysis_payload(selected_ficha, payload_ok)
+        st.success(
+            f"Analisis guardado. analisis_id={analisis_id[:8]}..., "
+            f"version={version_num}, estado={new_state}. Se conserva solo la version mas reciente."
+        )
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### Analisis actual guardado")
+    vrow = active_df[active_df["ficha"].astype(str) == str(selected_ficha)].head(1)
+    if vrow.empty:
+        st.info("Todavia no hay analisis guardado para esta ficha.")
+        return
+
+    v = vrow.iloc[0]
+    analisis_id = _clean_text(v.get("analisis_id", ""))
+    st.caption(
+        f"Fecha de carga: {_clean_text(v.get('fecha_carga', '')) or '-'} | "
+        f"Ultima actualizacion: {_clean_text(v.get('fecha_ultima_actualizacion', '')) or '-'}"
+    )
+    st.markdown("#### Resumen ejecutivo")
+    st.info(_clean_text(v.get("resumen_ejecutivo", "")) or "Sin resumen ejecutivo.")
+
+    hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", analisis_id)
+    gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", analisis_id)
+    precio_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_precio", analisis_id)
+
+    st.markdown("#### 1) Proponentes historicos en Panama")
+    show_hist = [c for c in AP_HIST_COLUMNS if c in hist_df.columns]
+    st.dataframe(
+        hist_df[show_hist] if show_hist else _empty_table(AP_HIST_COLUMNS),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("#### 2) Mejores por gama")
+    show_gama = [c for c in AP_GAMA_COLUMNS if c in gama_df.columns]
+    st.dataframe(
+        gama_df[show_gama] if show_gama else _empty_table(AP_GAMA_COLUMNS),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("#### 3) Mejores por precio")
+    show_precio = [c for c in AP_PRECIO_COLUMNS if c in precio_df.columns]
+    st.dataframe(
+        precio_df[show_precio] if show_precio else _empty_table(AP_PRECIO_COLUMNS),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def _render_tab_contacto_correos() -> None:
     st.markdown("### Contacto y correos")
     _placeholder_block(
@@ -6778,7 +6980,7 @@ with tabs[2]:
 with tabs[3]:
     _render_tab_estudio_profundo(ficha_acts_df, ranked_df, db_path)
 with tabs[4]:
-    _render_tab_analisis_proveedores(ranked_df)
+    _render_tab_analisis_proveedores_v2(ranked_df)
 with tabs[5]:
     _render_tab_contacto_correos()
 with tabs[6]:
