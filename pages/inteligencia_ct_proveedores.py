@@ -7286,22 +7286,6 @@ def _render_tab_resultado_final() -> None:
         )
 
 
-def _render_architecture_notes() -> None:
-    with st.expander("🧱 Arquitectura funcional propuesta (Fase 1 - diseño)", expanded=False):
-        st.markdown(
-            """
-            - Esta página está montada como **blueprint visual** para validar flujo y UX.
-            - En Fase 2 se conectará con tablas de datos (determinístico + IA).
-            - Diseño preparado para módulos:
-              - `core/ct_scoring.py`
-              - `core/ct_analytics.py`
-              - `services/ct_repository.py`
-              - `services/ct_automation.py`
-              - `services/ct_ai_insights.py`
-            """
-        )
-
-
 st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 
@@ -7313,7 +7297,6 @@ ranked_df = _score_fichas(ficha_metrics_df, st.session_state["intel_weights"])
 
 _render_sidebar()
 _render_kpis(ranked_df)
-_render_architecture_notes()
 
 TAB_OPTIONS = [
     "Dashboard",
