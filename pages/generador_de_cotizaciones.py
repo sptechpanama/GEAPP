@@ -27,6 +27,7 @@ from docx.shared import Inches, Pt
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image
 from openpyxl.styles import Alignment, Border, Side
+from openpyxl.utils.cell import range_boundaries
 from gspread.exceptions import WorksheetNotFound
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -443,9 +444,12 @@ def _resolve_base_asset(file_name: str) -> Path:
     return SELENIUM_COTIZACION_DIR / file_name
 
 
-TEMPLATE_RS_STANDARD = _resolve_base_asset("plantilla_cotizacion.xlsx")
-TEMPLATE_RIR_STANDARD = _resolve_base_asset("plantilla_cotizacion_rir.xlsx")
-TEMPLATE_SP_STANDARD = _resolve_base_asset("plantilla_cotizacion_sp.xlsx")
+TEMPLATE_RS_STANDARD = _resolve_base_asset("plantilla_cotizacion-estandar.xlsx")
+TEMPLATE_RIR_STANDARD = _resolve_base_asset("plantilla_cotizacion_rir-estandar.xlsx")
+TEMPLATE_SP_STANDARD = _resolve_base_asset("plantilla_cotizacion_sp-estandar.xlsx")
+TEMPLATE_RS_PANAMA = _resolve_base_asset("plantilla_cotizacion.xlsx")
+TEMPLATE_RIR_PANAMA = _resolve_base_asset("plantilla_cotizacion_rir.xlsx")
+TEMPLATE_SP_PANAMA = _resolve_base_asset("plantilla_cotizacion_sp.xlsx")
 HEADER_RS_STANDARD = _resolve_base_asset("encabezado.png")
 HEADER_RIR_STANDARD = _resolve_base_asset("encabezado_rir.png")
 HEADER_SP_STANDARD = _resolve_base_asset("encabezado_sp.png")
@@ -754,7 +758,7 @@ def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool, d
     titulo_full = str(ws["B22"].value or "").strip()
     titulo_short = str(ws["C19"].value or "").strip()
     titulo_intro = ""
-    intro_text = str(ws["B21"].value or ws["B18"].value or "").strip()
+    intro_text = str(ws["B17"].value or ws["B21"].value or ws["B18"].value or "").strip()
     if intro_text:
         m_intro = re.search(r"cotizaci[oó]n para:\s*(.+)$", intro_text, flags=re.IGNORECASE)
         if m_intro:
@@ -1981,16 +1985,17 @@ def _build_standard_quote_excel(
     quote_kind: str = "estandar",
 ) -> bytes:
     quote_kind_norm = str(quote_kind or "").strip().lower()
+    is_standard_layout = quote_kind_norm in {"estandar", "standard", "cotizacion_estandar", "privada"}
     if empresa == "RIR Medical":
-        template_path = TEMPLATE_RIR_STANDARD
+        template_path = TEMPLATE_RIR_STANDARD if is_standard_layout else TEMPLATE_RIR_PANAMA
         header_path = HEADER_RIR_STANDARD
         signature_path = SIGNATURE_RIR_STANDARD
     elif empresa in (SP_COMPANY_NAME, "SP Engineering"):
-        template_path = TEMPLATE_SP_STANDARD
+        template_path = TEMPLATE_SP_STANDARD if is_standard_layout else TEMPLATE_SP_PANAMA
         header_path = HEADER_SP_STANDARD
         signature_path = SIGNATURE_SP_STANDARD
     else:
-        template_path = TEMPLATE_RS_STANDARD
+        template_path = TEMPLATE_RS_STANDARD if is_standard_layout else TEMPLATE_RS_PANAMA
         header_path = HEADER_RS_STANDARD
         signature_path = SIGNATURE_RS_STANDARD
 
@@ -2033,6 +2038,51 @@ def _build_standard_quote_excel(
     )
     align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     align_right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+    align_left_wrap = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    def _unmerge_intersecting(
+        row_start: int,
+        row_end: int,
+        col_start: int = 2,
+        col_end: int = 7,
+    ) -> None:
+        for merged in list(ws.merged_cells.ranges):
+            min_col, min_row, max_col, max_row = range_boundaries(str(merged))
+            if max_row < row_start or min_row > row_end:
+                continue
+            if max_col < col_start or min_col > col_end:
+                continue
+            ws.unmerge_cells(str(merged))
+
+    def _clear_block(
+        row_start: int,
+        row_end: int,
+        col_start: int = 2,
+        col_end: int = 7,
+    ) -> None:
+        _unmerge_intersecting(row_start, row_end, col_start, col_end)
+        for rr in range(row_start, row_end + 1):
+            for cc in range(col_start, col_end + 1):
+                ws.cell(row=rr, column=cc).value = None
+
+    def _fit_row_height(row_idx: int, text: str, chars_per_line: int = 72) -> None:
+        raw = str(text or "")
+        if not raw.strip():
+            return
+        logical_lines = max(1, raw.count("\n") + 1)
+        soft_lines = max(1, math.ceil(len(raw) / max(chars_per_line, 1)))
+        lines = max(logical_lines, soft_lines)
+        target = max(18.0, min(140.0, lines * 16.0))
+        current = ws.row_dimensions[row_idx].height
+        ws.row_dimensions[row_idx].height = max(float(current or 0.0), target)
+
+    def _write_merged_b_to_g(row_idx: int, text: str) -> None:
+        _unmerge_intersecting(row_idx, row_idx, 2, 7)
+        ws.merge_cells(start_row=row_idx, start_column=2, end_row=row_idx, end_column=7)
+        cell = ws.cell(row=row_idx, column=2)
+        cell.value = str(text or "")
+        cell.alignment = align_left_wrap
+        _fit_row_height(row_idx, cell.value)
 
     subtotal = 0.0
     for idx, row in items.iterrows():
@@ -2094,7 +2144,7 @@ def _build_standard_quote_excel(
         ruc_text = str(cliente_ruc or "-").strip()
         dv_text = str(cliente_dv or "-").strip()
     ws["B14"] = f"RUC: {ruc_text}   DV: {dv_text}"
-    if quote_kind_norm in {"estandar", "standard", "cotizacion_estandar", "privada"}:
+    if is_standard_layout:
         domicilio = _company_intro_address(empresa)
         if domicilio:
             intro = (
@@ -2103,14 +2153,15 @@ def _build_standard_quote_excel(
             )
         else:
             intro = f"La empresa {empresa} suministra por este medio cotización para: {title}."
-        # Limpia el texto legacy del template estándar:
-        # "suministra ... cotización en línea No / sobre: ..."
-        ws["B18"] = ""
-        ws["B19"] = ""
-        ws["C19"] = ""
-        ws["E18"] = ""
-        ws["B21"] = intro
-        ws["B21"].alignment = Alignment(wrap_text=True, vertical="center")
+        # Fila 17 exacta para el texto estándar, eliminando restos legacy.
+        # Mantener 2 filas vacías tras RUC (15-16) y 2 filas vacías antes del cuadro (20-21).
+        _clear_block(15, 21, 2, 7)
+        ws.merge_cells(start_row=17, start_column=2, end_row=17, end_column=7)
+        ws["B17"] = intro
+        ws["B17"].alignment = align_left_wrap
+        _fit_row_height(17, intro, chars_per_line=86)
+        # Conservar la fila 21 fusionada (vacía) como en plantilla base.
+        ws.merge_cells(start_row=21, start_column=2, end_row=21, end_column=7)
     else:
         ws["E18"] = numero_visible
         ws["C19"] = title
@@ -2125,25 +2176,25 @@ def _build_standard_quote_excel(
 
     extra_lines = [line.strip() for line in str(detalles_extra or "").splitlines() if line.strip()]
     # Reubicar notas cerca del cuadro de precios.
-    fila_info_base = fila_total + 2
+    # 2 filas vacias despues del cuadro/totales.
+    fila_info_base = fila_total + 3
+    fila_ultimo_detalle = fila_total + 1
     if extra_lines:
-        ws[f"B{fila_info_base}"] = "Detalles adicionales:"
+        _write_merged_b_to_g(fila_info_base, "Detalles adicionales:")
         for idx, line in enumerate(extra_lines[:8], start=1):
-            ws[f"B{fila_info_base + idx}"] = line
+            _write_merged_b_to_g(fila_info_base + idx, line)
         fila_ultimo_detalle = fila_info_base + min(len(extra_lines), 8)
-    else:
-        fila_ultimo_detalle = fila_total + 1
 
     # Dejar 2 filas vacías antes de condiciones comerciales.
     fila_forma_pago = fila_ultimo_detalle + 3
-    ws[f"B{fila_forma_pago}"] = f"Forma de pago: {forma_pago}"
-    ws[f"B{fila_forma_pago + 1}"] = f"Lugar de entrega: {lugar_entrega}"
-    ws[f"B{fila_forma_pago + 2}"] = f"Tiempo de entrega: {entrega}"
-    ws[f"B{fila_forma_pago + 3}"] = "Garantía: De fábrica"
-    ws[f"B{fila_forma_pago + 4}"] = "Adjudicación: Global"
-    ws[f"B{fila_forma_pago + 5}"] = f"Validez de la propuesta: {vigencia}"
+    _write_merged_b_to_g(fila_forma_pago, f"Forma de pago: {forma_pago}")
+    _write_merged_b_to_g(fila_forma_pago + 1, f"Lugar de entrega: {lugar_entrega}")
+    _write_merged_b_to_g(fila_forma_pago + 2, f"Tiempo de entrega: {entrega}")
+    _write_merged_b_to_g(fila_forma_pago + 3, "Garantía: De fábrica")
+    _write_merged_b_to_g(fila_forma_pago + 4, "Adjudicación: Global")
+    _write_merged_b_to_g(fila_forma_pago + 5, f"Validez de la propuesta: {vigencia}")
     if direccion:
-        ws[f"B{fila_forma_pago + 6}"] = f"Dirección del cliente: {direccion}"
+        _write_merged_b_to_g(fila_forma_pago + 6, f"Dirección del cliente: {direccion}")
 
     base_firma_row = fila_forma_pago + 9
 
