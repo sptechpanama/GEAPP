@@ -11,11 +11,40 @@ def _is_direct_cost(category: str) -> bool:
     return "proyecto" in key
 
 
+def _safe_series(df: pd.DataFrame, col: str, default_value: object = "") -> pd.Series:
+    """
+    Devuelve siempre una Series alineada al indice de `df` para evitar
+    errores cuando la columna falta, viene duplicada o llega con tipo inesperado.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return pd.Series(dtype="object")
+
+    if col in df.columns:
+        raw = df[col]
+        if isinstance(raw, pd.DataFrame):
+            # Si hay columnas duplicadas, toma la primera de forma determinista.
+            series = raw.iloc[:, 0]
+        elif isinstance(raw, pd.Series):
+            series = raw
+        else:
+            series = pd.Series([raw] * len(df), index=df.index)
+    else:
+        series = pd.Series([default_value] * len(df), index=df.index)
+
+    return series.reindex(df.index)
+
+
+def _safe_datetime_series(df: pd.DataFrame, col: str) -> pd.Series:
+    return pd.to_datetime(_safe_series(df, col, pd.NaT), errors="coerce")
+
+
 def _ensure_estado_resultados_schema(df: pd.DataFrame) -> pd.DataFrame:
     """
     Blindaje defensivo: evita KeyError por columnas faltantes.
     """
     out = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    if isinstance(out, pd.DataFrame) and out.columns.duplicated().any():
+        out = out.loc[:, ~out.columns.duplicated(keep="first")].copy()
     if COL_CATEGORIA not in out.columns:
         out[COL_CATEGORIA] = ""
     if COL_MONTO not in out.columns:
@@ -25,10 +54,10 @@ def _ensure_estado_resultados_schema(df: pd.DataFrame) -> pd.DataFrame:
     if COL_EMPRESA not in out.columns:
         out[COL_EMPRESA] = ""
 
-    out[COL_CATEGORIA] = out[COL_CATEGORIA].astype(str).fillna("")
-    out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0)
-    out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
-    out[COL_EMPRESA] = out[COL_EMPRESA].astype(str).fillna("")
+    out[COL_CATEGORIA] = _safe_series(out, COL_CATEGORIA, "").astype(str).fillna("")
+    out[COL_MONTO] = pd.to_numeric(_safe_series(out, COL_MONTO, 0.0), errors="coerce").fillna(0.0)
+    out[COL_FECHA] = _safe_datetime_series(out, COL_FECHA)
+    out[COL_EMPRESA] = _safe_series(out, COL_EMPRESA, "").astype(str).fillna("")
     return out
 
 
@@ -41,18 +70,16 @@ def build_estado_resultados(
     ing = _ensure_estado_resultados_schema(df_ing)
     gas = _ensure_estado_resultados_schema(df_gas)
 
-    cat_ing = ing.get(COL_CATEGORIA, pd.Series("", index=ing.index)).astype(str)
-    cat_gas = gas.get(COL_CATEGORIA, pd.Series("", index=gas.index)).astype(str)
-    monto_ing = pd.to_numeric(ing.get(COL_MONTO, pd.Series(0.0, index=ing.index)), errors="coerce").fillna(0.0)
-    monto_gas = pd.to_numeric(gas.get(COL_MONTO, pd.Series(0.0, index=gas.index)), errors="coerce").fillna(0.0)
+    cat_ing = _safe_series(ing, COL_CATEGORIA, "").astype(str)
+    cat_gas = _safe_series(gas, COL_CATEGORIA, "").astype(str)
 
     ing = ing[cat_ing.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
     gas = gas[cat_gas.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
-    cat_gas = gas.get(COL_CATEGORIA, pd.Series("", index=gas.index)).astype(str)
+    cat_gas = _safe_series(gas, COL_CATEGORIA, "").astype(str)
 
-    ingresos = float(pd.to_numeric(ing.get(COL_MONTO, pd.Series(0.0, index=ing.index)), errors="coerce").fillna(0.0).sum())
+    ingresos = float(pd.to_numeric(_safe_series(ing, COL_MONTO, 0.0), errors="coerce").fillna(0.0).sum())
     direct_mask = cat_gas.map(_is_direct_cost)
-    gas_amounts = pd.to_numeric(gas.get(COL_MONTO, pd.Series(0.0, index=gas.index)), errors="coerce").fillna(0.0)
+    gas_amounts = pd.to_numeric(_safe_series(gas, COL_MONTO, 0.0), errors="coerce").fillna(0.0)
     costos_directos = float(gas_amounts[direct_mask].sum()) if not gas_amounts.empty else 0.0
     gastos_operativos = float(gas_amounts[~direct_mask].sum()) if not gas_amounts.empty else 0.0
 
@@ -73,8 +100,8 @@ def build_estado_resultados(
 
     ing_month = ing.copy()
     gas_month = gas.copy()
-    ing_month["Mes"] = pd.to_datetime(ing_month.get(COL_FECHA), errors="coerce").dt.to_period("M")
-    gas_month["Mes"] = pd.to_datetime(gas_month.get(COL_FECHA), errors="coerce").dt.to_period("M")
+    ing_month["Mes"] = _safe_datetime_series(ing_month, COL_FECHA).dt.to_period("M")
+    gas_month["Mes"] = _safe_datetime_series(gas_month, COL_FECHA).dt.to_period("M")
 
     if COL_MONTO not in ing_month.columns:
         ing_month[COL_MONTO] = 0.0
