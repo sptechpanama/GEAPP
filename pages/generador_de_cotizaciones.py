@@ -444,9 +444,34 @@ def _resolve_base_asset(file_name: str) -> Path:
     return SELENIUM_COTIZACION_DIR / file_name
 
 
-TEMPLATE_RS_STANDARD = _resolve_base_asset("plantilla_cotizacion-estandar.xlsx")
-TEMPLATE_RIR_STANDARD = _resolve_base_asset("plantilla_cotizacion_rir-estandar.xlsx")
-TEMPLATE_SP_STANDARD = _resolve_base_asset("plantilla_cotizacion_sp-estandar.xlsx")
+def _resolve_base_asset_candidates(*file_names: str) -> Path:
+    candidates = [str(name or "").strip() for name in file_names if str(name or "").strip()]
+    if not candidates:
+        return _resolve_base_asset("")
+    for name in candidates:
+        repo_candidate = REPO_COTIZACION_BASE_DIR / name
+        if repo_candidate.exists():
+            return repo_candidate
+        local_candidate = SELENIUM_COTIZACION_DIR / name
+        if local_candidate.exists():
+            return local_candidate
+    # Mantiene comportamiento anterior: retornar el primer candidato resuelto
+    # aunque no exista, para que el error final indique ruta concreta.
+    return _resolve_base_asset(candidates[0])
+
+
+TEMPLATE_RS_STANDARD = _resolve_base_asset_candidates(
+    "plantilla_cotizacion-estandar.xlsx",
+    "plantilla_cotizacion.xlsx",
+)
+TEMPLATE_RIR_STANDARD = _resolve_base_asset_candidates(
+    "plantilla_cotizacion_rir-estandar.xlsx",
+    "plantilla_cotizacion_rir.xlsx",
+)
+TEMPLATE_SP_STANDARD = _resolve_base_asset_candidates(
+    "plantilla_cotizacion_sp-estandar.xlsx",
+    "plantilla_cotizacion_sp.xlsx",
+)
 TEMPLATE_RS_PANAMA = _resolve_base_asset("plantilla_cotizacion.xlsx")
 TEMPLATE_RIR_PANAMA = _resolve_base_asset("plantilla_cotizacion_rir.xlsx")
 TEMPLATE_SP_PANAMA = _resolve_base_asset("plantilla_cotizacion_sp.xlsx")
