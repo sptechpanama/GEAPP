@@ -335,19 +335,29 @@ def _build_verificar_por_corregir(
     )
 
     # Deteccion de posibles gastos fijos no cargados.
-    month_range = pd.period_range(
-        start=min(pd.to_datetime(gas_f.get(COL_FECHA), errors="coerce").dropna().min() if not gas_f.empty else pd.Timestamp(date.today()), pd.Timestamp(date.today())),
-        end=max(pd.to_datetime(gas_f.get(COL_FECHA), errors="coerce").dropna().max() if not gas_f.empty else pd.Timestamp(date.today()), pd.Timestamp(date.today())),
-        freq="M",
+    # Debe tolerar hojas incompletas o fechas invalidas sin romper la pagina.
+    gas_fecha_series = (
+        pd.to_datetime(gas_f[COL_FECHA], errors="coerce")
+        if COL_FECHA in gas_f.columns
+        else pd.Series(index=gas_f.index, dtype="datetime64[ns]")
     )
-    gas_text = (
-        gas_f.get(COL_DESC, "").astype(str)
-        + " "
-        + gas_f.get(COL_CONCEPTO, "").astype(str)
-        + " "
-        + gas_f.get(COL_CATEGORIA, "").astype(str)
-    ).str.lower()
-    gas_month = pd.to_datetime(gas_f.get(COL_FECHA), errors="coerce").dt.to_period("M")
+    valid_gas_dates = gas_fecha_series.dropna()
+    today_ts = pd.Timestamp(date.today())
+    if valid_gas_dates.empty:
+        start_m = today_ts.to_period("M")
+        end_m = today_ts.to_period("M")
+    else:
+        start_m = valid_gas_dates.min().to_period("M")
+        end_candidate = valid_gas_dates.max().to_period("M")
+        end_m = max(end_candidate, today_ts.to_period("M"))
+
+    month_range = pd.period_range(start=start_m, end=end_m, freq="M")
+
+    desc_s = gas_f[COL_DESC].astype(str) if COL_DESC in gas_f.columns else pd.Series("", index=gas_f.index)
+    conc_s = gas_f[COL_CONCEPTO].astype(str) if COL_CONCEPTO in gas_f.columns else pd.Series("", index=gas_f.index)
+    cat_s = gas_f[COL_CATEGORIA].astype(str) if COL_CATEGORIA in gas_f.columns else pd.Series("", index=gas_f.index)
+    gas_text = (desc_s + " " + conc_s + " " + cat_s).str.lower()
+    gas_month = gas_fecha_series.dt.to_period("M")
     fixed_rules = {
         "Alquiler": ["alquiler", "arrendamiento", "rent"],
         "Salarios": ["salario", "planilla", "nomina", "nómina"],
