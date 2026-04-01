@@ -753,7 +753,13 @@ def _extract_excel_items(excel_bytes: bytes) -> tuple[pd.DataFrame, str, bool, d
 
     titulo_full = str(ws["B22"].value or "").strip()
     titulo_short = str(ws["C19"].value or "").strip()
-    titulo = titulo_full or titulo_short
+    titulo_intro = ""
+    intro_text = str(ws["B21"].value or ws["B18"].value or "").strip()
+    if intro_text:
+        m_intro = re.search(r"cotizaci[oó]n para:\s*(.+)$", intro_text, flags=re.IGNORECASE)
+        if m_intro:
+            titulo_intro = str(m_intro.group(1) or "").strip().rstrip(".")
+    titulo = titulo_full or titulo_short or titulo_intro
     titulo = _repair_truncated_title(titulo, items)
     itbms_row = 23 + len(items) + 1
     itbms_val = ws[f"G{itbms_row}"].value
@@ -2088,8 +2094,6 @@ def _build_standard_quote_excel(
         ruc_text = str(cliente_ruc or "-").strip()
         dv_text = str(cliente_dv or "-").strip()
     ws["B14"] = f"RUC: {ruc_text}   DV: {dv_text}"
-    ws["E18"] = numero_visible
-    ws["C19"] = title
     if quote_kind_norm in {"estandar", "standard", "cotizacion_estandar", "privada"}:
         domicilio = _company_intro_address(empresa)
         if domicilio:
@@ -2099,9 +2103,17 @@ def _build_standard_quote_excel(
             )
         else:
             intro = f"La empresa {empresa} suministra por este medio cotización para: {title}."
+        # Limpia el texto legacy del template estándar:
+        # "suministra ... cotización en línea No / sobre: ..."
+        ws["B18"] = ""
+        ws["B19"] = ""
+        ws["C19"] = ""
+        ws["E18"] = ""
         ws["B21"] = intro
         ws["B21"].alignment = Alignment(wrap_text=True, vertical="center")
     else:
+        ws["E18"] = numero_visible
+        ws["C19"] = title
         ws["B21"] = title
     if numero_visible != str(numero_cot or "").strip():
         ws["B12"] = str(numero_cot or "").strip()
@@ -2112,25 +2124,28 @@ def _build_standard_quote_excel(
     vigencia = condiciones.get("Vigencia") or "15 días"
 
     extra_lines = [line.strip() for line in str(detalles_extra or "").splitlines() if line.strip()]
-    fila_info_base = 30 + numero_items
+    # Reubicar notas cerca del cuadro de precios.
+    fila_info_base = fila_total + 2
     if extra_lines:
         ws[f"B{fila_info_base}"] = "Detalles adicionales:"
         for idx, line in enumerate(extra_lines[:8], start=1):
             ws[f"B{fila_info_base + idx}"] = line
-        fila_lugar = fila_info_base + min(len(extra_lines), 8) + 2
+        fila_ultimo_detalle = fila_info_base + min(len(extra_lines), 8)
     else:
-        fila_lugar = fila_info_base
+        fila_ultimo_detalle = fila_total + 1
 
-    ws[f"B{fila_lugar - 1}"] = f"Forma de pago: {forma_pago}"
-    ws[f"B{fila_lugar}"] = f"Lugar de entrega: {lugar_entrega}"
-    ws[f"B{fila_lugar + 1}"] = f"Tiempo de entrega: {entrega}"
-    ws[f"B{fila_lugar + 2}"] = "Garantía: De fábrica"
-    ws[f"B{fila_lugar + 3}"] = "Adjudicación: Global"
-    ws[f"B{fila_lugar + 4}"] = f"Validez de la propuesta: {vigencia}"
+    # Dejar 2 filas vacías antes de condiciones comerciales.
+    fila_forma_pago = fila_ultimo_detalle + 3
+    ws[f"B{fila_forma_pago}"] = f"Forma de pago: {forma_pago}"
+    ws[f"B{fila_forma_pago + 1}"] = f"Lugar de entrega: {lugar_entrega}"
+    ws[f"B{fila_forma_pago + 2}"] = f"Tiempo de entrega: {entrega}"
+    ws[f"B{fila_forma_pago + 3}"] = "Garantía: De fábrica"
+    ws[f"B{fila_forma_pago + 4}"] = "Adjudicación: Global"
+    ws[f"B{fila_forma_pago + 5}"] = f"Validez de la propuesta: {vigencia}"
     if direccion:
-        ws[f"B{fila_lugar + 5}"] = f"Dirección del cliente: {direccion}"
+        ws[f"B{fila_forma_pago + 6}"] = f"Dirección del cliente: {direccion}"
 
-    base_firma_row = fila_lugar + 9
+    base_firma_row = fila_forma_pago + 9
 
     firma_row = max(38 + filas_a_insertar, base_firma_row)
     ws[f"B{firma_row - 2}"] = "Atentamente,"
