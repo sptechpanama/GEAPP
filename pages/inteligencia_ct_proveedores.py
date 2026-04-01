@@ -1809,13 +1809,47 @@ def _score_fichas(ficha_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataF
     return df.sort_values(["score_total", "actos", "monto_historico"], ascending=[False, False, False]).reset_index(drop=True)
 
 
-def _ensure_study_state() -> list[dict]:
-    if not st.session_state.get("intel_tracking_loaded", False):
-        records, backend, status = _load_tracking_records_persistent()
-        st.session_state["intel_fichas_estudio"] = records
+def _ensure_study_state(sync_remote: bool = False) -> list[dict]:
+    """
+    Carga estado de seguimiento con estrategia rapida por defecto.
+    - sync_remote=False: usa SQLite local para entrada rapida.
+    - sync_remote=True: sincroniza con Sheets antes de operar.
+    """
+    loaded = bool(st.session_state.get("intel_tracking_loaded", False))
+    remote_synced = bool(st.session_state.get("intel_tracking_remote_synced", False))
+
+    if not loaded:
+        if sync_remote:
+            try:
+                records, backend, status = _load_tracking_records_persistent()
+                remote_synced = True
+            except Exception as exc:
+                records = _read_tracking_records_from_sqlite()
+                backend = "sqlite"
+                status = f"Seguimiento cargado localmente (sync remoto fallo: {exc})"
+        else:
+            records = _read_tracking_records_from_sqlite()
+            backend = "sqlite"
+            status = "Seguimiento cargado rapido desde SQLite local."
+
+        st.session_state["intel_fichas_estudio"] = _normalize_tracking_records(records)
         st.session_state["intel_tracking_backend"] = backend
         st.session_state["intel_tracking_status"] = status
         st.session_state["intel_tracking_loaded"] = True
+        st.session_state["intel_tracking_remote_synced"] = remote_synced
+    elif sync_remote and not remote_synced:
+        try:
+            records, backend, status = _load_tracking_records_persistent()
+            st.session_state["intel_fichas_estudio"] = _normalize_tracking_records(records)
+            st.session_state["intel_tracking_backend"] = backend
+            st.session_state["intel_tracking_status"] = status
+            st.session_state["intel_tracking_remote_synced"] = True
+        except Exception as exc:
+            base_status = str(st.session_state.get("intel_tracking_status", "Seguimiento local activo")).strip()
+            st.session_state["intel_tracking_status"] = (
+                f"{base_status} (sync remoto pendiente: {exc})"
+            ).strip()
+
     if "intel_fichas_estudio" not in st.session_state:
         st.session_state["intel_fichas_estudio"] = []
     return st.session_state["intel_fichas_estudio"]
@@ -1838,7 +1872,8 @@ def _ensure_discarded_state() -> list[str]:
 
 
 def _add_ficha_to_study(row: pd.Series) -> bool:
-    current = _ensure_study_state()
+    # Antes de mutar, sincroniza para evitar sobrescribir seguimiento remoto.
+    current = _ensure_study_state(sync_remote=True)
     ficha = str(row.get("ficha", "")).strip()
     if not ficha:
         return False
@@ -5761,7 +5796,8 @@ def _render_kpis(ranked_df: pd.DataFrame) -> None:
     total_fichas = int(len(ranked_df))
     top_ataque = int((ranked_df.get("clasificacion", pd.Series(dtype=str)) == "atacar ya").sum()) if not ranked_df.empty else 0
     prometedoras = int((ranked_df.get("clasificacion", pd.Series(dtype=str)) == "prometedor").sum()) if not ranked_df.empty else 0
-    fichas_estudio = _ensure_study_state()
+    # Carga local rapida para no bloquear la entrada por sincronizacion remota.
+    fichas_estudio = _ensure_study_state(sync_remote=False)
     total_en_seguimiento = len(fichas_estudio)
     total_en_estudio = sum(1 for x in fichas_estudio if str(x.get("estado", "")).strip().lower() == "en estudio")
 
@@ -6186,7 +6222,7 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
 
 def _render_tab_seguimiento_ct() -> None:
     st.markdown("### Fichas en seg.")
-    fichas_estudio = _ensure_study_state()
+    fichas_estudio = _ensure_study_state(sync_remote=True)
     tracking_status = str(st.session_state.get("intel_tracking_status", "") or "").strip()
     if tracking_status:
         st.caption(f"Persistencia seguimiento: {tracking_status}")
@@ -6312,7 +6348,7 @@ def _render_tab_estudio_profundo(
                 f"tipo2={int(last_stats.get('tipo2_detectados', 0))}, "
                 f"consultas omitidas por limite={int(last_stats.get('queries_skipped_limit', 0))}."
             )
-        seg = pd.DataFrame(_ensure_study_state())
+        seg = pd.DataFrame(_ensure_study_state(sync_remote=True))
         if seg.empty:
             st.info("No hay fichas en seguimiento. Env?alas desde Detecc. fichas.")
         else:
@@ -7289,14 +7325,63 @@ def _render_tab_resultado_final() -> None:
 st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 
+def _tab_requires_universe(tab_name: str) -> bool:
+    return tab_name in {"Dashboard", "Detecc. fichas", "Estudio de fichas", "AnÃ¡lisis proveedores"}
+
+
+def _tab_requires_study_bootstrap(tab_name: str) -> bool:
+    return tab_name in {"Fichas en seg.", "Estudio de fichas", "AnÃ¡lisis proveedores"}
+
+
+def _weights_signature(weights: dict[str, float]) -> str:
+    keys = sorted(_default_weights().keys())
+    parts: list[str] = []
+    for key in keys:
+        parts.append(f"{key}:{float(weights.get(key, 0.0)):.4f}")
+    return "|".join(parts)
+
+
+def _get_universe_session_cached() -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    if not st.session_state.get("intel_universe_cache_ready", False):
+        ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe()
+        st.session_state["intel_ficha_metrics_df_cache"] = ficha_metrics_df
+        st.session_state["intel_ficha_acts_df_cache"] = ficha_acts_df
+        st.session_state["intel_db_path_cache"] = db_path
+        st.session_state["intel_universe_cache_ready"] = True
+    return (
+        st.session_state.get("intel_ficha_metrics_df_cache", pd.DataFrame()),
+        st.session_state.get("intel_ficha_acts_df_cache", pd.DataFrame()),
+        str(st.session_state.get("intel_db_path_cache", "") or ""),
+    )
+
+
+def _get_ranked_session_cached(ficha_metrics_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataFrame:
+    if ficha_metrics_df.empty:
+        st.session_state["intel_ranked_df_cache"] = pd.DataFrame()
+        st.session_state["intel_ranked_weights_sig"] = _weights_signature(weights)
+        st.session_state["intel_ranked_rows"] = 0
+        return pd.DataFrame()
+
+    sig = _weights_signature(weights)
+    cached_sig = str(st.session_state.get("intel_ranked_weights_sig", "") or "")
+    cached_rows = int(st.session_state.get("intel_ranked_rows", -1))
+    cached_df = st.session_state.get("intel_ranked_df_cache", pd.DataFrame())
+    if (
+        isinstance(cached_df, pd.DataFrame)
+        and cached_sig == sig
+        and cached_rows == int(len(ficha_metrics_df))
+    ):
+        return cached_df
+
+    ranked_df = _score_fichas(ficha_metrics_df, weights)
+    st.session_state["intel_ranked_df_cache"] = ranked_df
+    st.session_state["intel_ranked_weights_sig"] = sig
+    st.session_state["intel_ranked_rows"] = int(len(ficha_metrics_df))
+    return ranked_df
+
+
 _ensure_default_weights_profile()
-_bootstrap_study_storage_once()
-
-ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe()
-ranked_df = _score_fichas(ficha_metrics_df, st.session_state["intel_weights"])
-
 _render_sidebar()
-_render_kpis(ranked_df)
 
 TAB_OPTIONS = [
     "Dashboard",
@@ -7308,8 +7393,9 @@ TAB_OPTIONS = [
     "Seg. contacto",
     "Resultado ficha",
 ]
+default_tab = "Fichas en seg."
 if st.session_state.get("intel_active_tab") not in TAB_OPTIONS:
-    st.session_state["intel_active_tab"] = TAB_OPTIONS[0]
+    st.session_state["intel_active_tab"] = default_tab
 
 # Carga optimizada:
 # con st.tabs Streamlit ejecuta todas las pestanas en cada rerun.
@@ -7321,6 +7407,29 @@ active_tab = st.radio(
     horizontal=True,
     label_visibility="collapsed",
 )
+
+needs_universe = _tab_requires_universe(active_tab)
+needs_study_bootstrap = _tab_requires_study_bootstrap(active_tab)
+
+if needs_study_bootstrap:
+    _bootstrap_study_storage_once()
+
+ficha_metrics_df = pd.DataFrame()
+ficha_acts_df = pd.DataFrame()
+db_path = ""
+ranked_df = st.session_state.get("intel_ranked_df_cache", pd.DataFrame())
+if not isinstance(ranked_df, pd.DataFrame):
+    ranked_df = pd.DataFrame()
+
+if needs_universe:
+    if not st.session_state.get("intel_universe_cache_ready", False):
+        with st.spinner("Cargando universo de fichas..."):
+            ficha_metrics_df, ficha_acts_df, db_path = _get_universe_session_cached()
+    else:
+        ficha_metrics_df, ficha_acts_df, db_path = _get_universe_session_cached()
+    ranked_df = _get_ranked_session_cached(ficha_metrics_df, st.session_state["intel_weights"])
+
+_render_kpis(ranked_df)
 
 if active_tab == "Dashboard":
     _render_tab_dashboard(ranked_df, db_path)
