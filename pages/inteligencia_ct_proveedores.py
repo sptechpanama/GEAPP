@@ -2245,6 +2245,175 @@ def _append_intel_manual_request(client, payload: dict[str, object]) -> str:
     return request_id
 
 
+def _register_study_request_session(
+    request_id: str,
+    ficha: str,
+    nombre_ficha: str,
+    notes: str = "",
+    *,
+    set_current_if_empty: bool = True,
+) -> None:
+    req = _clean_text(request_id)
+    if not req:
+        return
+    ficha_id = _clean_text(ficha)
+    ficha_name = _clean_text(nombre_ficha)
+    notes_txt = _clean_text(notes)
+
+    meta_map = st.session_state.get("intel_study_request_meta_map", {})
+    if not isinstance(meta_map, dict):
+        meta_map = {}
+    meta_map[req] = {
+        "ficha": ficha_id,
+        "nombre_ficha": ficha_name,
+        "notes": notes_txt,
+    }
+    st.session_state["intel_study_request_meta_map"] = meta_map
+
+    batch_ids_raw = st.session_state.get("intel_study_request_batch_ids", [])
+    batch_ids = [str(x).strip() for x in (batch_ids_raw if isinstance(batch_ids_raw, list) else []) if str(x).strip()]
+    if req not in batch_ids:
+        batch_ids.append(req)
+    st.session_state["intel_study_request_batch_ids"] = batch_ids
+
+    current_req = _clean_text(st.session_state.get("intel_study_request_id", ""))
+    if set_current_if_empty and not current_req:
+        st.session_state["intel_study_request_id"] = req
+        st.session_state["intel_study_request_ficha"] = ficha_id
+        st.session_state["intel_study_request_ficha_name"] = ficha_name
+        st.session_state["intel_study_request_notes"] = notes_txt
+        st.session_state.pop("intel_study_request_synced_id", None)
+        st.session_state["intel_manual_last_req_row"] = None
+        st.session_state["intel_manual_last_poll_ts"] = 0.0
+        st.session_state["intel_manual_poll_cooldown_until"] = 0.0
+
+
+def _advance_study_request_queue(current_request_id: str) -> str:
+    current = _clean_text(current_request_id)
+    batch_ids_raw = st.session_state.get("intel_study_request_batch_ids", [])
+    batch_ids = [str(x).strip() for x in (batch_ids_raw if isinstance(batch_ids_raw, list) else []) if str(x).strip()]
+    if current in batch_ids:
+        idx = batch_ids.index(current)
+        batch_ids = batch_ids[idx + 1 :]
+    else:
+        batch_ids = [rid for rid in batch_ids if rid != current]
+    st.session_state["intel_study_request_batch_ids"] = batch_ids
+
+    next_id = batch_ids[0] if batch_ids else ""
+    st.session_state["intel_study_request_id"] = next_id
+    st.session_state.pop("intel_study_request_synced_id", None)
+    st.session_state["intel_manual_last_req_row"] = None
+    st.session_state["intel_manual_last_poll_ts"] = 0.0
+    st.session_state["intel_manual_poll_cooldown_until"] = 0.0
+    if not next_id:
+        st.session_state["intel_study_request_ficha"] = ""
+        st.session_state["intel_study_request_ficha_name"] = ""
+        st.session_state["intel_study_request_notes"] = ""
+        return ""
+
+    meta_map = st.session_state.get("intel_study_request_meta_map", {})
+    if not isinstance(meta_map, dict):
+        meta_map = {}
+    next_meta = meta_map.get(next_id, {}) if isinstance(meta_map, dict) else {}
+    st.session_state["intel_study_request_ficha"] = _clean_text(next_meta.get("ficha", ""))
+    st.session_state["intel_study_request_ficha_name"] = _clean_text(next_meta.get("nombre_ficha", ""))
+    st.session_state["intel_study_request_notes"] = _clean_text(next_meta.get("notes", ""))
+    return next_id
+
+
+def _is_pending_study_state(state_value: object) -> bool:
+    state = _normalize_column_key(_clean_text(state_value))
+    if not state:
+        return True
+    if "pendiente" in state:
+        return True
+    return state in {"nuevo", "sin estudio"}
+
+
+def _enqueue_auto_study_for_fichas(
+    fichas: list[str],
+    *,
+    db_path: str,
+    max_queries: int,
+    notes: str,
+) -> dict[str, object]:
+    targets = [str(f).strip() for f in (fichas or []) if str(f).strip()]
+    if not targets:
+        return {"queued": 0, "already": 0, "errors": [], "request_ids": []}
+
+    current = _ensure_study_state(sync_remote=True)
+    records = _normalize_tracking_records(current)
+    by_ficha = {str(r.get("ficha", "")).strip(): r for r in records}
+
+    queued = 0
+    already = 0
+    errors: list[str] = []
+    request_ids: list[str] = []
+    now_iso = _utc_now_iso()
+
+    from sheets import get_client
+
+    client, _ = get_client()
+    _ensure_intel_orquestador_job(client)
+
+    for ficha in targets:
+        rec = by_ficha.get(str(ficha).strip())
+        if rec is None:
+            errors.append(f"{ficha}: no esta en seguimiento")
+            continue
+        estado_actual = _clean_text(rec.get("estado", ""))
+        if not _is_pending_study_state(estado_actual):
+            already += 1
+            continue
+
+        req_notes = _clean_text(notes)
+        try:
+            request_id = _append_intel_manual_request(
+                client,
+                {
+                    "ficha": str(ficha),
+                    "nombre_ficha": _clean_text(rec.get("nombre_ficha", "")),
+                    "db_path": str(db_path or ""),
+                    "max_queries": int(max_queries),
+                    "notes": req_notes,
+                    "headless": False,
+                },
+            )
+            request_ids.append(request_id)
+            queued += 1
+
+            rec["estado"] = "en estudio"
+            rec["updated_at"] = now_iso
+            existing_notes = _clean_text(rec.get("notas", ""))
+            auto_marker = f"Auto-estudio encolado request_id={request_id}"
+            rec["notas"] = f"{existing_notes} | {auto_marker}".strip(" |")
+
+            _register_study_request_session(
+                request_id=request_id,
+                ficha=str(ficha),
+                nombre_ficha=_clean_text(rec.get("nombre_ficha", "")),
+                notes=req_notes,
+                set_current_if_empty=True,
+            )
+        except Exception as exc:
+            errors.append(f"{ficha}: {exc}")
+            continue
+
+    st.session_state["intel_fichas_estudio"] = _normalize_tracking_records(records)
+    ok, msg = _persist_tracking_records(st.session_state["intel_fichas_estudio"])
+    st.session_state["intel_tracking_status"] = msg
+    st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
+
+    return {
+        "queued": queued,
+        "already": already,
+        "errors": errors,
+        "request_ids": request_ids,
+        "persist_ok": ok,
+        "persist_msg": msg,
+    }
+
+
 def _fetch_intel_manual_request(client, request_id: str) -> dict[str, str] | None:
     sheet_id, _ = _open_sheet_with_fallback(client, _sheet_id_candidates("manual"), "pc_manual")
     sh = client.open_by_key(sheet_id)
@@ -2737,6 +2906,36 @@ def _persist_tracking_records(records: list[dict[str, object]]) -> tuple[bool, s
     if sheet_error:
         return False, f"Guardado en local (SQLite). Sheets no disponible: {sheet_error}"
     return True, "Guardado en Sheets y SQLite."
+
+
+def _update_tracking_state(
+    ficha: str,
+    new_state: str,
+    note_suffix: str = "",
+) -> tuple[bool, str]:
+    ficha_key = _clean_text(ficha)
+    if not ficha_key:
+        return False, "Ficha vacia para actualizar estado."
+    records = _ensure_study_state(sync_remote=True)
+    changed = False
+    now_iso = _utc_now_iso()
+    for rec in records:
+        if _clean_text(rec.get("ficha", "")) != ficha_key:
+            continue
+        rec["estado"] = _clean_text(new_state) or rec.get("estado", "")
+        rec["updated_at"] = now_iso
+        if note_suffix:
+            existing = _clean_text(rec.get("notas", ""))
+            rec["notas"] = f"{existing} | {note_suffix}".strip(" |")
+        changed = True
+        break
+    if not changed:
+        return False, f"Ficha {ficha_key} no encontrada en seguimiento."
+    st.session_state["intel_fichas_estudio"] = _normalize_tracking_records(records)
+    ok, msg = _persist_tracking_records(st.session_state["intel_fichas_estudio"])
+    st.session_state["intel_tracking_status"] = msg
+    st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
+    return ok, msg
 
 
 def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
@@ -6074,17 +6273,41 @@ def _render_tab_deteccion_ct(ficha_metrics_df: pd.DataFrame, ficha_acts_df: pd.D
 
             added = 0
             already = 0
+            added_fichas: list[str] = []
             for ficha_req in valid:
                 full_row = ranked_df[ranked_df["ficha"].astype(str) == str(ficha_req)].head(1)
                 if full_row.empty:
                     continue
                 if _add_ficha_to_study(full_row.iloc[0]):
                     added += 1
+                    added_fichas.append(str(ficha_req))
                 else:
                     already += 1
 
             if added:
                 st.success(f"{added} ficha(s) enviadas a 'Fichas en seg.'.")
+                auto_db_path = str(st.session_state.get("intel_db_path_cache", "") or "")
+                try:
+                    enqueue = _enqueue_auto_study_for_fichas(
+                        added_fichas,
+                        db_path=auto_db_path,
+                        max_queries=int(st.session_state.get("intel_study_max_queries", INTEL_STUDY_DEFAULT_MAX_QUERIES)),
+                        notes="Auto-estudio al pasar a seguimiento",
+                    )
+                    if int(enqueue.get("queued", 0)) > 0:
+                        st.success(
+                            f"Auto-estudio activado: {int(enqueue.get('queued', 0))} ficha(s) "
+                            "encoladas en orquestador."
+                        )
+                    if int(enqueue.get("already", 0)) > 0:
+                        st.info(
+                            f"{int(enqueue.get('already', 0))} ficha(s) ya estaban con estado no pendiente "
+                            "y no se reencolaron."
+                        )
+                    if enqueue.get("errors"):
+                        st.warning("Auto-estudio con observaciones: " + "; ".join(enqueue.get("errors", [])))
+                except Exception as exc:
+                    st.warning(f"Fichas agregadas a seguimiento, pero no se pudo auto-encolar estudio: {exc}")
             if already:
                 st.info(f"{already} ficha(s) ya estaban en seguimiento.")
             if invalid:
@@ -6303,6 +6526,19 @@ def _render_tab_seguimiento_ct() -> None:
         st.session_state["intel_tracking_status"] = msg
         st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
         st.success(f"Estado actualizado para ficha {target}.")
+        if _is_pending_study_state(new_state):
+            try:
+                auto_db_path = str(st.session_state.get("intel_db_path_cache", "") or "")
+                enqueue = _enqueue_auto_study_for_fichas(
+                    [str(target)],
+                    db_path=auto_db_path,
+                    max_queries=int(st.session_state.get("intel_study_max_queries", INTEL_STUDY_DEFAULT_MAX_QUERIES)),
+                    notes="Auto-estudio por cambio de estado a pendiente",
+                )
+                if int(enqueue.get("queued", 0)) > 0:
+                    st.success("Auto-estudio encolado para la ficha actualizada.")
+            except Exception as exc:
+                st.warning(f"No se pudo auto-encolar estudio tras actualizar estado: {exc}")
 
     if st.button("Quitar ficha seleccionada"):
         st.session_state["intel_fichas_estudio"] = [
@@ -6315,6 +6551,32 @@ def _render_tab_seguimiento_ct() -> None:
         st.rerun()
 
 
+def _auto_enqueue_study_backlog_once(db_path: str) -> None:
+    if bool(st.session_state.get("intel_auto_study_bootstrapped", False)):
+        return
+    try:
+        seg_boot_df = pd.DataFrame(_ensure_study_state(sync_remote=True))
+        if not seg_boot_df.empty and "ficha" in seg_boot_df.columns:
+            if "estado" in seg_boot_df.columns:
+                pending_mask = seg_boot_df["estado"].map(_is_pending_study_state)
+            else:
+                pending_mask = pd.Series([True] * len(seg_boot_df), index=seg_boot_df.index)
+            pending_fichas = (
+                seg_boot_df.loc[pending_mask, "ficha"].astype(str).str.strip().replace("", pd.NA).dropna().tolist()
+            )
+            if pending_fichas:
+                enqueue = _enqueue_auto_study_for_fichas(
+                    pending_fichas,
+                    db_path=str(db_path or ""),
+                    max_queries=int(st.session_state.get("intel_study_max_queries", INTEL_STUDY_DEFAULT_MAX_QUERIES)),
+                    notes="Auto-estudio inicial para fichas en seguimiento",
+                )
+                st.session_state["intel_auto_study_bootstrap_report"] = enqueue
+        st.session_state["intel_auto_study_bootstrapped"] = True
+    except Exception as exc:
+        st.session_state["intel_auto_study_bootstrap_error"] = str(exc)
+
+
 def _render_tab_estudio_profundo(
     ficha_acts_df: pd.DataFrame,
     ranked_df: pd.DataFrame,
@@ -6325,6 +6587,22 @@ def _render_tab_estudio_profundo(
     persist_status = _clean_text(st.session_state.get("intel_study_persist_status", ""))
     if persist_status:
         st.caption(f"Persistencia estudios: {persist_status}")
+
+    _auto_enqueue_study_backlog_once(str(db_path or ""))
+    bootstrap_report = st.session_state.get("intel_auto_study_bootstrap_report")
+    if isinstance(bootstrap_report, dict):
+        if int(bootstrap_report.get("queued", 0)) > 0:
+            st.success(
+                f"Auto-estudio inicial: {int(bootstrap_report.get('queued', 0))} ficha(s) encoladas "
+                "automaticamente en orquestador."
+            )
+        if bootstrap_report.get("errors"):
+            st.warning("Auto-estudio inicial con observaciones: " + "; ".join(bootstrap_report.get("errors", [])))
+        st.session_state["intel_auto_study_bootstrap_report"] = {}
+    bootstrap_error = _clean_text(st.session_state.get("intel_auto_study_bootstrap_error", ""))
+    if bootstrap_error:
+        st.warning(f"No se pudo completar auto-estudio inicial de seguimiento: {bootstrap_error}")
+        st.session_state["intel_auto_study_bootstrap_error"] = ""
 
     tab_pend, tab_run, tab_cons, tab_done, tab_ver = st.tabs(
         [
@@ -6423,6 +6701,17 @@ def _render_tab_estudio_profundo(
                         for r in seg.to_dict(orient="records")
                     }
 
+                    st.session_state["intel_study_request_batch_ids"] = []
+                    st.session_state["intel_study_request_meta_map"] = {}
+                    st.session_state["intel_study_request_id"] = ""
+                    st.session_state["intel_study_request_ficha"] = ""
+                    st.session_state["intel_study_request_ficha_name"] = ""
+                    st.session_state["intel_study_request_notes"] = ""
+                    st.session_state.pop("intel_study_request_synced_id", None)
+                    st.session_state["intel_manual_last_req_row"] = None
+                    st.session_state["intel_manual_last_poll_ts"] = 0.0
+                    st.session_state["intel_manual_poll_cooldown_until"] = 0.0
+
                     request_ids: list[str] = []
                     for ficha_req in valid_fichas:
                         req_name = _clean_text(seg_name_map.get(str(ficha_req), "")) or target_name
@@ -6438,19 +6727,15 @@ def _render_tab_estudio_profundo(
                             },
                         )
                         request_ids.append(request_id)
+                        _register_study_request_session(
+                            request_id=request_id,
+                            ficha=str(ficha_req),
+                            nombre_ficha=req_name,
+                            notes=_clean_text(run_notes),
+                            set_current_if_empty=True,
+                        )
 
                     first_id = request_ids[0]
-                    st.session_state["intel_study_request_id"] = first_id
-                    st.session_state["intel_study_request_batch_ids"] = request_ids
-                    st.session_state["intel_study_request_ficha"] = str(valid_fichas[0])
-                    st.session_state["intel_study_request_ficha_name"] = _clean_text(
-                        seg_name_map.get(str(valid_fichas[0]), "")
-                    )
-                    st.session_state["intel_study_request_notes"] = _clean_text(run_notes)
-                    st.session_state.pop("intel_study_request_synced_id", None)
-                    st.session_state["intel_manual_last_req_row"] = None
-                    st.session_state["intel_manual_last_poll_ts"] = 0.0
-                    st.session_state["intel_manual_poll_cooldown_until"] = 0.0
                     if len(request_ids) == 1:
                         st.success(
                             f"Solicitud enviada al orquestador (request_id={first_id[:10]}...). "
@@ -6543,6 +6828,10 @@ def _render_tab_estudio_profundo(
 
                     sync_now = st.button("Sincronizar resultado remoto", key="intel_sync_remote_now")
                     st.caption("Auto-actualizacion activa cada 5 segundos mientras el run este en proceso.")
+                    batch_ids_raw = st.session_state.get("intel_study_request_batch_ids", [])
+                    batch_ids = [str(x).strip() for x in (batch_ids_raw if isinstance(batch_ids_raw, list) else []) if str(x).strip()]
+                    if batch_ids:
+                        st.caption(f"Cola activa: {len(batch_ids)} solicitud(es).")
 
                     synced_id = _clean_text(st.session_state.get("intel_study_request_synced_id", ""))
                     if sync_now or (status == "done" and synced_id != current_request_id):
@@ -6556,10 +6845,36 @@ def _render_tab_estudio_profundo(
                         if ok:
                             st.session_state["intel_study_request_synced_id"] = current_request_id
                             st.session_state["intel_selected_run_id"] = run_id
-                            st.success(msg)
+                            ficha_done = _clean_text(st.session_state.get("intel_study_request_ficha", ""))
+                            if ficha_done:
+                                _update_tracking_state(
+                                    ficha_done,
+                                    "listo para busqueda de proveedores",
+                                    note_suffix=f"Estudio completado run_id={run_id}",
+                                )
+                            st.success(msg + " Estado de seguimiento actualizado.")
+                            next_id = _advance_study_request_queue(current_request_id)
+                            if next_id:
+                                st.info(f"Continuando automaticamente con siguiente request_id={next_id[:10]}...")
                             st.rerun()
                         else:
                             st.warning(msg)
+
+                    if status == "error":
+                        ficha_err = _clean_text(st.session_state.get("intel_study_request_ficha", ""))
+                        if ficha_err:
+                            _update_tracking_state(
+                                ficha_err,
+                                "pendiente de estudio profundo",
+                                note_suffix=f"Error en request_id={current_request_id}",
+                            )
+                        next_id = _advance_study_request_queue(current_request_id)
+                        if next_id:
+                            st.warning(
+                                f"Request con error ({current_request_id[:10]}...). "
+                                f"Se continua con {next_id[:10]}..."
+                            )
+                            st.rerun()
 
                     auto_refresh = status in {"pending", "enqueued", "running"}
                     if auto_refresh:
@@ -6823,11 +7138,13 @@ def _render_tab_estudio_profundo(
                             "headless": False,
                         },
                     )
-                    st.session_state["intel_study_request_id"] = request_id
-                    st.session_state["intel_study_request_ficha"] = str(chosen)
-                    st.session_state["intel_study_request_ficha_name"] = ficha_name
-                    st.session_state["intel_study_request_notes"] = "Reestudio manual"
-                    st.session_state.pop("intel_study_request_synced_id", None)
+                    _register_study_request_session(
+                        request_id=request_id,
+                        ficha=str(chosen),
+                        nombre_ficha=ficha_name,
+                        notes="Reestudio manual",
+                        set_current_if_empty=True,
+                    )
                     st.success(
                         f"Reestudio encolado en orquestador (request_id={request_id[:10]}...). "
                         "Sincroniza cuando el estado cambie a done."
@@ -7428,6 +7745,9 @@ if needs_universe:
     else:
         ficha_metrics_df, ficha_acts_df, db_path = _get_universe_session_cached()
     ranked_df = _get_ranked_session_cached(ficha_metrics_df, st.session_state["intel_weights"])
+
+if needs_study_bootstrap:
+    _auto_enqueue_study_backlog_once(str(db_path or st.session_state.get("intel_db_path_cache", "") or ""))
 
 _render_kpis(ranked_df)
 
