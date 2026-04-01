@@ -41,12 +41,20 @@ def build_estado_resultados(
     ing = _ensure_estado_resultados_schema(df_ing)
     gas = _ensure_estado_resultados_schema(df_gas)
 
-    ing = ing[ing[COL_CATEGORIA].map(lambda x: include_by_category(x, include_miscelaneos))].copy()
-    gas = gas[gas[COL_CATEGORIA].map(lambda x: include_by_category(x, include_miscelaneos))].copy()
+    cat_ing = ing.get(COL_CATEGORIA, pd.Series("", index=ing.index)).astype(str)
+    cat_gas = gas.get(COL_CATEGORIA, pd.Series("", index=gas.index)).astype(str)
+    monto_ing = pd.to_numeric(ing.get(COL_MONTO, pd.Series(0.0, index=ing.index)), errors="coerce").fillna(0.0)
+    monto_gas = pd.to_numeric(gas.get(COL_MONTO, pd.Series(0.0, index=gas.index)), errors="coerce").fillna(0.0)
 
-    ingresos = float(ing[COL_MONTO].sum())
-    costos_directos = float(gas[gas[COL_CATEGORIA].map(_is_direct_cost)][COL_MONTO].sum())
-    gastos_operativos = float(gas[~gas[COL_CATEGORIA].map(_is_direct_cost)][COL_MONTO].sum())
+    ing = ing[cat_ing.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
+    gas = gas[cat_gas.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
+    cat_gas = gas.get(COL_CATEGORIA, pd.Series("", index=gas.index)).astype(str)
+
+    ingresos = float(pd.to_numeric(ing.get(COL_MONTO, pd.Series(0.0, index=ing.index)), errors="coerce").fillna(0.0).sum())
+    direct_mask = cat_gas.map(_is_direct_cost)
+    gas_amounts = pd.to_numeric(gas.get(COL_MONTO, pd.Series(0.0, index=gas.index)), errors="coerce").fillna(0.0)
+    costos_directos = float(gas_amounts[direct_mask].sum()) if not gas_amounts.empty else 0.0
+    gastos_operativos = float(gas_amounts[~direct_mask].sum()) if not gas_amounts.empty else 0.0
 
     utilidad_bruta = ingresos - costos_directos
     utilidad_operativa = utilidad_bruta - gastos_operativos
@@ -65,15 +73,37 @@ def build_estado_resultados(
 
     ing_month = ing.copy()
     gas_month = gas.copy()
-    ing_month["Mes"] = pd.to_datetime(ing_month[COL_FECHA], errors="coerce").dt.to_period("M")
-    gas_month["Mes"] = pd.to_datetime(gas_month[COL_FECHA], errors="coerce").dt.to_period("M")
+    ing_month["Mes"] = pd.to_datetime(ing_month.get(COL_FECHA), errors="coerce").dt.to_period("M")
+    gas_month["Mes"] = pd.to_datetime(gas_month.get(COL_FECHA), errors="coerce").dt.to_period("M")
 
-    ing_m = ing_month.groupby("Mes", as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Ingresos"})
-    gas_m = gas_month.groupby("Mes", as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Gastos"})
+    if COL_MONTO not in ing_month.columns:
+        ing_month[COL_MONTO] = 0.0
+    if COL_MONTO not in gas_month.columns:
+        gas_month[COL_MONTO] = 0.0
+
+    ing_m = (
+        ing_month.groupby("Mes", as_index=False)[COL_MONTO]
+        .sum()
+        .rename(columns={COL_MONTO: "Ingresos"})
+    )
+    gas_m = (
+        gas_month.groupby("Mes", as_index=False)[COL_MONTO]
+        .sum()
+        .rename(columns={COL_MONTO: "Gastos"})
+    )
     mensual = ing_m.merge(gas_m, on="Mes", how="outer").fillna(0.0)
     if not mensual.empty:
         mensual["Mes"] = mensual["Mes"].dt.to_timestamp()
     mensual["Utilidad"] = mensual["Ingresos"] - mensual["Gastos"]
+
+    if COL_EMPRESA not in ing.columns:
+        ing[COL_EMPRESA] = ""
+    if COL_EMPRESA not in gas.columns:
+        gas[COL_EMPRESA] = ""
+    if COL_MONTO not in ing.columns:
+        ing[COL_MONTO] = 0.0
+    if COL_MONTO not in gas.columns:
+        gas[COL_MONTO] = 0.0
 
     empresa_ing = ing.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Ingresos"})
     empresa_gas = gas.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Gastos"})
@@ -81,6 +111,10 @@ def build_estado_resultados(
     por_empresa["Utilidad"] = por_empresa["Ingresos"] - por_empresa["Gastos"]
     por_empresa = por_empresa.sort_values("Utilidad", ascending=False)
 
+    if COL_CATEGORIA not in gas.columns:
+        gas[COL_CATEGORIA] = ""
+    if COL_MONTO not in gas.columns:
+        gas[COL_MONTO] = 0.0
     gasto_categoria = (
         gas.groupby(COL_CATEGORIA, as_index=False)[COL_MONTO]
         .sum()
