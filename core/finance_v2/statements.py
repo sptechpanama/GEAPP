@@ -11,14 +11,35 @@ def _is_direct_cost(category: str) -> bool:
     return "proyecto" in key
 
 
+def _ensure_estado_resultados_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Blindaje defensivo: evita KeyError por columnas faltantes.
+    """
+    out = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    if COL_CATEGORIA not in out.columns:
+        out[COL_CATEGORIA] = ""
+    if COL_MONTO not in out.columns:
+        out[COL_MONTO] = 0.0
+    if COL_FECHA not in out.columns:
+        out[COL_FECHA] = pd.NaT
+    if COL_EMPRESA not in out.columns:
+        out[COL_EMPRESA] = ""
+
+    out[COL_CATEGORIA] = out[COL_CATEGORIA].astype(str).fillna("")
+    out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0)
+    out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
+    out[COL_EMPRESA] = out[COL_EMPRESA].astype(str).fillna("")
+    return out
+
+
 def build_estado_resultados(
     df_ing: pd.DataFrame,
     df_gas: pd.DataFrame,
     *,
     include_miscelaneos: bool,
 ) -> dict:
-    ing = df_ing.copy()
-    gas = df_gas.copy()
+    ing = _ensure_estado_resultados_schema(df_ing)
+    gas = _ensure_estado_resultados_schema(df_gas)
 
     ing = ing[ing[COL_CATEGORIA].map(lambda x: include_by_category(x, include_miscelaneos))].copy()
     gas = gas[gas[COL_CATEGORIA].map(lambda x: include_by_category(x, include_miscelaneos))].copy()
