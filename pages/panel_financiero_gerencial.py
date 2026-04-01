@@ -442,8 +442,28 @@ opts = get_filter_options(df_ing, df_gas)
 
 with st.sidebar:
     st.markdown("### Filtros globales")
-    fecha_desde = st.date_input("Desde", value=min_date, min_value=min_date, max_value=max_date, key="f2_desde")
-    fecha_hasta = st.date_input("Hasta", value=max_date, min_value=min_date, max_value=max_date, key="f2_hasta")
+    today = date.today()
+    mes_inicio = date(today.year, today.month, 1)
+    default_desde = max(min_date, mes_inicio)
+    default_hasta = min(max_date, today)
+    if default_desde > default_hasta:
+        default_desde = min_date
+        default_hasta = max_date
+
+    modo_tiempo = st.radio(
+        "Modo de tiempo",
+        ["Periodo corriente (mes actual)", "Rango personalizado"],
+        index=0,
+        key="f2_modo_tiempo",
+    )
+
+    if modo_tiempo == "Rango personalizado":
+        fecha_desde = st.date_input("Desde", value=default_desde, min_value=min_date, max_value=max_date, key="f2_desde")
+        fecha_hasta = st.date_input("Hasta", value=default_hasta, min_value=min_date, max_value=max_date, key="f2_hasta")
+    else:
+        fecha_desde = default_desde
+        fecha_hasta = default_hasta
+        st.caption(f"Periodo activo: {fecha_desde.isoformat()} -> {fecha_hasta.isoformat()}")
 
     empresa_opt = ["Todas"] + opts["empresas"]
     empresa = st.selectbox("Empresa", options=empresa_opt, index=0, key="f2_empresa")
@@ -480,14 +500,15 @@ with st.sidebar:
                 "f2_escenarios",
                 "f2_vista",
                 "f2_include_misc",
+                "f2_modo_tiempo",
                 "f2_period_cash_actual",
                 "f2_period_cash_proj",
                 "f2_period_results",
                 "f2_period_balance",
             ]:
                 st.session_state.pop(k, None)
-            st.session_state["f2_desde"] = min_date
-            st.session_state["f2_hasta"] = max_date
+            st.session_state["f2_desde"] = default_desde
+            st.session_state["f2_hasta"] = default_hasta
             _safe_rerun()
 
 if fecha_desde > fecha_hasta:
@@ -707,7 +728,7 @@ with tab_d:
     period_results = st.selectbox(
         "Periodo (estado de resultados)",
         options=PERIOD_OPTIONS_RESULTS,
-        index=PERIOD_OPTIONS_RESULTS.index("Cuatrimestral"),
+        index=PERIOD_OPTIONS_RESULTS.index("Mensual"),
         key="f2_period_results",
     )
 
@@ -774,7 +795,7 @@ with tab_e:
     period_balance = st.selectbox(
         "Periodo (balance)",
         options=PERIOD_OPTIONS_BALANCE,
-        index=PERIOD_OPTIONS_BALANCE.index("Anual"),
+        index=PERIOD_OPTIONS_BALANCE.index("Mensual"),
         key="f2_period_balance",
     )
 
