@@ -103,14 +103,27 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_filter_options(df_ing: pd.DataFrame, df_gas: pd.DataFrame) -> dict:
+    def _clean_option(x) -> str:
+        try:
+            if pd.isna(x):
+                return ""
+        except Exception:
+            pass
+        val = str(x or "").strip()
+        if val.lower() in {"nan", "none", "null"}:
+            return ""
+        return val
+
     empresas = sorted({
-        *[x for x in df_ing[COL_EMPRESA].dropna().astype(str).str.strip().tolist() if x],
-        *[x for x in df_gas[COL_EMPRESA].dropna().astype(str).str.strip().tolist() if x],
+        *[_clean_option(x) for x in df_ing[COL_EMPRESA].tolist()],
+        *[_clean_option(x) for x in df_gas[COL_EMPRESA].tolist()],
     })
     escenarios = sorted({
-        *[x for x in df_ing[COL_ESCENARIO].dropna().astype(str).str.strip().tolist() if x],
-        *[x for x in df_gas[COL_ESCENARIO].dropna().astype(str).str.strip().tolist() if x],
+        *[_clean_option(x) for x in df_ing[COL_ESCENARIO].tolist()],
+        *[_clean_option(x) for x in df_gas[COL_ESCENARIO].tolist()],
     })
+    empresas = [x for x in empresas if x]
+    escenarios = [x for x in escenarios if x]
     return {
         "empresas": empresas,
         "escenarios": escenarios,

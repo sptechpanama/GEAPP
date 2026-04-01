@@ -139,16 +139,28 @@ def _aggregate_cash_series(serie: pd.DataFrame, period_label: str) -> pd.DataFra
         return pd.DataFrame(columns=[COL_FECHA, "flujo", "saldo"])
     freq = _freq_from_period_label(period_label)
     base = serie.copy()
-    base[COL_FECHA] = pd.to_datetime(base[COL_FECHA], errors="coerce")
-    base = base.dropna(subset=[COL_FECHA])
+    date_col = COL_FECHA if COL_FECHA in base.columns else ("fecha" if "fecha" in base.columns else "fecha_evento")
+    flow_col = "flujo" if "flujo" in base.columns else ("flujo_proyectado" if "flujo_proyectado" in base.columns else None)
+    if date_col not in base.columns or flow_col is None:
+        return pd.DataFrame(columns=[COL_FECHA, "flujo", "saldo"])
+
+    base[date_col] = pd.to_datetime(base[date_col], errors="coerce")
+    base[flow_col] = pd.to_numeric(base[flow_col], errors="coerce").fillna(0.0)
+    base = base.dropna(subset=[date_col])
+    if base.empty:
+        return pd.DataFrame(columns=[COL_FECHA, "flujo", "saldo"])
+
     grouped = (
-        base.groupby(pd.Grouper(key=COL_FECHA, freq=freq), as_index=False)["flujo"]
+        base.set_index(date_col)[flow_col]
+        .resample(freq)
         .sum()
-        .dropna(subset=[COL_FECHA])
+        .reset_index()
+        .rename(columns={date_col: COL_FECHA, flow_col: "flujo"})
     )
+    grouped = grouped.dropna(subset=[COL_FECHA])
     grouped = grouped.sort_values(COL_FECHA)
     grouped["saldo"] = grouped["flujo"].cumsum()
-    return grouped
+    return grouped[[COL_FECHA, "flujo", "saldo"]]
 
 
 def _aggregate_resultados_periodo(mensual_df: pd.DataFrame, period_label: str) -> pd.DataFrame:
@@ -156,14 +168,25 @@ def _aggregate_resultados_periodo(mensual_df: pd.DataFrame, period_label: str) -
         return pd.DataFrame(columns=["Periodo", "Ingresos", "Gastos", "Utilidad"])
     freq = _freq_from_period_label(period_label)
     work = mensual_df.copy()
-    work["Mes"] = pd.to_datetime(work.get("Mes"), errors="coerce")
-    work = work.dropna(subset=["Mes"])
+    mes_col = "Mes" if "Mes" in work.columns else ("mes" if "mes" in work.columns else None)
+    if mes_col is None:
+        return pd.DataFrame(columns=["Periodo", "Ingresos", "Gastos", "Utilidad"])
+    for col in ["Ingresos", "Gastos", "Utilidad"]:
+        if col not in work.columns:
+            work[col] = 0.0
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
+    work[mes_col] = pd.to_datetime(work.get(mes_col), errors="coerce")
+    work = work.dropna(subset=[mes_col])
+    if work.empty:
+        return pd.DataFrame(columns=["Periodo", "Ingresos", "Gastos", "Utilidad"])
     grouped = (
-        work.groupby(pd.Grouper(key="Mes", freq=freq), as_index=False)[["Ingresos", "Gastos", "Utilidad"]]
+        work.set_index(mes_col)[["Ingresos", "Gastos", "Utilidad"]]
+        .resample(freq)
         .sum()
-        .dropna(subset=["Mes"])
-        .sort_values("Mes")
-        .rename(columns={"Mes": "Periodo"})
+        .reset_index()
+        .rename(columns={mes_col: "Periodo"})
+        .dropna(subset=["Periodo"])
+        .sort_values("Periodo")
     )
     return grouped
 
