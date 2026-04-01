@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import pandas as pd
+from pandas.api.types import is_period_dtype
 
 from .constants import COL_CATEGORIA, COL_EMPRESA, COL_FECHA, COL_MONTO
 from .helpers import include_by_category, safe_div
@@ -118,9 +119,19 @@ def build_estado_resultados(
         .sum()
         .rename(columns={COL_MONTO: "Gastos"})
     )
-    mensual = ing_m.merge(gas_m, on="Mes", how="outer").fillna(0.0)
-    if not mensual.empty:
-        mensual["Mes"] = mensual["Mes"].dt.to_timestamp()
+    mensual = ing_m.merge(gas_m, on="Mes", how="outer")
+    for col in ("Ingresos", "Gastos"):
+        if col not in mensual.columns:
+            mensual[col] = 0.0
+        mensual[col] = pd.to_numeric(mensual[col], errors="coerce").fillna(0.0)
+    if not mensual.empty and "Mes" in mensual.columns:
+        mes_series = mensual["Mes"]
+        if is_period_dtype(mes_series):
+            mensual["Mes"] = mes_series.dt.to_timestamp()
+        else:
+            mensual["Mes"] = pd.to_datetime(mes_series, errors="coerce")
+            mensual = mensual.dropna(subset=["Mes"])
+    mensual = mensual.sort_values("Mes", na_position="last")
     mensual["Utilidad"] = mensual["Ingresos"] - mensual["Gastos"]
 
     if COL_EMPRESA not in ing.columns:

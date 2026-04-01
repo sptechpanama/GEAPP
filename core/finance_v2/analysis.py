@@ -3,6 +3,7 @@
 from datetime import date
 
 import pandas as pd
+from pandas.api.types import is_period_dtype
 
 from .constants import (
     COL_CATEGORIA,
@@ -61,6 +62,41 @@ def _ensure_analysis_schema(df: pd.DataFrame, *, is_gasto: bool) -> pd.DataFrame
     return out
 
 
+def _group_sum_safe(
+    df: pd.DataFrame,
+    by_col: str,
+    value_col: str,
+    *,
+    out_by_name: str | None = None,
+    out_value_name: str | None = None,
+    cast_group_to_str: bool = True,
+) -> pd.DataFrame:
+    """
+    GroupBy seguro: crea columnas faltantes y evita KeyError por estructura inconsistente.
+    """
+    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    if isinstance(work, pd.DataFrame) and work.columns.duplicated().any():
+        work = work.loc[:, ~work.columns.duplicated(keep="first")].copy()
+
+    if by_col not in work.columns:
+        work[by_col] = ""
+    if value_col not in work.columns:
+        work[value_col] = 0.0
+
+    group_series = _safe_series(work, by_col, "")
+    if cast_group_to_str:
+        group_series = group_series.astype(str)
+    work[by_col] = group_series
+    work[value_col] = pd.to_numeric(_safe_series(work, value_col, 0.0), errors="coerce").fillna(0.0)
+
+    out = work.groupby(by_col, dropna=False, as_index=False)[value_col].sum()
+    if out_by_name and out_by_name != by_col:
+        out = out.rename(columns={by_col: out_by_name})
+    if out_value_name and out_value_name != value_col:
+        out = out.rename(columns={value_col: out_value_name})
+    return out
+
+
 def _due_status(days_delta: float | int | None) -> str:
     if days_delta is None or pd.isna(days_delta):
         return "Sin fecha"
@@ -74,17 +110,17 @@ def _due_status(days_delta: float | int | None) -> str:
 
 def build_cuentas_por_cobrar(df_ing_pend: pd.DataFrame, *, fecha_hoy: date | None = None) -> pd.DataFrame:
     today = pd.Timestamp(fecha_hoy or date.today())
-    out = df_ing_pend.copy()
-    out["fecha_esperada"] = pd.to_datetime(out.get(COL_FECHA_COBRO), errors="coerce")
+    out = _ensure_analysis_schema(df_ing_pend, is_gasto=False)
+    out["fecha_esperada"] = pd.to_datetime(_safe_series(out, COL_FECHA_COBRO, pd.NaT), errors="coerce")
     out["dias_para_cobro"] = (out["fecha_esperada"] - today).dt.days
     out["estado"] = out["dias_para_cobro"].map(_due_status)
 
     result = pd.DataFrame(
         {
-            "cliente": out.get(COL_CLIENTE_NOMBRE, ""),
-            "proyecto": out.get(COL_PROYECTO, ""),
-            "empresa": out.get(COL_EMPRESA, ""),
-            "monto": pd.to_numeric(out.get(COL_MONTO), errors="coerce").fillna(0.0),
+            "cliente": _safe_series(out, COL_CLIENTE_NOMBRE, ""),
+            "proyecto": _safe_series(out, COL_PROYECTO, ""),
+            "empresa": _safe_series(out, COL_EMPRESA, ""),
+            "monto": pd.to_numeric(_safe_series(out, COL_MONTO, 0.0), errors="coerce").fillna(0.0),
             "fecha_esperada_cobro": out["fecha_esperada"],
             "dias_para_cobro": out["dias_para_cobro"],
             "estado": out["estado"],
@@ -96,12 +132,12 @@ def build_cuentas_por_cobrar(df_ing_pend: pd.DataFrame, *, fecha_hoy: date | Non
 
 def build_cuentas_por_pagar(df_gas_pend: pd.DataFrame, *, fecha_hoy: date | None = None) -> tuple[pd.DataFrame, dict]:
     today = pd.Timestamp(fecha_hoy or date.today())
-    out = df_gas_pend.copy()
+    out = _ensure_analysis_schema(df_gas_pend, is_gasto=True)
 
-    out["fecha_esperada"] = pd.to_datetime(out.get("__fecha_pago_estimada"), errors="coerce")
-    fallback_mask = out["fecha_esperada"].isna()
-    out.loc[fallback_mask, "fecha_esperada"] = pd.to_datetime(out.loc[fallback_mask, COL_FECHA], errors="coerce")
-    out["fuente_fecha"] = out.get("__fecha_pago_fuente", "sin_fecha")
+    out["fecha_esperada"] = pd.to_datetime(_safe_series(out, "__fecha_pago_estimada", pd.NaT), errors="coerce")
+    fallback_mask = pd.Series(out["fecha_esperada"].isna(), index=out.index)
+    out.loc[fallback_mask, "fecha_esperada"] = pd.to_datetime(_safe_series(out.loc[fallback_mask], COL_FECHA, pd.NaT), errors="coerce")
+    out["fuente_fecha"] = _safe_series(out, "__fecha_pago_fuente", "sin_fecha").astype(str)
     out.loc[fallback_mask, "fuente_fecha"] = "fallback_fecha_registro"
 
     out["dias_para_pago"] = (out["fecha_esperada"] - today).dt.days
@@ -109,10 +145,10 @@ def build_cuentas_por_pagar(df_gas_pend: pd.DataFrame, *, fecha_hoy: date | None
 
     result = pd.DataFrame(
         {
-            "proveedor": out.get(COL_PROVEEDOR, ""),
-            "proyecto": out.get(COL_PROYECTO, ""),
-            "empresa": out.get(COL_EMPRESA, ""),
-            "monto": pd.to_numeric(out.get(COL_MONTO), errors="coerce").fillna(0.0),
+            "proveedor": _safe_series(out, COL_PROVEEDOR, ""),
+            "proyecto": _safe_series(out, COL_PROYECTO, ""),
+            "empresa": _safe_series(out, COL_EMPRESA, ""),
+            "monto": pd.to_numeric(_safe_series(out, COL_MONTO, 0.0), errors="coerce").fillna(0.0),
             "fecha_esperada_pago": out["fecha_esperada"],
             "dias_para_pago": out["dias_para_pago"],
             "estado": out["estado"],
@@ -144,48 +180,61 @@ def build_analisis_gerencial(
     ing = ing[ing_cat.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
     gas = gas[gas_cat.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
 
-    ing_empresa = ing.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "ingresos"})
-    gas_empresa = gas.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "gastos"})
+    ing_empresa = _group_sum_safe(ing, COL_EMPRESA, COL_MONTO, out_value_name="ingresos")
+    gas_empresa = _group_sum_safe(gas, COL_EMPRESA, COL_MONTO, out_value_name="gastos")
     empresa = ing_empresa.merge(gas_empresa, on=COL_EMPRESA, how="outer").fillna(0.0)
     empresa["utilidad"] = empresa["ingresos"] - empresa["gastos"]
     empresa = empresa.sort_values("utilidad", ascending=False)
 
-    top_gastos = (
-        gas.groupby(COL_CATEGORIA, as_index=False)[COL_MONTO]
-        .sum()
-        .rename(columns={COL_CATEGORIA: "categoria", COL_MONTO: "gasto"})
-        .sort_values("gasto", ascending=False)
-    )
+    top_gastos = _group_sum_safe(
+        gas,
+        COL_CATEGORIA,
+        COL_MONTO,
+        out_by_name="categoria",
+        out_value_name="gasto",
+    ).sort_values("gasto", ascending=False)
 
     ing_m = ing.copy()
     gas_m = gas.copy()
     ing_m["mes"] = pd.to_datetime(_safe_series(ing_m, COL_FECHA, pd.NaT), errors="coerce").dt.to_period("M")
     gas_m["mes"] = pd.to_datetime(_safe_series(gas_m, COL_FECHA, pd.NaT), errors="coerce").dt.to_period("M")
-    m_ing = ing_m.groupby("mes", as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "ingresos"})
-    m_gas = gas_m.groupby("mes", as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "gastos"})
-    evolucion = m_ing.merge(m_gas, on="mes", how="outer").fillna(0.0)
-    if not evolucion.empty:
-        evolucion["mes"] = evolucion["mes"].dt.to_timestamp()
+    m_ing = _group_sum_safe(ing_m, "mes", COL_MONTO, out_value_name="ingresos", cast_group_to_str=False)
+    m_gas = _group_sum_safe(gas_m, "mes", COL_MONTO, out_value_name="gastos", cast_group_to_str=False)
+    evolucion = m_ing.merge(m_gas, on="mes", how="outer")
+    for col in ("ingresos", "gastos"):
+        if col not in evolucion.columns:
+            evolucion[col] = 0.0
+        evolucion[col] = pd.to_numeric(evolucion[col], errors="coerce").fillna(0.0)
+    if not evolucion.empty and "mes" in evolucion.columns:
+        mes_series = evolucion["mes"]
+        if is_period_dtype(mes_series):
+            evolucion["mes"] = mes_series.dt.to_timestamp()
+        else:
+            evolucion["mes"] = pd.to_datetime(mes_series, errors="coerce")
+            evolucion = evolucion.dropna(subset=["mes"])
+    evolucion = evolucion.sort_values("mes", na_position="last")
     evolucion["utilidad"] = evolucion["ingresos"] - evolucion["gastos"]
 
-    conc_cliente = (
-        ing.groupby(COL_CLIENTE_NOMBRE, as_index=False)[COL_MONTO]
-        .sum()
-        .rename(columns={COL_CLIENTE_NOMBRE: "cliente", COL_MONTO: "ingresos"})
-        .sort_values("ingresos", ascending=False)
-    )
+    conc_cliente = _group_sum_safe(
+        ing,
+        COL_CLIENTE_NOMBRE,
+        COL_MONTO,
+        out_by_name="cliente",
+        out_value_name="ingresos",
+    ).sort_values("ingresos", ascending=False)
     total_ing = float(conc_cliente["ingresos"].sum()) if not conc_cliente.empty else 0.0
     if total_ing > 0:
         conc_cliente["participacion_pct"] = conc_cliente["ingresos"].map(lambda x: safe_div(x, total_ing) * 100.0)
     else:
         conc_cliente["participacion_pct"] = 0.0
 
-    conc_proyecto = (
-        ing.groupby(COL_PROYECTO, as_index=False)[COL_MONTO]
-        .sum()
-        .rename(columns={COL_PROYECTO: "proyecto", COL_MONTO: "ingresos"})
-        .sort_values("ingresos", ascending=False)
-    )
+    conc_proyecto = _group_sum_safe(
+        ing,
+        COL_PROYECTO,
+        COL_MONTO,
+        out_by_name="proyecto",
+        out_value_name="ingresos",
+    ).sort_values("ingresos", ascending=False)
 
     cxc_work = cxc_df.copy() if isinstance(cxc_df, pd.DataFrame) else pd.DataFrame()
     if "cliente" not in cxc_work.columns:
@@ -193,7 +242,7 @@ def build_analisis_gerencial(
     if "monto" not in cxc_work.columns:
         cxc_work["monto"] = 0.0
     cxc_work["monto"] = pd.to_numeric(cxc_work["monto"], errors="coerce").fillna(0.0)
-    cxc_concentracion = cxc_work.groupby("cliente", as_index=False)["monto"].sum().sort_values("monto", ascending=False)
+    cxc_concentracion = _group_sum_safe(cxc_work, "cliente", "monto").sort_values("monto", ascending=False)
     cxc_total = float(cxc_concentracion["monto"].sum()) if not cxc_concentracion.empty else 0.0
     if cxc_total > 0:
         cxc_concentracion["participacion_pct"] = cxc_concentracion["monto"].map(lambda x: safe_div(x, cxc_total) * 100.0)
