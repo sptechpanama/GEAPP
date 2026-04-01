@@ -17,6 +17,50 @@ from .constants import (
 from .helpers import include_by_category, safe_div
 
 
+def _safe_series(df: pd.DataFrame, col: str, default_value: object = "") -> pd.Series:
+    """
+    Devuelve una Series segura alineada al indice de df.
+    Evita errores por columnas faltantes o duplicadas.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return pd.Series(dtype="object")
+
+    if col in df.columns:
+        raw = df[col]
+        if isinstance(raw, pd.DataFrame):
+            series = raw.iloc[:, 0]
+        elif isinstance(raw, pd.Series):
+            series = raw
+        else:
+            series = pd.Series([raw] * len(df), index=df.index)
+    else:
+        series = pd.Series([default_value] * len(df), index=df.index)
+    return series.reindex(df.index)
+
+
+def _ensure_analysis_schema(df: pd.DataFrame, *, is_gasto: bool) -> pd.DataFrame:
+    out = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    if isinstance(out, pd.DataFrame) and out.columns.duplicated().any():
+        out = out.loc[:, ~out.columns.duplicated(keep="first")].copy()
+
+    required_common = [COL_FECHA, COL_CATEGORIA, COL_MONTO, COL_EMPRESA, COL_PROYECTO]
+    required_extra = [COL_PROVEEDOR] if is_gasto else [COL_CLIENTE_NOMBRE]
+    for col in required_common + required_extra:
+        if col not in out.columns:
+            out[col] = ""
+
+    out[COL_FECHA] = pd.to_datetime(_safe_series(out, COL_FECHA, pd.NaT), errors="coerce")
+    out[COL_CATEGORIA] = _safe_series(out, COL_CATEGORIA, "").astype(str)
+    out[COL_MONTO] = pd.to_numeric(_safe_series(out, COL_MONTO, 0.0), errors="coerce").fillna(0.0)
+    out[COL_EMPRESA] = _safe_series(out, COL_EMPRESA, "").astype(str)
+    out[COL_PROYECTO] = _safe_series(out, COL_PROYECTO, "").astype(str)
+    if is_gasto:
+        out[COL_PROVEEDOR] = _safe_series(out, COL_PROVEEDOR, "").astype(str)
+    else:
+        out[COL_CLIENTE_NOMBRE] = _safe_series(out, COL_CLIENTE_NOMBRE, "").astype(str)
+    return out
+
+
 def _due_status(days_delta: float | int | None) -> str:
     if days_delta is None or pd.isna(days_delta):
         return "Sin fecha"
@@ -92,11 +136,13 @@ def build_analisis_gerencial(
     *,
     include_miscelaneos: bool,
 ) -> dict:
-    ing = df_ing.copy()
-    gas = df_gas.copy()
+    ing = _ensure_analysis_schema(df_ing, is_gasto=False)
+    gas = _ensure_analysis_schema(df_gas, is_gasto=True)
 
-    ing = ing[ing[COL_CATEGORIA].map(lambda x: include_by_category(x, include_miscelaneos))].copy()
-    gas = gas[gas[COL_CATEGORIA].map(lambda x: include_by_category(x, include_miscelaneos))].copy()
+    ing_cat = _safe_series(ing, COL_CATEGORIA, "").astype(str)
+    gas_cat = _safe_series(gas, COL_CATEGORIA, "").astype(str)
+    ing = ing[ing_cat.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
+    gas = gas[gas_cat.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
 
     ing_empresa = ing.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "ingresos"})
     gas_empresa = gas.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "gastos"})
@@ -113,8 +159,8 @@ def build_analisis_gerencial(
 
     ing_m = ing.copy()
     gas_m = gas.copy()
-    ing_m["mes"] = pd.to_datetime(ing_m[COL_FECHA], errors="coerce").dt.to_period("M")
-    gas_m["mes"] = pd.to_datetime(gas_m[COL_FECHA], errors="coerce").dt.to_period("M")
+    ing_m["mes"] = pd.to_datetime(_safe_series(ing_m, COL_FECHA, pd.NaT), errors="coerce").dt.to_period("M")
+    gas_m["mes"] = pd.to_datetime(_safe_series(gas_m, COL_FECHA, pd.NaT), errors="coerce").dt.to_period("M")
     m_ing = ing_m.groupby("mes", as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "ingresos"})
     m_gas = gas_m.groupby("mes", as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "gastos"})
     evolucion = m_ing.merge(m_gas, on="mes", how="outer").fillna(0.0)
@@ -141,7 +187,13 @@ def build_analisis_gerencial(
         .sort_values("ingresos", ascending=False)
     )
 
-    cxc_concentracion = cxc_df.groupby("cliente", as_index=False)["monto"].sum().sort_values("monto", ascending=False)
+    cxc_work = cxc_df.copy() if isinstance(cxc_df, pd.DataFrame) else pd.DataFrame()
+    if "cliente" not in cxc_work.columns:
+        cxc_work["cliente"] = ""
+    if "monto" not in cxc_work.columns:
+        cxc_work["monto"] = 0.0
+    cxc_work["monto"] = pd.to_numeric(cxc_work["monto"], errors="coerce").fillna(0.0)
+    cxc_concentracion = cxc_work.groupby("cliente", as_index=False)["monto"].sum().sort_values("monto", ascending=False)
     cxc_total = float(cxc_concentracion["monto"].sum()) if not cxc_concentracion.empty else 0.0
     if cxc_total > 0:
         cxc_concentracion["participacion_pct"] = cxc_concentracion["monto"].map(lambda x: safe_div(x, cxc_total) * 100.0)
