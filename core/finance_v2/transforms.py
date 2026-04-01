@@ -16,6 +16,7 @@ from .constants import (
     COL_ESCENARIO,
     COL_FECHA,
     COL_FECHA_COBRO,
+    COL_FECHA_PAGO,
     COL_MONTO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
@@ -83,7 +84,7 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
 
     # Fecha esperada de pago: puede no existir en el esquema actual.
     fallback_candidates = [
-        "Fecha esperada de pago",
+        COL_FECHA_PAGO,
         "Fecha de pago",
         "Fecha pago",
         "Fecha de vencimiento",

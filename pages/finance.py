@@ -27,13 +27,7 @@ def _safe_rerun() -> None:
         legacy()
 
 from sheets import get_client, read_worksheet, write_worksheet
-from charts import (
-    chart_bars_saldo_mensual,
-    chart_line_ing_gas_util_mensual,
-    chart_bar_top_gastos,
-)
 from services.backups import debug_sa_quota
-from core.metrics import kpis_finanzas, monthly_pnl, top_gastos_por_categoria
 from core.cashflow import preparar_cashflow
 try:
     from core.sync import sync_cambios
@@ -113,6 +107,7 @@ COL_CLI_NOM = "ClienteNombre"
 COL_EMP     = "Empresa"
 COL_COB     = "Cobrado"
 COL_FCOBRO  = "Fecha de cobro"
+COL_FPAGO   = "Fecha esperada de pago"
 COL_ROWID   = "RowID"
 COL_REF_RID = "Ref RowID Ingreso"
 COL_POR_COB = "Por_cobrar"        # Ingresos: "No"/"Sí"
@@ -329,14 +324,15 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
 def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = _canon_cols(df.copy())
     for col in [COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_ESC, COL_REF_RID,
-                COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_ROWID, COL_USER]:
+                COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_PROV, COL_FPAGO, COL_ROWID, COL_USER]:
         if col not in out.columns:
             if col == COL_MONTO: out[col] = 0.0
-            elif col == COL_FECHA: out[col] = pd.NaT
+            elif col in {COL_FECHA, COL_FPAGO}: out[col] = pd.NaT
             elif col == COL_EMP: out[col] = EMPRESA_DEFAULT
             elif col == COL_POR_PAG: out[col] = "No"
             else: out[col] = ""
     out[COL_FECHA] = _ts(out[COL_FECHA])
+    out[COL_FPAGO] = _ts(out[COL_FPAGO])
     out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
     out[COL_EMP]   = out[COL_EMP].astype("string").str.upper().str.strip().where(
         out[COL_EMP].astype("string").str.upper().str.strip().isin(EMPRESAS_OPCIONES),
@@ -737,10 +733,35 @@ def safe_write_worksheet(client, sheet_id, worksheet, new_df, old_df=None, id_co
         print(f"[WARN] Error al escribir en {worksheet}: {e}")
         return False
 
+
+def _ensure_operational_schema_persisted_once(client, sheet_id: str) -> None:
+    """
+    Garantiza que las hojas operativas tengan las columnas requeridas
+    para Finanzas 2 (incluyendo fechas esperadas).
+    """
+    if st.session_state.get("finance_schema_persisted", False):
+        return
+    try:
+        raw_ing = get_sheet_df_cached(sheet_id, WS_ING, st.session_state.google_cache_token)
+        raw_gas = get_sheet_df_cached(sheet_id, WS_GAS, st.session_state.google_cache_token)
+
+        norm_ing = ensure_ingresos_columns(raw_ing)
+        norm_gas = ensure_gastos_columns(raw_gas)
+
+        if set(norm_ing.columns) != set(raw_ing.columns):
+            safe_write_worksheet(client, sheet_id, WS_ING, norm_ing, old_df=raw_ing, id_col=COL_ROWID)
+        if set(norm_gas.columns) != set(raw_gas.columns):
+            safe_write_worksheet(client, sheet_id, WS_GAS, norm_gas, old_df=raw_gas, id_col=COL_ROWID)
+    except Exception:
+        # Si falla, no bloquea la operativa.
+        pass
+    st.session_state["finance_schema_persisted"] = True
+
 # Carga base
 cache_token = st.session_state.google_cache_token
 st.session_state.df_ing = load_norm_cached(SHEET_ID, WS_ING, True, cache_token)
 st.session_state.df_gas = load_norm_cached(SHEET_ID, WS_GAS, False, cache_token)
+_ensure_operational_schema_persisted_once(client, SHEET_ID)
 
 
 # === Copias "antes" para comparar cambios ===
@@ -841,28 +862,7 @@ with k1: st.metric("Capital disponible para inversión", _format_money_es(capita
 with k2: st.metric("Capital actual", _format_money_es(saldo_actual))
 with k3: st.metric("Cuentas por cobrar (futuras)", _format_money_es(cxc_futuras))
 
-# -------------------- Gráficas y análisis --------------------
-with st.expander("📈 Ver análisis y gráficas", expanded=False):
-    st.markdown("### Tendencia mensual (Ingresos vs Gastos vs Utilidad)")
-    pnl_m = monthly_pnl(df_ing_reales, df_gas_reales)
-    st.altair_chart(chart_line_ing_gas_util_mensual(pnl_m), width="stretch")
-
-    st.markdown("### Top categorías de gasto")
-    try:
-        df_top = top_gastos_por_categoria(df_gas_reales, top_n=5)
-        st.altair_chart(chart_bar_top_gastos(df_top), width="stretch")
-    except Exception:
-        st.caption("Sin categorías de gasto disponibles.")
-
-    st.markdown("### Flujo de caja acumulado (filtrado)")
-    if cash.empty:
-        st.info("No hay datos en el período seleccionado.")
-    else:
-        gc1, gc2 = st.columns([2, 1])
-        with gc1:
-            st.line_chart(cash.set_index(COL_FECHA)[["Saldo"]], height=280, width="stretch")
-        with gc2:
-            st.altair_chart(chart_bars_saldo_mensual(cash), width="stretch")
+# La visualización analítica fue trasladada al "Panel Financiero Gerencial".
 
 
 # ============================================================
@@ -1072,7 +1072,7 @@ if ing_should_expand:
 with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     _prepare_entry_defaults("ing")
 
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.1])
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.2])
     with c1:
         empresa_ing = st.selectbox(
             "Empresa",
@@ -1102,6 +1102,13 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             ["No", "Sí"],
             index=0,
             key="ing_porcob_quick",
+            on_change=lambda: _mark_form_force_open("ing"),
+        )
+    with c5:
+        fecha_cobro_esperada = st.date_input(
+            "Fecha esperada de cobro",
+            value=_today(),
+            key="ing_fecha_cobro_quick",
             on_change=lambda: _mark_form_force_open("ing"),
         )
     categoria_ing = st.selectbox(
@@ -1152,7 +1159,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         hoy_ts = pd.Timestamp(_today())
         rid = uuid.uuid4().hex
         cobrado = "No" if por_cobrar_nuevo == "Sí" else "Sí"
-        fecha_cobro = hoy_ts if cobrado == "Sí" else pd.NaT
+        fecha_cobro = _ts(fecha_cobro_esperada)
         nueva = {
             COL_ROWID: rid,
             COL_FECHA: _ts(fecha_nueva),
@@ -1192,6 +1199,7 @@ if COL_CAT in df_ing_f.columns:
             ing_cat_options.append(cat)
 ing_colcfg = {
     COL_POR_COB: st.column_config.SelectboxColumn(COL_POR_COB, options=["No","Sí"]),
+    COL_FCOBRO:  st.column_config.DateColumn("Fecha esperada de cobro"),
     COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=ing_cat_options),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     # COL_CONC oculto en la vista
@@ -1203,15 +1211,36 @@ ing_colcfg = {
 df_ing_editor = df_ing_f[ing_cols_view].copy()
 if COL_MONTO in df_ing_editor.columns:
     df_ing_editor[COL_MONTO] = df_ing_editor[COL_MONTO].map(_format_number_es)
+ing_order = [x for x in [
+    COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_EMP, COL_POR_COB, COL_FCOBRO,
+    COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_DESC, COL_USER, COL_ROWID
+] if x in ing_cols_view]
 edited_ing = st.data_editor(
     df_ing_editor, num_rows="dynamic", hide_index=True, width="stretch",
-    column_config=ing_colcfg, key="tabla_ingresos"
+    column_config=ing_colcfg, key="tabla_ingresos", column_order=ing_order
 )
 edited_ing = _editor_state_to_dataframe(
     df_ing_editor,
     "tabla_ingresos",
     numeric_cols={COL_MONTO},
 )
+
+if COL_POR_COB in st.session_state.df_ing.columns and COL_FCOBRO in st.session_state.df_ing.columns:
+    miss_cobro_mask = (
+        st.session_state.df_ing[COL_POR_COB].map(_si_no_norm).eq("Sí")
+        & st.session_state.df_ing[COL_FCOBRO].isna()
+    )
+    miss_cobro_count = int(miss_cobro_mask.sum())
+    if miss_cobro_count > 0:
+        st.warning(f"Hay {miss_cobro_count} ingreso(s) por cobrar sin Fecha de cobro.")
+        if st.button("Completar Fecha de cobro faltante con Fecha del registro", key="btn_fill_ing_fechacobro"):
+            st.session_state.df_ing.loc[miss_cobro_mask, COL_FCOBRO] = st.session_state.df_ing.loc[miss_cobro_mask, COL_FECHA]
+            st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
+            wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
+            if wrote:
+                st.cache_data.clear()
+            st.success("Fechas de cobro completadas para ingresos pendientes.")
+            _safe_rerun()
 
 # === BORRADO REAL PRIMERO (INGRESOS) ===
 if COL_ROWID not in edited_ing.columns:
@@ -1263,7 +1292,7 @@ if gas_should_expand:
 with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     _prepare_entry_defaults("gas")
 
-    g1, g2, g3, g4, g5 = st.columns([1, 1, 1, 2, 1])
+    g1, g2, g3, g4, g5, g6 = st.columns([1, 1, 1, 1.6, 1, 1.3])
     with g1:
         empresa_g = st.selectbox(
             "Empresa",
@@ -1301,6 +1330,13 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             ["No", "Sí"],
             index=0,
             key="gas_porpag_quick",
+            on_change=lambda: _mark_form_force_open("gas"),
+        )
+    with g6:
+        fecha_pago_esperada = st.date_input(
+            "Fecha esperada de pago",
+            value=_today(),
+            key="gas_fecha_pago_quick",
             on_change=lambda: _mark_form_force_open("gas"),
         )
 
@@ -1362,6 +1398,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             COL_CAT: categoria_g,
             COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
             COL_POR_PAG: por_pagar_nuevo,
+            COL_FPAGO: _ts(fecha_pago_esperada),
             COL_PROY: (proyecto_id_g or "").strip(),
             COL_CLI_ID: (cliente_id_g or "").strip(),
             COL_CLI_NOM: (cliente_nombre_g or "").strip(),
@@ -1382,6 +1419,7 @@ st.markdown("### Gastos (tabla)")
 gas_cols_view = [c for c in df_gas_f.columns if c not in (COL_ROWID, COL_ESC)] + [COL_ROWID]
 gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No","Sí"]),
+    COL_FPAGO:   st.column_config.DateColumn("Fecha esperada de pago"),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     COL_CAT:     st.column_config.SelectboxColumn(
         COL_CAT,
@@ -1396,7 +1434,7 @@ gas_colcfg = {
 }
 # Fuerza un orden amigable: ... Descripción, Proveedor, ...
 gas_order = [x for x in [
-    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_POR_PAG,
+    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_POR_PAG, COL_FPAGO,
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_USER, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]
 
@@ -1423,6 +1461,23 @@ edited_gas = _editor_state_to_dataframe(
     "tabla_gastos",
     numeric_cols={COL_MONTO},
 )
+
+if COL_POR_PAG in st.session_state.df_gas.columns and COL_FPAGO in st.session_state.df_gas.columns:
+    miss_pago_mask = (
+        st.session_state.df_gas[COL_POR_PAG].map(_si_no_norm).eq("Sí")
+        & st.session_state.df_gas[COL_FPAGO].isna()
+    )
+    miss_pago_count = int(miss_pago_mask.sum())
+    if miss_pago_count > 0:
+        st.warning(f"Hay {miss_pago_count} gasto(s) por pagar sin Fecha esperada de pago.")
+        if st.button("Completar Fecha esperada de pago faltante con Fecha del registro", key="btn_fill_gas_fechapago"):
+            st.session_state.df_gas.loc[miss_pago_mask, COL_FPAGO] = st.session_state.df_gas.loc[miss_pago_mask, COL_FECHA]
+            st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
+            wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
+            if wrote:
+                st.cache_data.clear()
+            st.success("Fechas esperadas de pago completadas para gastos pendientes.")
+            _safe_rerun()
 # === BORRADO REAL PRIMERO (GASTOS) ===
 if COL_ROWID not in edited_gas.columns:
     st.warning("No se encontró columna RowID en la tabla de Gastos; no se pueden borrar filas en Sheets.")

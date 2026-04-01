@@ -28,6 +28,19 @@ from core.finance_v2 import (
     split_real_vs_pending,
 )
 from core.finance_v2.constants import COL_FECHA
+from core.finance_v2.constants import (
+    COL_CATEGORIA,
+    COL_CLIENTE_NOMBRE,
+    COL_CONCEPTO,
+    COL_DESC,
+    COL_EMPRESA,
+    COL_FECHA_COBRO,
+    COL_MONTO,
+    COL_POR_COBRAR,
+    COL_POR_PAGAR,
+    COL_PROVEEDOR,
+    COL_PROYECTO,
+)
 from ui.theme import apply_global_theme
 
 
@@ -103,6 +116,261 @@ def _series_to_csv_download(df: pd.DataFrame, filename: str, label: str):
     st.download_button(label, data=csv_data, file_name=filename, mime="text/csv")
 
 
+PERIOD_OPTIONS_CASH = ["Mensual", "Semanal", "Diario"]
+PERIOD_OPTIONS_RESULTS = ["Cuatrimestral", "Mensual", "Trimestral", "Anual"]
+PERIOD_OPTIONS_BALANCE = ["Anual", "Cuatrimestral", "Mensual"]
+
+
+def _freq_from_period_label(label: str) -> str:
+    key = str(label or "").strip().lower()
+    mapping = {
+        "diario": "D",
+        "semanal": "W",
+        "mensual": "M",
+        "trimestral": "Q",
+        "cuatrimestral": "4MS",
+        "anual": "Y",
+    }
+    return mapping.get(key, "M")
+
+
+def _aggregate_cash_series(serie: pd.DataFrame, period_label: str) -> pd.DataFrame:
+    if serie is None or serie.empty:
+        return pd.DataFrame(columns=[COL_FECHA, "flujo", "saldo"])
+    freq = _freq_from_period_label(period_label)
+    base = serie.copy()
+    base[COL_FECHA] = pd.to_datetime(base[COL_FECHA], errors="coerce")
+    base = base.dropna(subset=[COL_FECHA])
+    grouped = (
+        base.groupby(pd.Grouper(key=COL_FECHA, freq=freq), as_index=False)["flujo"]
+        .sum()
+        .dropna(subset=[COL_FECHA])
+    )
+    grouped = grouped.sort_values(COL_FECHA)
+    grouped["saldo"] = grouped["flujo"].cumsum()
+    return grouped
+
+
+def _aggregate_resultados_periodo(mensual_df: pd.DataFrame, period_label: str) -> pd.DataFrame:
+    if mensual_df is None or mensual_df.empty:
+        return pd.DataFrame(columns=["Periodo", "Ingresos", "Gastos", "Utilidad"])
+    freq = _freq_from_period_label(period_label)
+    work = mensual_df.copy()
+    work["Mes"] = pd.to_datetime(work.get("Mes"), errors="coerce")
+    work = work.dropna(subset=["Mes"])
+    grouped = (
+        work.groupby(pd.Grouper(key="Mes", freq=freq), as_index=False)[["Ingresos", "Gastos", "Utilidad"]]
+        .sum()
+        .dropna(subset=["Mes"])
+        .sort_values("Mes")
+        .rename(columns={"Mes": "Periodo"})
+    )
+    return grouped
+
+
+def _prepare_expected_dates_for_balance(split: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ing_p = split["ing_pend"].copy()
+    ing_p["fecha_origen"] = pd.to_datetime(ing_p.get(COL_FECHA), errors="coerce")
+    ing_p["fecha_esperada"] = pd.to_datetime(ing_p.get(COL_FECHA_COBRO), errors="coerce")
+    ing_p["monto"] = pd.to_numeric(ing_p.get(COL_MONTO), errors="coerce").fillna(0.0)
+
+    gas_p = split["gas_pend"].copy()
+    gas_p["fecha_origen"] = pd.to_datetime(gas_p.get(COL_FECHA), errors="coerce")
+    gas_p["fecha_esperada"] = pd.to_datetime(gas_p.get("__fecha_pago_estimada"), errors="coerce")
+    gas_p.loc[gas_p["fecha_esperada"].isna(), "fecha_esperada"] = pd.to_datetime(
+        gas_p.loc[gas_p["fecha_esperada"].isna(), COL_FECHA],
+        errors="coerce",
+    )
+    gas_p["monto"] = pd.to_numeric(gas_p.get(COL_MONTO), errors="coerce").fillna(0.0)
+    return ing_p, gas_p
+
+
+def _build_balance_snapshots(
+    cash_movimientos: pd.DataFrame,
+    split: dict[str, pd.DataFrame],
+    period_label: str,
+    fecha_desde: date,
+    fecha_hasta: date,
+) -> pd.DataFrame:
+    freq = _freq_from_period_label(period_label)
+    start = pd.Timestamp(fecha_desde)
+    end = pd.Timestamp(fecha_hasta)
+    if start > end:
+        return pd.DataFrame()
+
+    # Corte por periodo. Ej.: anual / cuatrimestral / mensual.
+    cutoffs = pd.date_range(start=start, end=end, freq=freq)
+    if len(cutoffs) == 0 or cutoffs[-1] != end:
+        cutoffs = cutoffs.append(pd.DatetimeIndex([end]))
+
+    mov = cash_movimientos.copy()
+    mov[COL_FECHA] = pd.to_datetime(mov.get(COL_FECHA), errors="coerce")
+    mov["flujo"] = pd.to_numeric(mov.get("flujo"), errors="coerce").fillna(0.0)
+    mov = mov.dropna(subset=[COL_FECHA])
+
+    ing_p, gas_p = _prepare_expected_dates_for_balance(split)
+
+    rows: list[dict[str, object]] = []
+    for cutoff in cutoffs:
+        efectivo = float(mov.loc[mov[COL_FECHA] <= cutoff, "flujo"].sum()) if not mov.empty else 0.0
+
+        # Supuesto gerencial: una cuenta pendiente existe desde fecha origen
+        # hasta su fecha esperada; si no tiene fecha esperada, se mantiene abierta.
+        cxc_mask = (
+            (ing_p["fecha_origen"].isna() | (ing_p["fecha_origen"] <= cutoff))
+            & (ing_p["fecha_esperada"].isna() | (ing_p["fecha_esperada"] > cutoff))
+        )
+        cxp_mask = (
+            (gas_p["fecha_origen"].isna() | (gas_p["fecha_origen"] <= cutoff))
+            & (gas_p["fecha_esperada"].isna() | (gas_p["fecha_esperada"] > cutoff))
+        )
+
+        cxc = float(ing_p.loc[cxc_mask, "monto"].sum()) if not ing_p.empty else 0.0
+        cxp = float(gas_p.loc[cxp_mask, "monto"].sum()) if not gas_p.empty else 0.0
+        activos = float(efectivo + cxc)
+        pasivos = float(cxp)
+        patrimonio = float(activos - pasivos)
+        capital_trabajo = float(activos - pasivos)
+
+        rows.append(
+            {
+                "corte": cutoff,
+                "efectivo": efectivo,
+                "cuentas_por_cobrar": cxc,
+                "cuentas_por_pagar": cxp,
+                "activos_totales": activos,
+                "pasivos_totales": pasivos,
+                "patrimonio_neto": patrimonio,
+                "capital_trabajo": capital_trabajo,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _build_verificar_por_corregir(
+    ing_f: pd.DataFrame,
+    gas_f: pd.DataFrame,
+    split: dict[str, pd.DataFrame],
+) -> tuple[list[dict[str, object]], pd.DataFrame]:
+    checks: list[dict[str, object]] = []
+    issues: list[dict[str, object]] = []
+
+    ing_pending = split["ing_pend"].copy()
+    gas_pending = split["gas_pend"].copy()
+
+    miss_ing_due = int(pd.to_datetime(ing_pending.get(COL_FECHA_COBRO), errors="coerce").isna().sum()) if not ing_pending.empty else 0
+    miss_gas_due = int(pd.to_datetime(gas_pending.get("__fecha_pago_estimada"), errors="coerce").isna().sum()) if not gas_pending.empty else 0
+    checks.append(
+        {
+            "check": "Fechas esperadas pendientes",
+            "status": "OK" if (miss_ing_due + miss_gas_due) == 0 else "REVISAR",
+            "detalle": f"Ingresos por cobrar sin fecha: {miss_ing_due} | Gastos por pagar sin fecha: {miss_gas_due}",
+        }
+    )
+
+    def _append_issue(df: pd.DataFrame, source: str, mask: pd.Series, problem: str, action: str) -> None:
+        if df is None or df.empty or mask is None or not mask.any():
+            return
+        subset = df.loc[mask].copy()
+        for _, row in subset.head(300).iterrows():
+            issues.append(
+                {
+                    "fuente": source,
+                    "rowid": str(row.get("RowID", "")),
+                    "fecha": row.get(COL_FECHA, pd.NaT),
+                    "empresa": str(row.get(COL_EMPRESA, "")),
+                    "categoria": str(row.get(COL_CATEGORIA, "")),
+                    "monto": float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0]),
+                    "problema": problem,
+                    "accion_sugerida": action,
+                }
+            )
+
+    ing_monto = pd.to_numeric(ing_f.get(COL_MONTO), errors="coerce").fillna(0.0)
+    gas_monto = pd.to_numeric(gas_f.get(COL_MONTO), errors="coerce").fillna(0.0)
+    ing_fecha = pd.to_datetime(ing_f.get(COL_FECHA), errors="coerce")
+    gas_fecha = pd.to_datetime(gas_f.get(COL_FECHA), errors="coerce")
+
+    _append_issue(ing_f, "Ingresos", ing_fecha.isna(), "Fecha faltante", "Completar fecha del registro.")
+    _append_issue(gas_f, "Gastos", gas_fecha.isna(), "Fecha faltante", "Completar fecha del registro.")
+    _append_issue(ing_f, "Ingresos", ing_monto <= 0, "Monto <= 0", "Corregir monto positivo.")
+    _append_issue(gas_f, "Gastos", gas_monto <= 0, "Monto <= 0", "Corregir monto positivo.")
+    _append_issue(
+        ing_pending,
+        "Ingresos",
+        pd.to_datetime(ing_pending.get(COL_FECHA_COBRO), errors="coerce").isna(),
+        "Por cobrar sin fecha esperada",
+        "Asignar Fecha de cobro esperada.",
+    )
+    _append_issue(
+        gas_pending,
+        "Gastos",
+        pd.to_datetime(gas_pending.get("__fecha_pago_estimada"), errors="coerce").isna(),
+        "Por pagar sin fecha esperada",
+        "Asignar Fecha esperada de pago.",
+    )
+
+    # Deteccion de posibles gastos fijos no cargados.
+    month_range = pd.period_range(
+        start=min(pd.to_datetime(gas_f.get(COL_FECHA), errors="coerce").dropna().min() if not gas_f.empty else pd.Timestamp(date.today()), pd.Timestamp(date.today())),
+        end=max(pd.to_datetime(gas_f.get(COL_FECHA), errors="coerce").dropna().max() if not gas_f.empty else pd.Timestamp(date.today()), pd.Timestamp(date.today())),
+        freq="M",
+    )
+    gas_text = (
+        gas_f.get(COL_DESC, "").astype(str)
+        + " "
+        + gas_f.get(COL_CONCEPTO, "").astype(str)
+        + " "
+        + gas_f.get(COL_CATEGORIA, "").astype(str)
+    ).str.lower()
+    gas_month = pd.to_datetime(gas_f.get(COL_FECHA), errors="coerce").dt.to_period("M")
+    fixed_rules = {
+        "Alquiler": ["alquiler", "arrendamiento", "rent"],
+        "Salarios": ["salario", "planilla", "nomina", "nómina"],
+        "Seguros": ["seguro", "poliza", "póliza", "aseguradora"],
+    }
+    for label, kws in fixed_rules.items():
+        if gas_f.empty:
+            matched = pd.Series(dtype=bool)
+        else:
+            matched = gas_text.str.contains("|".join(kws), na=False)
+        months_with = set(gas_month[matched].dropna().tolist()) if not gas_f.empty else set()
+        missing = [m for m in month_range if m not in months_with]
+        status = "OK" if not missing else "REVISAR"
+        checks.append(
+            {
+                "check": f"Gasto fijo potencial: {label}",
+                "status": status,
+                "detalle": "Cobertura mensual completa." if not missing else f"Meses sin registro detectados: {len(missing)}",
+            }
+        )
+        if missing:
+            issues.append(
+                {
+                    "fuente": "Gastos",
+                    "rowid": "",
+                    "fecha": pd.NaT,
+                    "empresa": "",
+                    "categoria": "Gastos fijos",
+                    "monto": 0.0,
+                    "problema": f"Posible gasto fijo faltante: {label}",
+                    "accion_sugerida": "Verificar meses faltantes y registrar si aplica.",
+                }
+            )
+
+    checks.append(
+        {
+            "check": "Completitud operativa",
+            "status": "OK" if len(issues) == 0 else "REVISAR",
+            "detalle": f"Registros por corregir detectados: {len(issues)}",
+        }
+    )
+
+    issues_df = pd.DataFrame(issues)
+    return checks, issues_df
+
+
 st.title("Panel Financiero Gerencial")
 st.caption(
     "Vista gerencial y analitica construida sobre los mismos datos de Finanzas 1. "
@@ -158,7 +426,6 @@ with st.sidebar:
     search = st.text_input("Busqueda", key="f2_search", placeholder="cliente, proyecto, categoria, proveedor...")
 
     vista_modo = st.radio("Vista", ["Consolidado", "Por empresa"], horizontal=False, key="f2_vista")
-    granularidad = st.selectbox("Flujo proyectado", ["D", "W", "M"], index=0, key="f2_gran")
 
     include_misc = st.toggle(
         "Incluir Miscelaneos en rentabilidad",
@@ -174,7 +441,17 @@ with st.sidebar:
             _safe_rerun()
     with col_b:
         if st.button("Limpiar filtros", key="f2_clear"):
-            for k in ["f2_empresa", "f2_search", "f2_escenarios", "f2_gran", "f2_vista", "f2_include_misc"]:
+            for k in [
+                "f2_empresa",
+                "f2_search",
+                "f2_escenarios",
+                "f2_vista",
+                "f2_include_misc",
+                "f2_period_cash_actual",
+                "f2_period_cash_proj",
+                "f2_period_results",
+                "f2_period_balance",
+            ]:
                 st.session_state.pop(k, None)
             st.session_state["f2_desde"] = min_date
             st.session_state["f2_hasta"] = max_date
@@ -206,7 +483,7 @@ proyectado = build_cashflow_proyectado(
     split["ing_pend"],
     split["gas_pend"],
     saldo_inicial=cash_actual["metricas"]["efectivo_actual"],
-    granularidad=granularidad,
+    granularidad="D",
 )
 
 estado = build_estado_resultados(ing_f, gas_f, include_miscelaneos=include_misc)
@@ -230,6 +507,9 @@ metricas_resumen = [
     ("Posicion financiera neta", format_money_es(balance["metricas"]["posicion_financiera_neta"])),
 ]
 
+checks_summary, issues_df = _build_verificar_por_corregir(ing_f, gas_f, split)
+checks_df = pd.DataFrame(checks_summary)
+
 st.markdown("## Resumen Ejecutivo")
 _render_kpi_row(metricas_resumen, cols=3)
 
@@ -242,7 +522,7 @@ st.caption(
     "balance general simplificado con informacion disponible."
 )
 
-tab_a, tab_b, tab_c, tab_d, tab_e, tab_f, tab_g = st.tabs(
+tab_a, tab_b, tab_c, tab_d, tab_e, tab_f, tab_g, tab_h, tab_i = st.tabs(
     [
         "A. Resumen Ejecutivo",
         "B. Flujo de Caja Actual",
@@ -251,6 +531,8 @@ tab_a, tab_b, tab_c, tab_d, tab_e, tab_f, tab_g = st.tabs(
         "E. Balance General",
         "F. Cuentas por Cobrar y por Pagar",
         "G. Analisis Gerencial",
+        "H. Verificar",
+        "I. Por corregir",
     ]
 )
 
@@ -280,9 +562,22 @@ with tab_a:
         if cxp_quality["con_fallback_fecha"] > 0:
             st.caption("Supuesto aplicado: cuando no existe fecha estimada de pago, se usa Fecha del registro del gasto.")
 
+    revisar_count = int((checks_df.get("status", pd.Series(dtype=str)) == "REVISAR").sum()) if not checks_df.empty else 0
+    if revisar_count > 0:
+        st.warning(f"Hay {revisar_count} chequeo(s) gerenciales marcados para revision.")
+    else:
+        st.success("No se detectaron alertas en los chequeos gerenciales.")
+
 with tab_b:
     st.markdown("### Flujo de caja actual")
     st.caption("Base caja: ingresos cobrados (Por_cobrar=No) y gastos pagados (Por_pagar=No).")
+
+    period_cash_actual = st.selectbox(
+        "Periodo (flujo actual)",
+        options=PERIOD_OPTIONS_CASH,
+        index=PERIOD_OPTIONS_CASH.index("Mensual"),
+        key="f2_period_cash_actual",
+    )
 
     kpis_actual = [
         ("Entradas reales", format_money_es(cash_actual["metricas"]["entradas_reales"])),
@@ -292,17 +587,20 @@ with tab_b:
     ]
     _render_kpi_row(kpis_actual, cols=4)
 
-    serie_actual = cash_actual["serie"]
+    serie_actual_raw = cash_actual["serie"]
+    serie_actual = _aggregate_cash_series(serie_actual_raw, period_cash_actual)
+
     if not serie_actual.empty:
+        fmt = "%Y-%m-%d" if period_cash_actual in {"Diario", "Semanal"} else "%Y-%m"
         c1, c2 = st.columns([2, 1])
         with c1:
             _line_chart(serie_actual, COL_FECHA, "saldo", "Saldo acumulado", color="#22c55e")
         with c2:
             _bar_chart(
-                serie_actual.tail(25).assign(fecha_str=lambda d: d[COL_FECHA].dt.strftime("%Y-%m-%d")),
-                "fecha_str",
+                serie_actual.tail(24).assign(periodo=lambda d: d[COL_FECHA].dt.strftime(fmt)),
+                "periodo",
                 "flujo",
-                "Flujo diario",
+                f"Flujo {period_cash_actual.lower()}",
                 color="#0ea5e9",
             )
     else:
@@ -313,13 +611,26 @@ with tab_b:
         por_empresa = (
             cash_actual["movimientos"].groupby("Empresa", as_index=False)["flujo"].sum().sort_values("flujo", ascending=False)
         )
-        _bar_chart(por_empresa.rename(columns={"Empresa": "empresa"}), "empresa", "flujo", "Flujo neto por empresa", color="#22c55e")
+        _bar_chart(
+            por_empresa.rename(columns={"Empresa": "empresa"}),
+            "empresa",
+            "flujo",
+            "Flujo neto por empresa",
+            color="#22c55e",
+        )
 
 with tab_c:
     st.markdown("### Flujo de caja proyectado")
     st.caption(
         "Incluye cobros pendientes y pagos pendientes futuros. Si no existe fecha estimada de pago, "
         "se usa la Fecha del registro como fallback y se reporta en calidad de datos."
+    )
+
+    period_cash_proj = st.selectbox(
+        "Periodo (flujo proyectado)",
+        options=PERIOD_OPTIONS_CASH,
+        index=PERIOD_OPTIONS_CASH.index("Mensual"),
+        key="f2_period_cash_proj",
     )
 
     kpis_proj = [
@@ -334,14 +645,25 @@ with tab_c:
     for note in proyectado.get("notas", []):
         st.caption(f"- {note}")
 
-    if not proyectado["serie"].empty:
-        _line_chart(
-            proyectado["serie"].rename(columns={"fecha_evento": "fecha"}),
-            "fecha",
-            "saldo_proyectado",
-            "Saldo proyectado",
-            color="#f59e0b",
-        )
+    serie_proj_base = (
+        proyectado["serie"]
+        .rename(columns={"fecha_evento": COL_FECHA, "flujo_proyectado": "flujo", "saldo_proyectado": "saldo"})
+        .copy()
+    )
+    serie_proj = _aggregate_cash_series(serie_proj_base, period_cash_proj)
+    if not serie_proj.empty:
+        fmt = "%Y-%m-%d" if period_cash_proj in {"Diario", "Semanal"} else "%Y-%m"
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            _line_chart(serie_proj, COL_FECHA, "saldo", "Saldo proyectado", color="#f59e0b")
+        with c2:
+            _bar_chart(
+                serie_proj.tail(24).assign(periodo=lambda d: d[COL_FECHA].dt.strftime(fmt)),
+                "periodo",
+                "flujo",
+                f"Flujo proyectado {period_cash_proj.lower()}",
+                color="#f59e0b",
+            )
         st.markdown("#### Eventos futuros")
         st.dataframe(proyectado["eventos"], use_container_width=True, hide_index=True)
     else:
@@ -349,6 +671,13 @@ with tab_c:
 
 with tab_d:
     st.markdown("### Estado de resultados (gerencial)")
+    period_results = st.selectbox(
+        "Periodo (estado de resultados)",
+        options=PERIOD_OPTIONS_RESULTS,
+        index=PERIOD_OPTIONS_RESULTS.index("Cuatrimestral"),
+        key="f2_period_results",
+    )
+
     for note in estado.get("notas", []):
         st.caption(f"- {note}")
 
@@ -359,21 +688,40 @@ with tab_d:
         column_config={"Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
     )
 
-    if not estado["mensual"].empty:
-        st.markdown("#### Evolucion mensual")
-        df_m = estado["mensual"].copy().melt(id_vars=["Mes"], value_vars=["Ingresos", "Gastos", "Utilidad"], var_name="Rubro", value_name="Monto")
+    resultados_periodo = _aggregate_resultados_periodo(estado["mensual"], period_results)
+    if not resultados_periodo.empty:
+        st.markdown(f"#### Evolucion {period_results.lower()}")
+        df_period = resultados_periodo.copy().melt(
+            id_vars=["Periodo"],
+            value_vars=["Ingresos", "Gastos", "Utilidad"],
+            var_name="Rubro",
+            value_name="Monto",
+        )
         chart = (
-            alt.Chart(df_m)
+            alt.Chart(df_period)
             .mark_line(point=True)
             .encode(
-                x=alt.X("Mes:T", title="Mes"),
+                x=alt.X("Periodo:T", title=period_results),
                 y=alt.Y("Monto:Q", title="Monto"),
                 color=alt.Color("Rubro:N", title="Rubro"),
-                tooltip=["Mes:T", "Rubro:N", alt.Tooltip("Monto:Q", format=",.2f")],
+                tooltip=["Periodo:T", "Rubro:N", alt.Tooltip("Monto:Q", format=",.2f")],
             )
             .properties(height=320)
         )
         st.altair_chart(chart, use_container_width=True)
+
+        st.dataframe(
+            resultados_periodo,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ingresos": st.column_config.NumberColumn("Ingresos", format="$%0.2f"),
+                "Gastos": st.column_config.NumberColumn("Gastos", format="$%0.2f"),
+                "Utilidad": st.column_config.NumberColumn("Utilidad", format="$%0.2f"),
+            },
+        )
+    else:
+        st.info("Sin datos para construir el estado de resultados en el periodo seleccionado.")
 
     if not estado["por_empresa"].empty:
         st.markdown("#### Desglose por empresa")
@@ -390,14 +738,70 @@ with tab_d:
 
 with tab_e:
     st.markdown("### Balance general (simplificado)")
+    period_balance = st.selectbox(
+        "Periodo (balance)",
+        options=PERIOD_OPTIONS_BALANCE,
+        index=PERIOD_OPTIONS_BALANCE.index("Anual"),
+        key="f2_period_balance",
+    )
+
+    snapshots = _build_balance_snapshots(
+        cash_movimientos=cash_actual["movimientos"],
+        split=split,
+        period_label=period_balance,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+    )
+    snapshots = snapshots.sort_values("corte") if not snapshots.empty else snapshots
+
     for note in balance.get("notas", []):
         st.caption(f"- {note}")
+
+    if not snapshots.empty:
+        st.markdown(f"#### Serie de cortes ({period_balance.lower()})")
+        _line_chart(
+            snapshots.rename(columns={"corte": COL_FECHA, "patrimonio_neto": "saldo"}),
+            COL_FECHA,
+            "saldo",
+            "Patrimonio neto estimado",
+            color="#38bdf8",
+        )
+
+        latest = snapshots.iloc[-1]
+        activos_df = pd.DataFrame(
+            [
+                {"Cuenta": "Efectivo y equivalentes", "Monto": float(latest["efectivo"])},
+                {"Cuenta": "Cuentas por cobrar", "Monto": float(latest["cuentas_por_cobrar"])},
+            ]
+        )
+        pasivos_df = pd.DataFrame(
+            [
+                {"Cuenta": "Cuentas por pagar", "Monto": float(latest["cuentas_por_pagar"])},
+            ]
+        )
+        patrimonio_df = pd.DataFrame(
+            [
+                {"Cuenta": "Patrimonio neto estimado", "Monto": float(latest["patrimonio_neto"])},
+            ]
+        )
+        total_activos = float(latest["activos_totales"])
+        total_pasivos = float(latest["pasivos_totales"])
+        patrimonio_neto = float(latest["patrimonio_neto"])
+        capital_trabajo = float(latest["capital_trabajo"])
+    else:
+        activos_df = balance["activos"]
+        pasivos_df = balance["pasivos"]
+        patrimonio_df = balance["patrimonio"]
+        total_activos = float(balance["metricas"]["total_activos"])
+        total_pasivos = float(balance["metricas"]["total_pasivos"])
+        patrimonio_neto = float(balance["metricas"]["patrimonio_neto"])
+        capital_trabajo = float(balance["metricas"]["capital_trabajo"])
 
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("#### Activos")
         st.dataframe(
-            balance["activos"],
+            activos_df,
             use_container_width=True,
             hide_index=True,
             column_config={"Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
@@ -405,7 +809,7 @@ with tab_e:
     with c2:
         st.markdown("#### Pasivos")
         st.dataframe(
-            balance["pasivos"],
+            pasivos_df,
             use_container_width=True,
             hide_index=True,
             column_config={"Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
@@ -413,7 +817,7 @@ with tab_e:
     with c3:
         st.markdown("#### Patrimonio")
         st.dataframe(
-            balance["patrimonio"],
+            patrimonio_df,
             use_container_width=True,
             hide_index=True,
             column_config={"Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
@@ -422,10 +826,10 @@ with tab_e:
     st.markdown("#### Totales")
     totals = pd.DataFrame(
         [
-            {"Indicador": "Total activos", "Monto": balance["metricas"]["total_activos"]},
-            {"Indicador": "Total pasivos", "Monto": balance["metricas"]["total_pasivos"]},
-            {"Indicador": "Patrimonio neto estimado", "Monto": balance["metricas"]["patrimonio_neto"]},
-            {"Indicador": "Capital de trabajo", "Monto": balance["metricas"]["capital_trabajo"]},
+            {"Indicador": "Total activos", "Monto": total_activos},
+            {"Indicador": "Total pasivos", "Monto": total_pasivos},
+            {"Indicador": "Patrimonio neto estimado", "Monto": patrimonio_neto},
+            {"Indicador": "Capital de trabajo", "Monto": capital_trabajo},
         ]
     )
     st.dataframe(
@@ -533,6 +937,51 @@ with tab_g:
             "ingresos": st.column_config.NumberColumn("Ingresos", format="$%0.2f"),
         },
     )
+
+with tab_h:
+    st.markdown("### Verificar")
+    st.caption("Chequeos automaticos para validar calidad operativa de datos en Finanzas 1.")
+    if checks_df.empty:
+        st.info("No se generaron chequeos con los filtros actuales.")
+    else:
+        ok_count = int((checks_df["status"] == "OK").sum())
+        revisar_count = int((checks_df["status"] == "REVISAR").sum())
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total chequeos", str(len(checks_df)))
+        c2.metric("OK", str(ok_count))
+        c3.metric("Revisar", str(revisar_count))
+        st.dataframe(checks_df, use_container_width=True, hide_index=True)
+
+with tab_i:
+    st.markdown("### Por corregir")
+    st.caption("Registros y alertas detectadas que conviene completar o ajustar para mejorar el panel gerencial.")
+    if issues_df.empty:
+        st.success("No se detectaron registros por corregir con los filtros actuales.")
+    else:
+        src_opts = ["Todos"] + sorted([x for x in issues_df["fuente"].dropna().astype(str).unique().tolist() if x])
+        problem_opts = ["Todos"] + sorted([x for x in issues_df["problema"].dropna().astype(str).unique().tolist() if x])
+        f1, f2 = st.columns(2)
+        with f1:
+            src_sel = st.selectbox("Filtrar por fuente", src_opts, index=0, key="f2_issue_fuente")
+        with f2:
+            prob_sel = st.selectbox("Filtrar por problema", problem_opts, index=0, key="f2_issue_problema")
+
+        issues_view = issues_df.copy()
+        if src_sel != "Todos":
+            issues_view = issues_view[issues_view["fuente"] == src_sel]
+        if prob_sel != "Todos":
+            issues_view = issues_view[issues_view["problema"] == prob_sel]
+
+        st.dataframe(
+            issues_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "monto": st.column_config.NumberColumn("Monto", format="$%0.2f"),
+                "fecha": st.column_config.DateColumn("Fecha"),
+            },
+        )
+        _series_to_csv_download(issues_view, "finanzas2_por_corregir.csv", "Exportar por corregir")
 
 st.markdown("---")
 st.caption(

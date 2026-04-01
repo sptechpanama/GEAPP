@@ -18,6 +18,7 @@ COL_USUARIO = "Usuario"
 
 COL_POR_PAGAR = "Por_pagar"
 COL_PROVEEDOR = "Proveedor"
+COL_FECHA_PAGO = "Fecha esperada de pago"
 
 INGRESOS_BASE_COLUMNS = [
     COL_FECHA,
@@ -50,6 +51,7 @@ GASTOS_BASE_COLUMNS = [
     COL_EMPRESA,
     COL_POR_PAGAR,
     COL_PROVEEDOR,
+    COL_FECHA_PAGO,
     COL_ROW_ID,
     COL_USUARIO,
 ]
