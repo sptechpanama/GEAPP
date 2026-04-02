@@ -5519,21 +5519,100 @@ def _build_prompt_for_chatgpt(contexto: dict[str, object]) -> str:
     link = _safe_minsa_link(contexto.get("enlace_ficha_tecnica", ""))
     json_context = json.dumps(contexto, ensure_ascii=False, indent=2)
     return (
-        "Use SOLO el contexto suministrado para estructurar un analisis de proveedores.\n"
-        "Responde UNICAMENTE JSON valido (sin markdown) con esta estructura minima:\n"
+        "Usa el contexto suministrado como base obligatoria del analisis historico y puedes investigar "
+        "fuentes externas confiables para completar el analisis de proveedores externos.\n"
+        "Responde UNICAMENTE JSON valido (sin markdown) con esta estructura completa exacta:\n"
         "{\n"
-        '  "metadata_consulta": {...},\n'
-        '  "contexto_ficha": {"ficha_id":"...","nombre_ficha":"...","enlace_ficha_tecnica":"..."},\n'
-        '  "proveedores_historicos_panama": [ ... ],\n'
-        '  "proveedores_externos_clasificados": {"mejor_gama":[...], "mejor_precio":[...]},\n'
+        '  "metadata_consulta": {\n'
+        '    "ficha_id":"...",\n'
+        '    "fecha_analisis":"...",\n'
+        '    "etapa_embudo":"analisis_proveedores",\n'
+        '    "criterio_busqueda_externa":"..."\n'
+        '  },\n'
+        '  "contexto_ficha": {\n'
+        '    "ficha_id":"...",\n'
+        '    "nombre_ficha":"...",\n'
+        '    "enlace_ficha_tecnica":"...",\n'
+        '    "descripcion_producto":"...",\n'
+        '    "palabras_clave":[...],\n'
+        '    "marcas_detectadas_historicamente":[...],\n'
+        '    "modelos_detectados_historicamente":[...],\n'
+        '    "paises_detectados_historicamente":[...],\n'
+        '    "proveedores_historicos_detectados":[...],\n'
+        '    "resumen_breve_estudio_historico":"..."\n'
+        '  },\n'
+        '  "proveedores_historicos_panama": [\n'
+        '    {\n'
+        '      "proveedor":"...",\n'
+        '      "marca":"...",\n'
+        '      "modelo":"...",\n'
+        '      "pais_origen":"...",\n'
+        '      "cantidad_actos_ganados":0,\n'
+        '      "precio_promedio_historico":0,\n'
+        '      "precio_minimo_historico":0,\n'
+        '      "precio_maximo_historico":0,\n'
+        '      "telefono":"...",\n'
+        '      "contacto_email":"...",\n'
+        '      "contacto_whatsapp":"...",\n'
+        '      "canal_contacto_mas_probable":"...",\n'
+        '      "correo_inicial_listo":"...",\n'
+        '      "whatsapp_inicial_listo":"...",\n'
+        '      "observaciones":"..."\n'
+        '    }\n'
+        '  ],\n'
+        '  "proveedores_externos_clasificados": {\n'
+        '    "mejor_gama":[\n'
+        '      {\n'
+        '        "proveedor_o_fabricante":"...",\n'
+        '        "marca":"...",\n'
+        '        "modelo":"...",\n'
+        '        "pais_origen":"...",\n'
+        '        "sitio_web":"...",\n'
+        '        "telefono":"...",\n'
+        '        "contacto_email":"...",\n'
+        '        "contacto_whatsapp":"...",\n'
+        '        "canal_contacto_mas_probable":"...",\n'
+        '        "razon_clasificacion":"...",\n'
+        '        "correo_inicial_listo":"...",\n'
+        '        "whatsapp_inicial_listo":"...",\n'
+        '        "observaciones":"..."\n'
+        '      }\n'
+        '    ],\n'
+        '    "mejor_precio":[\n'
+        '      {\n'
+        '        "proveedor_o_fabricante":"...",\n'
+        '        "marca":"...",\n'
+        '        "modelo":"...",\n'
+        '        "pais_origen":"...",\n'
+        '        "sitio_web":"...",\n'
+        '        "telefono":"...",\n'
+        '        "contacto_email":"...",\n'
+        '        "contacto_whatsapp":"...",\n'
+        '        "canal_contacto_mas_probable":"...",\n'
+        '        "rango_precio_referencial":"...",\n'
+        '        "razon_clasificacion":"...",\n'
+        '        "correo_inicial_listo":"...",\n'
+        '        "whatsapp_inicial_listo":"...",\n'
+        '        "observaciones":"..."\n'
+        '      }\n'
+        '    ]\n'
+        '  },\n'
         '  "resumen_ejecutivo": "..." \n'
         "}\n"
         "Reglas:\n"
+        "- Orden obligatorio del trabajo y del JSON: primero `proveedores_historicos_panama`; despues `proveedores_externos_clasificados`.\n"
+        "- `proveedores_historicos_panama` es OBLIGATORIO y debe construirse como traduccion uno-a-uno de `proveedores_historicos_detalle`.\n"
+        "- No consolides ni mezcles dos registros historicos distintos en una sola fila si cambia proveedor, marca, modelo o pais_origen.\n"
+        "- Preserva todos los campos historicos disponibles; si un dato historico falta, dejalo vacio, no lo inventes.\n"
+        "- Usa `proveedores_historicos_detalle` como fuente canonica para mantener asociacion proveedor-marca-modelo-pais.\n"
+        "- No alteres ni sobrescribas datos historicos del contexto con investigacion externa.\n"
         "- incluir entre 5 y 10 proveedores externos adicionales confiables cuando sea posible.\n"
+        "- Prioriza fabricantes, casas matrices o distribuidores autorizados sobre revendedores genericos cuando existan.\n"
         "- por cada proveedor incluir telefono, contacto_email, contacto_whatsapp, canal_contacto_mas_probable,\n"
         "  correo_inicial_listo y whatsapp_inicial_listo.\n"
-        "- Usa `proveedores_historicos_detalle` para mantener asociacion proveedor-marca-modelo-pais.\n"
         "- No mezclar marcas/paises entre proveedores distintos; si falta dato, dejar vacio.\n"
+        "- Para clasificar un proveedor en `mejor_gama` o `mejor_precio`, incluye evidencia concreta en `razon_clasificacion` y/o `observaciones`.\n"
+        "- La evidencia debe mencionar señales observables: fabricante, sitio oficial, linea premium, rango de precio, catalogo, distribucion autorizada o comparacion objetiva.\n"
         "- El correo_inicial_listo DEBE iniciar exactamente con:\n"
         "\"My name is Rodrigo Sánchez and I represent RIR Medical Engineering, a company based in Panama focused on supplying medical products to hospitals and public institutions.\"\n"
         f"- El correo y whatsapp deben referenciar la ficha {ficha_id} y el enlace {link}.\n"
@@ -5766,6 +5845,8 @@ def _ensure_provider_analysis_contexts(resumen_df: pd.DataFrame, ranked_df: pd.D
             if _clean_text(current.get("run_id_estudio", "")) != run_id:
                 needs_update = True
             if _clean_text(current.get("prompt_texto", "")) == "":
+                needs_update = True
+            if _clean_text(current.get("prompt_texto", "")) != prompt_texto:
                 needs_update = True
             if _clean_text(current.get("contexto_texto", "")) == "":
                 needs_update = True
