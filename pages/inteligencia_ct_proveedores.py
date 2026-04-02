@@ -7062,9 +7062,22 @@ def _render_tab_estudio_profundo(
             st.caption("Corridas registradas (persistentes).")
             st.dataframe(runs_df, use_container_width=True, hide_index=True)
             run_options = runs_df["run_id"].astype(str).tolist()
+            run_label_map = {
+                str(row.get("run_id", "")): (
+                    f"{_clean_text(row.get('ficha', ''))} - {_clean_text(row.get('nombre_ficha', ''))}".strip(" -")
+                    or str(row.get("run_id", ""))
+                )
+                for _, row in runs_df.iterrows()
+            }
             default_run = str(st.session_state.get("intel_selected_run_id", "") or "")
             default_idx = run_options.index(default_run) if default_run in run_options else 0
-            selected_run = st.selectbox("Run a visualizar", run_options, index=default_idx, key="intel_study_run_view")
+            selected_run = st.selectbox(
+                "Run a visualizar",
+                run_options,
+                index=default_idx,
+                key="intel_study_run_view",
+                format_func=lambda x: run_label_map.get(str(x), str(x)),
+            )
             st.session_state["intel_selected_run_id"] = selected_run
             detail_df = _load_run_detail_df(selected_run)
             if detail_df.empty:
