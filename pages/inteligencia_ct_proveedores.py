@@ -7086,6 +7086,9 @@ def _render_tab_estudio_profundo(
             "Usa este espacio para guardar hallazgos posteriores al contacto con proveedores. "
             "Cada comentario queda persistido en Sheets y asociado a la ficha."
         )
+        ap_comment_flash = st.session_state.pop("intel_ap_comment_flash", "")
+        if ap_comment_flash:
+            st.success(ap_comment_flash)
         ap_ctx_df = _load_ap_context_df()
         if ap_ctx_df.empty:
             st.info("Aún no hay fichas estudiadas preparadas para asociar comentarios.")
@@ -7116,6 +7119,9 @@ def _render_tab_estudio_profundo(
             comments_view = comments_df[comments_df["ficha"].astype(str) == str(selected_comment_ficha)].copy() if not comments_df.empty else pd.DataFrame()
 
             comment_input_key = f"intel_ap_comment_input_{selected_comment_ficha}"
+            if st.session_state.get("intel_ap_comment_clear_target") == str(selected_comment_ficha):
+                st.session_state[comment_input_key] = ""
+                st.session_state.pop("intel_ap_comment_clear_target", None)
             new_comment = st.text_area(
                 "Agregar comentario",
                 key=comment_input_key,
@@ -7125,8 +7131,8 @@ def _render_tab_estudio_profundo(
             if st.button("Guardar comentario", key=f"intel_ap_comment_save_{selected_comment_ficha}"):
                 ok, msg = _save_ap_comment(selected_comment_ficha, new_comment)
                 if ok:
-                    st.session_state[comment_input_key] = ""
-                    st.success(msg)
+                    st.session_state["intel_ap_comment_clear_target"] = str(selected_comment_ficha)
+                    st.session_state["intel_ap_comment_flash"] = msg
                     st.rerun()
                 else:
                     st.warning(msg)
