@@ -6691,7 +6691,7 @@ def _render_tab_estudio_profundo(
         [
             "Pendientes de estudio",
             "Ejecuci?n de estudio",
-            "Consultas finales",
+            "Registro de hallazgos",
             "Fichas estudiadas",
             "Versiones y actualizaci?n",
         ]
