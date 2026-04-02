@@ -51,6 +51,29 @@ if st.session_state.get("authentication_status") is not True:
     st.switch_page("Inicio.py")
 
 
+F2_DEFAULTS_VERSION = "2026-04-02-defaults-v4"
+
+
+def _ensure_v2_default_state() -> None:
+    """
+    Fuerza defaults de UX una sola vez por versión para evitar que session_state
+    histórico deje selectores en valores viejos (ej: 'Mensual' en todas las secciones).
+    """
+    if st.session_state.get("f2_defaults_version") == F2_DEFAULTS_VERSION:
+        return
+    st.session_state["f2_modo_tiempo"] = "Periodo corriente (mes actual)"
+    st.session_state["f2_period_cash_actual"] = "Mensual"
+    st.session_state["f2_period_cash_proj"] = "Mensual"
+    st.session_state["f2_period_results"] = "Semestral"
+    st.session_state["f2_period_balance"] = "Anual"
+    st.session_state["f2_horizonte_proyeccion"] = 4
+    st.session_state["f2_use_recommended_periods"] = True
+    st.session_state["f2_defaults_version"] = F2_DEFAULTS_VERSION
+
+
+_ensure_v2_default_state()
+
+
 
 def _safe_rerun() -> None:
     rerun = getattr(st, "rerun", None)
@@ -117,7 +140,7 @@ def _series_to_csv_download(df: pd.DataFrame, filename: str, label: str):
 
 
 PERIOD_OPTIONS_CASH = ["Mensual", "Semanal", "Diario"]
-PERIOD_OPTIONS_RESULTS = ["Cuatrimestral", "Mensual", "Trimestral", "Anual"]
+PERIOD_OPTIONS_RESULTS = ["Semestral", "Cuatrimestral", "Mensual", "Trimestral", "Anual"]
 PERIOD_OPTIONS_BALANCE = ["Anual", "Cuatrimestral", "Mensual"]
 
 
@@ -127,6 +150,7 @@ def _freq_from_period_label(label: str) -> str:
         "diario": "D",
         "semanal": "W",
         "mensual": "M",
+        "semestral": "6MS",
         "trimestral": "Q",
         "cuatrimestral": "4MS",
         "anual": "Y",
@@ -189,6 +213,14 @@ def _aggregate_resultados_periodo(mensual_df: pd.DataFrame, period_label: str) -
         .sort_values("Periodo")
     )
     return grouped
+
+
+def _filter_df_window(df: pd.DataFrame, fecha_inicio: date, fecha_fin: date) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=(df.columns if isinstance(df, pd.DataFrame) else []))
+    out = df.copy()
+    out[COL_FECHA] = pd.to_datetime(out.get(COL_FECHA), errors="coerce")
+    return out[(out[COL_FECHA] >= pd.Timestamp(fecha_inicio)) & (out[COL_FECHA] <= pd.Timestamp(fecha_fin))].copy()
 
 
 def _prepare_expected_dates_for_balance(split: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -486,6 +518,28 @@ with st.sidebar:
         help="Se aplica a Estado de resultados y analisis gerencial. Caja y balance mantienen todos los movimientos.",
         key="f2_include_misc",
     )
+    horizonte_proy_meses = st.selectbox(
+        "Horizonte de proyeccion",
+        options=[4, 6, 9],
+        index=0,
+        key="f2_horizonte_proyeccion",
+    )
+    use_recommended_periods = st.toggle(
+        "Usar periodos recomendados",
+        value=True,
+        help=(
+            "Activa los periodos recomendados por defecto: Flujo actual/proyectado Mensual, "
+            "Estado de resultados Semestral y Balance Anual."
+        ),
+        key="f2_use_recommended_periods",
+    )
+    custom_periods = not bool(use_recommended_periods)
+
+    if use_recommended_periods:
+        st.session_state["f2_period_cash_actual"] = "Mensual"
+        st.session_state["f2_period_cash_proj"] = "Mensual"
+        st.session_state["f2_period_results"] = "Semestral"
+        st.session_state["f2_period_balance"] = "Anual"
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -505,6 +559,8 @@ with st.sidebar:
                 "f2_period_cash_proj",
                 "f2_period_results",
                 "f2_period_balance",
+                "f2_horizonte_proyeccion",
+                "f2_use_recommended_periods",
             ]:
                 st.session_state.pop(k, None)
             st.session_state["f2_desde"] = default_desde
@@ -515,36 +571,70 @@ if fecha_desde > fecha_hasta:
     st.warning("El rango de fechas es invalido.")
     st.stop()
 
-filters = GlobalFilters(
-    fecha_desde=fecha_desde,
-    fecha_hasta=fecha_hasta,
+# Base de trabajo: mismos filtros de negocio (empresa/escenario/busqueda), con historico completo.
+scope_filters = GlobalFilters(
+    fecha_desde=min_date,
+    fecha_hasta=max_date,
     empresa=empresa,
     busqueda=search,
     escenarios=escenarios_sel,
 )
+ing_scope, gas_scope = apply_global_filters(df_ing, df_gas, scope_filters)
 
-ing_f, gas_f = apply_global_filters(df_ing, df_gas, filters)
+if modo_tiempo == "Rango personalizado":
+    cash_desde, cash_hasta = fecha_desde, fecha_hasta
+    resultados_desde, resultados_hasta = fecha_desde, fecha_hasta
+    balance_desde, balance_hasta = fecha_desde, fecha_hasta
+else:
+    today_ref = date.today()
+    cash_desde, cash_hasta = fecha_desde, fecha_hasta  # mes actual (ya calculado arriba)
+    resultados_desde = max(min_date, (pd.Timestamp(today_ref).to_period("M") - 5).to_timestamp().date())
+    resultados_hasta = min(max_date, today_ref)
+    balance_desde = max(min_date, (pd.Timestamp(today_ref).to_period("M") - 11).to_timestamp().date())
+    balance_hasta = min(max_date, today_ref)
+
+# Flujos/KPIs del periodo operativo visible (default: mes actual).
+ing_f = _filter_df_window(ing_scope, cash_desde, cash_hasta)
+gas_f = _filter_df_window(gas_scope, cash_desde, cash_hasta)
 split = split_real_vs_pending(ing_f, gas_f)
 
+# Proyeccion: usa historico completo pendiente.
+split_proj = split_real_vs_pending(ing_scope, gas_scope)
+
+# Estado de resultados: default semestral (ultimos 6 meses), editable por rango personalizado.
+ing_res = _filter_df_window(ing_scope, resultados_desde, resultados_hasta)
+gas_res = _filter_df_window(gas_scope, resultados_desde, resultados_hasta)
+
+# Balance: default anual (ultimos 12 meses), editable por rango personalizado.
+ing_bal = _filter_df_window(ing_scope, balance_desde, balance_hasta)
+gas_bal = _filter_df_window(gas_scope, balance_desde, balance_hasta)
+split_balance = split_real_vs_pending(ing_bal, gas_bal)
+
 cash_actual = build_cashflow_actual(split["ing_real"], split["gas_real"])
+cash_balance = build_cashflow_actual(split_balance["ing_real"], split_balance["gas_real"])
 cxc_df = build_cuentas_por_cobrar(split["ing_pend"])
 cxp_df, cxp_quality = build_cuentas_por_pagar(split["gas_pend"])
+cxc_balance_df = build_cuentas_por_cobrar(split_balance["ing_pend"])
+cxp_balance_df, _ = build_cuentas_por_pagar(split_balance["gas_pend"])
 
 cxc_total = float(cxc_df["monto"].sum()) if not cxc_df.empty else 0.0
 cxp_total = float(cxp_df["monto"].sum()) if not cxp_df.empty else 0.0
+cxc_balance_total = float(cxc_balance_df["monto"].sum()) if not cxc_balance_df.empty else 0.0
+cxp_balance_total = float(cxp_balance_df["monto"].sum()) if not cxp_balance_df.empty else 0.0
 
 proyectado = build_cashflow_proyectado(
-    split["ing_pend"],
-    split["gas_pend"],
+    split_proj["ing_pend"],
+    split_proj["gas_pend"],
     saldo_inicial=cash_actual["metricas"]["efectivo_actual"],
     granularidad="D",
+    horizon_months=int(horizonte_proy_meses),
 )
 
-estado = build_estado_resultados(ing_f, gas_f, include_miscelaneos=include_misc)
+estado = build_estado_resultados(ing_res, gas_res, include_miscelaneos=include_misc)
 balance = build_balance_general_simplificado(
-    efectivo_actual=cash_actual["metricas"]["efectivo_actual"],
-    cuentas_por_cobrar=cxc_total,
-    cuentas_por_pagar=cxp_total,
+    efectivo_actual=cash_balance["metricas"]["efectivo_actual"],
+    cuentas_por_cobrar=cxc_balance_total,
+    cuentas_por_pagar=cxp_balance_total,
 )
 
 analisis = build_analisis_gerencial(ing_f, gas_f, cxc_df, include_miscelaneos=include_misc)
@@ -563,6 +653,13 @@ metricas_resumen = [
 
 checks_summary, issues_df = _build_verificar_por_corregir(ing_f, gas_f, split)
 checks_df = pd.DataFrame(checks_summary)
+
+# Periodicidad por defecto recomendada. Solo se edita si el usuario desactiva
+# "Usar periodos recomendados".
+period_cash_actual = "Mensual"
+period_cash_proj = "Mensual"
+period_results = "Semestral"
+period_balance = "Anual"
 
 st.markdown("## Resumen Ejecutivo")
 _render_kpi_row(metricas_resumen, cols=3)
@@ -626,12 +723,15 @@ with tab_b:
     st.markdown("### Flujo de caja actual")
     st.caption("Base caja: ingresos cobrados (Por_cobrar=No) y gastos pagados (Por_pagar=No).")
 
-    period_cash_actual = st.selectbox(
-        "Periodo (flujo actual)",
-        options=PERIOD_OPTIONS_CASH,
-        index=PERIOD_OPTIONS_CASH.index("Mensual"),
-        key="f2_period_cash_actual",
-    )
+    if custom_periods:
+        period_cash_actual = st.selectbox(
+            "Periodo (flujo actual)",
+            options=PERIOD_OPTIONS_CASH,
+            index=PERIOD_OPTIONS_CASH.index("Mensual"),
+            key="f2_period_cash_actual",
+        )
+    else:
+        st.caption("Periodicidad por defecto aplicada: Mensual.")
 
     kpis_actual = [
         ("Entradas reales", format_money_es(cash_actual["metricas"]["entradas_reales"])),
@@ -679,13 +779,17 @@ with tab_c:
         "Incluye cobros pendientes y pagos pendientes futuros. Si no existe fecha estimada de pago, "
         "se usa la Fecha del registro como fallback y se reporta en calidad de datos."
     )
+    st.caption(f"Horizonte activo: {int(horizonte_proy_meses)} meses desde el mes actual.")
 
-    period_cash_proj = st.selectbox(
-        "Periodo (flujo proyectado)",
-        options=PERIOD_OPTIONS_CASH,
-        index=PERIOD_OPTIONS_CASH.index("Mensual"),
-        key="f2_period_cash_proj",
-    )
+    if custom_periods:
+        period_cash_proj = st.selectbox(
+            "Periodo (flujo proyectado)",
+            options=PERIOD_OPTIONS_CASH,
+            index=PERIOD_OPTIONS_CASH.index("Mensual"),
+            key="f2_period_cash_proj",
+        )
+    else:
+        st.caption("Periodicidad por defecto aplicada: Mensual.")
 
     kpis_proj = [
         ("Saldo inicial", format_money_es(proyectado["metricas"]["saldo_inicial"])),
@@ -725,12 +829,16 @@ with tab_c:
 
 with tab_d:
     st.markdown("### Estado de resultados (gerencial)")
-    period_results = st.selectbox(
-        "Periodo (estado de resultados)",
-        options=PERIOD_OPTIONS_RESULTS,
-        index=PERIOD_OPTIONS_RESULTS.index("Mensual"),
-        key="f2_period_results",
-    )
+    st.caption(f"Ventana de datos usada: {resultados_desde.isoformat()} -> {resultados_hasta.isoformat()}")
+    if custom_periods:
+        period_results = st.selectbox(
+            "Periodo (estado de resultados)",
+            options=PERIOD_OPTIONS_RESULTS,
+            index=PERIOD_OPTIONS_RESULTS.index("Semestral"),
+            key="f2_period_results",
+        )
+    else:
+        st.caption("Periodicidad por defecto aplicada: Semestral.")
 
     for note in estado.get("notas", []):
         st.caption(f"- {note}")
@@ -792,19 +900,23 @@ with tab_d:
 
 with tab_e:
     st.markdown("### Balance general (simplificado)")
-    period_balance = st.selectbox(
-        "Periodo (balance)",
-        options=PERIOD_OPTIONS_BALANCE,
-        index=PERIOD_OPTIONS_BALANCE.index("Mensual"),
-        key="f2_period_balance",
-    )
+    st.caption(f"Ventana de datos usada: {balance_desde.isoformat()} -> {balance_hasta.isoformat()}")
+    if custom_periods:
+        period_balance = st.selectbox(
+            "Periodo (balance)",
+            options=PERIOD_OPTIONS_BALANCE,
+            index=PERIOD_OPTIONS_BALANCE.index("Anual"),
+            key="f2_period_balance",
+        )
+    else:
+        st.caption("Periodicidad por defecto aplicada: Anual.")
 
     snapshots = _build_balance_snapshots(
-        cash_movimientos=cash_actual["movimientos"],
-        split=split,
+        cash_movimientos=cash_balance["movimientos"],
+        split=split_balance,
         period_label=period_balance,
-        fecha_desde=fecha_desde,
-        fecha_hasta=fecha_hasta,
+        fecha_desde=balance_desde,
+        fecha_hasta=balance_hasta,
     )
     snapshots = snapshots.sort_values("corte") if not snapshots.empty else snapshots
 

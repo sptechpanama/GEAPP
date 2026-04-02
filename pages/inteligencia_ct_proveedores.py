@@ -2181,6 +2181,12 @@ def _ensure_ws_headers(client, sheet_id: str, worksheet: str, headers: list[str]
 
 
 def _ensure_intel_orquestador_job(client) -> None:
+    # Evita releer pc_config en cada encolado dentro de la misma sesion.
+    # Esto reduce picos de lectura en Sheets (429) sin afectar funcionalidad.
+    cache_key = "intel_orq_job_ready"
+    if bool(st.session_state.get(cache_key, False)):
+        return
+
     sheet_id, sh = _open_sheet_with_fallback(client, _sheet_id_candidates("config"), "pc_config")
     _ensure_ws_headers(client, sheet_id, PC_CONFIG_WORKSHEET, PC_CONFIG_HEADERS)
     sh = client.open_by_key(sheet_id)
@@ -2205,6 +2211,7 @@ def _ensure_intel_orquestador_job(client) -> None:
                 current = str(row.get(key, "")).strip()
                 if current != value:
                     ws.update_cell(idx, col, value)
+            st.session_state[cache_key] = True
             return
 
     row_data = {
@@ -2216,6 +2223,7 @@ def _ensure_intel_orquestador_job(client) -> None:
         "enabled": "si",
     }
     ws.append_row([row_data.get(col, "") for col in PC_CONFIG_HEADERS], value_input_option="USER_ENTERED")
+    st.session_state[cache_key] = True
 
 
 def _append_intel_manual_request(client, payload: dict[str, object]) -> str:
@@ -6552,29 +6560,16 @@ def _render_tab_seguimiento_ct() -> None:
 
 
 def _auto_enqueue_study_backlog_once(db_path: str) -> None:
+    # 2026-04: Se desactiva auto-estudio masivo de backlog historico para
+    # evitar picos de lectura de Sheets (429) al abrir la seccion.
+    # Regla vigente:
+    # - SI auto-estudio para fichas nuevas que se agregan/cambian a pendiente.
+    # - NO auto-estudio inicial de todas las fichas ya existentes.
     if bool(st.session_state.get("intel_auto_study_bootstrapped", False)):
         return
-    try:
-        seg_boot_df = pd.DataFrame(_ensure_study_state(sync_remote=True))
-        if not seg_boot_df.empty and "ficha" in seg_boot_df.columns:
-            if "estado" in seg_boot_df.columns:
-                pending_mask = seg_boot_df["estado"].map(_is_pending_study_state)
-            else:
-                pending_mask = pd.Series([True] * len(seg_boot_df), index=seg_boot_df.index)
-            pending_fichas = (
-                seg_boot_df.loc[pending_mask, "ficha"].astype(str).str.strip().replace("", pd.NA).dropna().tolist()
-            )
-            if pending_fichas:
-                enqueue = _enqueue_auto_study_for_fichas(
-                    pending_fichas,
-                    db_path=str(db_path or ""),
-                    max_queries=int(st.session_state.get("intel_study_max_queries", INTEL_STUDY_DEFAULT_MAX_QUERIES)),
-                    notes="Auto-estudio inicial para fichas en seguimiento",
-                )
-                st.session_state["intel_auto_study_bootstrap_report"] = enqueue
-        st.session_state["intel_auto_study_bootstrapped"] = True
-    except Exception as exc:
-        st.session_state["intel_auto_study_bootstrap_error"] = str(exc)
+    st.session_state["intel_auto_study_bootstrapped"] = True
+    st.session_state["intel_auto_study_bootstrap_report"] = {}
+    st.session_state["intel_auto_study_bootstrap_error"] = ""
 
 
 def _render_tab_estudio_profundo(
@@ -6589,6 +6584,10 @@ def _render_tab_estudio_profundo(
         st.caption(f"Persistencia estudios: {persist_status}")
 
     _auto_enqueue_study_backlog_once(str(db_path or ""))
+    st.caption(
+        "Auto-estudio inicial masivo desactivado para evitar limites de lectura (429) en Sheets. "
+        "Se mantiene auto-estudio solo para fichas nuevas agregadas a seguimiento."
+    )
     bootstrap_report = st.session_state.get("intel_auto_study_bootstrap_report")
     if isinstance(bootstrap_report, dict):
         if int(bootstrap_report.get("queued", 0)) > 0:
