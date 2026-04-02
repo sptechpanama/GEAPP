@@ -207,6 +207,7 @@ INTEL_STUDY_SHEETS_TABLE_MAP: dict[str, str] = {
     "analisis_proveedores_hist_panama": "intel_ap_hist_panama",
     "analisis_proveedores_mejor_gama": "intel_ap_mejor_gama",
     "analisis_proveedores_mejor_precio": "intel_ap_mejor_precio",
+    "analisis_proveedores_comentarios": "intel_ap_comentarios",
 }
 
 
@@ -3450,12 +3451,27 @@ def _ensure_study_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analisis_proveedores_comentarios (
+                comentario_id TEXT PRIMARY KEY,
+                ficha TEXT NOT NULL,
+                analisis_id TEXT,
+                run_id_estudio TEXT,
+                usuario TEXT,
+                comentario TEXT NOT NULL,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_contexto_estado ON analisis_proveedores_contexto(estado_analisis)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_version_ficha ON analisis_proveedores_version(ficha)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_version_active ON analisis_proveedores_version(ficha, is_active)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_hist_analisis ON analisis_proveedores_hist_panama(analisis_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_gama_analisis ON analisis_proveedores_mejor_gama(analisis_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_precio_analisis ON analisis_proveedores_mejor_precio(analisis_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_comentarios_ficha ON analisis_proveedores_comentarios(ficha, created_at)")
 
         # Backward compatibility: agrega columnas nuevas si la DB ya existía.
         existing_cols = {
@@ -5579,6 +5595,74 @@ def _load_ap_versions_df() -> pd.DataFrame:
     return _load_ap_versions_df_cached(_get_study_data_rev())
 
 
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_ap_comments_df_cached(_rev: int) -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT *
+            FROM analisis_proveedores_comentarios
+            ORDER BY datetime(created_at) DESC, ficha ASC
+            """,
+            conn,
+        )
+
+
+def _load_ap_comments_df() -> pd.DataFrame:
+    return _load_ap_comments_df_cached(_get_study_data_rev())
+
+
+def _save_ap_comment(ficha: str, comentario: str) -> tuple[bool, str]:
+    _ensure_study_db()
+    ficha = _clean_text(ficha)
+    comentario_txt = _clean_text(comentario)
+    if not ficha:
+        return False, "Falta ficha para guardar comentario."
+    if not comentario_txt:
+        return False, "El comentario está vacío."
+
+    now = _utc_now_iso()
+    comentario_id = str(uuid.uuid4())
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        ctx_row = conn.execute(
+            """
+            SELECT analisis_id_activo, run_id_estudio
+            FROM analisis_proveedores_contexto
+            WHERE ficha=?
+            """,
+            (ficha,),
+        ).fetchone()
+        analisis_id = _clean_text(ctx_row[0]) if ctx_row and len(ctx_row) > 0 else ""
+        run_id_estudio = _clean_text(ctx_row[1]) if ctx_row and len(ctx_row) > 1 else ""
+
+        conn.execute(
+            """
+            INSERT INTO analisis_proveedores_comentarios (
+                comentario_id, ficha, analisis_id, run_id_estudio, usuario, comentario, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comentario_id,
+                ficha,
+                analisis_id,
+                run_id_estudio,
+                _current_user(),
+                comentario_txt,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+    _bump_study_data_rev()
+    _persist_study_tables_after_write(
+        ["analisis_proveedores_comentarios"],
+        reason="ap_comentarios",
+    )
+    return True, "Comentario guardado."
+
+
 def _ensure_provider_analysis_contexts(resumen_df: pd.DataFrame, ranked_df: pd.DataFrame) -> tuple[int, int]:
     _ensure_study_db()
     if resumen_df.empty:
@@ -6997,6 +7081,76 @@ def _render_tab_estudio_profundo(
                     st.dataframe(agg, use_container_width=True, hide_index=True)
 
     with tab_cons:
+        st.markdown("#### Bitácora de seguimiento con proveedores")
+        st.caption(
+            "Usa este espacio para guardar hallazgos posteriores al contacto con proveedores. "
+            "Cada comentario queda persistido en Sheets y asociado a la ficha."
+        )
+        ap_ctx_df = _load_ap_context_df()
+        if ap_ctx_df.empty:
+            st.info("Aún no hay fichas estudiadas preparadas para asociar comentarios.")
+        else:
+            ap_ctx_df = ap_ctx_df.copy()
+            ap_ctx_df["ficha_label"] = ap_ctx_df.apply(
+                lambda r: f"{_clean_text(r.get('ficha', ''))} - {_clean_text(r.get('nombre_ficha', ''))}".strip(" -"),
+                axis=1,
+            )
+            ap_ctx_df = ap_ctx_df.sort_values(["updated_at", "ficha"], ascending=[False, True], kind="stable")
+            ap_comment_options = ap_ctx_df["ficha"].astype(str).tolist()
+            ap_comment_map = dict(zip(ap_ctx_df["ficha"].astype(str), ap_ctx_df["ficha_label"].astype(str)))
+            selected_comment_ficha = st.selectbox(
+                "Ficha para comentarios",
+                ap_comment_options,
+                key="intel_ap_comment_ficha",
+                format_func=lambda x: ap_comment_map.get(str(x), str(x)),
+            )
+            selected_ctx_row = ap_ctx_df[ap_ctx_df["ficha"].astype(str) == str(selected_comment_ficha)].head(1)
+            if not selected_ctx_row.empty:
+                ctx_row = selected_ctx_row.iloc[0]
+                st.caption(
+                    f"Estado análisis: `{_clean_text(ctx_row.get('estado_analisis', '')) or '-'}` | "
+                    f"Análisis activo: `{_clean_text(ctx_row.get('analisis_id_activo', ''))[:8] or '-'}`"
+                )
+
+            comments_df = _load_ap_comments_df()
+            comments_view = comments_df[comments_df["ficha"].astype(str) == str(selected_comment_ficha)].copy() if not comments_df.empty else pd.DataFrame()
+
+            comment_input_key = f"intel_ap_comment_input_{selected_comment_ficha}"
+            new_comment = st.text_area(
+                "Agregar comentario",
+                key=comment_input_key,
+                height=120,
+                placeholder="Ej: Proveedor confirmó cumplimiento parcial, pidió ficha adicional, cotización pendiente, contacto por WhatsApp, etc.",
+            )
+            if st.button("Guardar comentario", key=f"intel_ap_comment_save_{selected_comment_ficha}"):
+                ok, msg = _save_ap_comment(selected_comment_ficha, new_comment)
+                if ok:
+                    st.session_state[comment_input_key] = ""
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.warning(msg)
+
+            if comments_view.empty:
+                st.info("Aún no hay comentarios guardados para esta ficha.")
+            else:
+                comments_view = comments_view.rename(
+                    columns={
+                        "created_at": "fecha",
+                        "usuario": "usuario",
+                        "comentario": "comentario",
+                        "analisis_id": "analisis_id",
+                    }
+                )
+                show_comment_cols = [c for c in ["fecha", "usuario", "analisis_id", "comentario"] if c in comments_view.columns]
+                st.dataframe(
+                    comments_view[show_comment_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        st.markdown("---")
+        st.markdown("#### Resolución de consultas del estudio")
         if runs_df.empty:
             st.info("Sin runs para consultas.")
         else:
