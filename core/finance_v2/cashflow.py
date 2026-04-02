@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import date
+from calendar import monthrange
 
 import pandas as pd
 
@@ -10,9 +11,11 @@ from .constants import (
     COL_FECHA,
     COL_FECHA_COBRO,
     COL_MONTO,
+    COL_RECURRENTE,
     COL_PROVEEDOR,
     COL_PROYECTO,
 )
+from .helpers import yes_no_flag
 
 
 def _build_cash_movements(df_ing: pd.DataFrame, df_gas: pd.DataFrame) -> pd.DataFrame:
@@ -73,8 +76,53 @@ def build_cashflow_proyectado(
     *,
     granularidad: str = "D",
     fecha_hoy: date | None = None,
+    horizon_months: int = 4,
 ) -> dict:
     today = pd.Timestamp(fecha_hoy or date.today())
+    today_norm = today.normalize()
+
+    horizon_months = int(horizon_months or 4)
+    if horizon_months < 1:
+        horizon_months = 1
+    end_period = today_norm.to_period("M") + (horizon_months - 1)
+    horizon_end = end_period.to_timestamp(how="end").normalize()
+
+    def _expand_recurrent_monthly(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return frame
+        recurrent_mask = frame.get("__is_recurrente", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
+        one_off = frame.loc[~recurrent_mask].copy()
+        recurrent = frame.loc[recurrent_mask].copy()
+        if recurrent.empty:
+            return one_off
+
+        month_range = pd.period_range(
+            start=today_norm.to_period("M"),
+            end=horizon_end.to_period("M"),
+            freq="M",
+        )
+
+        expanded_rows: list[dict] = []
+        for _, row in recurrent.iterrows():
+            base_date = pd.to_datetime(row.get("fecha_evento"), errors="coerce")
+            if pd.isna(base_date):
+                continue
+            base_day = int(base_date.day) if int(base_date.day) > 0 else 1
+            row_base = row.to_dict()
+            for period in month_range:
+                max_day = monthrange(int(period.year), int(period.month))[1]
+                due_date = pd.Timestamp(
+                    year=int(period.year),
+                    month=int(period.month),
+                    day=min(base_day, max_day),
+                )
+                row_copy = dict(row_base)
+                row_copy["fecha_evento"] = due_date
+                row_copy["fecha_fuente"] = f"{row_copy.get('fecha_fuente', 'fecha')}_recurrente"
+                expanded_rows.append(row_copy)
+
+        recurrent_expanded = pd.DataFrame(expanded_rows, columns=frame.columns) if expanded_rows else pd.DataFrame(columns=frame.columns)
+        return pd.concat([one_off, recurrent_expanded], ignore_index=True, sort=False)
 
     # Cobros esperados: usamos Fecha de cobro; fallback a Fecha si falta.
     cxc = df_ing_pend.copy()
@@ -85,6 +133,8 @@ def build_cashflow_proyectado(
     cxc.loc[cxc["fecha_evento"].isna(), "fecha_fuente"] = "sin_fecha"
     cxc["monto_evento"] = pd.to_numeric(cxc[COL_MONTO], errors="coerce").fillna(0.0)
     cxc["tipo_evento"] = "cobro"
+    cxc_rec = cxc[COL_RECURRENTE] if COL_RECURRENTE in cxc.columns else pd.Series("No", index=cxc.index)
+    cxc["__is_recurrente"] = cxc_rec.map(yes_no_flag).eq("Si")
 
     # Pagos esperados: preferimos fecha estimada de pago; fallback a Fecha del registro.
     cxp = df_gas_pend.copy()
@@ -96,15 +146,23 @@ def build_cashflow_proyectado(
     cxp.loc[cxp["fecha_fuente"] == "fecha_pago_estimada", "fecha_fuente"] = cxp.get("__fecha_pago_fuente", "fecha_pago_estimada")
     cxp["monto_evento"] = -pd.to_numeric(cxp[COL_MONTO], errors="coerce").fillna(0.0)
     cxp["tipo_evento"] = "pago"
+    cxp_rec = cxp[COL_RECURRENTE] if COL_RECURRENTE in cxp.columns else pd.Series("No", index=cxp.index)
+    cxp["__is_recurrente"] = cxp_rec.map(yes_no_flag).eq("Si")
+
+    recurring_cxc = int(cxc["__is_recurrente"].sum()) if "__is_recurrente" in cxc.columns else 0
+    recurring_cxp = int(cxp["__is_recurrente"].sum()) if "__is_recurrente" in cxp.columns else 0
+
+    cxc_events = _expand_recurrent_monthly(cxc)
+    cxp_events = _expand_recurrent_monthly(cxp)
 
     events = pd.concat([
-        cxc[["fecha_evento", "monto_evento", "tipo_evento", "fecha_fuente", COL_EMPRESA, COL_CLIENTE_NOMBRE, COL_PROYECTO]],
-        cxp[["fecha_evento", "monto_evento", "tipo_evento", "fecha_fuente", COL_EMPRESA, COL_PROVEEDOR, COL_PROYECTO]],
+        cxc_events[["fecha_evento", "monto_evento", "tipo_evento", "fecha_fuente", COL_EMPRESA, COL_CLIENTE_NOMBRE, COL_PROYECTO]],
+        cxp_events[["fecha_evento", "monto_evento", "tipo_evento", "fecha_fuente", COL_EMPRESA, COL_PROVEEDOR, COL_PROYECTO]],
     ], ignore_index=True, sort=False)
 
-    events["fecha_evento"] = pd.to_datetime(events["fecha_evento"], errors="coerce")
+    events["fecha_evento"] = pd.to_datetime(events["fecha_evento"], errors="coerce").dt.normalize()
     events = events.dropna(subset=["fecha_evento"]).copy()
-    events = events[events["fecha_evento"] >= today].sort_values("fecha_evento")
+    events = events[(events["fecha_evento"] >= today_norm) & (events["fecha_evento"] <= horizon_end)].sort_values("fecha_evento")
 
     if events.empty:
         return {
@@ -118,9 +176,10 @@ def build_cashflow_proyectado(
                 "saldo_proyectado_final": float(saldo_inicial),
             },
             "notas": [
-                "No hay eventos futuros dentro del rango filtrado.",
+                f"No hay eventos futuros dentro del horizonte de {horizon_months} mes(es).",
                 f"Cobros pendientes sin Fecha de cobro (fallback): {int(missing_cxc)}",
                 f"Pagos pendientes sin fecha estimada (fallback a Fecha registro): {int(missing_cxp)}",
+                f"Registros recurrentes detectados: cobros={recurring_cxc}, pagos={recurring_cxp}",
             ],
         }
 
@@ -141,8 +200,10 @@ def build_cashflow_proyectado(
 
     notes = [
         "Supuesto de proyeccion: caja (cobros y pagos), no devengo contable.",
+        f"Horizonte de proyeccion: {horizon_months} mes(es) desde el mes actual.",
         f"Cobros pendientes sin Fecha de cobro (fallback a Fecha): {int(missing_cxc)}",
         f"Pagos pendientes sin fecha estimada (fallback a Fecha registro): {int(missing_cxp)}",
+        f"Registros recurrentes detectados: cobros={recurring_cxc}, pagos={recurring_cxp}",
     ]
 
     return {

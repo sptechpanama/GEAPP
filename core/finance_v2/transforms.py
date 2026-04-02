@@ -20,6 +20,7 @@ from .constants import (
     COL_MONTO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
+    COL_RECURRENTE,
     COL_PROVEEDOR,
     COL_PROYECTO,
     COL_ROW_ID,
@@ -66,6 +67,7 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out[COL_CATEGORIA] = out[COL_CATEGORIA].map(normalize_category)
     out[COL_POR_COBRAR] = out[COL_POR_COBRAR].map(yes_no_flag)
     out[COL_COBRADO] = out[COL_COBRADO].map(yes_no_flag)
+    out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
 
     out["__source"] = "ingreso"
     return out
@@ -81,6 +83,7 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
 
     out[COL_CATEGORIA] = out[COL_CATEGORIA].map(normalize_category)
     out[COL_POR_PAGAR] = out[COL_POR_PAGAR].map(yes_no_flag)
+    out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
 
     # Fecha esperada de pago: puede no existir en el esquema actual.
     fallback_candidates = [
