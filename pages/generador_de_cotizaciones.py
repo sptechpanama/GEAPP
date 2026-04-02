@@ -80,10 +80,35 @@ def _slugify_text(text: str, *, max_words: int = 8, max_len: int = 56) -> str:
 
 def _quote_excel_filename(numero_cot: str, descripcion_corta: str) -> str:
     base = str(numero_cot or "").strip() or "COTIZACION"
+    base = re.sub(r"[\\/:*?\"<>|]+", "-", base).strip(" .-_") or "COTIZACION"
+    if base.lower() in {"xlsx", "xlsm", "xls"}:
+        base = "COTIZACION"
     suffix = _slugify_text(descripcion_corta, max_words=8, max_len=56)
-    if suffix:
-        return f"{base}-{suffix}.xlsx"
-    return f"{base}.xlsx"
+    candidate = f"{base}-{suffix}.xlsx" if suffix else f"{base}.xlsx"
+    return _safe_excel_filename(candidate, fallback_base="COTIZACION")
+
+
+def _safe_excel_filename(name: str, fallback_base: str = "COTIZACION") -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        raw = fallback_base
+    raw = os.path.basename(raw).replace("\x00", "").strip()
+    raw = re.sub(r"[\\/:*?\"<>|]+", "-", raw).strip()
+    if not raw:
+        raw = fallback_base
+
+    lower = raw.lower()
+    if lower in {"xlsx", ".xlsx", "xlsm", ".xlsm", "xls", ".xls"}:
+        raw = fallback_base
+
+    root, ext = os.path.splitext(raw)
+    root = root.strip(" .-_")
+    if not root:
+        root = fallback_base
+    if ext.lower() not in {".xlsx", ".xlsm", ".xls"}:
+        ext = ".xlsx"
+    safe = f"{root}{ext}"
+    return safe
 
 
 def _openai_api_key() -> str:
@@ -2500,7 +2525,10 @@ def _save_panama_quote_to_history(
         detalles=detalles_extra,
         items=[str(x).strip() for x in items_df["producto_servicio"].tolist() if str(x).strip()][:5],
     )
-    excel_filename = _quote_excel_filename(numero_cot, descripcion_corta)
+    excel_filename = _safe_excel_filename(
+        _quote_excel_filename(numero_cot, descripcion_corta),
+        fallback_base=(str(numero_cot or "").strip() or "COTIZACION"),
+    )
 
     drive_file_id = existing_row.get("drive_file_id") if existing_row else ""
     drive_file_name = existing_row.get("drive_file_name") if existing_row else ""
@@ -3303,7 +3331,9 @@ ASSETS_DIR = os.path.join(os.path.dirname(BASE_DIR), "assets")
 
 # Prefer paths proporcionados, luego assets de respaldo
 RS_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RS Engineering.png")
-RIR_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo RIR Medical.png")
+# Para RIR, toda salida debe priorizar el encabezado nuevo.
+# Se deja el logo histórico solo como fallback técnico.
+RIR_LOGO_PATH = str(HEADER_RIR_STANDARD)
 SP_LOGO_PATH = os.path.join(ASSETS_DIR, "Logo SP Engineering.png")
 RS_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rs.png.png")
 RIR_LOGO_FALLBACK = os.path.join(ASSETS_DIR, "rir.png.png")
@@ -3338,7 +3368,7 @@ COMPANIES = {
     "RIR Medical": {
         "color": "#1d4ed8",
         "accent": "#22c55e",
-        "logo_b64": _load_logo_b64(RIR_LOGO_PATH, RIR_LOGO_FALLBACK),
+        "logo_b64": _load_logo_b64(RIR_LOGO_PATH, os.path.join(ASSETS_DIR, "Logo RIR Medical.png"), RIR_LOGO_FALLBACK),
         "background_b64": BACKGROUND_B64,
         "logo_box_width": 320,
         "logo_box_height": 170,
@@ -3958,9 +3988,15 @@ if active_tab == "Cotización - Panamá Compra":
         st.download_button(
             "Descargar Excel de cotización",
             data=st.session_state["pc_cot_final_excel_bytes"],
-            file_name=st.session_state.get("pc_cot_final_excel_name") or "cotizacion_panama_estandar.xlsx",
+            file_name=_safe_excel_filename(
+                st.session_state.get("pc_cot_final_excel_name") or "cotizacion_panama_estandar.xlsx",
+                fallback_base="cotizacion_panama_estandar",
+            ),
             mime=_guess_mime_from_filename(
-                st.session_state.get("pc_cot_final_excel_name") or "cotizacion_panama_estandar.xlsx"
+                _safe_excel_filename(
+                    st.session_state.get("pc_cot_final_excel_name") or "cotizacion_panama_estandar.xlsx",
+                    fallback_base="cotizacion_panama_estandar",
+                )
             ),
         )
 
@@ -4629,7 +4665,10 @@ if active_tab == "Cotizacion - Estandar":
         "Lugar de entrega": lugar_entrega or "-",
     }
     st.markdown("### Vista previa (Excel final)")
-    excel_preview_name = f"{numero_cot}.xlsx"
+    excel_preview_name = _safe_excel_filename(
+        _quote_excel_filename(numero_cot, ""),
+        fallback_base="COTIZACION",
+    )
     excel_preview_bytes = None
     excel_preview_error = None
     try:
@@ -4746,7 +4785,10 @@ if active_tab == "Cotizacion - Estandar":
                     detalles=detalles_extra,
                     items=item_names_for_desc,
                 )
-                excel_filename = _quote_excel_filename(numero_cot, descripcion_corta)
+                excel_filename = _safe_excel_filename(
+                    _quote_excel_filename(numero_cot, descripcion_corta),
+                    fallback_base=(str(numero_cot or "").strip() or "COTIZACION"),
+                )
                 if excel_preview_bytes:
                     excel_bytes = excel_preview_bytes
                 else:
@@ -5148,7 +5190,10 @@ if active_tab == "Historial de cotizaciones":
                         except Exception as exc:
                             st.error(f"No se pudo descargar: {exc}")
                     if st.session_state.get(download_key):
-                        out_name = sel_row.get("drive_file_name") or f"{sel_row.get('numero_cotizacion')}.xlsx"
+                        out_name = _safe_excel_filename(
+                            sel_row.get("drive_file_name") or f"{sel_row.get('numero_cotizacion')}.xlsx",
+                            fallback_base=(str(sel_row.get("numero_cotizacion") or "").strip() or "COTIZACION"),
+                        )
                         st.download_button(
                             "Descargar archivo",
                             data=st.session_state[download_key],
