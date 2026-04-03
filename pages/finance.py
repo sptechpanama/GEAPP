@@ -10,6 +10,7 @@
 from __future__ import annotations
 import uuid, time
 import streamlit as st
+import streamlit.components.v1 as components
 from ui.theme import apply_global_theme
 st.set_page_config(page_title="Finanzas Operativas", page_icon="📊", layout="wide")
 apply_global_theme()
@@ -121,12 +122,13 @@ COL_USER  = "Usuario"
 
 EMPRESAS_OPCIONES = ["RS-SP", "RIR"]
 EMPRESA_DEFAULT   = "RS-SP"
-REC_PERIOD_OPTIONS = ["Mensual", "Bimestral", "Trimestral"]
+YES_NO_OPTIONS    = ["No", "Sí"]
+REC_PERIOD_OPTIONS = ["15nal", "Mensual", "Semestral"]
 REC_RULE_OPTIONS = [
-    "Mismo dia de fecha esperada",
     "Inicio de cada mes",
     "Dia 15 de cada mes",
-    "Fin de mes",
+    "Dia 1 y 15 de cada mes",
+    "Mismo dia de fecha esperada",
 ]
 
 
@@ -332,7 +334,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
             elif col == COL_REC_PER:
                 out[col] = "Mensual"
             elif col == COL_REC_REG:
-                out[col] = "Mismo dia de fecha esperada"
+                out[col] = "Inicio de cada mes"
             else:
                 out[col] = ""
     out[COL_FECHA] = _ts(out[COL_FECHA]); out[COL_FCOBRO] = _ts(out[COL_FCOBRO])
@@ -345,9 +347,13 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_COB]     = out[COL_COB].map(_si_no_norm)
     out[COL_REC]     = out[COL_REC].map(_si_no_norm)
     out = _ensure_text(out, [COL_DESC, COL_CONC, COL_CAT, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB, COL_COB, COL_REC, COL_REC_PER, COL_REC_REG, COL_ROWID, COL_USER])
-    out.loc[out[COL_REC] != "Sí", [COL_REC_PER, COL_REC_REG]] = ""
-    out.loc[(out[COL_REC] == "Sí") & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
-    out.loc[(out[COL_REC] == "Sí") & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Mismo dia de fecha esperada"
+    out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
+    out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
+    out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
+    rec_mask = out[COL_REC].map(_si_no_norm).eq("Sí")
+    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG]] = ""
+    out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
+    out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -361,7 +367,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
             elif col == COL_EMP: out[col] = EMPRESA_DEFAULT
             elif col in {COL_POR_PAG, COL_REC}: out[col] = "No"
             elif col == COL_REC_PER: out[col] = "Mensual"
-            elif col == COL_REC_REG: out[col] = "Mismo dia de fecha esperada"
+            elif col == COL_REC_REG: out[col] = "Inicio de cada mes"
             else: out[col] = ""
     out[COL_FECHA] = _ts(out[COL_FECHA])
     out[COL_FPAGO] = _ts(out[COL_FPAGO])
@@ -373,9 +379,13 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_POR_PAG] = out[COL_POR_PAG].map(_si_no_norm)
     out[COL_REC]     = out[COL_REC].map(_si_no_norm)
     out = _ensure_text(out, [COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_REC, COL_REC_PER, COL_REC_REG, COL_PROV, COL_ROWID, COL_USER])
-    out.loc[out[COL_REC] != "Sí", [COL_REC_PER, COL_REC_REG]] = ""
-    out.loc[(out[COL_REC] == "Sí") & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
-    out.loc[(out[COL_REC] == "Sí") & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Mismo dia de fecha esperada"
+    out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
+    out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
+    out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
+    rec_mask = out[COL_REC].map(_si_no_norm).eq("Sí")
+    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG]] = ""
+    out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
+    out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -602,10 +612,29 @@ def _client_options_for_company(company: str | None) -> list[str]:
 
 def _mark_form_force_open(prefix: str) -> None:
     st.session_state[f"{prefix}_force_open"] = True
+    st.session_state[f"{prefix}_scroll_to"] = True
 
 
 def _clear_form_force_open(prefix: str) -> None:
     st.session_state[f"{prefix}_force_open"] = False
+    st.session_state[f"{prefix}_scroll_to"] = False
+
+
+def _render_form_scroll_restore(anchor_id: str, should_scroll: bool) -> None:
+    st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
+    if not should_scroll:
+        return
+    components.html(
+        f"""
+        <script>
+        const anchor = window.parent.document.getElementById("{anchor_id}");
+        if (anchor) {{
+          anchor.scrollIntoView({{behavior: "auto", block: "start"}});
+        }}
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _ensure_client_selection(prefix: str, options: list[str]) -> None:
@@ -1108,10 +1137,14 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
 # ============================================================
 st.markdown("## Ingresos")
 ing_should_expand = st.session_state.pop("ing_force_open", False)
+ing_should_scroll = st.session_state.pop("ing_scroll_to", False)
 if ing_should_expand:
     st.session_state["ing_force_open"] = True
+_render_form_scroll_restore("finance-ing-form-anchor", ing_should_scroll)
 with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     _prepare_entry_defaults("ing")
+    if _si_no_norm(st.session_state.get("ing_recurrente_quick", "No")) != "No":
+        st.session_state["ing_porcob_quick"] = YES_NO_OPTIONS[1]
 
     c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 1.2, 1.0])
     with c1:
@@ -1138,11 +1171,13 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             on_change=lambda: _mark_form_force_open("ing"),
         )
     with c4:
+        ing_recurring_enabled = _si_no_norm(st.session_state.get("ing_recurrente_quick", "No")) != "No"
         por_cobrar_nuevo = st.selectbox(
             "Por_cobrar",
-            ["No", "Sí"],
-            index=0,
+            YES_NO_OPTIONS,
+            index=1 if ing_recurring_enabled else 0,
             key="ing_porcob_quick",
+            disabled=ing_recurring_enabled,
             on_change=lambda: _mark_form_force_open("ing"),
         )
     with c5:
@@ -1155,7 +1190,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     with c6:
         recurrente_ing = st.selectbox(
             "Recurrente",
-            ["No", "Si"],
+            YES_NO_OPTIONS,
             index=0,
             key="ing_recurrente_quick",
             on_change=lambda: _mark_form_force_open("ing"),
@@ -1173,14 +1208,17 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
                 on_change=lambda: _mark_form_force_open("ing"),
             )
         with r2:
-            rec_rule_ing = st.selectbox(
-                "Regla fecha recurrencia",
-                REC_RULE_OPTIONS,
-                index=0,
-                key="ing_rec_rule_quick",
-                on_change=lambda: _mark_form_force_open("ing"),
-            )
-        st.caption("Para proyectarse automaticamente, un ingreso recurrente debe quedar como Por_cobrar = Si.")
+            if rec_period_ing == "15nal":
+                rec_rule_ing = "Dia 1 y 15 de cada mes"
+                st.text_input("Regla fecha recurrencia", value=rec_rule_ing, disabled=True, key="ing_rec_rule_quick_locked")
+            else:
+                rec_rule_ing = st.selectbox(
+                    "Regla fecha recurrencia",
+                    [x for x in REC_RULE_OPTIONS if x != "Dia 1 y 15 de cada mes"],
+                    index=0,
+                    key="ing_rec_rule_quick",
+                    on_change=lambda: _mark_form_force_open("ing"),
+                )
     categoria_ing = st.selectbox(
         "Categoria",
         ["Proyectos", "Oficina", "Miscelaneos"],
@@ -1226,40 +1264,38 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             cliente_id = linked_client_id
             cliente_nombre = linked_client_name or cliente_nombre
 
-        if _si_no_norm(recurrente_ing) != "No" and _si_no_norm(por_cobrar_nuevo) == "No":
-            st.error("Un ingreso recurrente debe registrarse como Por_cobrar = Si para proyectarse.")
-        else:
-            rid = uuid.uuid4().hex
-            cobrado = "No" if _si_no_norm(por_cobrar_nuevo) != "No" else "Si"
-            fecha_cobro = _ts(fecha_cobro_esperada)
-            nueva = {
-                COL_ROWID: rid,
-                COL_FECHA: _ts(fecha_nueva),
-                COL_MONTO: float(monto_nuevo),
-                COL_PROY: (proyecto_id or "").strip(),
-                COL_CLI_ID: (cliente_id or "").strip(),
-                COL_CLI_NOM: (cliente_nombre or "").strip(),
-                COL_EMP: (empresa_ing or EMPRESA_DEFAULT).strip(),
-                COL_DESC: (desc_nueva or "").strip(),
-                COL_CONC: (desc_nueva or "").strip(),
-                COL_POR_COB: por_cobrar_nuevo,
-                COL_COB: cobrado,
-                COL_FCOBRO: fecha_cobro,
-                COL_REC: recurrente_ing,
-                COL_REC_PER: rec_period_ing if _si_no_norm(recurrente_ing) != "No" else "",
-                COL_REC_REG: rec_rule_ing if _si_no_norm(recurrente_ing) != "No" else "",
-                COL_CAT: categoria_ing,
-                COL_ESC: "Real",
-                COL_USER: _current_user(),
-            }
-            st.session_state.df_ing = pd.concat([st.session_state.df_ing, pd.DataFrame([nueva])], ignore_index=True)
-            st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
-            wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
-            if wrote:
-                st.cache_data.clear()
-            _clear_form_force_open("ing")
-            _reset_entry_state("ing")
-            _safe_rerun()
+        rid = uuid.uuid4().hex
+        por_cobrar_final = YES_NO_OPTIONS[1] if _si_no_norm(recurrente_ing) != "No" else por_cobrar_nuevo
+        cobrado = "No" if _si_no_norm(por_cobrar_final) != "No" else "Si"
+        fecha_cobro = _ts(fecha_cobro_esperada)
+        nueva = {
+            COL_ROWID: rid,
+            COL_FECHA: _ts(fecha_nueva),
+            COL_MONTO: float(monto_nuevo),
+            COL_PROY: (proyecto_id or "").strip(),
+            COL_CLI_ID: (cliente_id or "").strip(),
+            COL_CLI_NOM: (cliente_nombre or "").strip(),
+            COL_EMP: (empresa_ing or EMPRESA_DEFAULT).strip(),
+            COL_DESC: (desc_nueva or "").strip(),
+            COL_CONC: (desc_nueva or "").strip(),
+            COL_POR_COB: por_cobrar_final,
+            COL_COB: cobrado,
+            COL_FCOBRO: fecha_cobro,
+            COL_REC: recurrente_ing,
+            COL_REC_PER: rec_period_ing if _si_no_norm(recurrente_ing) != "No" else "",
+            COL_REC_REG: rec_rule_ing if _si_no_norm(recurrente_ing) != "No" else "",
+            COL_CAT: categoria_ing,
+            COL_ESC: "Real",
+            COL_USER: _current_user(),
+        }
+        st.session_state.df_ing = pd.concat([st.session_state.df_ing, pd.DataFrame([nueva])], ignore_index=True)
+        st.session_state.df_ing = ensure_ingresos_columns(st.session_state.df_ing)
+        wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, st.session_state.df_ing, old_df=df_ing_before)
+        if wrote:
+            st.cache_data.clear()
+        _clear_form_force_open("ing")
+        _reset_entry_state("ing")
+        _safe_rerun()
 
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
 st.markdown("### Ingresos (tabla)")
@@ -1273,8 +1309,8 @@ if COL_CAT in df_ing_f.columns:
         if cat not in ing_cat_options:
             ing_cat_options.append(cat)
 ing_colcfg = {
-    COL_POR_COB: st.column_config.SelectboxColumn(COL_POR_COB, options=["No", "Si"]),
-    COL_REC:     st.column_config.SelectboxColumn(COL_REC, options=["No", "Si"]),
+    COL_POR_COB: st.column_config.SelectboxColumn(COL_POR_COB, options=YES_NO_OPTIONS),
+    COL_REC:     st.column_config.SelectboxColumn(COL_REC, options=YES_NO_OPTIONS),
     COL_REC_PER: st.column_config.SelectboxColumn(COL_REC_PER, options=REC_PERIOD_OPTIONS),
     COL_REC_REG: st.column_config.SelectboxColumn(COL_REC_REG, options=REC_RULE_OPTIONS),
     COL_FCOBRO:  st.column_config.DateColumn("Fecha esperada de cobro"),
@@ -1364,10 +1400,14 @@ sync_cambios(
 # ============================================================
 st.markdown("## Gastos")
 gas_should_expand = st.session_state.pop("gas_force_open", False)
+gas_should_scroll = st.session_state.pop("gas_scroll_to", False)
 if gas_should_expand:
     st.session_state["gas_force_open"] = True
+_render_form_scroll_restore("finance-gas-form-anchor", gas_should_scroll)
 with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     _prepare_entry_defaults("gas")
+    if _si_no_norm(st.session_state.get("gas_recurrente_quick", "No")) != "No":
+        st.session_state["gas_porpag_quick"] = YES_NO_OPTIONS[1]
 
     g1, g2, g3, g4, g5, g6, g7 = st.columns([1, 1, 1, 1.6, 1, 1.3, 1.0])
     with g1:
@@ -1402,11 +1442,13 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             on_change=lambda: _mark_form_force_open("gas"),
         )
     with g5:
+        gas_recurring_enabled = _si_no_norm(st.session_state.get("gas_recurrente_quick", "No")) != "No"
         por_pagar_nuevo = st.selectbox(
             "Por_pagar",
-            ["No", "Sí"],
-            index=0,
+            YES_NO_OPTIONS,
+            index=1 if gas_recurring_enabled else 0,
             key="gas_porpag_quick",
+            disabled=gas_recurring_enabled,
             on_change=lambda: _mark_form_force_open("gas"),
         )
     with g6:
@@ -1419,7 +1461,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     with g7:
         recurrente_gas = st.selectbox(
             "Recurrente",
-            ["No", "Si"],
+            YES_NO_OPTIONS,
             index=0,
             key="gas_recurrente_quick",
             on_change=lambda: _mark_form_force_open("gas"),
@@ -1437,14 +1479,17 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
                 on_change=lambda: _mark_form_force_open("gas"),
             )
         with rg2:
-            rec_rule_gas = st.selectbox(
-                "Regla fecha recurrencia",
-                REC_RULE_OPTIONS,
-                index=0,
-                key="gas_rec_rule_quick",
-                on_change=lambda: _mark_form_force_open("gas"),
-            )
-        st.caption("Para proyectarse automaticamente, un gasto recurrente debe quedar como Por_pagar = Si.")
+            if rec_period_gas == "15nal":
+                rec_rule_gas = "Dia 1 y 15 de cada mes"
+                st.text_input("Regla fecha recurrencia", value=rec_rule_gas, disabled=True, key="gas_rec_rule_quick_locked")
+            else:
+                rec_rule_gas = st.selectbox(
+                    "Regla fecha recurrencia",
+                    [x for x in REC_RULE_OPTIONS if x != "Dia 1 y 15 de cada mes"],
+                    index=0,
+                    key="gas_rec_rule_quick",
+                    on_change=lambda: _mark_form_force_open("gas"),
+                )
 
     cliente_id_g = ""
     cliente_nombre_g = ""
@@ -1495,42 +1540,40 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             cliente_id_g = ""
             cliente_nombre_g = ""
             proyecto_id_g = ""
-        if _si_no_norm(recurrente_gas) != "No" and _si_no_norm(por_pagar_nuevo) == "No":
-            st.error("Un gasto recurrente debe registrarse como Por_pagar = Si para proyectarse.")
-        else:
-            nueva_g = {
-                COL_ROWID: uuid.uuid4().hex,
-                COL_FECHA: _ts(fecha_g),
-                COL_MONTO: float(monto_g),
-                COL_DESC: (desc_g or "").strip(),
-                COL_CONC: (desc_g or "").strip(),
-                COL_CAT: categoria_g,
-                COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
-                COL_POR_PAG: por_pagar_nuevo,
-                COL_REC: recurrente_gas,
-                COL_REC_PER: rec_period_gas if _si_no_norm(recurrente_gas) != "No" else "",
-                COL_REC_REG: rec_rule_gas if _si_no_norm(recurrente_gas) != "No" else "",
-                COL_FPAGO: _ts(fecha_pago_esperada),
-                COL_PROY: (proyecto_id_g or "").strip(),
-                COL_CLI_ID: (cliente_id_g or "").strip(),
-                COL_CLI_NOM: (cliente_nombre_g or "").strip(),
-                COL_PROV: (prov_g or "").strip(),
-                COL_USER: _current_user(),
-            }
-            st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
-            st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
-            wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
-            if wrote:
-                st.cache_data.clear()
-            _clear_form_force_open("gas")
-            _reset_entry_state("gas")
-            _safe_rerun()
+        por_pagar_final = YES_NO_OPTIONS[1] if _si_no_norm(recurrente_gas) != "No" else por_pagar_nuevo
+        nueva_g = {
+            COL_ROWID: uuid.uuid4().hex,
+            COL_FECHA: _ts(fecha_g),
+            COL_MONTO: float(monto_g),
+            COL_DESC: (desc_g or "").strip(),
+            COL_CONC: (desc_g or "").strip(),
+            COL_CAT: categoria_g,
+            COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
+            COL_POR_PAG: por_pagar_final,
+            COL_REC: recurrente_gas,
+            COL_REC_PER: rec_period_gas if _si_no_norm(recurrente_gas) != "No" else "",
+            COL_REC_REG: rec_rule_gas if _si_no_norm(recurrente_gas) != "No" else "",
+            COL_FPAGO: _ts(fecha_pago_esperada),
+            COL_PROY: (proyecto_id_g or "").strip(),
+            COL_CLI_ID: (cliente_id_g or "").strip(),
+            COL_CLI_NOM: (cliente_nombre_g or "").strip(),
+            COL_PROV: (prov_g or "").strip(),
+            COL_USER: _current_user(),
+        }
+        st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
+        st.session_state.df_gas = ensure_gastos_columns(st.session_state.df_gas)
+        wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, st.session_state.df_gas, old_df=df_gas_before)
+        if wrote:
+            st.cache_data.clear()
+        _clear_form_force_open("gas")
+        _reset_entry_state("gas")
+        _safe_rerun()
 # Tabla Gastos (etiqueta "Descripcion" para Concepto)
 st.markdown("### Gastos (tabla)")
 gas_cols_view = [c for c in df_gas_f.columns if c not in (COL_ROWID, COL_ESC)] + [COL_ROWID]
 gas_colcfg = {
-    COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=["No", "Si"]),
-    COL_REC:     st.column_config.SelectboxColumn(COL_REC, options=["No", "Si"]),
+    COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=YES_NO_OPTIONS),
+    COL_REC:     st.column_config.SelectboxColumn(COL_REC, options=YES_NO_OPTIONS),
     COL_REC_PER: st.column_config.SelectboxColumn(COL_REC_PER, options=REC_PERIOD_OPTIONS),
     COL_REC_REG: st.column_config.SelectboxColumn(COL_REC_REG, options=REC_RULE_OPTIONS),
     COL_FPAGO:   st.column_config.DateColumn("Fecha esperada de pago"),

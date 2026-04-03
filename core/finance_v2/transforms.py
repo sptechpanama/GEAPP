@@ -85,7 +85,10 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
     out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE]] = ""
     out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_PERIOD] == ""), COL_REC_PERIOD] = "Mensual"
-    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Mismo dia de fecha esperada"
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Inicio de cada mes"
+    out.loc[out[COL_REC_PERIOD] == "Quincenal", COL_REC_PERIOD] = "15nal"
+    out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
+    out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
 
     out["__source"] = "ingreso"
     return out
@@ -119,7 +122,10 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
     out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE]] = ""
     out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_PERIOD] == ""), COL_REC_PERIOD] = "Mensual"
-    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Mismo dia de fecha esperada"
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Inicio de cada mes"
+    out.loc[out[COL_REC_PERIOD] == "Quincenal", COL_REC_PERIOD] = "15nal"
+    out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
+    out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
 
     # Fecha esperada de pago: puede no existir en el esquema actual.
     fallback_candidates = [

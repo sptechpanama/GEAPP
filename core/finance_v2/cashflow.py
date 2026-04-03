@@ -91,10 +91,8 @@ def build_cashflow_proyectado(
 
     def _recurrence_interval_months(raw_value) -> int:
         key = normalize_text_key(raw_value)
-        if "trimestr" in key:
-            return 3
-        if "bimestr" in key:
-            return 2
+        if "semestr" in key:
+            return 6
         return 1
 
     def _due_date_for_period(period: pd.Period, base_date: pd.Timestamp, rule_raw) -> pd.Timestamp:
@@ -102,10 +100,10 @@ def build_cashflow_proyectado(
         max_day = monthrange(int(period.year), int(period.month))[1]
         if "inicio" in rule:
             day = 1
+        elif "1y15" in rule or ("1" in rule and "15" in rule):
+            day = 1
         elif "15" in rule:
             day = 15
-        elif "fin" in rule:
-            day = max_day
         else:
             day = min(int(base_date.day) if int(base_date.day) > 0 else 1, max_day)
         return pd.Timestamp(year=int(period.year), month=int(period.month), day=day)
@@ -130,10 +128,27 @@ def build_cashflow_proyectado(
             base_date = pd.to_datetime(row.get("fecha_evento"), errors="coerce")
             if pd.isna(base_date):
                 continue
+            period_key = normalize_text_key(row.get(COL_REC_PERIOD, "Mensual"))
+            recurrence_rule = row.get(COL_REC_RULE, "Inicio de cada mes")
+            row_base = row.to_dict()
+            if "quinc" in period_key or "15nal" in period_key:
+                for period in month_range:
+                    for day in (1, 15):
+                        max_day = monthrange(int(period.year), int(period.month))[1]
+                        due_date = pd.Timestamp(
+                            year=int(period.year),
+                            month=int(period.month),
+                            day=min(day, max_day),
+                        )
+                        if due_date < today_norm or due_date > horizon_end:
+                            continue
+                        row_copy = dict(row_base)
+                        row_copy["fecha_evento"] = due_date
+                        row_copy["fecha_fuente"] = f"{row_copy.get('fecha_fuente', 'fecha')}_recurrente"
+                        expanded_rows.append(row_copy)
+                continue
             anchor_period = base_date.to_period("M")
             interval_months = _recurrence_interval_months(row.get(COL_REC_PERIOD, "Mensual"))
-            recurrence_rule = row.get(COL_REC_RULE, "Mismo dia de fecha esperada")
-            row_base = row.to_dict()
             for period in month_range:
                 month_delta = (int(period.year) - int(anchor_period.year)) * 12 + (int(period.month) - int(anchor_period.month))
                 if month_delta < 0 or (month_delta % interval_months) != 0:
