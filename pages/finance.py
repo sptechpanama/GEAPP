@@ -911,26 +911,33 @@ df_gas_reales  = df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "No"].copy()
 # -------------------- KPIs principales --------------------
 ing_total = float(df_ing_reales[COL_MONTO].sum()) if COL_MONTO in df_ing_reales.columns else 0.0
 gas_total = float(df_gas_reales[COL_MONTO].sum()) if COL_MONTO in df_gas_reales.columns else 0.0
-utilidad  = ing_total - gas_total
-margen    = (utilidad / ing_total * 100.0) if ing_total > 0 else 0.0
 
-from ui.kpis import render_kpis
-render_kpis(ing_total, gas_total, utilidad, margen)
+k1, k2 = st.columns(2)
+with k1:
+    st.markdown(
+        '<div class="kpi-card"><p class="kpi-label">Ingresos (filtrados)</p>'
+        f'<p class="kpi-value">{_format_money_es(ing_total)}</p></div>',
+        unsafe_allow_html=True,
+    )
+with k2:
+    st.markdown(
+        '<div class="kpi-card"><p class="kpi-label">Gastos (filtrados)</p>'
+        f'<p class="kpi-value">{_format_money_es(gas_total)}</p></div>',
+        unsafe_allow_html=True,
+    )
 
 # ---- Flujo y saldo actual ----
 cash = preparar_cashflow(df_ing_reales, df_gas_reales)
 saldo_actual = float(cash["Saldo"].iloc[-1]) if not cash.empty else 0.0
 
-# KPI: Capital disponible + Capital actual + CxC futuras (al lado)
-colchon_fijo = st.number_input("Colchón fijo (USD)", min_value=0.0, value=15000.0, step=500.0)
+# KPI: Capital actual + CxC futuras + CxP activas
 cxp_activas = float(df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "Sí"][COL_MONTO].sum()) if not df_gas_f.empty else 0.0
-capital_disponible = saldo_actual - colchon_fijo - cxp_activas
 cxc_futuras = float(df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "Sí"][COL_MONTO].sum()) if not df_ing_f.empty else 0.0
 
 k1, k2, k3 = st.columns(3)
-with k1: st.metric("Capital disponible para inversión", _format_money_es(capital_disponible))
-with k2: st.metric("Capital actual", _format_money_es(saldo_actual))
-with k3: st.metric("Cuentas por cobrar (futuras)", _format_money_es(cxc_futuras))
+with k1: st.metric("Capital actual", _format_money_es(saldo_actual))
+with k2: st.metric("Cuentas por cobrar", _format_money_es(cxc_futuras))
+with k3: st.metric("Cuentas por pagar", _format_money_es(cxp_activas))
 
 # La visualización analítica fue trasladada al "Panel Financiero Gerencial".
 
