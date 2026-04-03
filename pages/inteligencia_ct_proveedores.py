@@ -201,12 +201,15 @@ AP_CONTACT_STATUS_OPTIONS = [
     "intentando contactar",
     "contactado - resultado exitoso",
     "contactado - resultado fallido",
+    "sin proveedor viable encontrado",
 ]
 AP_CONTACT_STATUS_DEFAULT_FILTER = [
     "por contactar",
     "intentando contactar",
 ]
 AP_CONTACT_COLUMNS = [
+    "ficha",
+    "nombre_ficha",
     "fabricante_a_contactar",
     "marca",
     "modelo",
@@ -222,6 +225,8 @@ AP_CONTACT_COLUMNS = [
     "comentarios_post_contacto",
     "updated_at",
 ]
+AP_CONTACT_MANUAL_ORIGIN = "manual"
+AP_CONTACT_AUTO_ORIGIN = "auto_seed"
 
 INTEL_STUDY_SHEETS_TABLE_MAP: dict[str, str] = {
     "estudio_runs": "intel_estudio_runs",
@@ -3500,6 +3505,7 @@ def _ensure_study_db() -> None:
                 analisis_id TEXT,
                 run_id_estudio TEXT,
                 dedupe_key TEXT,
+                origen_registro TEXT,
                 fuentes_detectadas TEXT,
                 fabricante_a_contactar TEXT NOT NULL,
                 marca TEXT,
@@ -3569,6 +3575,7 @@ def _ensure_study_db() -> None:
             ("analisis_id", "TEXT"),
             ("run_id_estudio", "TEXT"),
             ("dedupe_key", "TEXT"),
+            ("origen_registro", "TEXT"),
             ("fuentes_detectadas", "TEXT"),
             ("fabricante_a_contactar", "TEXT"),
             ("marca", "TEXT"),
@@ -3589,6 +3596,14 @@ def _ensure_study_db() -> None:
         for col_name, col_type in ap_contact_required:
             if col_name.lower() not in ap_contact_cols:
                 conn.execute(f"ALTER TABLE analisis_proveedores_contacto ADD COLUMN {col_name} {col_type}")
+        conn.execute(
+            """
+            UPDATE analisis_proveedores_contacto
+            SET origen_registro=?
+            WHERE COALESCE(TRIM(origen_registro), '') = ''
+            """,
+            (AP_CONTACT_AUTO_ORIGIN,),
+        )
 
         conn.commit()
 
@@ -6227,6 +6242,8 @@ def _normalize_ap_contact_status(value: object) -> str:
     text = _clean_text(value).lower()
     if text in AP_CONTACT_STATUS_OPTIONS:
         return text
+    if "sin proveedor viable" in text or ("proveedor" in text and "viable" in text and "sin" in text):
+        return "sin proveedor viable encontrado"
     if "exitos" in text:
         return "contactado - resultado exitoso"
     if "fallid" in text:
@@ -6234,6 +6251,13 @@ def _normalize_ap_contact_status(value: object) -> str:
     if "intent" in text:
         return "intentando contactar"
     return "por contactar"
+
+
+def _normalize_ap_contact_origin(value: object) -> str:
+    text = _normalize_column_key(value)
+    if text == _normalize_column_key(AP_CONTACT_MANUAL_ORIGIN):
+        return AP_CONTACT_MANUAL_ORIGIN
+    return AP_CONTACT_AUTO_ORIGIN
 
 
 def _make_ap_contact_dedupe_key(
@@ -6269,6 +6293,62 @@ def _load_ap_contact_df_cached(_rev: int) -> pd.DataFrame:
 
 def _load_ap_contact_df() -> pd.DataFrame:
     return _load_ap_contact_df_cached(_get_study_data_rev())
+
+
+def _build_ficha_name_lookup() -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for source_df in (_load_ap_context_df(), _load_resumen_estudiadas_df()):
+        if source_df.empty:
+            continue
+        for _, row in source_df.iterrows():
+            ficha = _clean_text(row.get("ficha", ""))
+            nombre = _clean_text(row.get("nombre_ficha", ""))
+            if ficha and nombre and ficha not in lookup:
+                lookup[ficha] = nombre
+    return lookup
+
+
+def _prepare_ap_contact_manual_view(contact_df: pd.DataFrame, ficha: str = "") -> pd.DataFrame:
+    if contact_df.empty:
+        return pd.DataFrame()
+    view_df = contact_df.copy()
+    if "origen_registro" not in view_df.columns:
+        view_df["origen_registro"] = AP_CONTACT_AUTO_ORIGIN
+    view_df["origen_registro"] = view_df["origen_registro"].map(_normalize_ap_contact_origin)
+    view_df = view_df[view_df["origen_registro"] == AP_CONTACT_MANUAL_ORIGIN].copy()
+    if ficha:
+        view_df = view_df[view_df["ficha"].astype(str) == str(ficha)].copy()
+    if view_df.empty:
+        return view_df
+    name_lookup = _build_ficha_name_lookup()
+    if "nombre_ficha" not in view_df.columns:
+        view_df["nombre_ficha"] = ""
+    view_df["nombre_ficha"] = view_df["nombre_ficha"].fillna("").astype(str)
+    missing_mask = view_df["nombre_ficha"].str.strip() == ""
+    if missing_mask.any():
+        view_df.loc[missing_mask, "nombre_ficha"] = (
+            view_df.loc[missing_mask, "ficha"].astype(str).map(lambda x: name_lookup.get(str(x).strip(), "")).fillna("")
+        )
+    view_df["estado_contacto"] = view_df.get("estado_contacto", pd.Series(dtype=str)).map(_normalize_ap_contact_status)
+    view_df["ficha_label"] = view_df.apply(
+        lambda r: f"{_clean_text(r.get('ficha', ''))} - {_clean_text(r.get('nombre_ficha', ''))}".strip(" -"),
+        axis=1,
+    )
+    return view_df.sort_values(
+        ["updated_at", "ficha", "fabricante_a_contactar"],
+        ascending=[False, True, True],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+def _coerce_iso_date(value: object) -> str:
+    parsed = _parse_any_date(value)
+    if pd.isna(parsed):
+        return ""
+    try:
+        return parsed.date().isoformat()
+    except Exception:
+        return str(parsed)[:10]
 
 
 def _build_ap_contact_seed_rows(ficha: str, analisis_id: str) -> list[dict[str, object]]:
@@ -6393,11 +6473,11 @@ def _sync_ap_contact_registry(ficha: str, analisis_id: str) -> tuple[int, int]:
                 conn.execute(
                     """
                     INSERT INTO analisis_proveedores_contacto (
-                        contacto_id, ficha, analisis_id, run_id_estudio, dedupe_key, fuentes_detectadas,
+                        contacto_id, ficha, analisis_id, run_id_estudio, dedupe_key, origen_registro, fuentes_detectadas,
                         fabricante_a_contactar, marca, modelo, pais_origen, telefono, contacto_email,
                         contacto_whatsapp, canal_contacto_mas_probable, fecha_primer_contacto, estado_contacto,
                         comentarios, comentarios_post_contacto, usuario, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(uuid.uuid4()),
@@ -6405,6 +6485,7 @@ def _sync_ap_contact_registry(ficha: str, analisis_id: str) -> tuple[int, int]:
                         analisis_id,
                         run_id_estudio,
                         dedupe_key,
+                        AP_CONTACT_AUTO_ORIGIN,
                         _clean_text(seed.get("fuentes_detectadas", "")),
                         _clean_text(seed.get("fabricante_a_contactar", "")),
                         _clean_text(seed.get("marca", "")),
@@ -6430,6 +6511,7 @@ def _sync_ap_contact_registry(ficha: str, analisis_id: str) -> tuple[int, int]:
             for col in [
                 "analisis_id",
                 "run_id_estudio",
+                "origen_registro",
                 "fuentes_detectadas",
                 "fabricante_a_contactar",
                 "marca",
@@ -6441,8 +6523,10 @@ def _sync_ap_contact_registry(ficha: str, analisis_id: str) -> tuple[int, int]:
                 "canal_contacto_mas_probable",
             ]:
                 current_val = _clean_text(row_existing.get(col, ""))
-                if col in {"analisis_id", "run_id_estudio"}:
+                if col in {"analisis_id", "run_id_estudio", "origen_registro"}:
                     desired_val = analisis_id if col == "analisis_id" else run_id_estudio
+                    if col == "origen_registro":
+                        desired_val = AP_CONTACT_AUTO_ORIGIN
                 else:
                     desired_val = _clean_text(seed.get(col, ""))
                 if desired_val and desired_val != current_val:
@@ -6486,6 +6570,7 @@ def _save_ap_contact_record(payload: dict[str, object]) -> tuple[bool, str]:
     dedupe_key = _clean_text(payload.get("dedupe_key", "")) or _make_ap_contact_dedupe_key(ficha, fabricante, marca, modelo, pais)
     fecha_primer_contacto = _clean_text(payload.get("fecha_primer_contacto", ""))
     estado_contacto = _normalize_ap_contact_status(payload.get("estado_contacto", ""))
+    origen_registro = AP_CONTACT_MANUAL_ORIGIN
     with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
         ctx_row = conn.execute(
             "SELECT analisis_id_activo, run_id_estudio FROM analisis_proveedores_contexto WHERE ficha=?",
@@ -6505,7 +6590,7 @@ def _save_ap_contact_record(payload: dict[str, object]) -> tuple[bool, str]:
                     UPDATE analisis_proveedores_contacto
                     SET analisis_id=?, run_id_estudio=?, dedupe_key=?, fuentes_detectadas=?, fabricante_a_contactar=?,
                         marca=?, modelo=?, pais_origen=?, telefono=?, contacto_email=?, contacto_whatsapp=?,
-                        canal_contacto_mas_probable=?, fecha_primer_contacto=?, estado_contacto=?, comentarios=?,
+                        canal_contacto_mas_probable=?, fecha_primer_contacto=?, estado_contacto=?, origen_registro=?, comentarios=?,
                         comentarios_post_contacto=?, usuario=?, updated_at=?
                     WHERE contacto_id=? AND ficha=?
                     """,
@@ -6524,6 +6609,7 @@ def _save_ap_contact_record(payload: dict[str, object]) -> tuple[bool, str]:
                         _clean_text(payload.get("canal_contacto_mas_probable", "")),
                         fecha_primer_contacto,
                         estado_contacto,
+                        origen_registro,
                         _clean_text(payload.get("comentarios", "")),
                         _clean_text(payload.get("comentarios_post_contacto", "")),
                         _current_user(),
@@ -6549,11 +6635,11 @@ def _save_ap_contact_record(payload: dict[str, object]) -> tuple[bool, str]:
         conn.execute(
             """
             INSERT INTO analisis_proveedores_contacto (
-                contacto_id, ficha, analisis_id, run_id_estudio, dedupe_key, fuentes_detectadas,
+                contacto_id, ficha, analisis_id, run_id_estudio, dedupe_key, origen_registro, fuentes_detectadas,
                 fabricante_a_contactar, marca, modelo, pais_origen, telefono, contacto_email,
                 contacto_whatsapp, canal_contacto_mas_probable, fecha_primer_contacto, estado_contacto,
                 comentarios, comentarios_post_contacto, usuario, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(uuid.uuid4()),
@@ -6561,6 +6647,7 @@ def _save_ap_contact_record(payload: dict[str, object]) -> tuple[bool, str]:
                 analisis_id,
                 run_id_estudio,
                 dedupe_key,
+                origen_registro,
                 _clean_text(payload.get("fuentes_detectadas", "")),
                 fabricante,
                 marca,
@@ -6587,15 +6674,12 @@ def _save_ap_contact_record(payload: dict[str, object]) -> tuple[bool, str]:
 
 
 def _render_ap_contact_summary_expander(ficha: str, analisis_id: str, key_prefix: str) -> None:
+    del analisis_id
     ficha = _clean_text(ficha)
-    analisis_id = _clean_text(analisis_id)
-    if analisis_id:
-        _sync_ap_contact_registry(ficha, analisis_id)
-    contact_df = _load_ap_contact_df()
-    view_df = contact_df[contact_df["ficha"].astype(str) == ficha].copy() if not contact_df.empty else pd.DataFrame()
+    view_df = _prepare_ap_contact_manual_view(_load_ap_contact_df(), ficha)
     with st.expander("Registro integral de proveedores a contactar", expanded=False):
         if view_df.empty:
-            st.info("Aún no hay proveedores/fabricantes cargados en el registro estructurado para esta ficha.")
+            st.info("Aun no hay registros manuales para esta ficha. Solo apareceran los que agregues con el formulario.")
             return
         default_states = [s for s in AP_CONTACT_STATUS_DEFAULT_FILTER if s in AP_CONTACT_STATUS_OPTIONS]
         selected_states = st.multiselect(
@@ -6609,30 +6693,21 @@ def _render_ap_contact_summary_expander(ficha: str, analisis_id: str, key_prefix
                 view_df.get("estado_contacto", pd.Series(dtype=str)).astype(str).str.lower().isin([s.lower() for s in selected_states])
             ].copy()
         if view_df.empty:
-            st.info("No hay registros para los estados seleccionados.")
+            st.info("No hay registros manuales para los estados seleccionados.")
             return
         show_cols = [c for c in AP_CONTACT_COLUMNS if c in view_df.columns]
         st.dataframe(view_df[show_cols], use_container_width=True, hide_index=True)
 
+
 def _render_ap_contact_editor_block(ficha: str, analisis_id: str, key_prefix: str) -> None:
     ficha = _clean_text(ficha)
     analisis_id = _clean_text(analisis_id)
-    if analisis_id:
-        inserted, updated = _sync_ap_contact_registry(ficha, analisis_id)
-        if inserted or updated:
-            st.caption(
-                f"Registro estructurado sincronizado desde el an?lisis: nuevos={inserted}, actualizados={updated}."
-            )
-
-    contact_df = _load_ap_contact_df()
-    view_df = contact_df[contact_df["ficha"].astype(str) == ficha].copy() if not contact_df.empty else pd.DataFrame()
-    if "estado_contacto" in view_df.columns:
-        view_df["estado_contacto"] = view_df["estado_contacto"].map(_normalize_ap_contact_status)
+    view_df = _prepare_ap_contact_manual_view(_load_ap_contact_df(), ficha)
 
     st.markdown("#### Registro estructurado de contacto")
     st.caption(
-        "Usa este cuadro para gestionar a qui?n contactar, la fecha del primer contacto y los hallazgos posteriores. "
-        "Todo queda persistente en Sheets y asociado a la ficha."
+        "Aqui solo se guardan proveedores/fabricantes agregados manualmente. "
+        "La fecha de primer contacto se registra manualmente y por defecto toma el dia actual."
     )
 
     edit_options = ["__new__"] + (
@@ -6664,7 +6739,7 @@ def _render_ap_contact_editor_block(ficha: str, analisis_id: str, key_prefix: st
     current = current_row.iloc[0] if not current_row.empty else pd.Series(dtype=object)
 
     parsed_contact_date = _parse_any_date(current.get("fecha_primer_contacto", ""))
-    has_contact_date_default = not pd.isna(parsed_contact_date)
+    default_contact_date = parsed_contact_date.date() if not pd.isna(parsed_contact_date) else date.today()
     form_suffix = re.sub(r"[^a-zA-Z0-9_]+", "_", f"{ficha}_{selected_contact_id or 'new'}")
     with st.form(key=f"{key_prefix}_contact_form_{form_suffix}"):
         fabricante_val = st.text_input(
@@ -6673,28 +6748,28 @@ def _render_ap_contact_editor_block(ficha: str, analisis_id: str, key_prefix: st
         )
         c_meta1, c_meta2, c_meta3 = st.columns(3)
         with c_meta1:
-            st.text_input("Marca", value=_clean_text(current.get("marca", "")), disabled=True)
+            marca_val = st.text_input("Marca", value=_clean_text(current.get("marca", "")))
         with c_meta2:
-            st.text_input("Modelo", value=_clean_text(current.get("modelo", "")), disabled=True)
+            modelo_val = st.text_input("Modelo", value=_clean_text(current.get("modelo", "")))
         with c_meta3:
-            st.text_input("Pa?s", value=_clean_text(current.get("pais_origen", "")), disabled=True)
+            pais_val = st.text_input("Pais", value=_clean_text(current.get("pais_origen", "")))
+
+        c_contacto1, c_contacto2, c_contacto3 = st.columns(3)
+        with c_contacto1:
+            telefono_val = st.text_input("Telefono", value=_clean_text(current.get("telefono", "")))
+        with c_contacto2:
+            email_val = st.text_input("Email", value=_clean_text(current.get("contacto_email", "")))
+        with c_contacto3:
+            whatsapp_val = st.text_input("WhatsApp", value=_clean_text(current.get("contacto_whatsapp", "")))
 
         c1, c2 = st.columns([1, 1.4])
         with c1:
-            has_contact_date = st.checkbox(
-                "Fecha de primer contacto registrada",
-                value=has_contact_date_default,
-                key=f"{key_prefix}_contact_has_date_{form_suffix}",
+            first_contact_date = st.date_input(
+                "Fecha de primer contacto",
+                value=default_contact_date,
+                key=f"{key_prefix}_contact_first_date_{form_suffix}",
+                format="YYYY-MM-DD",
             )
-            first_contact_date = None
-            if has_contact_date:
-                default_date = parsed_contact_date.date() if has_contact_date_default else date.today()
-                first_contact_date = st.date_input(
-                    "Fecha de primer contacto",
-                    value=default_date,
-                    key=f"{key_prefix}_contact_first_date_{form_suffix}",
-                    format="YYYY-MM-DD",
-                )
         with c2:
             default_status = _normalize_ap_contact_status(current.get("estado_contacto", ""))
             status_index = AP_CONTACT_STATUS_OPTIONS.index(default_status) if default_status in AP_CONTACT_STATUS_OPTIONS else 0
@@ -6705,6 +6780,10 @@ def _render_ap_contact_editor_block(ficha: str, analisis_id: str, key_prefix: st
                 key=f"{key_prefix}_contact_status_{form_suffix}",
             )
 
+        canal_val = st.text_input(
+            "Canal mas probable",
+            value=_clean_text(current.get("canal_contacto_mas_probable", "")),
+        )
         comentarios_val = st.text_area(
             "Comentarios",
             value=_clean_text(current.get("comentarios", "")),
@@ -6725,20 +6804,20 @@ def _render_ap_contact_editor_block(ficha: str, analisis_id: str, key_prefix: st
             "dedupe_key": _clean_text(current.get("dedupe_key", "")) or _make_ap_contact_dedupe_key(
                 ficha,
                 fabricante_val,
-                current.get("marca", ""),
-                current.get("modelo", ""),
-                current.get("pais_origen", ""),
+                marca_val,
+                modelo_val,
+                pais_val,
             ),
-            "fuentes_detectadas": _clean_text(current.get("fuentes_detectadas", "")),
+            "fuentes_detectadas": _clean_text(current.get("fuentes_detectadas", "")) or "manual",
             "fabricante_a_contactar": fabricante_val,
-            "marca": _clean_text(current.get("marca", "")),
-            "modelo": _clean_text(current.get("modelo", "")),
-            "pais_origen": _clean_text(current.get("pais_origen", "")),
-            "telefono": _clean_text(current.get("telefono", "")),
-            "contacto_email": _clean_text(current.get("contacto_email", "")),
-            "contacto_whatsapp": _clean_text(current.get("contacto_whatsapp", "")),
-            "canal_contacto_mas_probable": _clean_text(current.get("canal_contacto_mas_probable", "")),
-            "fecha_primer_contacto": first_contact_date.isoformat() if first_contact_date else "",
+            "marca": marca_val,
+            "modelo": modelo_val,
+            "pais_origen": pais_val,
+            "telefono": telefono_val,
+            "contacto_email": email_val,
+            "contacto_whatsapp": whatsapp_val,
+            "canal_contacto_mas_probable": canal_val,
+            "fecha_primer_contacto": first_contact_date.isoformat(),
             "estado_contacto": estado_val,
             "comentarios": comentarios_val,
             "comentarios_post_contacto": comentarios_post_val,
@@ -6755,10 +6834,168 @@ def _render_ap_contact_editor_block(ficha: str, analisis_id: str, key_prefix: st
         st.success(flash_msg)
 
     if view_df.empty:
-        st.info("A?n no hay registros estructurados para esta ficha.")
+        st.info("Aun no hay registros manuales para esta ficha.")
     else:
         show_cols = [c for c in AP_CONTACT_COLUMNS if c in view_df.columns]
         st.dataframe(view_df[show_cols], use_container_width=True, hide_index=True)
+
+
+def _render_ap_hallazgos_block(ficha: str, analisis_id: str, key_prefix: str) -> None:
+    ficha = _clean_text(ficha)
+    analisis_id = _clean_text(analisis_id)
+    if not ficha:
+        st.info("Selecciona una ficha para registrar hallazgos.")
+        return
+    st.markdown("#### Registro de hallazgos")
+    st.caption(
+        "Usa este espacio para guardar hallazgos posteriores al contacto con proveedores. "
+        "Cada comentario queda persistido en Sheets y asociado a la ficha."
+    )
+    ap_comment_flash = st.session_state.pop("intel_ap_comment_flash", "")
+    if ap_comment_flash:
+        st.success(ap_comment_flash)
+
+    comments_df = _load_ap_comments_df()
+    comments_view = comments_df[comments_df["ficha"].astype(str) == str(ficha)].copy() if not comments_df.empty else pd.DataFrame()
+    comment_input_key = f"intel_ap_comment_input_{key_prefix}_{ficha}"
+    if st.session_state.get("intel_ap_comment_clear_target") == f"{key_prefix}:{ficha}":
+        st.session_state[comment_input_key] = ""
+        st.session_state.pop("intel_ap_comment_clear_target", None)
+    new_comment = st.text_area(
+        "Agregar comentario",
+        key=comment_input_key,
+        height=120,
+        placeholder="Ej: Proveedor confirmo cumplimiento parcial, pidio ficha adicional, cotizacion pendiente, contacto por WhatsApp, etc.",
+    )
+    if st.button("Guardar comentario", key=f"intel_ap_comment_save_{key_prefix}_{ficha}"):
+        ok, msg = _save_ap_comment(ficha, new_comment)
+        if ok:
+            st.session_state["intel_ap_comment_clear_target"] = f"{key_prefix}:{ficha}"
+            st.session_state["intel_ap_comment_flash"] = msg
+            st.rerun()
+        else:
+            st.warning(msg)
+
+    if comments_view.empty:
+        st.info("Aun no hay comentarios guardados para esta ficha.")
+    else:
+        comments_view = comments_view.rename(
+            columns={
+                "created_at": "fecha",
+                "usuario": "usuario",
+                "comentario": "comentario",
+                "analisis_id": "analisis_id",
+            }
+        )
+        show_comment_cols = [c for c in ["fecha", "usuario", "analisis_id", "comentario"] if c in comments_view.columns]
+        st.dataframe(
+            comments_view[show_comment_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    _render_ap_contact_editor_block(ficha, analisis_id, key_prefix=f"{key_prefix}_editor")
+
+
+def _render_ap_contact_grid_editor(
+    title: str,
+    source_df: pd.DataFrame,
+    allowed_states: list[str],
+    key_prefix: str,
+    empty_message: str,
+) -> None:
+    st.markdown(f"#### {title}")
+    if source_df.empty:
+        st.info(empty_message)
+        return
+    state_set = {str(s).strip().lower() for s in allowed_states}
+    subset = source_df[
+        source_df.get("estado_contacto", pd.Series(dtype=str)).astype(str).str.lower().isin(state_set)
+    ].copy()
+    if subset.empty:
+        st.info(empty_message)
+        return
+
+    subset = subset.reset_index(drop=True)
+    editable_cols = [
+        "ficha",
+        "nombre_ficha",
+        "fabricante_a_contactar",
+        "marca",
+        "modelo",
+        "pais_origen",
+        "telefono",
+        "contacto_email",
+        "contacto_whatsapp",
+        "canal_contacto_mas_probable",
+        "fecha_primer_contacto",
+        "estado_contacto",
+        "comentarios",
+        "comentarios_post_contacto",
+        "updated_at",
+    ]
+    edit_df = subset[[c for c in editable_cols if c in subset.columns]].copy()
+    if "fecha_primer_contacto" in edit_df.columns:
+        edit_df["fecha_primer_contacto"] = edit_df["fecha_primer_contacto"].map(
+            lambda x: _parse_any_date(x).date() if not pd.isna(_parse_any_date(x)) else None
+        )
+    edited_df = st.data_editor(
+        edit_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        key=f"{key_prefix}_grid",
+        disabled=["ficha", "nombre_ficha", "updated_at"],
+        column_config={
+            "estado_contacto": st.column_config.SelectboxColumn(
+                "estado_contacto",
+                options=AP_CONTACT_STATUS_OPTIONS,
+                required=True,
+            ),
+            "fecha_primer_contacto": st.column_config.DateColumn(
+                "fecha_primer_contacto",
+                format="YYYY-MM-DD",
+            ),
+        },
+    )
+    if st.button("Guardar cambios", key=f"{key_prefix}_save"):
+        errors: list[str] = []
+        for idx, edited_row in edited_df.reset_index(drop=True).iterrows():
+            base = subset.iloc[idx].to_dict()
+            row_dict = edited_row.to_dict()
+            payload = {
+                "contacto_id": _clean_text(base.get("contacto_id", "")),
+                "ficha": _clean_text(base.get("ficha", "")),
+                "analisis_id": _clean_text(base.get("analisis_id", "")),
+                "dedupe_key": _clean_text(base.get("dedupe_key", "")) or _make_ap_contact_dedupe_key(
+                    base.get("ficha", ""),
+                    row_dict.get("fabricante_a_contactar", ""),
+                    row_dict.get("marca", ""),
+                    row_dict.get("modelo", ""),
+                    row_dict.get("pais_origen", ""),
+                ),
+                "fuentes_detectadas": _clean_text(base.get("fuentes_detectadas", "")) or "manual",
+                "fabricante_a_contactar": _clean_text(row_dict.get("fabricante_a_contactar", "")),
+                "marca": _clean_text(row_dict.get("marca", "")),
+                "modelo": _clean_text(row_dict.get("modelo", "")),
+                "pais_origen": _clean_text(row_dict.get("pais_origen", "")),
+                "telefono": _clean_text(row_dict.get("telefono", "")),
+                "contacto_email": _clean_text(row_dict.get("contacto_email", "")),
+                "contacto_whatsapp": _clean_text(row_dict.get("contacto_whatsapp", "")),
+                "canal_contacto_mas_probable": _clean_text(row_dict.get("canal_contacto_mas_probable", "")),
+                "fecha_primer_contacto": _coerce_iso_date(row_dict.get("fecha_primer_contacto", "")),
+                "estado_contacto": _normalize_ap_contact_status(row_dict.get("estado_contacto", "")),
+                "comentarios": _clean_text(row_dict.get("comentarios", "")),
+                "comentarios_post_contacto": _clean_text(row_dict.get("comentarios_post_contacto", "")),
+            }
+            ok, msg = _save_ap_contact_record(payload)
+            if not ok:
+                errors.append(msg)
+        if errors:
+            st.warning("No se pudieron guardar todos los cambios: " + " | ".join(dict.fromkeys(errors)))
+        else:
+            st.success("Cambios guardados.")
+            st.rerun()
 
 
 def _empty_table(columns: list[str]) -> pd.DataFrame:
@@ -6782,8 +7019,8 @@ def _render_sidebar() -> None:
     st.sidebar.selectbox("País", ["Todos"], index=0)
     st.sidebar.selectbox("Clasificación de contacto", ["Todas"], index=0)
     st.sidebar.checkbox("Solo con contacto encontrado", value=False)
-    st.sidebar.checkbox("Solo con seguimiento vencido", value=False)
-    st.sidebar.checkbox("Solo viable: prov. en conv.", value=False)
+    st.sidebar.checkbox("Solo proveedores viables", value=False)
+    st.sidebar.checkbox("Solo pendiente de prov. viable", value=False)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ Acciones rápidas")
@@ -6799,29 +7036,44 @@ def _render_kpis(ranked_df: pd.DataFrame) -> None:
     total_fichas = int(len(ranked_df))
     top_ataque = int((ranked_df.get("clasificacion", pd.Series(dtype=str)) == "atacar ya").sum()) if not ranked_df.empty else 0
     prometedoras = int((ranked_df.get("clasificacion", pd.Series(dtype=str)) == "prometedor").sum()) if not ranked_df.empty else 0
-    # Carga local rapida para no bloquear la entrada por sincronizacion remota.
     fichas_estudio = _ensure_study_state(sync_remote=False)
     total_en_seguimiento = len(fichas_estudio)
     total_en_estudio = sum(1 for x in fichas_estudio if str(x.get("estado", "")).strip().lower() == "en estudio")
 
-    cols = st.columns(5)
+    manual_contact_df = _prepare_ap_contact_manual_view(_load_ap_contact_df())
+    if manual_contact_df.empty:
+        correos_por_enviar = 0
+        proveedores_viables = 0
+        proveedor_no_viable = 0
+        pend_prov_viable = 0
+    else:
+        estado_series = manual_contact_df.get("estado_contacto", pd.Series(dtype=str)).astype(str).str.lower()
+        correos_por_enviar = int((estado_series == "por contactar").sum())
+        proveedores_viables = int((estado_series == "contactado - resultado exitoso").sum())
+        proveedor_no_viable = int((estado_series == "contactado - resultado fallido").sum())
+        pend_prov_viable = int(
+            manual_contact_df.loc[
+                estado_series == "sin proveedor viable encontrado",
+                "ficha",
+            ].astype(str).nunique()
+        )
+
+    cols = st.columns(4)
     cols[0].metric("Fichas det. con actos", f"{total_fichas:,}")
     cols[1].metric("Fichas en seg.", f"{total_en_seguimiento:,}")
     cols[2].metric("Fichas en est.", f"{total_en_estudio:,}")
-    cols[3].metric("Seg. vencidos", "0")
-    cols[4].metric("Correos por env.", "0")
+    cols[3].metric("Correos por env.", f"{correos_por_enviar:,}")
 
-    cols2 = st.columns(5)
-    cols2[0].metric("Viable: prov. en conv.", "0")
-    cols2[1].metric("Estudio: pend. contacto", "0")
-    cols2[2].metric("Estudio: sin proveedor", "0")
-    cols2[3].metric("Contactada no rentable", "0")
-    cols2[4].metric("Justif. no rent. pend.", "0")
+    cols2 = st.columns(3)
+    cols2[0].metric("Proveedores viables", f"{proveedores_viables:,}")
+    cols2[1].metric("Proveedor no viable", f"{proveedor_no_viable:,}")
+    cols2[2].metric("Pend. de encontrar prov. viable", f"{pend_prov_viable:,}")
 
     st.caption(
         f"Captacion actual (DB): {top_ataque} fichas en 'atacar ya' y {prometedoras} en 'prometedor'. "
-        "Estados de seguimiento/contacto se habilitan en la siguiente fase."
+        "Estados de seguimiento/contacto consolidados desde registros manuales de proveedores."
     )
+
 
 def _render_tab_dashboard(ranked_df: pd.DataFrame, db_path: str) -> None:
     st.markdown("### Dashboard Ejecutivo")
@@ -7403,7 +7655,7 @@ def _render_tab_estudio_profundo(
         [
             "Pendientes de estudio",
             "Ejecuci?n de estudio",
-            "Registro de hallazgos",
+            "Consultas del estudio",
             "Fichas estudiadas",
             "Versiones y actualizaci?n",
         ]
@@ -7806,90 +8058,7 @@ def _render_tab_estudio_profundo(
                     st.dataframe(agg, use_container_width=True, hide_index=True)
 
     with tab_cons:
-        st.markdown("#### Bitácora de seguimiento con proveedores")
-        st.caption(
-            "Usa este espacio para guardar hallazgos posteriores al contacto con proveedores. "
-            "Cada comentario queda persistido en Sheets y asociado a la ficha."
-        )
-        ap_comment_flash = st.session_state.pop("intel_ap_comment_flash", "")
-        if ap_comment_flash:
-            st.success(ap_comment_flash)
-        ap_ctx_df = _load_ap_context_df()
-        if ap_ctx_df.empty:
-            st.info("Aún no hay fichas estudiadas preparadas para asociar comentarios.")
-        else:
-            ap_ctx_df = ap_ctx_df.copy()
-            ap_ctx_df["ficha_label"] = ap_ctx_df.apply(
-                lambda r: f"{_clean_text(r.get('ficha', ''))} - {_clean_text(r.get('nombre_ficha', ''))}".strip(" -"),
-                axis=1,
-            )
-            ap_ctx_df = ap_ctx_df.sort_values(["updated_at", "ficha"], ascending=[False, True], kind="stable")
-            ap_comment_options = ap_ctx_df["ficha"].astype(str).tolist()
-            ap_comment_map = dict(zip(ap_ctx_df["ficha"].astype(str), ap_ctx_df["ficha_label"].astype(str)))
-            selected_comment_ficha = st.selectbox(
-                "Ficha para comentarios",
-                ap_comment_options,
-                key="intel_ap_comment_ficha",
-                format_func=lambda x: ap_comment_map.get(str(x), str(x)),
-            )
-            selected_ctx_row = ap_ctx_df[ap_ctx_df["ficha"].astype(str) == str(selected_comment_ficha)].head(1)
-            active_comment_analisis_id = ""
-            if not selected_ctx_row.empty:
-                ctx_row = selected_ctx_row.iloc[0]
-                active_comment_analisis_id = _clean_text(ctx_row.get("analisis_id_activo", ""))
-                st.caption(
-                    f"Estado análisis: `{_clean_text(ctx_row.get('estado_analisis', '')) or '-'}` | "
-                    f"Análisis activo: `{_clean_text(ctx_row.get('analisis_id_activo', ''))[:8] or '-'}`"
-                )
-
-            comments_df = _load_ap_comments_df()
-            comments_view = comments_df[comments_df["ficha"].astype(str) == str(selected_comment_ficha)].copy() if not comments_df.empty else pd.DataFrame()
-
-            comment_input_key = f"intel_ap_comment_input_{selected_comment_ficha}"
-            if st.session_state.get("intel_ap_comment_clear_target") == str(selected_comment_ficha):
-                st.session_state[comment_input_key] = ""
-                st.session_state.pop("intel_ap_comment_clear_target", None)
-            new_comment = st.text_area(
-                "Agregar comentario",
-                key=comment_input_key,
-                height=120,
-                placeholder="Ej: Proveedor confirmó cumplimiento parcial, pidió ficha adicional, cotización pendiente, contacto por WhatsApp, etc.",
-            )
-            if st.button("Guardar comentario", key=f"intel_ap_comment_save_{selected_comment_ficha}"):
-                ok, msg = _save_ap_comment(selected_comment_ficha, new_comment)
-                if ok:
-                    st.session_state["intel_ap_comment_clear_target"] = str(selected_comment_ficha)
-                    st.session_state["intel_ap_comment_flash"] = msg
-                    st.rerun()
-                else:
-                    st.warning(msg)
-
-            if comments_view.empty:
-                st.info("Aún no hay comentarios guardados para esta ficha.")
-            else:
-                comments_view = comments_view.rename(
-                    columns={
-                        "created_at": "fecha",
-                        "usuario": "usuario",
-                        "comentario": "comentario",
-                        "analisis_id": "analisis_id",
-                    }
-                )
-                show_comment_cols = [c for c in ["fecha", "usuario", "analisis_id", "comentario"] if c in comments_view.columns]
-                st.dataframe(
-                    comments_view[show_comment_cols],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            _render_ap_contact_editor_block(
-                str(selected_comment_ficha),
-                active_comment_analisis_id,
-                key_prefix=f"hallazgos_{selected_comment_ficha}",
-            )
-
-        st.markdown("---")
-        st.markdown("#### Resolución de consultas del estudio")
+        st.markdown("#### Resolucion de consultas del estudio")
         if runs_df.empty:
             st.info("Sin runs para consultas.")
         else:
@@ -7903,7 +8072,7 @@ def _render_tab_estudio_profundo(
                 if queries_df.empty:
                     st.info("Este run no tiene consultas registradas.")
                 else:
-                    st.caption("Resuelve solo las ambig?edades reales detectadas al final del proceso.")
+                    st.caption("Resuelve solo las ambiguedades reales detectadas al final del proceso.")
                     pending_df = queries_df[queries_df["estado"].astype(str) != "resuelta"].copy()
                     resolved_df = queries_df[queries_df["estado"].astype(str) == "resuelta"].copy()
                     st.write(f"Pendientes: {len(pending_df)} | Resueltas: {len(resolved_df)}")
@@ -7924,14 +8093,14 @@ def _render_tab_estudio_profundo(
                             option_labels = [str(x.get("label", "")) for x in options_payload if str(x.get("label", "")).strip()]
                             label_to_value = {str(x.get("label", "")): str(x.get("value", "")) for x in options_payload}
                             selected_label = st.selectbox(
-                                f"Opci?n sugerida ({i+1})",
+                                f"Opcion sugerida ({i+1})",
                                 [""] + option_labels,
                                 key=f"intel_query_opt_{consulta_id}",
                             )
                             manual_value = st.text_input(
                                 f"Valor manual ({i+1})",
                                 key=f"intel_query_manual_{consulta_id}",
-                                placeholder="Opcional, solo si ninguna opci?n aplica",
+                                placeholder="Opcional, solo si ninguna opcion aplica",
                             )
                             responses.append(
                                 {
@@ -7940,16 +8109,14 @@ def _render_tab_estudio_profundo(
                                     "valor_manual": manual_value.strip(),
                                 }
                             )
+                    if st.button("Guardar respuestas", key="intel_save_queries"):
+                        _apply_query_resolution(selected_run, responses)
+                        st.success("Respuestas guardadas y run actualizado.")
+                        st.rerun()
 
-                    csave, cfinal = st.columns(2)
-                    if csave.button("Guardar progreso"):
-                        _apply_query_resolution(selected_run, responses)
-                        st.success("Progreso guardado.")
-                        st.rerun()
-                    if cfinal.button("Resolver y completar run"):
-                        _apply_query_resolution(selected_run, responses)
-                        st.success("Consultas procesadas. Se recalcul? resumen y estado del estudio.")
-                        st.rerun()
+                    if not resolved_df.empty:
+                        with st.expander("Consultas ya resueltas", expanded=False):
+                            st.dataframe(resolved_df, use_container_width=True, hide_index=True)
 
     with tab_done:
         resumen_df = _load_resumen_estudiadas_df()
@@ -8352,11 +8519,12 @@ def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
 
     st.markdown("#### Analisis actual guardado")
     vrow = active_df[active_df["ficha"].astype(str) == str(selected_ficha)].head(1)
+    active_analisis_id = ""
     if vrow.empty:
         st.info("Todavia no hay analisis guardado para esta ficha.")
     else:
         v = vrow.iloc[0]
-        analisis_id = _clean_text(v.get("analisis_id", ""))
+        active_analisis_id = _clean_text(v.get("analisis_id", ""))
         st.caption(
             f"Fecha de carga: {_clean_text(v.get('fecha_carga', '')) or '-'} | "
             f"Ultima actualizacion: {_clean_text(v.get('fecha_ultima_actualizacion', '')) or '-'}"
@@ -8365,13 +8533,13 @@ def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
         st.info(_clean_text(v.get("resumen_ejecutivo", "")) or "Sin resumen ejecutivo.")
         _render_ap_contact_summary_expander(
             str(selected_ficha),
-            analisis_id,
+            active_analisis_id,
             key_prefix=f"ap_summary_{selected_ficha}",
         )
 
-        hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", analisis_id)
-        gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", analisis_id)
-        precio_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_precio", analisis_id)
+        hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", active_analisis_id)
+        gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", active_analisis_id)
+        precio_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_precio", active_analisis_id)
 
         st.markdown("#### 1) Proponentes historicos en Panama")
         show_hist = [c for c in AP_HIST_COLUMNS if c in hist_df.columns]
@@ -8396,6 +8564,9 @@ def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
             use_container_width=True,
             hide_index=True,
         )
+
+    st.markdown("---")
+    _render_ap_hallazgos_block(str(selected_ficha), active_analisis_id or _clean_text(row.get("analisis_id_activo", "")), key_prefix=f"ap_hallazgos_{selected_ficha}")
 
     st.markdown("---")
     st.markdown("#### Prompt listo para ChatGPT")
@@ -8464,6 +8635,39 @@ def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
 
 
 def _render_tab_contacto_correos() -> None:
+    st.markdown("### Contacto y correos")
+    manual_df = _prepare_ap_contact_manual_view(_load_ap_contact_df())
+    if manual_df.empty:
+        st.info("Aun no hay registros manuales de contacto. Agrega proveedores manualmente desde Analisis proveedores > Registro de hallazgos.")
+        return
+
+    st.caption("Resumen global editable de registros manuales. Se muestran ficha y nombre de ficha en cada fila.")
+    _render_ap_contact_grid_editor(
+        "Por contactar e intentando contactar",
+        manual_df,
+        ["por contactar", "intentando contactar"],
+        key_prefix="contacto_global_pendientes",
+        empty_message="No hay registros manuales pendientes de contacto.",
+    )
+    st.markdown("---")
+    _render_ap_contact_grid_editor(
+        "Contactados: resultado exitoso y fallido",
+        manual_df,
+        ["contactado - resultado exitoso", "contactado - resultado fallido"],
+        key_prefix="contacto_global_resultados",
+        empty_message="No hay registros manuales en estados de resultado.",
+    )
+    st.markdown("---")
+    _render_ap_contact_grid_editor(
+        "Pendiente de encontrar proveedor viable",
+        manual_df,
+        ["sin proveedor viable encontrado"],
+        key_prefix="contacto_global_sin_viable",
+        empty_message="No hay fichas marcadas sin proveedor viable encontrado.",
+    )
+
+
+def _render_tab_seguimiento_contacto() -> None:
     st.markdown("### Contacto y correos")
     _placeholder_block(
         "Generador de correo inicial",
@@ -8540,11 +8744,11 @@ st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 
 def _tab_requires_universe(tab_name: str) -> bool:
-    return tab_name in {"Dashboard", "Detecc. fichas", "Estudio de fichas", "AnÃ¡lisis proveedores"}
+    return tab_name in {"Dashboard", "Detecc. fichas", "Estudio de fichas", "Analisis proveedores"}
 
 
 def _tab_requires_study_bootstrap(tab_name: str) -> bool:
-    return tab_name in {"Fichas en seg.", "Estudio de fichas", "AnÃ¡lisis proveedores"}
+    return tab_name in {"Fichas en seg.", "Estudio de fichas", "Analisis proveedores"}
 
 
 def _weights_signature(weights: dict[str, float]) -> str:
@@ -8602,10 +8806,8 @@ TAB_OPTIONS = [
     "Detecc. fichas",
     "Fichas en seg.",
     "Estudio de fichas",
-    "Análisis proveedores",
+    "Analisis proveedores",
     "Contacto y correos",
-    "Seg. contacto",
-    "Resultado ficha",
 ]
 default_tab = "Fichas en seg."
 if st.session_state.get("intel_active_tab") not in TAB_OPTIONS:
@@ -8656,11 +8858,7 @@ elif active_tab == "Fichas en seg.":
     _render_tab_seguimiento_ct()
 elif active_tab == "Estudio de fichas":
     _render_tab_estudio_profundo(ficha_acts_df, ranked_df, db_path)
-elif active_tab == "Análisis proveedores":
+elif active_tab == "Analisis proveedores":
     _render_tab_analisis_proveedores_v2(ranked_df)
 elif active_tab == "Contacto y correos":
     _render_tab_contacto_correos()
-elif active_tab == "Seg. contacto":
-    _render_tab_seguimiento_contacto()
-else:
-    _render_tab_resultado_final()
