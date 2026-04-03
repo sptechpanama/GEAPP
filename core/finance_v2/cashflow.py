@@ -11,11 +11,13 @@ from .constants import (
     COL_FECHA,
     COL_FECHA_COBRO,
     COL_MONTO,
+    COL_REC_PERIOD,
+    COL_REC_RULE,
     COL_RECURRENTE,
     COL_PROVEEDOR,
     COL_PROYECTO,
 )
-from .helpers import yes_no_flag
+from .helpers import normalize_text_key, yes_no_flag
 
 
 def _build_cash_movements(df_ing: pd.DataFrame, df_gas: pd.DataFrame) -> pd.DataFrame:
@@ -87,7 +89,28 @@ def build_cashflow_proyectado(
     end_period = today_norm.to_period("M") + (horizon_months - 1)
     horizon_end = end_period.to_timestamp(how="end").normalize()
 
-    def _expand_recurrent_monthly(frame: pd.DataFrame) -> pd.DataFrame:
+    def _recurrence_interval_months(raw_value) -> int:
+        key = normalize_text_key(raw_value)
+        if "trimestr" in key:
+            return 3
+        if "bimestr" in key:
+            return 2
+        return 1
+
+    def _due_date_for_period(period: pd.Period, base_date: pd.Timestamp, rule_raw) -> pd.Timestamp:
+        rule = normalize_text_key(rule_raw)
+        max_day = monthrange(int(period.year), int(period.month))[1]
+        if "inicio" in rule:
+            day = 1
+        elif "15" in rule:
+            day = 15
+        elif "fin" in rule:
+            day = max_day
+        else:
+            day = min(int(base_date.day) if int(base_date.day) > 0 else 1, max_day)
+        return pd.Timestamp(year=int(period.year), month=int(period.month), day=day)
+
+    def _expand_recurrent_events(frame: pd.DataFrame) -> pd.DataFrame:
         if frame is None or frame.empty:
             return frame
         recurrent_mask = frame.get("__is_recurrente", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
@@ -107,15 +130,15 @@ def build_cashflow_proyectado(
             base_date = pd.to_datetime(row.get("fecha_evento"), errors="coerce")
             if pd.isna(base_date):
                 continue
-            base_day = int(base_date.day) if int(base_date.day) > 0 else 1
+            anchor_period = base_date.to_period("M")
+            interval_months = _recurrence_interval_months(row.get(COL_REC_PERIOD, "Mensual"))
+            recurrence_rule = row.get(COL_REC_RULE, "Mismo dia de fecha esperada")
             row_base = row.to_dict()
             for period in month_range:
-                max_day = monthrange(int(period.year), int(period.month))[1]
-                due_date = pd.Timestamp(
-                    year=int(period.year),
-                    month=int(period.month),
-                    day=min(base_day, max_day),
-                )
+                month_delta = (int(period.year) - int(anchor_period.year)) * 12 + (int(period.month) - int(anchor_period.month))
+                if month_delta < 0 or (month_delta % interval_months) != 0:
+                    continue
+                due_date = _due_date_for_period(period, base_date, recurrence_rule)
                 row_copy = dict(row_base)
                 row_copy["fecha_evento"] = due_date
                 row_copy["fecha_fuente"] = f"{row_copy.get('fecha_fuente', 'fecha')}_recurrente"
@@ -152,8 +175,8 @@ def build_cashflow_proyectado(
     recurring_cxc = int(cxc["__is_recurrente"].sum()) if "__is_recurrente" in cxc.columns else 0
     recurring_cxp = int(cxp["__is_recurrente"].sum()) if "__is_recurrente" in cxp.columns else 0
 
-    cxc_events = _expand_recurrent_monthly(cxc)
-    cxp_events = _expand_recurrent_monthly(cxp)
+    cxc_events = _expand_recurrent_events(cxc)
+    cxp_events = _expand_recurrent_events(cxp)
 
     events = pd.concat([
         cxc_events[["fecha_evento", "monto_evento", "tipo_evento", "fecha_fuente", COL_EMPRESA, COL_CLIENTE_NOMBRE, COL_PROYECTO]],

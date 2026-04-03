@@ -14,6 +14,8 @@ COL_POR_COBRAR = "Por_cobrar"
 COL_COBRADO = "Cobrado"
 COL_FECHA_COBRO = "Fecha de cobro"
 COL_RECURRENTE = "Recurrente"
+COL_REC_PERIOD = "Periodo recurrencia"
+COL_REC_RULE = "Regla fecha recurrencia"
 COL_ROW_ID = "RowID"
 COL_USUARIO = "Usuario"
 
@@ -36,6 +38,8 @@ INGRESOS_BASE_COLUMNS = [
     COL_COBRADO,
     COL_FECHA_COBRO,
     COL_RECURRENTE,
+    COL_REC_PERIOD,
+    COL_REC_RULE,
     COL_ROW_ID,
     COL_USUARIO,
 ]
@@ -54,6 +58,8 @@ GASTOS_BASE_COLUMNS = [
     COL_POR_PAGAR,
     COL_PROVEEDOR,
     COL_RECURRENTE,
+    COL_REC_PERIOD,
+    COL_REC_RULE,
     COL_FECHA_PAGO,
     COL_ROW_ID,
     COL_USUARIO,

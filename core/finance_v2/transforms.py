@@ -20,6 +20,8 @@ from .constants import (
     COL_MONTO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
+    COL_REC_PERIOD,
+    COL_REC_RULE,
     COL_RECURRENTE,
     COL_PROVEEDOR,
     COL_PROYECTO,
@@ -61,13 +63,29 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out[COL_FECHA_COBRO] = pd.to_datetime(out[COL_FECHA_COBRO], errors="coerce")
     out[COL_MONTO] = out[COL_MONTO].map(parse_number_maybe_es)
 
-    for col in [COL_DESC, COL_CONCEPTO, COL_CATEGORIA, COL_ESCENARIO, COL_PROYECTO, COL_CLIENTE_ID, COL_CLIENTE_NOMBRE, COL_EMPRESA, COL_ROW_ID, COL_USUARIO]:
+    for col in [
+        COL_DESC,
+        COL_CONCEPTO,
+        COL_CATEGORIA,
+        COL_ESCENARIO,
+        COL_PROYECTO,
+        COL_CLIENTE_ID,
+        COL_CLIENTE_NOMBRE,
+        COL_EMPRESA,
+        COL_REC_PERIOD,
+        COL_REC_RULE,
+        COL_ROW_ID,
+        COL_USUARIO,
+    ]:
         out[col] = out[col].map(normalize_text)
 
     out[COL_CATEGORIA] = out[COL_CATEGORIA].map(normalize_category)
     out[COL_POR_COBRAR] = out[COL_POR_COBRAR].map(yes_no_flag)
     out[COL_COBRADO] = out[COL_COBRADO].map(yes_no_flag)
     out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
+    out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE]] = ""
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_PERIOD] == ""), COL_REC_PERIOD] = "Mensual"
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Mismo dia de fecha esperada"
 
     out["__source"] = "ingreso"
     return out
@@ -76,14 +94,32 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
 def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out = _ensure_columns(df_gas, GASTOS_BASE_COLUMNS)
     out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
+    out[COL_FECHA_PAGO] = pd.to_datetime(out[COL_FECHA_PAGO], errors="coerce")
     out[COL_MONTO] = out[COL_MONTO].map(parse_number_maybe_es)
 
-    for col in [COL_DESC, COL_CONCEPTO, COL_CATEGORIA, COL_ESCENARIO, COL_PROYECTO, COL_CLIENTE_ID, COL_CLIENTE_NOMBRE, COL_EMPRESA, COL_PROVEEDOR, COL_ROW_ID, COL_USUARIO]:
+    for col in [
+        COL_DESC,
+        COL_CONCEPTO,
+        COL_CATEGORIA,
+        COL_ESCENARIO,
+        COL_PROYECTO,
+        COL_CLIENTE_ID,
+        COL_CLIENTE_NOMBRE,
+        COL_EMPRESA,
+        COL_PROVEEDOR,
+        COL_REC_PERIOD,
+        COL_REC_RULE,
+        COL_ROW_ID,
+        COL_USUARIO,
+    ]:
         out[col] = out[col].map(normalize_text)
 
     out[COL_CATEGORIA] = out[COL_CATEGORIA].map(normalize_category)
     out[COL_POR_PAGAR] = out[COL_POR_PAGAR].map(yes_no_flag)
     out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
+    out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE]] = ""
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_PERIOD] == ""), COL_REC_PERIOD] = "Mensual"
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Mismo dia de fecha esperada"
 
     # Fecha esperada de pago: puede no existir en el esquema actual.
     fallback_candidates = [
