@@ -196,6 +196,32 @@ AP_PRECIO_COLUMNS = [
     "whatsapp_inicial_listo",
     "observaciones",
 ]
+AP_CONTACT_STATUS_OPTIONS = [
+    "por contactar",
+    "intentando contactar",
+    "contactado - resultado exitoso",
+    "contactado - resultado fallido",
+]
+AP_CONTACT_STATUS_DEFAULT_FILTER = [
+    "por contactar",
+    "intentando contactar",
+]
+AP_CONTACT_COLUMNS = [
+    "fabricante_a_contactar",
+    "marca",
+    "modelo",
+    "pais_origen",
+    "fuentes_detectadas",
+    "telefono",
+    "contacto_email",
+    "contacto_whatsapp",
+    "canal_contacto_mas_probable",
+    "fecha_primer_contacto",
+    "estado_contacto",
+    "comentarios",
+    "comentarios_post_contacto",
+    "updated_at",
+]
 
 INTEL_STUDY_SHEETS_TABLE_MAP: dict[str, str] = {
     "estudio_runs": "intel_estudio_runs",
@@ -208,6 +234,7 @@ INTEL_STUDY_SHEETS_TABLE_MAP: dict[str, str] = {
     "analisis_proveedores_mejor_gama": "intel_ap_mejor_gama",
     "analisis_proveedores_mejor_precio": "intel_ap_mejor_precio",
     "analisis_proveedores_comentarios": "intel_ap_comentarios",
+    "analisis_proveedores_contacto": "intel_ap_contacto",
 }
 
 
@@ -3465,6 +3492,33 @@ def _ensure_study_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analisis_proveedores_contacto (
+                contacto_id TEXT PRIMARY KEY,
+                ficha TEXT NOT NULL,
+                analisis_id TEXT,
+                run_id_estudio TEXT,
+                dedupe_key TEXT,
+                fuentes_detectadas TEXT,
+                fabricante_a_contactar TEXT NOT NULL,
+                marca TEXT,
+                modelo TEXT,
+                pais_origen TEXT,
+                telefono TEXT,
+                contacto_email TEXT,
+                contacto_whatsapp TEXT,
+                canal_contacto_mas_probable TEXT,
+                fecha_primer_contacto TEXT,
+                estado_contacto TEXT,
+                comentarios TEXT,
+                comentarios_post_contacto TEXT,
+                usuario TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_contexto_estado ON analisis_proveedores_contexto(estado_analisis)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_version_ficha ON analisis_proveedores_version(ficha)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_version_active ON analisis_proveedores_version(ficha, is_active)")
@@ -3472,6 +3526,8 @@ def _ensure_study_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_gama_analisis ON analisis_proveedores_mejor_gama(analisis_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_precio_analisis ON analisis_proveedores_mejor_precio(analisis_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_comentarios_ficha ON analisis_proveedores_comentarios(ficha, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ap_contacto_ficha ON analisis_proveedores_contacto(ficha, updated_at)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ap_contacto_dedupe ON analisis_proveedores_contacto(ficha, dedupe_key)")
 
         # Backward compatibility: agrega columnas nuevas si la DB ya existía.
         existing_cols = {
@@ -3504,6 +3560,35 @@ def _ensure_study_db() -> None:
         for col_name, col_type in ap_ctx_required:
             if col_name.lower() not in ap_ctx_cols:
                 conn.execute(f"ALTER TABLE analisis_proveedores_contexto ADD COLUMN {col_name} {col_type}")
+
+        ap_contact_cols = {
+            str(row[1] or "").strip().lower()
+            for row in conn.execute("PRAGMA table_info(analisis_proveedores_contacto)").fetchall()
+        }
+        ap_contact_required = [
+            ("analisis_id", "TEXT"),
+            ("run_id_estudio", "TEXT"),
+            ("dedupe_key", "TEXT"),
+            ("fuentes_detectadas", "TEXT"),
+            ("fabricante_a_contactar", "TEXT"),
+            ("marca", "TEXT"),
+            ("modelo", "TEXT"),
+            ("pais_origen", "TEXT"),
+            ("telefono", "TEXT"),
+            ("contacto_email", "TEXT"),
+            ("contacto_whatsapp", "TEXT"),
+            ("canal_contacto_mas_probable", "TEXT"),
+            ("fecha_primer_contacto", "TEXT"),
+            ("estado_contacto", "TEXT"),
+            ("comentarios", "TEXT"),
+            ("comentarios_post_contacto", "TEXT"),
+            ("usuario", "TEXT"),
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT"),
+        ]
+        for col_name, col_type in ap_contact_required:
+            if col_name.lower() not in ap_contact_cols:
+                conn.execute(f"ALTER TABLE analisis_proveedores_contacto ADD COLUMN {col_name} {col_type}")
 
         conn.commit()
 
@@ -6138,6 +6223,544 @@ def _load_ap_table_by_analisis(table_name: str, analisis_id: str) -> pd.DataFram
     return _load_ap_table_by_analisis_cached(table_name, _clean_text(analisis_id), _get_study_data_rev())
 
 
+def _normalize_ap_contact_status(value: object) -> str:
+    text = _clean_text(value).lower()
+    if text in AP_CONTACT_STATUS_OPTIONS:
+        return text
+    if "exitos" in text:
+        return "contactado - resultado exitoso"
+    if "fallid" in text:
+        return "contactado - resultado fallido"
+    if "intent" in text:
+        return "intentando contactar"
+    return "por contactar"
+
+
+def _make_ap_contact_dedupe_key(
+    ficha: object,
+    fabricante_a_contactar: object,
+    marca: object = "",
+    modelo: object = "",
+    pais_origen: object = "",
+) -> str:
+    parts = [
+        _normalize_ficha_identifier(ficha),
+        _canonical_party_name(fabricante_a_contactar),
+        _normalize_column_key(marca),
+        _normalize_column_key(modelo),
+        _normalize_column_key(pais_origen),
+    ]
+    return "|".join(parts)
+
+
+@st.cache_data(show_spinner=False, ttl=INTEL_STUDY_SQL_CACHE_TTL)
+def _load_ap_contact_df_cached(_rev: int) -> pd.DataFrame:
+    _ensure_study_db()
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT *
+            FROM analisis_proveedores_contacto
+            ORDER BY datetime(updated_at) DESC, ficha ASC, fabricante_a_contactar ASC
+            """,
+            conn,
+        )
+
+
+def _load_ap_contact_df() -> pd.DataFrame:
+    return _load_ap_contact_df_cached(_get_study_data_rev())
+
+
+def _build_ap_contact_seed_rows(ficha: str, analisis_id: str) -> list[dict[str, object]]:
+    ficha = _clean_text(ficha)
+    analisis_id = _clean_text(analisis_id)
+    if not ficha or not analisis_id:
+        return []
+
+    buckets: dict[str, dict[str, object]] = {}
+
+    def _merge_row(source_label: str, source_row: pd.Series, target_col: str) -> None:
+        target = _clean_text(source_row.get(target_col, ""))
+        if not target:
+            return
+        marca = _clean_text(source_row.get("marca", ""))
+        modelo = _clean_text(source_row.get("modelo", ""))
+        pais = _clean_text(source_row.get("pais_origen", ""))
+        dedupe_key = _make_ap_contact_dedupe_key(ficha, target, marca, modelo, pais)
+        current = buckets.get(
+            dedupe_key,
+            {
+                "dedupe_key": dedupe_key,
+                "fabricante_a_contactar": target,
+                "marca": marca,
+                "modelo": modelo,
+                "pais_origen": pais,
+                "fuentes_detectadas": "",
+                "telefono": "",
+                "contacto_email": "",
+                "contacto_whatsapp": "",
+                "canal_contacto_mas_probable": "",
+            },
+        )
+        source_set = {
+            _clean_text(x)
+            for x in str(current.get("fuentes_detectadas", "") or "").split(" | ")
+            if _clean_text(x)
+        }
+        source_set.add(source_label)
+        current["fuentes_detectadas"] = " | ".join(sorted(source_set))
+        for col in [
+            "fabricante_a_contactar",
+            "marca",
+            "modelo",
+            "pais_origen",
+            "telefono",
+            "contacto_email",
+            "contacto_whatsapp",
+            "canal_contacto_mas_probable",
+        ]:
+            if not _clean_text(current.get(col, "")):
+                src_col = "fabricante_a_contactar" if col == "fabricante_a_contactar" else col
+                if col in {"telefono", "contacto_email", "contacto_whatsapp", "canal_contacto_mas_probable"}:
+                    src_col = col
+                value = _clean_text(source_row.get(src_col, ""))
+                if value:
+                    current[col] = value
+        buckets[dedupe_key] = current
+
+    hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", analisis_id)
+    if not hist_df.empty:
+        for _, row in hist_df.iterrows():
+            _merge_row("historico_panama", row, "proveedor")
+
+    gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", analisis_id)
+    if not gama_df.empty:
+        for _, row in gama_df.iterrows():
+            _merge_row("mejor_gama", row, "proveedor_o_fabricante")
+
+    precio_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_precio", analisis_id)
+    if not precio_df.empty:
+        for _, row in precio_df.iterrows():
+            _merge_row("mejor_precio", row, "proveedor_o_fabricante")
+
+    return sorted(
+        buckets.values(),
+        key=lambda r: (
+            _normalize_column_key(r.get("fabricante_a_contactar", "")),
+            _normalize_column_key(r.get("marca", "")),
+            _normalize_column_key(r.get("modelo", "")),
+        ),
+    )
+
+
+def _sync_ap_contact_registry(ficha: str, analisis_id: str) -> tuple[int, int]:
+    _ensure_study_db()
+    ficha = _clean_text(ficha)
+    analisis_id = _clean_text(analisis_id)
+    if not ficha or not analisis_id:
+        return 0, 0
+
+    seed_rows = _build_ap_contact_seed_rows(ficha, analisis_id)
+    if not seed_rows:
+        return 0, 0
+
+    now = _utc_now_iso()
+    inserted = 0
+    updated = 0
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        ctx_row = conn.execute(
+            "SELECT run_id_estudio FROM analisis_proveedores_contexto WHERE ficha=?",
+            (ficha,),
+        ).fetchone()
+        run_id_estudio = _clean_text(ctx_row[0]) if ctx_row and len(ctx_row) > 0 else ""
+        existing_rows = pd.read_sql_query(
+            "SELECT * FROM analisis_proveedores_contacto WHERE ficha=?",
+            conn,
+            params=(ficha,),
+        )
+        existing_by_key = {}
+        if not existing_rows.empty:
+            existing_rows["dedupe_key"] = existing_rows.get("dedupe_key", pd.Series(dtype=str)).astype(str)
+            for _, row in existing_rows.iterrows():
+                existing_by_key[_clean_text(row.get("dedupe_key", ""))] = row
+
+        for seed in seed_rows:
+            dedupe_key = _clean_text(seed.get("dedupe_key", ""))
+            if not dedupe_key:
+                continue
+            row_existing = existing_by_key.get(dedupe_key)
+            if row_existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO analisis_proveedores_contacto (
+                        contacto_id, ficha, analisis_id, run_id_estudio, dedupe_key, fuentes_detectadas,
+                        fabricante_a_contactar, marca, modelo, pais_origen, telefono, contacto_email,
+                        contacto_whatsapp, canal_contacto_mas_probable, fecha_primer_contacto, estado_contacto,
+                        comentarios, comentarios_post_contacto, usuario, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        ficha,
+                        analisis_id,
+                        run_id_estudio,
+                        dedupe_key,
+                        _clean_text(seed.get("fuentes_detectadas", "")),
+                        _clean_text(seed.get("fabricante_a_contactar", "")),
+                        _clean_text(seed.get("marca", "")),
+                        _clean_text(seed.get("modelo", "")),
+                        _clean_text(seed.get("pais_origen", "")),
+                        _clean_text(seed.get("telefono", "")),
+                        _clean_text(seed.get("contacto_email", "")),
+                        _clean_text(seed.get("contacto_whatsapp", "")),
+                        _clean_text(seed.get("canal_contacto_mas_probable", "")),
+                        "",
+                        "por contactar",
+                        "",
+                        "",
+                        _current_user(),
+                        now,
+                        now,
+                    ),
+                )
+                inserted += 1
+                continue
+
+            updates: dict[str, object] = {}
+            for col in [
+                "analisis_id",
+                "run_id_estudio",
+                "fuentes_detectadas",
+                "fabricante_a_contactar",
+                "marca",
+                "modelo",
+                "pais_origen",
+                "telefono",
+                "contacto_email",
+                "contacto_whatsapp",
+                "canal_contacto_mas_probable",
+            ]:
+                current_val = _clean_text(row_existing.get(col, ""))
+                if col in {"analisis_id", "run_id_estudio"}:
+                    desired_val = analisis_id if col == "analisis_id" else run_id_estudio
+                else:
+                    desired_val = _clean_text(seed.get(col, ""))
+                if desired_val and desired_val != current_val:
+                    updates[col] = desired_val
+            if updates:
+                updates["updated_at"] = now
+                set_sql = ", ".join([f"{col}=?" for col in updates.keys()])
+                params = list(updates.values()) + [ficha, dedupe_key]
+                conn.execute(
+                    f"UPDATE analisis_proveedores_contacto SET {set_sql} WHERE ficha=? AND dedupe_key=?",
+                    tuple(params),
+                )
+                updated += 1
+
+        if inserted or updated:
+            conn.commit()
+
+    if inserted or updated:
+        _bump_study_data_rev()
+        _persist_study_tables_after_write(
+            ["analisis_proveedores_contacto"],
+            reason="ap_contacto_sync",
+        )
+    return inserted, updated
+
+
+def _save_ap_contact_record(payload: dict[str, object]) -> tuple[bool, str]:
+    _ensure_study_db()
+    ficha = _clean_text(payload.get("ficha", ""))
+    fabricante = _clean_text(payload.get("fabricante_a_contactar", ""))
+    contacto_id = _clean_text(payload.get("contacto_id", ""))
+    if not ficha:
+        return False, "Falta ficha para guardar el registro."
+    if not fabricante:
+        return False, "Debes indicar el fabricante/proveedor a contactar."
+
+    now = _utc_now_iso()
+    marca = _clean_text(payload.get("marca", ""))
+    modelo = _clean_text(payload.get("modelo", ""))
+    pais = _clean_text(payload.get("pais_origen", ""))
+    dedupe_key = _clean_text(payload.get("dedupe_key", "")) or _make_ap_contact_dedupe_key(ficha, fabricante, marca, modelo, pais)
+    fecha_primer_contacto = _clean_text(payload.get("fecha_primer_contacto", ""))
+    estado_contacto = _normalize_ap_contact_status(payload.get("estado_contacto", ""))
+    with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+        ctx_row = conn.execute(
+            "SELECT analisis_id_activo, run_id_estudio FROM analisis_proveedores_contexto WHERE ficha=?",
+            (ficha,),
+        ).fetchone()
+        analisis_id = _clean_text(ctx_row[0]) if ctx_row and len(ctx_row) > 0 else ""
+        run_id_estudio = _clean_text(ctx_row[1]) if ctx_row and len(ctx_row) > 1 else ""
+
+        if contacto_id:
+            current = conn.execute(
+                "SELECT contacto_id FROM analisis_proveedores_contacto WHERE contacto_id=? AND ficha=?",
+                (contacto_id, ficha),
+            ).fetchone()
+            if current:
+                conn.execute(
+                    """
+                    UPDATE analisis_proveedores_contacto
+                    SET analisis_id=?, run_id_estudio=?, dedupe_key=?, fuentes_detectadas=?, fabricante_a_contactar=?,
+                        marca=?, modelo=?, pais_origen=?, telefono=?, contacto_email=?, contacto_whatsapp=?,
+                        canal_contacto_mas_probable=?, fecha_primer_contacto=?, estado_contacto=?, comentarios=?,
+                        comentarios_post_contacto=?, usuario=?, updated_at=?
+                    WHERE contacto_id=? AND ficha=?
+                    """,
+                    (
+                        analisis_id,
+                        run_id_estudio,
+                        dedupe_key,
+                        _clean_text(payload.get("fuentes_detectadas", "")),
+                        fabricante,
+                        marca,
+                        modelo,
+                        pais,
+                        _clean_text(payload.get("telefono", "")),
+                        _clean_text(payload.get("contacto_email", "")),
+                        _clean_text(payload.get("contacto_whatsapp", "")),
+                        _clean_text(payload.get("canal_contacto_mas_probable", "")),
+                        fecha_primer_contacto,
+                        estado_contacto,
+                        _clean_text(payload.get("comentarios", "")),
+                        _clean_text(payload.get("comentarios_post_contacto", "")),
+                        _current_user(),
+                        now,
+                        contacto_id,
+                        ficha,
+                    ),
+                )
+                conn.commit()
+                _bump_study_data_rev()
+                _persist_study_tables_after_write(["analisis_proveedores_contacto"], reason="ap_contacto_update")
+                return True, "Registro de contacto actualizado."
+
+        existing = conn.execute(
+            "SELECT contacto_id FROM analisis_proveedores_contacto WHERE ficha=? AND dedupe_key=?",
+            (ficha, dedupe_key),
+        ).fetchone()
+        if existing and _clean_text(existing[0]):
+            payload = dict(payload)
+            payload["contacto_id"] = _clean_text(existing[0])
+            return _save_ap_contact_record(payload)
+
+        conn.execute(
+            """
+            INSERT INTO analisis_proveedores_contacto (
+                contacto_id, ficha, analisis_id, run_id_estudio, dedupe_key, fuentes_detectadas,
+                fabricante_a_contactar, marca, modelo, pais_origen, telefono, contacto_email,
+                contacto_whatsapp, canal_contacto_mas_probable, fecha_primer_contacto, estado_contacto,
+                comentarios, comentarios_post_contacto, usuario, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                ficha,
+                analisis_id,
+                run_id_estudio,
+                dedupe_key,
+                _clean_text(payload.get("fuentes_detectadas", "")),
+                fabricante,
+                marca,
+                modelo,
+                pais,
+                _clean_text(payload.get("telefono", "")),
+                _clean_text(payload.get("contacto_email", "")),
+                _clean_text(payload.get("contacto_whatsapp", "")),
+                _clean_text(payload.get("canal_contacto_mas_probable", "")),
+                fecha_primer_contacto,
+                estado_contacto,
+                _clean_text(payload.get("comentarios", "")),
+                _clean_text(payload.get("comentarios_post_contacto", "")),
+                _current_user(),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+    _bump_study_data_rev()
+    _persist_study_tables_after_write(["analisis_proveedores_contacto"], reason="ap_contacto_insert")
+    return True, "Registro de contacto guardado."
+
+
+def _render_ap_contact_summary_expander(ficha: str, analisis_id: str, key_prefix: str) -> None:
+    ficha = _clean_text(ficha)
+    analisis_id = _clean_text(analisis_id)
+    if analisis_id:
+        _sync_ap_contact_registry(ficha, analisis_id)
+    contact_df = _load_ap_contact_df()
+    view_df = contact_df[contact_df["ficha"].astype(str) == ficha].copy() if not contact_df.empty else pd.DataFrame()
+    with st.expander("Registro integral de proveedores a contactar", expanded=False):
+        if view_df.empty:
+            st.info("Aún no hay proveedores/fabricantes cargados en el registro estructurado para esta ficha.")
+            return
+        default_states = [s for s in AP_CONTACT_STATUS_DEFAULT_FILTER if s in AP_CONTACT_STATUS_OPTIONS]
+        selected_states = st.multiselect(
+            "Filtrar por estado",
+            AP_CONTACT_STATUS_OPTIONS,
+            default=default_states,
+            key=f"{key_prefix}_contact_status_filter",
+        )
+        if selected_states:
+            view_df = view_df[
+                view_df.get("estado_contacto", pd.Series(dtype=str)).astype(str).str.lower().isin([s.lower() for s in selected_states])
+            ].copy()
+        if view_df.empty:
+            st.info("No hay registros para los estados seleccionados.")
+            return
+        show_cols = [c for c in AP_CONTACT_COLUMNS if c in view_df.columns]
+        st.dataframe(view_df[show_cols], use_container_width=True, hide_index=True)
+
+def _render_ap_contact_editor_block(ficha: str, analisis_id: str, key_prefix: str) -> None:
+    ficha = _clean_text(ficha)
+    analisis_id = _clean_text(analisis_id)
+    if analisis_id:
+        inserted, updated = _sync_ap_contact_registry(ficha, analisis_id)
+        if inserted or updated:
+            st.caption(
+                f"Registro estructurado sincronizado desde el an?lisis: nuevos={inserted}, actualizados={updated}."
+            )
+
+    contact_df = _load_ap_contact_df()
+    view_df = contact_df[contact_df["ficha"].astype(str) == ficha].copy() if not contact_df.empty else pd.DataFrame()
+    if "estado_contacto" in view_df.columns:
+        view_df["estado_contacto"] = view_df["estado_contacto"].map(_normalize_ap_contact_status)
+
+    st.markdown("#### Registro estructurado de contacto")
+    st.caption(
+        "Usa este cuadro para gestionar a qui?n contactar, la fecha del primer contacto y los hallazgos posteriores. "
+        "Todo queda persistente en Sheets y asociado a la ficha."
+    )
+
+    edit_options = ["__new__"] + (
+        view_df["contacto_id"].astype(str).tolist()
+        if not view_df.empty and "contacto_id" in view_df.columns
+        else []
+    )
+    edit_label_map = {"__new__": "Nuevo registro manual"}
+    if not view_df.empty and "contacto_id" in view_df.columns:
+        for _, row in view_df.iterrows():
+            rid = _clean_text(row.get("contacto_id", ""))
+            if not rid:
+                continue
+            edit_label_map[rid] = (
+                f"{_clean_text(row.get('fabricante_a_contactar', '')) or 'Sin nombre'} | "
+                f"{_clean_text(row.get('estado_contacto', '')) or 'sin estado'}"
+            )
+    selected_contact_id = st.selectbox(
+        "Registro a editar",
+        edit_options,
+        key=f"{key_prefix}_contact_edit_id",
+        format_func=lambda x: edit_label_map.get(str(x), str(x)),
+    )
+    current_row = (
+        view_df[view_df["contacto_id"].astype(str) == str(selected_contact_id)].head(1)
+        if (selected_contact_id != "__new__" and not view_df.empty and "contacto_id" in view_df.columns)
+        else pd.DataFrame()
+    )
+    current = current_row.iloc[0] if not current_row.empty else pd.Series(dtype=object)
+
+    parsed_contact_date = _parse_any_date(current.get("fecha_primer_contacto", ""))
+    has_contact_date_default = not pd.isna(parsed_contact_date)
+    form_suffix = re.sub(r"[^a-zA-Z0-9_]+", "_", f"{ficha}_{selected_contact_id or 'new'}")
+    with st.form(key=f"{key_prefix}_contact_form_{form_suffix}"):
+        fabricante_val = st.text_input(
+            "Fabricante a contactar",
+            value=_clean_text(current.get("fabricante_a_contactar", "")),
+        )
+        c_meta1, c_meta2, c_meta3 = st.columns(3)
+        with c_meta1:
+            st.text_input("Marca", value=_clean_text(current.get("marca", "")), disabled=True)
+        with c_meta2:
+            st.text_input("Modelo", value=_clean_text(current.get("modelo", "")), disabled=True)
+        with c_meta3:
+            st.text_input("Pa?s", value=_clean_text(current.get("pais_origen", "")), disabled=True)
+
+        c1, c2 = st.columns([1, 1.4])
+        with c1:
+            has_contact_date = st.checkbox(
+                "Fecha de primer contacto registrada",
+                value=has_contact_date_default,
+                key=f"{key_prefix}_contact_has_date_{form_suffix}",
+            )
+            first_contact_date = None
+            if has_contact_date:
+                default_date = parsed_contact_date.date() if has_contact_date_default else date.today()
+                first_contact_date = st.date_input(
+                    "Fecha de primer contacto",
+                    value=default_date,
+                    key=f"{key_prefix}_contact_first_date_{form_suffix}",
+                    format="YYYY-MM-DD",
+                )
+        with c2:
+            default_status = _normalize_ap_contact_status(current.get("estado_contacto", ""))
+            status_index = AP_CONTACT_STATUS_OPTIONS.index(default_status) if default_status in AP_CONTACT_STATUS_OPTIONS else 0
+            estado_val = st.selectbox(
+                "Estado",
+                AP_CONTACT_STATUS_OPTIONS,
+                index=status_index,
+                key=f"{key_prefix}_contact_status_{form_suffix}",
+            )
+
+        comentarios_val = st.text_area(
+            "Comentarios",
+            value=_clean_text(current.get("comentarios", "")),
+            height=110,
+        )
+        comentarios_post_val = st.text_area(
+            "Comentarios luego del contacto",
+            value=_clean_text(current.get("comentarios_post_contacto", "")),
+            height=110,
+        )
+        submitted = st.form_submit_button("Guardar registro estructurado")
+
+    if submitted:
+        payload = {
+            "contacto_id": "" if selected_contact_id == "__new__" else selected_contact_id,
+            "ficha": ficha,
+            "analisis_id": analisis_id,
+            "dedupe_key": _clean_text(current.get("dedupe_key", "")) or _make_ap_contact_dedupe_key(
+                ficha,
+                fabricante_val,
+                current.get("marca", ""),
+                current.get("modelo", ""),
+                current.get("pais_origen", ""),
+            ),
+            "fuentes_detectadas": _clean_text(current.get("fuentes_detectadas", "")),
+            "fabricante_a_contactar": fabricante_val,
+            "marca": _clean_text(current.get("marca", "")),
+            "modelo": _clean_text(current.get("modelo", "")),
+            "pais_origen": _clean_text(current.get("pais_origen", "")),
+            "telefono": _clean_text(current.get("telefono", "")),
+            "contacto_email": _clean_text(current.get("contacto_email", "")),
+            "contacto_whatsapp": _clean_text(current.get("contacto_whatsapp", "")),
+            "canal_contacto_mas_probable": _clean_text(current.get("canal_contacto_mas_probable", "")),
+            "fecha_primer_contacto": first_contact_date.isoformat() if first_contact_date else "",
+            "estado_contacto": estado_val,
+            "comentarios": comentarios_val,
+            "comentarios_post_contacto": comentarios_post_val,
+        }
+        ok, msg = _save_ap_contact_record(payload)
+        if ok:
+            st.session_state[f"{key_prefix}_contact_flash"] = msg
+            st.rerun()
+        else:
+            st.warning(msg)
+
+    flash_msg = _clean_text(st.session_state.pop(f"{key_prefix}_contact_flash", ""))
+    if flash_msg:
+        st.success(flash_msg)
+
+    if view_df.empty:
+        st.info("A?n no hay registros estructurados para esta ficha.")
+    else:
+        show_cols = [c for c in AP_CONTACT_COLUMNS if c in view_df.columns]
+        st.dataframe(view_df[show_cols], use_container_width=True, hide_index=True)
+
+
 def _empty_table(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
@@ -7210,8 +7833,10 @@ def _render_tab_estudio_profundo(
                 format_func=lambda x: ap_comment_map.get(str(x), str(x)),
             )
             selected_ctx_row = ap_ctx_df[ap_ctx_df["ficha"].astype(str) == str(selected_comment_ficha)].head(1)
+            active_comment_analisis_id = ""
             if not selected_ctx_row.empty:
                 ctx_row = selected_ctx_row.iloc[0]
+                active_comment_analisis_id = _clean_text(ctx_row.get("analisis_id_activo", ""))
                 st.caption(
                     f"Estado análisis: `{_clean_text(ctx_row.get('estado_analisis', '')) or '-'}` | "
                     f"Análisis activo: `{_clean_text(ctx_row.get('analisis_id_activo', ''))[:8] or '-'}`"
@@ -7256,6 +7881,12 @@ def _render_tab_estudio_profundo(
                     use_container_width=True,
                     hide_index=True,
                 )
+
+            _render_ap_contact_editor_block(
+                str(selected_comment_ficha),
+                active_comment_analisis_id,
+                key_prefix=f"hallazgos_{selected_comment_ficha}",
+            )
 
         st.markdown("---")
         st.markdown("#### Resolución de consultas del estudio")
@@ -7732,6 +8363,11 @@ def _render_tab_analisis_proveedores_v2(ranked_df: pd.DataFrame) -> None:
         )
         st.markdown("#### Resumen ejecutivo")
         st.info(_clean_text(v.get("resumen_ejecutivo", "")) or "Sin resumen ejecutivo.")
+        _render_ap_contact_summary_expander(
+            str(selected_ficha),
+            analisis_id,
+            key_prefix=f"ap_summary_{selected_ficha}",
+        )
 
         hist_df = _load_ap_table_by_analisis("analisis_proveedores_hist_panama", analisis_id)
         gama_df = _load_ap_table_by_analisis("analisis_proveedores_mejor_gama", analisis_id)
