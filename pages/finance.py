@@ -1548,7 +1548,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         st.session_state["ing_estado_quick"] = "Pendiente"
         st.session_state["ing_porcob_quick"] = YES_NO_OPTIONS[1]
 
-    st.markdown("#### 1. Datos base")
+    st.markdown("#### Datos base")
     c1, c2, c3, c4, c5 = st.columns([1.0, 1.0, 1.0, 1.1, 1.0])
     with c1:
         empresa_ing = st.selectbox(
@@ -1640,7 +1640,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         on_change=lambda: _mark_form_force_open("ing"),
     )
 
-    st.markdown("#### 2. Recurrencia")
+    st.markdown("#### Recurrencia")
     rec_period_ing = ""
     rec_rule_ing = ""
     rec_dur_ing = ""
@@ -1692,7 +1692,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
                 on_change=lambda: _mark_form_force_open("ing"),
             )
 
-    st.markdown("#### 3. Clasificacion del ingreso")
+    st.markdown("#### Clasificacion del ingreso")
     categoria_ing = st.selectbox(
         "Categoria principal",
         ING_CATEGORY_OPTIONS,
@@ -1716,7 +1716,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         on_change=lambda: _mark_form_force_open("ing"),
     )
 
-    st.markdown("#### 4. Tratamiento en balance")
+    st.markdown("#### Tratamiento en balance")
     balance_ing_default = _derive_ing_balance(categoria_ing, estado_ing)
     tratamiento_ing = st.selectbox(
         "Tratamiento balance ingreso",
@@ -1726,7 +1726,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         on_change=lambda: _mark_form_force_open("ing"),
     )
 
-    st.markdown("#### 5. Financiamiento")
+    st.markdown("#### Financiamiento")
     fin_ing_default = YES_NO_OPTIONS[1] if categoria_ing == "Financiamiento recibido" else YES_NO_OPTIONS[0]
     fin_ing_toggle = st.selectbox(
         "?Corresponde a financiamiento recibido?",
@@ -1957,7 +1957,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         st.session_state["gas_estado_quick"] = "Pendiente"
         st.session_state["gas_porpag_quick"] = YES_NO_OPTIONS[1]
 
-    st.markdown("#### 1. Datos base")
+    st.markdown("#### Datos base")
     c1, c2, c3, c4, c5 = st.columns([1.0, 1.0, 1.0, 1.1, 1.0])
     with c1:
         empresa_g = st.selectbox(
@@ -2069,7 +2069,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
-    st.markdown("#### 2. Recurrencia")
+    st.markdown("#### Recurrencia")
     rec_period_gas = ""
     rec_rule_gas = ""
     rec_dur_gas = ""
@@ -2121,7 +2121,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
                 on_change=lambda: _mark_form_force_open("gas"),
             )
 
-    st.markdown("#### 3. Clasificacion del gasto")
+    st.markdown("#### Clasificacion del gasto")
     subclas_gas_default = _derive_gas_sub(categoria_g)
     subclas_gas = st.selectbox(
         "Subclasificacion gerencial",
@@ -2138,7 +2138,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
-    st.markdown("#### 4. Tratamiento en balance")
+    st.markdown("#### Tratamiento en balance")
     tratamiento_gas = st.selectbox(
         "Tratamiento balance gasto",
         GAS_BALANCE_OPTIONS,
@@ -2147,7 +2147,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
-    st.markdown("#### 5. Activo fijo")
+    st.markdown("#### Activo fijo")
     activo_dep_toggle = YES_NO_OPTIONS[0]
     activo_tipo = ""
     activo_vida = 5
@@ -2169,7 +2169,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             activo_dep_mensual = max(0.0, float(monto_g) - float(activo_residual)) / max(1, int(activo_vida) * 12)
             st.caption(f"Depreciacion/amortizacion mensual estimada: {_format_money_es(activo_dep_mensual)}")
 
-    st.markdown("#### 6. Financiamiento")
+    st.markdown("#### Financiamiento")
     fin_gas_toggle = st.selectbox(
         "?Tiene financiamiento asociado?",
         YES_NO_OPTIONS,
