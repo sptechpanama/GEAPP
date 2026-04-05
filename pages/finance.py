@@ -1573,12 +1573,16 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             key="ing_monto_quick",
             on_change=lambda: _mark_form_force_open("ing"),
         )
+    ing_recurrente_state = _bool_from_toggle(st.session_state.get("ing_recurrente_quick", "No"))
+    if ing_recurrente_state:
+        st.session_state["ing_estado_quick"] = "Pendiente"
     with c4:
         estado_ing = st.radio(
             "Estado",
             STATE_OPTIONS,
             horizontal=True,
             key="ing_estado_quick",
+            disabled=ing_recurrente_state,
         )
     with c5:
         recurrente_ing = st.selectbox(
@@ -1591,7 +1595,6 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
 
     if _bool_from_toggle(recurrente_ing):
         estado_ing = "Pendiente"
-        st.session_state["ing_estado_quick"] = "Pendiente"
 
     c6, c7 = st.columns([1, 1])
     fecha_cobro_esperada = pd.NaT
@@ -1979,12 +1982,16 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             key="gas_monto_quick",
             on_change=lambda: _mark_form_force_open("gas"),
         )
+    gas_recurrente_state = _bool_from_toggle(st.session_state.get("gas_recurrente_quick", "No"))
+    if gas_recurrente_state:
+        st.session_state["gas_estado_quick"] = "Pendiente"
     with c4:
         estado_g = st.radio(
             "Estado",
             STATE_OPTIONS,
             horizontal=True,
             key="gas_estado_quick",
+            disabled=gas_recurrente_state,
         )
     with c5:
         recurrente_gas = st.selectbox(
@@ -1997,7 +2004,6 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
 
     if _bool_from_toggle(recurrente_gas):
         estado_g = "Pendiente"
-        st.session_state["gas_estado_quick"] = "Pendiente"
 
     c6, c7 = st.columns([1, 1])
     fecha_pago_esperada = pd.NaT
