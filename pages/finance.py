@@ -227,6 +227,43 @@ FIN_MODALITY_OPTIONS = ["Cuotas periodicas", "Pago unico al vencimiento"]
 AF_TYPE_OPTIONS = ["Tangible", "Intangible"]
 AF_LIFE_OPTIONS = [1, 3, 5, 7, 10]
 
+ING_CATEGORY_HELP = {
+    "Proyectos": "Que entra: cobros principales del negocio. Ejemplos: suministro hospitalario; mantenimiento de equipos.",
+    "Oficina": "Que entra: reintegros o ingresos administrativos menores. Ejemplos: reintegro de caja chica; reembolso administrativo.",
+    "Otros ingresos operativos": "Que entra: ingresos operativos secundarios. Ejemplos: visita tecnica cobrada; servicio menor.",
+    "Ingreso financiero": "Que entra: intereses o rendimientos financieros. Ejemplos: interes de prestamo otorgado; rendimiento financiero.",
+    "Ingreso no operativo": "Que entra: ingresos extraordinarios no habituales. Ejemplos: venta ocasional de un bien; recuperacion extraordinaria.",
+    "Financiamiento recibido": "Que entra: dinero prestado recibido por la empresa. Ejemplos: prestamo bancario; prestamo del socio tratado como deuda.",
+    "Miscelaneos": "Que entra: ingresos pendientes de reclasificar. Ejemplos: ingreso aislado; recuperacion no definida aun.",
+}
+GAS_CATEGORY_HELP = {
+    "Proyectos": "Que entra: costos directos de proyecto. Ejemplos: materiales; subcontratos.",
+    "Gastos fijos": "Que entra: estructura fija del negocio. Ejemplos: alquiler; planilla administrativa.",
+    "Gastos operativos": "Que entra: operacion diaria no directa. Ejemplos: gasolina general; viaticos.",
+    "Oficina": "Que entra: administracion y consumibles menores. Ejemplos: impresiones; utiles de oficina.",
+    "Miscelaneos": "Que entra: gasto pendiente de reclasificar. Ejemplos: gasto aislado; gasto no definido aun.",
+    "Comisiones": "Que entra: gastos comerciales por venta. Ejemplos: comision de cierre; incentivo comercial.",
+    "Gasto financiero": "Que entra: intereses y cargos financieros. Ejemplos: interes de prestamo; cargo bancario.",
+    "Impuestos": "Que entra: tasas e impuestos no recuperables. Ejemplos: timbres; tasas municipales.",
+}
+GAS_SUB_HELP = {
+    "Costo directo": "Que entra: costos ligados al proyecto o venta. Ejemplos: material de obra; instalacion directa.",
+    "Administrativo fijo": "Que entra: estructura fija y administrativa. Ejemplos: alquiler; internet fijo.",
+    "Operativo variable": "Que entra: operacion diaria variable. Ejemplos: combustible; viaticos.",
+    "Comercial / ventas": "Que entra: gastos de venta y mercadeo. Ejemplos: comisiones; publicidad.",
+    "Financiero": "Que entra: costos por deuda o servicios financieros. Ejemplos: intereses; cargos bancarios.",
+    "Impuestos": "Que entra: tributos y tasas. Ejemplos: timbres; tasas municipales.",
+    "No operativo": "Que entra: salidas extraordinarias no habituales. Ejemplos: perdida extraordinaria; gasto aislado no recurrente.",
+}
+BALANCE_GAS_HELP = {
+    "Gasto del periodo": "Que entra: consumo del mismo periodo. Ejemplos: alquiler del mes; gasolina del mes.",
+    "Activo fijo": "Que entra: bien duradero que seguira dando valor. Ejemplos: laptop; vehiculo.",
+    "Inventario": "Que entra: bienes para vender o usar despues. Ejemplos: equipos para reventa; insumos en stock.",
+    "Anticipo / prepago": "Que entra: pago adelantado no consumido aun. Ejemplos: seguro anual; alquiler adelantado.",
+    "Cuenta por cobrar / prestamo otorgado": "Que entra: dinero entregado que debe recuperarse. Ejemplos: prestamo a tercero; prestamo a empresa relacionada.",
+    "Cancelacion de pasivo / deuda": "Que entra: pago de capital de deuda. Ejemplos: abono a prestamo; pago de capital de financiamiento.",
+}
+
 
 # -------------------- Helpers generales --------------------
 
@@ -279,6 +316,10 @@ def _derive_gas_sub(category: str) -> str:
         "Impuestos": "Impuestos",
     }
     return mapping.get(str(category or "").strip(), "Operativo variable")
+
+
+def _help_for_option(mapping: dict[str, str], selected: str, fallback: str = "") -> str:
+    return mapping.get(str(selected or "").strip(), fallback)
 
 
 def _date_or_nat(value):
@@ -1547,6 +1588,9 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     if _bool_from_toggle(st.session_state.get("ing_recurrente_quick", "No")):
         st.session_state["ing_estado_quick"] = "Pendiente"
         st.session_state["ing_porcob_quick"] = YES_NO_OPTIONS[1]
+    ing_categoria_state = st.session_state.get("ing_categoria_quick", ING_CATEGORY_OPTIONS[0])
+    ing_fin_state = _bool_from_toggle(st.session_state.get("ing_fin_toggle_quick", "No")) or ing_categoria_state == "Financiamiento recibido"
+    ing_monto_label = "Monto desembolsado / principal" if ing_fin_state else "Monto"
 
     st.markdown("#### Datos base")
     c1, c2, c3, c4, c5 = st.columns([1.0, 1.0, 1.0, 1.1, 1.0])
@@ -1567,7 +1611,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         )
     with c3:
         monto_nuevo = st.number_input(
-            "Monto",
+            ing_monto_label,
             min_value=0.0,
             step=1.0,
             key="ing_monto_quick",
@@ -1698,6 +1742,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         ING_CATEGORY_OPTIONS,
         index=0,
         key="ing_categoria_quick",
+        help=_help_for_option(ING_CATEGORY_HELP, st.session_state.get("ing_categoria_quick", ING_CATEGORY_OPTIONS[0])),
         on_change=lambda: _mark_form_force_open("ing"),
     )
     detalle_ing = st.selectbox(
@@ -1708,12 +1753,12 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         on_change=lambda: _mark_form_force_open("ing"),
     )
     naturaleza_default = _derive_ing_nature(categoria_ing)
-    naturaleza_ing = st.selectbox(
-        "Naturaleza ingreso",
-        ING_NATURE_OPTIONS,
-        index=ING_NATURE_OPTIONS.index(naturaleza_default if naturaleza_default in ING_NATURE_OPTIONS else "Operativo"),
-        key="ing_naturaleza_ing_quick",
-        on_change=lambda: _mark_form_force_open("ing"),
+    naturaleza_ing = naturaleza_default
+    st.text_input(
+        "Naturaleza ingreso (automatica)",
+        value=naturaleza_ing,
+        disabled=True,
+        help="Se deduce automaticamente desde Categoria principal.",
     )
 
     st.markdown("#### Tratamiento en balance")
@@ -1746,9 +1791,10 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     fin_periodicidad_ing = "Mensual"
     if fin_ing_on:
         f1, f2, f3 = st.columns(3)
+        fin_monto_ing = float(monto_nuevo)
         with f1:
             fin_tipo_ing = st.selectbox("Tipo", ["Financiamiento recibido"], key="ing_fin_tipo_quick")
-            fin_monto_ing = st.number_input("Monto principal", min_value=0.0, step=1.0, key="ing_fin_monto_quick")
+            st.caption(f"Se usa el monto base como principal/desembolso: {_format_money_es(fin_monto_ing)}")
             fin_fecha_inicio_ing = st.date_input("Fecha inicio", value=fecha_nueva, key="ing_fin_fecha_inicio_quick")
         with f2:
             fin_plazo_ing = st.number_input("Plazo en meses", min_value=1, step=1, value=1, key="ing_fin_plazo_quick")
@@ -1956,6 +2002,9 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     if _bool_from_toggle(st.session_state.get("gas_recurrente_quick", "No")):
         st.session_state["gas_estado_quick"] = "Pendiente"
         st.session_state["gas_porpag_quick"] = YES_NO_OPTIONS[1]
+    gas_trat_state = st.session_state.get("gas_trat_balance_gas_quick", "Gasto del periodo")
+    gas_fin_state = _bool_from_toggle(st.session_state.get("gas_fin_toggle_quick", "No"))
+    gas_monto_label = "Monto desembolsado / principal" if (gas_fin_state and gas_trat_state == "Cuenta por cobrar / prestamo otorgado") else "Monto"
 
     st.markdown("#### Datos base")
     c1, c2, c3, c4, c5 = st.columns([1.0, 1.0, 1.0, 1.1, 1.0])
@@ -1976,7 +2025,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         )
     with c3:
         monto_g = st.number_input(
-            "Monto",
+            gas_monto_label,
             min_value=0.0,
             step=1.0,
             key="gas_monto_quick",
@@ -2030,6 +2079,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         GAS_CATEGORY_OPTIONS,
         index=0,
         key="gas_categoria_quick",
+        help=_help_for_option(GAS_CATEGORY_HELP, st.session_state.get("gas_categoria_quick", GAS_CATEGORY_OPTIONS[0])),
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
@@ -2128,6 +2178,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         GAS_SUB_OPTIONS,
         index=GAS_SUB_OPTIONS.index(subclas_gas_default if subclas_gas_default in GAS_SUB_OPTIONS else "Operativo variable"),
         key="gas_subclas_gas_quick",
+        help=_help_for_option(GAS_SUB_HELP, st.session_state.get("gas_subclas_gas_quick", subclas_gas_default)),
         on_change=lambda: _mark_form_force_open("gas"),
     )
     detalle_gas = st.selectbox(
@@ -2144,6 +2195,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         GAS_BALANCE_OPTIONS,
         index=0,
         key="gas_trat_balance_gas_quick",
+        help=_help_for_option(BALANCE_GAS_HELP, st.session_state.get("gas_trat_balance_gas_quick", GAS_BALANCE_OPTIONS[0])),
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
@@ -2196,7 +2248,11 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         f1, f2, f3 = st.columns(3)
         with f1:
             fin_tipo_gas = st.selectbox("Tipo", fin_type_options, index=0, key="gas_fin_tipo_quick")
-            fin_monto_gas = st.number_input("Monto principal", min_value=0.0, step=1.0, key="gas_fin_monto_quick")
+            if fin_tipo_gas == "Financiamiento otorgado":
+                fin_monto_gas = float(monto_g)
+                st.caption(f"Se usa el monto base como principal/desembolso: {_format_money_es(fin_monto_gas)}")
+            else:
+                fin_monto_gas = st.number_input("Monto financiado", min_value=0.0, step=1.0, key="gas_fin_monto_quick")
             fin_fecha_inicio_gas = st.date_input("Fecha inicio", value=fecha_g, key="gas_fin_fecha_inicio_quick")
         with f2:
             fin_plazo_gas = st.number_input("Plazo en meses", min_value=1, step=1, value=1, key="gas_fin_plazo_quick")
