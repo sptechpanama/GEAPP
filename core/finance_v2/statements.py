@@ -14,13 +14,18 @@ from .constants import (
     COL_CATEGORIA,
     COL_EMPRESA,
     COL_FECHA,
+    COL_FECHA_REAL_COBRO,
+    COL_FECHA_REAL_PAGO,
     COL_FINANCIAMIENTO_CRONOGRAMA,
     COL_FINANCIAMIENTO_MONTO,
     COL_FINANCIAMIENTO_TIPO,
     COL_GASTO_DETALLE,
     COL_MONTO,
     COL_NATURALEZA_INGRESO,
+    COL_POR_COBRAR,
+    COL_POR_PAGAR,
     COL_SUBCLASIFICACION_GERENCIAL,
+    COL_TRATAMIENTO_BALANCE_ING,
     COL_TRATAMIENTO_BALANCE_GAS,
 )
 from .helpers import include_by_category, safe_div
@@ -87,6 +92,15 @@ def _ensure_estado_schema(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parse_schedule_df(df: pd.DataFrame) -> pd.DataFrame:
+    empty_columns = [
+        "fecha",
+        "interes",
+        "capital",
+        "cuota_total",
+        "saldo_pendiente",
+        "fin_type",
+        "empresa",
+    ]
     rows: list[dict[str, object]] = []
     for _, row in df.iterrows():
         raw = str(row.get(COL_FINANCIAMIENTO_CRONOGRAMA, "") or "").strip()
@@ -113,7 +127,9 @@ def _parse_schedule_df(df: pd.DataFrame) -> pd.DataFrame:
                     "empresa": str(row.get(COL_EMPRESA, "") or ""),
                 }
             )
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=empty_columns)
+    return pd.DataFrame(rows, columns=empty_columns)
 
 
 def _calc_depreciacion_periodo(gas: pd.DataFrame, fecha_desde: pd.Timestamp, fecha_hasta: pd.Timestamp) -> float:
@@ -165,9 +181,11 @@ def build_estado_resultados(
     gas = gas[gas[COL_CATEGORIA].map(lambda x: include_by_category(x, include_miscelaneos))].copy()
 
     nature = _safe_series(ing, COL_NATURALEZA_INGRESO, "").astype(str)
-    ingresos_operativos = float(pd.to_numeric(ing.loc[nature.eq("Operativo"), COL_MONTO], errors="coerce").fillna(0.0).sum())
-    ingresos_financieros_base = float(pd.to_numeric(ing.loc[nature.eq("Financiero"), COL_MONTO], errors="coerce").fillna(0.0).sum())
-    ingresos_no_operativos = float(pd.to_numeric(ing.loc[nature.eq("No operativo"), COL_MONTO], errors="coerce").fillna(0.0).sum())
+    ingresos_resultado = ing[nature.isin(["Operativo", "Financiero", "No operativo"])].copy()
+    nature_res = _safe_series(ingresos_resultado, COL_NATURALEZA_INGRESO, "").astype(str)
+    ingresos_operativos = float(pd.to_numeric(ingresos_resultado.loc[nature_res.eq("Operativo"), COL_MONTO], errors="coerce").fillna(0.0).sum())
+    ingresos_financieros_base = float(pd.to_numeric(ingresos_resultado.loc[nature_res.eq("Financiero"), COL_MONTO], errors="coerce").fillna(0.0).sum())
+    ingresos_no_operativos = float(pd.to_numeric(ingresos_resultado.loc[nature_res.eq("No operativo"), COL_MONTO], errors="coerce").fillna(0.0).sum())
 
     subclas = _safe_series(gas, COL_SUBCLASIFICACION_GERENCIAL, "").astype(str)
     trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
@@ -215,8 +233,8 @@ def build_estado_resultados(
         ]
     )
 
-    ing_month = ing.copy()
-    gas_month = gas.copy()
+    ing_month = ingresos_resultado.copy()
+    gas_month = gas[period_mask].copy()
     ing_month["Mes"] = _safe_datetime_series(ing_month, COL_FECHA).dt.to_period("M")
     gas_month["Mes"] = _safe_datetime_series(gas_month, COL_FECHA).dt.to_period("M")
 
@@ -245,14 +263,14 @@ def build_estado_resultados(
     mensual = mensual.sort_values("Mes", na_position="last")
     mensual["Utilidad"] = mensual["Ingresos"] - mensual["Gastos"]
 
-    empresa_ing = ing.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Ingresos"})
-    empresa_gas = gas.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Gastos"})
+    empresa_ing = ingresos_resultado.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Ingresos"})
+    empresa_gas = gas[period_mask].groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Gastos"})
     por_empresa = empresa_ing.merge(empresa_gas, on=COL_EMPRESA, how="outer").fillna(0.0)
     por_empresa["Utilidad"] = por_empresa["Ingresos"] - por_empresa["Gastos"]
     por_empresa = por_empresa.sort_values("Utilidad", ascending=False)
 
     gasto_categoria = (
-        gas.groupby(COL_CATEGORIA, as_index=False)[COL_MONTO]
+        gas[period_mask].groupby(COL_CATEGORIA, as_index=False)[COL_MONTO]
         .sum()
         .rename(columns={COL_CATEGORIA: "Categoria", COL_MONTO: "Gasto"})
         .sort_values("Gasto", ascending=False)
@@ -262,6 +280,7 @@ def build_estado_resultados(
         "Estado de resultados gerencial: usa fecha del hecho economico, no fecha de cobro/pago.",
         "Capital de prestamos no entra al resultado; solo intereses si entran al resultado.",
         "Activo fijo no pega completo al gasto; se reconoce via depreciacion/amortizacion cuando aplica.",
+        "Aportes de socio / capital e inversiones / participaciones en otras empresas no entran al resultado; se reflejan en caja y balance.",
     ]
     if not include_miscelaneos:
         notes.append("Politica aplicada: categoria Miscelaneos excluida de rentabilidad y estado de resultados.")
@@ -296,6 +315,8 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
     prestamos_otorgados = 0.0
     prestamos_recibidos = 0.0
     activos_fijos_netos = 0.0
+    inversiones_participaciones = 0.0
+    aportes_capital = 0.0
     gas_dates = _safe_datetime_series(gas, COL_FECHA)
     vigente_mask = gas_dates.notna() & (gas_dates <= cutoff)
     inventario = float(
@@ -323,6 +344,20 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         .sum()
     )
 
+    ing_trat = _safe_series(ing, COL_TRATAMIENTO_BALANCE_ING, "").astype(str)
+    ing_estado = _safe_series(ing, COL_POR_COBRAR, "No").astype(str)
+    ing_real_date = _safe_datetime_series(ing, COL_FECHA_REAL_COBRO)
+    ing_event_date = ing_real_date.fillna(_safe_datetime_series(ing, COL_FECHA))
+    aportes_mask = (
+        ing_trat.eq("Patrimonio")
+        & ~ing_estado.eq("Si")
+        & ing_event_date.notna()
+        & (ing_event_date <= cutoff)
+    )
+    aportes_capital = float(
+        pd.to_numeric(ing.loc[aportes_mask, COL_MONTO], errors="coerce").fillna(0.0).sum()
+    )
+
     for frame, sign in ((ing, "recibido"), (gas, "gasto")):
         for _, row in frame.iterrows():
             fin_type = str(row.get(COL_FINANCIAMIENTO_TIPO, "") or "").strip()
@@ -348,6 +383,20 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
                 elif fin_type == "Activo fijo financiado":
                     prestamos_recibidos += float(max(0.0, saldo))
 
+    gas_trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
+    gas_estado = _safe_series(gas, COL_POR_PAGAR, "No").astype(str)
+    gas_real_date = _safe_datetime_series(gas, COL_FECHA_REAL_PAGO)
+    gas_event_date = gas_real_date.fillna(_safe_datetime_series(gas, COL_FECHA))
+    inversiones_mask = (
+        gas_trat.eq("Inversion / participacion en otra empresa")
+        & ~gas_estado.eq("Si")
+        & gas_event_date.notna()
+        & (gas_event_date <= cutoff)
+    )
+    inversiones_participaciones = float(
+        pd.to_numeric(gas.loc[inversiones_mask, COL_MONTO], errors="coerce").fillna(0.0).sum()
+    )
+
     activos_rows = gas[
         vigente_mask & _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Activo fijo")
     ].copy()
@@ -371,6 +420,8 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         "inventario": float(inventario),
         "anticipos_prepagos": float(anticipos),
         "activos_fijos_netos": float(activos_fijos_netos),
+        "inversiones_participaciones": float(inversiones_participaciones),
+        "aportes_capital": float(aportes_capital),
     }
 
 
@@ -383,7 +434,9 @@ def build_balance_general_simplificado(
     inventario: float = 0.0,
     anticipos_prepagos: float = 0.0,
     activos_fijos_netos: float = 0.0,
+    inversiones_participaciones: float = 0.0,
     prestamos_recibidos: float = 0.0,
+    aportes_capital: float = 0.0,
     otras_deudas: float = 0.0,
 ) -> dict:
     activos_df = pd.DataFrame(
@@ -394,6 +447,7 @@ def build_balance_general_simplificado(
             {"Cuenta": "Inventario", "Monto": float(inventario)},
             {"Cuenta": "Anticipos / prepagos", "Monto": float(anticipos_prepagos)},
             {"Cuenta": "Activos fijos netos", "Monto": float(activos_fijos_netos)},
+            {"Cuenta": "Inversiones / participaciones", "Monto": float(inversiones_participaciones)},
         ]
     )
     activos_df = activos_df[activos_df["Monto"] != 0].reset_index(drop=True)
@@ -413,11 +467,15 @@ def build_balance_general_simplificado(
     capital_trabajo = (efectivo_actual + cuentas_por_cobrar + inventario + anticipos_prepagos) - (cuentas_por_pagar + prestamos_recibidos + otras_deudas)
 
     patrimonio_df = pd.DataFrame(
-        [{"Cuenta": "Patrimonio neto estimado", "Monto": float(patrimonio_neto)}]
+        [
+            {"Cuenta": "Aportes de socios / capital", "Monto": float(aportes_capital)},
+            {"Cuenta": "Patrimonio neto estimado", "Monto": float(patrimonio_neto)},
+        ]
     )
+    patrimonio_df = patrimonio_df[patrimonio_df["Monto"] != 0].reset_index(drop=True)
 
     notes = [
-        "Balance general gerencial y simplificado: incorpora caja, cuentas abiertas, prestamos, inventario, prepagos y activos fijos netos cuando existen.",
+        "Balance general gerencial y simplificado: incorpora caja, cuentas abiertas, prestamos, inventario, prepagos, inversiones y activos fijos netos cuando existen.",
         "Sin inventario operativo detallado, devengo automatico de prepagos ni conciliacion bancaria, algunos saldos siguen siendo aproximados.",
     ]
 

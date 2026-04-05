@@ -41,6 +41,7 @@ from core.finance_v2.constants import (
     COL_POR_PAGAR,
     COL_PROVEEDOR,
     COL_PROYECTO,
+    COL_TRATAMIENTO_BALANCE_ING,
 )
 from ui.theme import apply_global_theme
 
@@ -310,6 +311,9 @@ def _projection_window(horizon_months: int, today_ref: date | None = None) -> tu
 
 def _prepare_expected_dates_for_balance(split: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
     ing_p = split["ing_pend"].copy()
+    if COL_TRATAMIENTO_BALANCE_ING in ing_p.columns:
+        trat_ing = ing_p[COL_TRATAMIENTO_BALANCE_ING].astype(str)
+        ing_p = ing_p[(trat_ing == "") | (trat_ing == "Cuenta por cobrar")].copy()
     ing_p["fecha_origen"] = pd.to_datetime(ing_p.get(COL_FECHA), errors="coerce")
     ing_p["fecha_esperada"] = pd.to_datetime(ing_p.get(COL_FECHA_COBRO), errors="coerce")
     ing_p["monto"] = pd.to_numeric(ing_p.get(COL_MONTO), errors="coerce").fillna(0.0)
@@ -376,6 +380,7 @@ def _build_balance_snapshots(
             + float(extras.get("prestamos_otorgados", 0.0))
             + float(extras.get("inventario", 0.0))
             + float(extras.get("anticipos_prepagos", 0.0))
+            + float(extras.get("inversiones_participaciones", 0.0))
             + float(extras.get("activos_fijos_netos", 0.0))
         )
         pasivos = float(cxp + float(extras.get("prestamos_recibidos", 0.0)))
@@ -398,6 +403,7 @@ def _build_balance_snapshots(
                 "prestamos_otorgados": float(extras.get("prestamos_otorgados", 0.0)),
                 "inventario": float(extras.get("inventario", 0.0)),
                 "anticipos_prepagos": float(extras.get("anticipos_prepagos", 0.0)),
+                "inversiones_participaciones": float(extras.get("inversiones_participaciones", 0.0)),
                 "activos_fijos_netos": float(extras.get("activos_fijos_netos", 0.0)),
                 "prestamos_recibidos": float(extras.get("prestamos_recibidos", 0.0)),
                 "activos_totales": activos,
@@ -813,8 +819,10 @@ balance = build_balance_general_simplificado(
     prestamos_otorgados=float(balance_components.get("prestamos_otorgados", 0.0)),
     inventario=float(balance_components.get("inventario", 0.0)),
     anticipos_prepagos=float(balance_components.get("anticipos_prepagos", 0.0)),
+    inversiones_participaciones=float(balance_components.get("inversiones_participaciones", 0.0)),
     activos_fijos_netos=float(balance_components.get("activos_fijos_netos", 0.0)),
     prestamos_recibidos=float(balance_components.get("prestamos_recibidos", 0.0)),
+    aportes_capital=float(balance_components.get("aportes_capital", 0.0)),
 )
 
 analisis = build_analisis_gerencial(ing_f, gas_f, cxc_df, include_miscelaneos=include_misc)
@@ -1128,6 +1136,7 @@ with tab_e:
                 {"Cuenta": "Prestamos otorgados", "Monto": float(latest.get("prestamos_otorgados", 0.0))},
                 {"Cuenta": "Inventario", "Monto": float(latest.get("inventario", 0.0))},
                 {"Cuenta": "Anticipos / prepagos", "Monto": float(latest.get("anticipos_prepagos", 0.0))},
+                {"Cuenta": "Inversiones / participaciones", "Monto": float(latest.get("inversiones_participaciones", 0.0))},
                 {"Cuenta": "Activos fijos netos", "Monto": float(latest.get("activos_fijos_netos", 0.0))},
             ]
         )

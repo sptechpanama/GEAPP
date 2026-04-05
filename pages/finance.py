@@ -167,6 +167,7 @@ ING_CATEGORY_OPTIONS = [
     "Otros ingresos operativos",
     "Ingreso financiero",
     "Ingreso no operativo",
+    "Aporte de socio / capital",
     "Financiamiento recibido",
     "Miscelaneos",
 ]
@@ -175,16 +176,18 @@ ING_DETAIL_OPTIONS = [
     "Cobro de servicio",
     "Interes ganado",
     "Ingreso extraordinario",
+    "Aporte de capital",
     "Prestamo recibido",
     "Otro",
 ]
-ING_NATURE_OPTIONS = ["Operativo", "Financiero", "No operativo", "Financiamiento"]
-ING_BALANCE_OPTIONS = ["Cuenta por cobrar", "Caja / banco", "Pasivo financiero"]
+ING_NATURE_OPTIONS = ["Operativo", "Financiero", "No operativo", "Capital", "Financiamiento"]
+ING_BALANCE_OPTIONS = ["Cuenta por cobrar", "Caja / banco", "Patrimonio", "Pasivo financiero"]
 GAS_CATEGORY_OPTIONS = [
     "Proyectos",
     "Gastos fijos",
     "Gastos operativos",
     "Oficina",
+    "Inversiones",
     "Miscelaneos",
     "Comisiones",
     "Gasto financiero",
@@ -210,6 +213,7 @@ GAS_DETAIL_OPTIONS = [
     "Intereses",
     "Materiales",
     "Subcontratos",
+    "Aporte a otra empresa",
     "Timbres / tasas",
     "Otros",
 ]
@@ -218,6 +222,7 @@ GAS_BALANCE_OPTIONS = [
     "Activo fijo",
     "Inventario",
     "Anticipo / prepago",
+    "Inversion / participacion en otra empresa",
     "Cuenta por cobrar / prestamo otorgado",
     "Cancelacion de pasivo / deuda",
 ]
@@ -233,6 +238,7 @@ ING_CATEGORY_HELP = {
     "Otros ingresos operativos": "Que entra: ingresos operativos secundarios. Ejemplos: visita tecnica cobrada; servicio menor.",
     "Ingreso financiero": "Que entra: intereses o rendimientos financieros. Ejemplos: interes de prestamo otorgado; rendimiento financiero.",
     "Ingreso no operativo": "Que entra: ingresos extraordinarios no habituales. Ejemplos: venta ocasional de un bien; recuperacion extraordinaria.",
+    "Aporte de socio / capital": "Que entra: aportes de capital de socios. Ejemplos: aporte inicial del socio; capitalizacion extraordinaria.",
     "Financiamiento recibido": "Que entra: dinero prestado recibido por la empresa. Ejemplos: prestamo bancario; prestamo del socio tratado como deuda.",
     "Miscelaneos": "Que entra: ingresos pendientes de reclasificar. Ejemplos: ingreso aislado; recuperacion no definida aun.",
 }
@@ -241,6 +247,7 @@ GAS_CATEGORY_HELP = {
     "Gastos fijos": "Que entra: estructura fija del negocio. Ejemplos: alquiler; planilla administrativa.",
     "Gastos operativos": "Que entra: operacion diaria no directa. Ejemplos: gasolina general; viaticos.",
     "Oficina": "Que entra: administracion y consumibles menores. Ejemplos: impresiones; utiles de oficina.",
+    "Inversiones": "Que entra: aportes o participaciones en otras empresas. Ejemplos: aporte a RIR; participacion en una afiliada.",
     "Miscelaneos": "Que entra: gasto pendiente de reclasificar. Ejemplos: gasto aislado; gasto no definido aun.",
     "Comisiones": "Que entra: gastos comerciales por venta. Ejemplos: comision de cierre; incentivo comercial.",
     "Gasto financiero": "Que entra: intereses y cargos financieros. Ejemplos: interes de prestamo; cargo bancario.",
@@ -260,6 +267,7 @@ BALANCE_GAS_HELP = {
     "Activo fijo": "Que entra: bien duradero que seguira dando valor. Ejemplos: laptop; vehiculo.",
     "Inventario": "Que entra: bienes para vender o usar despues. Ejemplos: equipos para reventa; insumos en stock.",
     "Anticipo / prepago": "Que entra: pago adelantado no consumido aun. Ejemplos: seguro anual; alquiler adelantado.",
+    "Inversion / participacion en otra empresa": "Que entra: aportes e inversiones en otras empresas. Ejemplos: aporte de RS a RIR; compra de participacion societaria.",
     "Cuenta por cobrar / prestamo otorgado": "Que entra: dinero entregado que debe recuperarse. Ejemplos: prestamo a tercero; prestamo a empresa relacionada.",
     "Cancelacion de pasivo / deuda": "Que entra: pago de capital de deuda. Ejemplos: abono a prestamo; pago de capital de financiamiento.",
 }
@@ -293,12 +301,15 @@ def _derive_ing_nature(category: str) -> str:
         "Otros ingresos operativos": "Operativo",
         "Ingreso financiero": "Financiero",
         "Ingreso no operativo": "No operativo",
+        "Aporte de socio / capital": "Capital",
         "Financiamiento recibido": "Financiamiento",
     }
     return mapping.get(str(category or "").strip(), "Operativo")
 
 
 def _derive_ing_balance(category: str, estado: str) -> str:
+    if str(category or "").strip() == "Aporte de socio / capital":
+        return "Patrimonio"
     if str(category or "").strip() == "Financiamiento recibido":
         return "Pasivo financiero"
     return "Cuenta por cobrar" if str(estado or "").strip() == "Pendiente" else "Caja / banco"
@@ -310,12 +321,19 @@ def _derive_gas_sub(category: str) -> str:
         "Gastos fijos": "Administrativo fijo",
         "Gastos operativos": "Operativo variable",
         "Oficina": "Administrativo fijo",
+        "Inversiones": "No operativo",
         "Miscelaneos": "No operativo",
         "Comisiones": "Comercial / ventas",
         "Gasto financiero": "Financiero",
         "Impuestos": "Impuestos",
     }
     return mapping.get(str(category or "").strip(), "Operativo variable")
+
+
+def _derive_gas_balance(category: str) -> str:
+    if str(category or "").strip() == "Inversiones":
+        return "Inversion / participacion en otra empresa"
+    return "Gasto del periodo"
 
 
 def _help_for_option(mapping: dict[str, str], selected: str, fallback: str = "") -> str:
@@ -752,6 +770,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
     out.loc[rec_mask & (out[COL_REC_DUR].astype(str).str.strip() == ""), COL_REC_DUR] = "Indefinida"
     out.loc[out[COL_GAS_SUB].astype(str).str.strip() == "", COL_GAS_SUB] = out[COL_CAT].map(_derive_gas_sub)
+    out.loc[out[COL_TRAT_BAL_GAS].astype(str).str.strip() == "", COL_TRAT_BAL_GAS] = out[COL_CAT].map(_derive_gas_balance)
     af_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo")
     out.loc[~af_mask, [COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA, COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL]] = ["No", "", 0, pd.NaT, 0.0, "No", 0.0]
     fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle)
@@ -1763,13 +1782,22 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
 
     st.markdown("#### Tratamiento en balance")
     balance_ing_default = _derive_ing_balance(categoria_ing, estado_ing)
-    tratamiento_ing = st.selectbox(
-        "Tratamiento balance ingreso",
-        ING_BALANCE_OPTIONS,
-        index=ING_BALANCE_OPTIONS.index(balance_ing_default if balance_ing_default in ING_BALANCE_OPTIONS else "Cuenta por cobrar"),
-        key="ing_trat_balance_ing_quick",
-        on_change=lambda: _mark_form_force_open("ing"),
-    )
+    if categoria_ing in {"Aporte de socio / capital", "Financiamiento recibido"}:
+        tratamiento_ing = balance_ing_default
+        st.text_input(
+            "Tratamiento balance ingreso (automatico)",
+            value=tratamiento_ing,
+            disabled=True,
+            help="Se deduce automaticamente para categorias patrimoniales y de financiamiento.",
+        )
+    else:
+        tratamiento_ing = st.selectbox(
+            "Tratamiento balance ingreso",
+            ING_BALANCE_OPTIONS,
+            index=ING_BALANCE_OPTIONS.index(balance_ing_default if balance_ing_default in ING_BALANCE_OPTIONS else "Cuenta por cobrar"),
+            key="ing_trat_balance_ing_quick",
+            on_change=lambda: _mark_form_force_open("ing"),
+        )
 
     st.markdown("#### Financiamiento")
     fin_ing_default = YES_NO_OPTIONS[1] if categoria_ing == "Financiamiento recibido" else YES_NO_OPTIONS[0]
@@ -2082,6 +2110,11 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         help=_help_for_option(GAS_CATEGORY_HELP, st.session_state.get("gas_categoria_quick", GAS_CATEGORY_OPTIONS[0])),
         on_change=lambda: _mark_form_force_open("gas"),
     )
+    if categoria_g == "Inversiones":
+        if st.session_state.get("gas_subclas_gas_quick", "") in {"", "Operativo variable"}:
+            st.session_state["gas_subclas_gas_quick"] = "No operativo"
+        if st.session_state.get("gas_trat_balance_gas_quick", "") in {"", "Gasto del periodo"}:
+            st.session_state["gas_trat_balance_gas_quick"] = "Inversion / participacion en otra empresa"
 
     gas_company_code = (empresa_g or EMPRESA_DEFAULT).strip().upper()
     gas_client_options = _client_options_for_company(gas_company_code)
@@ -2190,10 +2223,11 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     )
 
     st.markdown("#### Tratamiento en balance")
+    tratamiento_gas_default = _derive_gas_balance(categoria_g)
     tratamiento_gas = st.selectbox(
         "Tratamiento balance gasto",
         GAS_BALANCE_OPTIONS,
-        index=0,
+        index=GAS_BALANCE_OPTIONS.index(tratamiento_gas_default if tratamiento_gas_default in GAS_BALANCE_OPTIONS else "Gasto del periodo"),
         key="gas_trat_balance_gas_quick",
         help=_help_for_option(BALANCE_GAS_HELP, st.session_state.get("gas_trat_balance_gas_quick", GAS_BALANCE_OPTIONS[0])),
         on_change=lambda: _mark_form_force_open("gas"),

@@ -14,6 +14,8 @@ from .constants import (
     COL_MONTO,
     COL_PROVEEDOR,
     COL_PROYECTO,
+    COL_TRATAMIENTO_BALANCE_GAS,
+    COL_TRATAMIENTO_BALANCE_ING,
 )
 from .helpers import include_by_category, safe_div
 
@@ -111,6 +113,10 @@ def _due_status(days_delta: float | int | None) -> str:
 def build_cuentas_por_cobrar(df_ing_pend: pd.DataFrame, *, fecha_hoy: date | None = None) -> pd.DataFrame:
     today = pd.Timestamp(fecha_hoy or date.today())
     out = _ensure_analysis_schema(df_ing_pend, is_gasto=False)
+    if COL_TRATAMIENTO_BALANCE_ING not in out.columns:
+        out[COL_TRATAMIENTO_BALANCE_ING] = ""
+    trat = _safe_series(out, COL_TRATAMIENTO_BALANCE_ING, "").astype(str)
+    out = out[(trat == "") | (trat == "Cuenta por cobrar")].copy()
     out["fecha_esperada"] = pd.to_datetime(_safe_series(out, COL_FECHA_COBRO, pd.NaT), errors="coerce")
     out["dias_para_cobro"] = (out["fecha_esperada"] - today).dt.days
     out["estado"] = out["dias_para_cobro"].map(_due_status)
@@ -179,6 +185,12 @@ def build_analisis_gerencial(
     gas_cat = _safe_series(gas, COL_CATEGORIA, "").astype(str)
     ing = ing[ing_cat.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
     gas = gas[gas_cat.map(lambda x: include_by_category(x, include_miscelaneos))].copy()
+    if COL_TRATAMIENTO_BALANCE_ING in ing.columns:
+        trat_ing = _safe_series(ing, COL_TRATAMIENTO_BALANCE_ING, "").astype(str)
+        ing = ing[~trat_ing.isin(["Patrimonio", "Pasivo financiero"])].copy()
+    if COL_TRATAMIENTO_BALANCE_GAS in gas.columns:
+        trat_gas = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
+        gas = gas[trat_gas.eq("Gasto del periodo")].copy()
 
     ing_empresa = _group_sum_safe(ing, COL_EMPRESA, COL_MONTO, out_value_name="ingresos")
     gas_empresa = _group_sum_safe(gas, COL_EMPRESA, COL_MONTO, out_value_name="gastos")

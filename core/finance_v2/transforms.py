@@ -86,6 +86,8 @@ def _ensure_columns(df: pd.DataFrame, required_columns: list[str]) -> pd.DataFra
 
 
 def _derive_ing_balance(category: str, por_cobrar: str) -> str:
+    if normalize_text(category) == "Aporte de socio / capital":
+        return "Patrimonio"
     if normalize_text(category) == "Financiamiento recibido":
         return "Pasivo financiero"
     return "Cuenta por cobrar" if yes_no_flag(por_cobrar) == "Si" else "Caja / banco"
@@ -98,12 +100,19 @@ def _derive_gas_sub(category: str) -> str:
         "Gastos fijos": "Administrativo fijo",
         "Gastos operativos": "Operativo variable",
         "Oficina": "Administrativo fijo",
+        "Inversiones": "No operativo",
         "Miscelaneos": "No operativo",
         "Comisiones": "Comercial / ventas",
         "Gasto financiero": "Financiero",
         "Impuestos": "Impuestos",
     }
     return mapping.get(key, "Operativo variable")
+
+
+def _derive_gas_balance(category: str) -> str:
+    if normalize_text(category) == "Inversiones":
+        return "Inversion / participacion en otra empresa"
+    return "Gasto del periodo"
 
 
 def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
@@ -160,9 +169,11 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
     out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
     out.loc[out[COL_NATURALEZA_INGRESO] == "", COL_NATURALEZA_INGRESO] = out[COL_CATEGORIA].map(
-        lambda x: "Financiamiento" if normalize_text(x) == "Financiamiento recibido" else (
+        lambda x: "Capital" if normalize_text(x) == "Aporte de socio / capital" else (
+            "Financiamiento" if normalize_text(x) == "Financiamiento recibido" else (
             "Financiero" if normalize_text(x) == "Ingreso financiero" else (
                 "No operativo" if normalize_text(x) == "Ingreso no operativo" else "Operativo"
+            )
             )
         )
     )
@@ -241,7 +252,7 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
     out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
     out.loc[out[COL_SUBCLASIFICACION_GERENCIAL] == "", COL_SUBCLASIFICACION_GERENCIAL] = out[COL_CATEGORIA].map(_derive_gas_sub)
-    out.loc[out[COL_TRATAMIENTO_BALANCE_GAS] == "", COL_TRATAMIENTO_BALANCE_GAS] = "Gasto del periodo"
+    out.loc[out[COL_TRATAMIENTO_BALANCE_GAS] == "", COL_TRATAMIENTO_BALANCE_GAS] = out[COL_CATEGORIA].map(_derive_gas_balance)
 
     fallback_candidates = [
         COL_FECHA_PAGO,
