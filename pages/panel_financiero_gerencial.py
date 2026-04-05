@@ -17,6 +17,7 @@ from core.finance_v2 import (
     build_cuentas_por_cobrar,
     build_cuentas_por_pagar,
     build_estado_resultados,
+    compute_balance_components,
     format_money_es,
     format_number_es,
     format_percent_es,
@@ -327,6 +328,8 @@ def _prepare_expected_dates_for_balance(split: dict[str, pd.DataFrame]) -> tuple
 def _build_balance_snapshots(
     cash_movimientos: pd.DataFrame,
     split: dict[str, pd.DataFrame],
+    df_ing_scope: pd.DataFrame,
+    df_gas_scope: pd.DataFrame,
     period_label: str,
     fecha_desde: date,
     fecha_hasta: date,
@@ -366,10 +369,25 @@ def _build_balance_snapshots(
 
         cxc = float(ing_p.loc[cxc_mask, "monto"].sum()) if not ing_p.empty else 0.0
         cxp = float(gas_p.loc[cxp_mask, "monto"].sum()) if not gas_p.empty else 0.0
-        activos = float(efectivo + cxc)
-        pasivos = float(cxp)
+        extras = compute_balance_components(df_ing_scope, df_gas_scope, cutoff_date=cutoff)
+        activos = float(
+            efectivo
+            + cxc
+            + float(extras.get("prestamos_otorgados", 0.0))
+            + float(extras.get("inventario", 0.0))
+            + float(extras.get("anticipos_prepagos", 0.0))
+            + float(extras.get("activos_fijos_netos", 0.0))
+        )
+        pasivos = float(cxp + float(extras.get("prestamos_recibidos", 0.0)))
         patrimonio = float(activos - pasivos)
-        capital_trabajo = float(activos - pasivos)
+        capital_trabajo = float(
+            efectivo
+            + cxc
+            + float(extras.get("inventario", 0.0))
+            + float(extras.get("anticipos_prepagos", 0.0))
+            - cxp
+            - float(extras.get("prestamos_recibidos", 0.0))
+        )
 
         rows.append(
             {
@@ -377,6 +395,11 @@ def _build_balance_snapshots(
                 "efectivo": efectivo,
                 "cuentas_por_cobrar": cxc,
                 "cuentas_por_pagar": cxp,
+                "prestamos_otorgados": float(extras.get("prestamos_otorgados", 0.0)),
+                "inventario": float(extras.get("inventario", 0.0)),
+                "anticipos_prepagos": float(extras.get("anticipos_prepagos", 0.0)),
+                "activos_fijos_netos": float(extras.get("activos_fijos_netos", 0.0)),
+                "prestamos_recibidos": float(extras.get("prestamos_recibidos", 0.0)),
                 "activos_totales": activos,
                 "pasivos_totales": pasivos,
                 "patrimonio_neto": patrimonio,
@@ -525,6 +548,22 @@ st.caption(
     "Vista gerencial y analitica construida sobre los mismos datos de Finanzas 1. "
     "No reemplaza ni modifica el flujo operativo actual."
 )
+
+with st.expander("Informacion de interes", expanded=False):
+    st.markdown("#### Como se estructura cada reporte")
+    st.markdown(
+        "- `Flujo de caja actual`: usa fecha real de cobro y fecha real de pago.\n"
+        "- `Flujo de caja proyectado`: usa fechas esperadas, recurrencias y cronogramas futuros.\n"
+        "- `Estado de resultados`: usa fecha del hecho economico; capital no va al resultado, solo intereses si entran al resultado.\n"
+        "- `Balance general`: integra caja, cuentas abiertas, prestamos, inventario, prepagos y activos fijos netos cuando existen."
+    )
+    st.markdown("#### Pendiente para robustecer")
+    st.markdown(
+        "- Manejo operativo de inventario.\n"
+        "- Devengo automatico de prepagos.\n"
+        "- Cierre mensual persistente.\n"
+        "- Conciliacion bancaria."
+    )
 
 if "finanzas2_cache_token" not in st.session_state:
     st.session_state["finanzas2_cache_token"] = uuid.uuid4().hex
@@ -732,23 +771,31 @@ split_balance = split_real_vs_pending(ing_scope, gas_scope)
 
 cash_actual = build_cashflow_actual(split["ing_real"], split["gas_real"])
 cash_balance = build_cashflow_actual(split_balance["ing_real"], split_balance["gas_real"])
-cxc_df = build_cuentas_por_cobrar(split["ing_pend"])
-cxp_df, cxp_quality = build_cuentas_por_pagar(split["gas_pend"])
+cxc_df = build_cuentas_por_cobrar(split_proj["ing_pend"])
+cxp_df, cxp_quality = build_cuentas_por_pagar(split_proj["gas_pend"])
 cxc_total = float(cxc_df["monto"].sum()) if not cxc_df.empty else 0.0
 cxp_total = float(cxp_df["monto"].sum()) if not cxp_df.empty else 0.0
 
 proyectado = build_cashflow_proyectado(
-    split_proj["ing_pend"],
-    split_proj["gas_pend"],
+    ing_scope,
+    gas_scope,
     saldo_inicial=cash_actual["metricas"]["efectivo_actual"],
     granularidad="D",
     horizon_months=int(horizonte_proy_meses),
 )
 
-estado = build_estado_resultados(ing_res, gas_res, include_miscelaneos=include_misc)
+estado = build_estado_resultados(
+    ing_scope,
+    gas_scope,
+    include_miscelaneos=include_misc,
+    fecha_desde=resultados_desde,
+    fecha_hasta=resultados_hasta,
+)
 balance_snapshots_summary = _build_balance_snapshots(
     cash_movimientos=cash_balance["movimientos"],
     split=split_balance,
+    df_ing_scope=ing_scope,
+    df_gas_scope=gas_scope,
     period_label=balance_period_default,
     fecha_desde=balance_desde,
     fecha_hasta=balance_hasta,
@@ -758,10 +805,16 @@ latest_balance_summary = (
     if not balance_snapshots_summary.empty
     else {}
 )
+balance_components = compute_balance_components(ing_scope, gas_scope, cutoff_date=balance_hasta)
 balance = build_balance_general_simplificado(
     efectivo_actual=float(latest_balance_summary.get("efectivo", 0.0)),
     cuentas_por_cobrar=float(latest_balance_summary.get("cuentas_por_cobrar", 0.0)),
     cuentas_por_pagar=float(latest_balance_summary.get("cuentas_por_pagar", 0.0)),
+    prestamos_otorgados=float(balance_components.get("prestamos_otorgados", 0.0)),
+    inventario=float(balance_components.get("inventario", 0.0)),
+    anticipos_prepagos=float(balance_components.get("anticipos_prepagos", 0.0)),
+    activos_fijos_netos=float(balance_components.get("activos_fijos_netos", 0.0)),
+    prestamos_recibidos=float(balance_components.get("prestamos_recibidos", 0.0)),
 )
 
 analisis = build_analisis_gerencial(ing_f, gas_f, cxc_df, include_miscelaneos=include_misc)
@@ -1046,6 +1099,8 @@ with tab_e:
     snapshots = _build_balance_snapshots(
         cash_movimientos=cash_balance["movimientos"],
         split=split_balance,
+        df_ing_scope=ing_scope,
+        df_gas_scope=gas_scope,
         period_label=period_balance,
         fecha_desde=balance_desde,
         fecha_hasta=balance_hasta,
@@ -1070,13 +1125,20 @@ with tab_e:
             [
                 {"Cuenta": "Efectivo y equivalentes", "Monto": float(latest["efectivo"])},
                 {"Cuenta": "Cuentas por cobrar", "Monto": float(latest["cuentas_por_cobrar"])},
+                {"Cuenta": "Prestamos otorgados", "Monto": float(latest.get("prestamos_otorgados", 0.0))},
+                {"Cuenta": "Inventario", "Monto": float(latest.get("inventario", 0.0))},
+                {"Cuenta": "Anticipos / prepagos", "Monto": float(latest.get("anticipos_prepagos", 0.0))},
+                {"Cuenta": "Activos fijos netos", "Monto": float(latest.get("activos_fijos_netos", 0.0))},
             ]
         )
+        activos_df = activos_df[activos_df["Monto"] != 0].reset_index(drop=True)
         pasivos_df = pd.DataFrame(
             [
                 {"Cuenta": "Cuentas por pagar", "Monto": float(latest["cuentas_por_pagar"])},
+                {"Cuenta": "Prestamos recibidos", "Monto": float(latest.get("prestamos_recibidos", 0.0))},
             ]
         )
+        pasivos_df = pasivos_df[pasivos_df["Monto"] != 0].reset_index(drop=True)
         patrimonio_df = pd.DataFrame(
             [
                 {"Cuenta": "Patrimonio neto estimado", "Monto": float(latest["patrimonio_neto"])},

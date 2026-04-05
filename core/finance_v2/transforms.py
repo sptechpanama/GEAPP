@@ -6,6 +6,13 @@ from datetime import date
 import pandas as pd
 
 from .constants import (
+    COL_ACTIVO_FIJO_DEP_MENSUAL,
+    COL_ACTIVO_FIJO_DEP_TOGGLE,
+    COL_ACTIVO_FIJO_FECHA_INICIO,
+    COL_ACTIVO_FIJO_TOGGLE,
+    COL_ACTIVO_FIJO_TIPO,
+    COL_ACTIVO_FIJO_VALOR_RESIDUAL,
+    COL_ACTIVO_FIJO_VIDA,
     COL_CATEGORIA,
     COL_CLIENTE_ID,
     COL_CLIENTE_NOMBRE,
@@ -16,16 +23,37 @@ from .constants import (
     COL_ESCENARIO,
     COL_FECHA,
     COL_FECHA_COBRO,
+    COL_FECHA_REAL_COBRO,
+    COL_FECHA_REAL_PAGO,
     COL_FECHA_PAGO,
+    COL_FINANCIAMIENTO_CRONOGRAMA,
+    COL_FINANCIAMIENTO_FECHA_INICIO,
+    COL_FINANCIAMIENTO_MODALIDAD,
+    COL_FINANCIAMIENTO_MONTO,
+    COL_FINANCIAMIENTO_PERIODICIDAD,
+    COL_FINANCIAMIENTO_PLAZO,
+    COL_FINANCIAMIENTO_TASA,
+    COL_FINANCIAMIENTO_TASA_TIPO,
+    COL_FINANCIAMIENTO_TIPO,
+    COL_FINANCIAMIENTO_TOGGLE,
+    COL_GASTO_DETALLE,
+    COL_INGRESO_DETALLE,
     COL_MONTO,
+    COL_NATURALEZA_INGRESO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
     COL_REC_PERIOD,
     COL_REC_RULE,
     COL_RECURRENTE,
+    COL_REC_COUNT,
+    COL_REC_DURATION,
+    COL_REC_UNTIL,
     COL_PROVEEDOR,
     COL_PROYECTO,
     COL_ROW_ID,
+    COL_SUBCLASIFICACION_GERENCIAL,
+    COL_TRATAMIENTO_BALANCE_GAS,
+    COL_TRATAMIENTO_BALANCE_ING,
     COL_USUARIO,
     GASTOS_BASE_COLUMNS,
     INGRESOS_BASE_COLUMNS,
@@ -57,11 +85,39 @@ def _ensure_columns(df: pd.DataFrame, required_columns: list[str]) -> pd.DataFra
     return out
 
 
+def _derive_ing_balance(category: str, por_cobrar: str) -> str:
+    if normalize_text(category) == "Financiamiento recibido":
+        return "Pasivo financiero"
+    return "Cuenta por cobrar" if yes_no_flag(por_cobrar) == "Si" else "Caja / banco"
+
+
+def _derive_gas_sub(category: str) -> str:
+    key = normalize_text(category)
+    mapping = {
+        "Proyectos": "Costo directo",
+        "Gastos fijos": "Administrativo fijo",
+        "Gastos operativos": "Operativo variable",
+        "Oficina": "Administrativo fijo",
+        "Miscelaneos": "No operativo",
+        "Comisiones": "Comercial / ventas",
+        "Gasto financiero": "Financiero",
+        "Impuestos": "Impuestos",
+    }
+    return mapping.get(key, "Operativo variable")
+
+
 def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out = _ensure_columns(df_ing, INGRESOS_BASE_COLUMNS)
     out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
     out[COL_FECHA_COBRO] = pd.to_datetime(out[COL_FECHA_COBRO], errors="coerce")
+    out[COL_FECHA_REAL_COBRO] = pd.to_datetime(out[COL_FECHA_REAL_COBRO], errors="coerce")
+    out[COL_REC_UNTIL] = pd.to_datetime(out[COL_REC_UNTIL], errors="coerce")
+    out[COL_FINANCIAMIENTO_FECHA_INICIO] = pd.to_datetime(out[COL_FINANCIAMIENTO_FECHA_INICIO], errors="coerce")
     out[COL_MONTO] = out[COL_MONTO].map(parse_number_maybe_es)
+    out[COL_FINANCIAMIENTO_MONTO] = out[COL_FINANCIAMIENTO_MONTO].map(parse_number_maybe_es)
+    out[COL_FINANCIAMIENTO_TASA] = out[COL_FINANCIAMIENTO_TASA].map(parse_number_maybe_es)
+    out[COL_FINANCIAMIENTO_PLAZO] = pd.to_numeric(out[COL_FINANCIAMIENTO_PLAZO], errors="coerce").fillna(0).astype(int)
+    out[COL_REC_COUNT] = pd.to_numeric(out[COL_REC_COUNT], errors="coerce").fillna(0).astype(int)
 
     for col in [
         COL_DESC,
@@ -74,8 +130,18 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
         COL_EMPRESA,
         COL_REC_PERIOD,
         COL_REC_RULE,
+        COL_REC_DURATION,
         COL_ROW_ID,
         COL_USUARIO,
+        COL_INGRESO_DETALLE,
+        COL_NATURALEZA_INGRESO,
+        COL_TRATAMIENTO_BALANCE_ING,
+        COL_FINANCIAMIENTO_TOGGLE,
+        COL_FINANCIAMIENTO_TIPO,
+        COL_FINANCIAMIENTO_TASA_TIPO,
+        COL_FINANCIAMIENTO_MODALIDAD,
+        COL_FINANCIAMIENTO_PERIODICIDAD,
+        COL_FINANCIAMIENTO_CRONOGRAMA,
     ]:
         out[col] = out[col].map(normalize_text)
 
@@ -83,13 +149,31 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out[COL_POR_COBRAR] = out[COL_POR_COBRAR].map(yes_no_flag)
     out[COL_COBRADO] = out[COL_COBRADO].map(yes_no_flag)
     out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
-    out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE]] = ""
+    out[COL_FINANCIAMIENTO_TOGGLE] = out[COL_FINANCIAMIENTO_TOGGLE].map(yes_no_flag)
+    out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE, COL_REC_DURATION]] = ""
+    out.loc[out[COL_RECURRENTE] != "Si", COL_REC_COUNT] = 0
+    out.loc[out[COL_RECURRENTE] != "Si", COL_REC_UNTIL] = pd.NaT
     out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_PERIOD] == ""), COL_REC_PERIOD] = "Mensual"
     out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Inicio de cada mes"
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_DURATION] == ""), COL_REC_DURATION] = "Indefinida"
     out.loc[out[COL_REC_PERIOD] == "Quincenal", COL_REC_PERIOD] = "15nal"
     out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
     out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
-
+    out.loc[out[COL_NATURALEZA_INGRESO] == "", COL_NATURALEZA_INGRESO] = out[COL_CATEGORIA].map(
+        lambda x: "Financiamiento" if normalize_text(x) == "Financiamiento recibido" else (
+            "Financiero" if normalize_text(x) == "Ingreso financiero" else (
+                "No operativo" if normalize_text(x) == "Ingreso no operativo" else "Operativo"
+            )
+        )
+    )
+    out.loc[out[COL_TRATAMIENTO_BALANCE_ING] == "", COL_TRATAMIENTO_BALANCE_ING] = [
+        _derive_ing_balance(cat, por_cobrar)
+        for cat, por_cobrar in zip(out[COL_CATEGORIA], out[COL_POR_COBRAR])
+    ]
+    out["__is_financiamiento"] = (
+        out[COL_FINANCIAMIENTO_TOGGLE].map(yes_no_flag).eq("Si")
+        | out[COL_CATEGORIA].eq("Financiamiento recibido")
+    )
     out["__source"] = "ingreso"
     return out
 
@@ -98,7 +182,18 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out = _ensure_columns(df_gas, GASTOS_BASE_COLUMNS)
     out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
     out[COL_FECHA_PAGO] = pd.to_datetime(out[COL_FECHA_PAGO], errors="coerce")
+    out[COL_FECHA_REAL_PAGO] = pd.to_datetime(out[COL_FECHA_REAL_PAGO], errors="coerce")
+    out[COL_REC_UNTIL] = pd.to_datetime(out[COL_REC_UNTIL], errors="coerce")
+    out[COL_ACTIVO_FIJO_FECHA_INICIO] = pd.to_datetime(out[COL_ACTIVO_FIJO_FECHA_INICIO], errors="coerce")
+    out[COL_FINANCIAMIENTO_FECHA_INICIO] = pd.to_datetime(out[COL_FINANCIAMIENTO_FECHA_INICIO], errors="coerce")
     out[COL_MONTO] = out[COL_MONTO].map(parse_number_maybe_es)
+    out[COL_ACTIVO_FIJO_VALOR_RESIDUAL] = out[COL_ACTIVO_FIJO_VALOR_RESIDUAL].map(parse_number_maybe_es)
+    out[COL_ACTIVO_FIJO_DEP_MENSUAL] = out[COL_ACTIVO_FIJO_DEP_MENSUAL].map(parse_number_maybe_es)
+    out[COL_FINANCIAMIENTO_MONTO] = out[COL_FINANCIAMIENTO_MONTO].map(parse_number_maybe_es)
+    out[COL_FINANCIAMIENTO_TASA] = out[COL_FINANCIAMIENTO_TASA].map(parse_number_maybe_es)
+    out[COL_FINANCIAMIENTO_PLAZO] = pd.to_numeric(out[COL_FINANCIAMIENTO_PLAZO], errors="coerce").fillna(0).astype(int)
+    out[COL_REC_COUNT] = pd.to_numeric(out[COL_REC_COUNT], errors="coerce").fillna(0).astype(int)
+    out[COL_ACTIVO_FIJO_VIDA] = pd.to_numeric(out[COL_ACTIVO_FIJO_VIDA], errors="coerce").fillna(0).astype(int)
 
     for col in [
         COL_DESC,
@@ -112,22 +207,42 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
         COL_PROVEEDOR,
         COL_REC_PERIOD,
         COL_REC_RULE,
+        COL_REC_DURATION,
         COL_ROW_ID,
         COL_USUARIO,
+        COL_SUBCLASIFICACION_GERENCIAL,
+        COL_GASTO_DETALLE,
+        COL_TRATAMIENTO_BALANCE_GAS,
+        COL_ACTIVO_FIJO_TOGGLE,
+        COL_ACTIVO_FIJO_TIPO,
+        COL_ACTIVO_FIJO_DEP_TOGGLE,
+        COL_FINANCIAMIENTO_TOGGLE,
+        COL_FINANCIAMIENTO_TIPO,
+        COL_FINANCIAMIENTO_TASA_TIPO,
+        COL_FINANCIAMIENTO_MODALIDAD,
+        COL_FINANCIAMIENTO_PERIODICIDAD,
+        COL_FINANCIAMIENTO_CRONOGRAMA,
     ]:
         out[col] = out[col].map(normalize_text)
 
     out[COL_CATEGORIA] = out[COL_CATEGORIA].map(normalize_category)
     out[COL_POR_PAGAR] = out[COL_POR_PAGAR].map(yes_no_flag)
     out[COL_RECURRENTE] = out[COL_RECURRENTE].map(yes_no_flag)
-    out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE]] = ""
+    out[COL_ACTIVO_FIJO_TOGGLE] = out[COL_ACTIVO_FIJO_TOGGLE].map(yes_no_flag)
+    out[COL_ACTIVO_FIJO_DEP_TOGGLE] = out[COL_ACTIVO_FIJO_DEP_TOGGLE].map(yes_no_flag)
+    out[COL_FINANCIAMIENTO_TOGGLE] = out[COL_FINANCIAMIENTO_TOGGLE].map(yes_no_flag)
+    out.loc[out[COL_RECURRENTE] != "Si", [COL_REC_PERIOD, COL_REC_RULE, COL_REC_DURATION]] = ""
+    out.loc[out[COL_RECURRENTE] != "Si", COL_REC_COUNT] = 0
+    out.loc[out[COL_RECURRENTE] != "Si", COL_REC_UNTIL] = pd.NaT
     out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_PERIOD] == ""), COL_REC_PERIOD] = "Mensual"
     out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_RULE] == ""), COL_REC_RULE] = "Inicio de cada mes"
+    out.loc[(out[COL_RECURRENTE] == "Si") & (out[COL_REC_DURATION] == ""), COL_REC_DURATION] = "Indefinida"
     out.loc[out[COL_REC_PERIOD] == "Quincenal", COL_REC_PERIOD] = "15nal"
     out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
     out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
+    out.loc[out[COL_SUBCLASIFICACION_GERENCIAL] == "", COL_SUBCLASIFICACION_GERENCIAL] = out[COL_CATEGORIA].map(_derive_gas_sub)
+    out.loc[out[COL_TRATAMIENTO_BALANCE_GAS] == "", COL_TRATAMIENTO_BALANCE_GAS] = "Gasto del periodo"
 
-    # Fecha esperada de pago: puede no existir en el esquema actual.
     fallback_candidates = [
         COL_FECHA_PAGO,
         "Fecha de pago",
@@ -143,6 +258,11 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
         out["__fecha_pago_estimada"] = pd.NaT
         out["__fecha_pago_fuente"] = "sin_fecha_pago"
 
+    out["__is_financiamiento"] = out[COL_FINANCIAMIENTO_TOGGLE].map(yes_no_flag).eq("Si")
+    out["__is_activo_fijo"] = (
+        out[COL_ACTIVO_FIJO_TOGGLE].map(yes_no_flag).eq("Si")
+        | out[COL_TRATAMIENTO_BALANCE_GAS].eq("Activo fijo")
+    )
     out["__source"] = "gasto"
     return out
 

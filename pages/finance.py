@@ -8,7 +8,7 @@
 # ================================================
 
 from __future__ import annotations
-import uuid, time
+import json, uuid, time
 import streamlit as st
 import streamlit.components.v1 as components
 from ui.theme import apply_global_theme
@@ -109,15 +109,43 @@ COL_EMP     = "Empresa"
 COL_COB     = "Cobrado"
 COL_FCOBRO  = "Fecha de cobro"
 COL_FPAGO   = "Fecha esperada de pago"
+COL_FCOBRO_REAL = "Fecha real de cobro"
+COL_FPAGO_REAL = "Fecha real de pago"
 COL_REC     = "Recurrente"
 COL_REC_PER = "Periodo recurrencia"
 COL_REC_REG = "Regla fecha recurrencia"
+COL_REC_DUR = "Duracion recurrencia"
+COL_REC_HASTA = "Recurrencia hasta fecha"
+COL_REC_CANT = "Recurrencia cantidad periodos"
 COL_ROWID   = "RowID"
 COL_REF_RID = "Ref RowID Ingreso"
 COL_POR_COB = "Por_cobrar"        # Ingresos: "No"/"Sí"
 COL_POR_PAG = "Por_pagar"         # Gastos:   "No"/"Sí"
 COL_PROV    = "Proveedor"         # Gastos: proveedor del gasto
 COL_USER  = "Usuario"
+COL_ING_DET = "Detalle ingreso"
+COL_ING_NAT = "Naturaleza ingreso"
+COL_TRAT_BAL_ING = "Tratamiento balance ingreso"
+COL_GAS_SUB = "Subclasificacion gerencial"
+COL_GAS_DET = "Detalle gasto"
+COL_TRAT_BAL_GAS = "Tratamiento balance gasto"
+COL_AF_TOGGLE = "Activo fijo"
+COL_AF_TIPO = "Tipo activo fijo"
+COL_AF_VIDA = "Vida util activo anios"
+COL_AF_FEC_INI = "Fecha inicio activo"
+COL_AF_VAL_RES = "Valor residual activo"
+COL_AF_DEP_TOGGLE = "Depreciar amortizar"
+COL_AF_DEP_MENSUAL = "Depreciacion mensual"
+COL_FIN_TOGGLE = "Financiamiento"
+COL_FIN_TIPO = "Tipo financiamiento"
+COL_FIN_MONTO = "Monto principal financiamiento"
+COL_FIN_FEC_INI = "Fecha inicio financiamiento"
+COL_FIN_PLAZO = "Plazo financiamiento meses"
+COL_FIN_TASA = "Tasa financiamiento"
+COL_FIN_TASA_TIPO = "Tipo tasa financiamiento"
+COL_FIN_MODALIDAD = "Modalidad financiamiento"
+COL_FIN_PERIOD = "Periodicidad financiamiento"
+COL_FIN_CRONO = "Cronograma financiamiento"
 
 
 EMPRESAS_OPCIONES = ["RS-SP", "RIR"]
@@ -130,6 +158,74 @@ REC_RULE_OPTIONS = [
     "Dia 1 y 15 de cada mes",
     "Mismo dia de fecha esperada",
 ]
+
+STATE_OPTIONS = ["Pendiente", "Realizado"]
+REC_DURATION_OPTIONS = ["Indefinida", "Hasta fecha", "Por cantidad de periodos"]
+ING_CATEGORY_OPTIONS = [
+    "Proyectos",
+    "Oficina",
+    "Otros ingresos operativos",
+    "Ingreso financiero",
+    "Ingreso no operativo",
+    "Financiamiento recibido",
+    "Miscelaneos",
+]
+ING_DETAIL_OPTIONS = [
+    "Cobro de proyecto",
+    "Cobro de servicio",
+    "Interes ganado",
+    "Ingreso extraordinario",
+    "Prestamo recibido",
+    "Otro",
+]
+ING_NATURE_OPTIONS = ["Operativo", "Financiero", "No operativo", "Financiamiento"]
+ING_BALANCE_OPTIONS = ["Cuenta por cobrar", "Caja / banco", "Pasivo financiero"]
+GAS_CATEGORY_OPTIONS = [
+    "Proyectos",
+    "Gastos fijos",
+    "Gastos operativos",
+    "Oficina",
+    "Miscelaneos",
+    "Comisiones",
+    "Gasto financiero",
+    "Impuestos",
+]
+GAS_SUB_OPTIONS = [
+    "Costo directo",
+    "Administrativo fijo",
+    "Operativo variable",
+    "Comercial / ventas",
+    "Financiero",
+    "Impuestos",
+    "No operativo",
+]
+GAS_DETAIL_OPTIONS = [
+    "Alquiler",
+    "Internet",
+    "Planilla",
+    "Gasolina",
+    "Viaticos",
+    "Comisiones",
+    "Mercadeo",
+    "Intereses",
+    "Materiales",
+    "Subcontratos",
+    "Timbres / tasas",
+    "Otros",
+]
+GAS_BALANCE_OPTIONS = [
+    "Gasto del periodo",
+    "Activo fijo",
+    "Inventario",
+    "Anticipo / prepago",
+    "Cuenta por cobrar / prestamo otorgado",
+    "Cancelacion de pasivo / deuda",
+]
+FIN_TYPE_OPTIONS = ["Financiamiento recibido", "Financiamiento otorgado", "Activo fijo financiado"]
+FIN_RATE_TYPE_OPTIONS = ["Mensual", "Anual"]
+FIN_MODALITY_OPTIONS = ["Cuotas periodicas", "Pago unico al vencimiento"]
+AF_TYPE_OPTIONS = ["Tangible", "Intangible"]
+AF_LIFE_OPTIONS = [1, 3, 5, 7, 10]
 
 
 # -------------------- Helpers generales --------------------
@@ -144,6 +240,118 @@ def _ts(x):
 def _si_no_norm(x) -> str:
     s = str(x).strip().lower()
     return "Sí" if s in {"si","sí","sí","yes","y","true","1"} else "No"
+
+def _estado_to_yes_no(estado: str) -> str:
+    return YES_NO_OPTIONS[1] if str(estado or "").strip() == "Pendiente" else YES_NO_OPTIONS[0]
+
+
+def _bool_from_toggle(value) -> bool:
+    return _si_no_norm(value) != "No"
+
+
+def _derive_ing_nature(category: str) -> str:
+    mapping = {
+        "Proyectos": "Operativo",
+        "Oficina": "Operativo",
+        "Otros ingresos operativos": "Operativo",
+        "Ingreso financiero": "Financiero",
+        "Ingreso no operativo": "No operativo",
+        "Financiamiento recibido": "Financiamiento",
+    }
+    return mapping.get(str(category or "").strip(), "Operativo")
+
+
+def _derive_ing_balance(category: str, estado: str) -> str:
+    if str(category or "").strip() == "Financiamiento recibido":
+        return "Pasivo financiero"
+    return "Cuenta por cobrar" if str(estado or "").strip() == "Pendiente" else "Caja / banco"
+
+
+def _derive_gas_sub(category: str) -> str:
+    mapping = {
+        "Proyectos": "Costo directo",
+        "Gastos fijos": "Administrativo fijo",
+        "Gastos operativos": "Operativo variable",
+        "Oficina": "Administrativo fijo",
+        "Miscelaneos": "No operativo",
+        "Comisiones": "Comercial / ventas",
+        "Gasto financiero": "Financiero",
+        "Impuestos": "Impuestos",
+    }
+    return mapping.get(str(category or "").strip(), "Operativo variable")
+
+
+def _date_or_nat(value):
+    ts = _ts(value)
+    return ts if not pd.isna(ts) else pd.NaT
+
+
+def _serialize_schedule(entries: list[dict]) -> str:
+    try:
+        return json.dumps(entries, ensure_ascii=False)
+    except Exception:
+        return "[]"
+
+
+def _build_financing_schedule(
+    *,
+    principal: float,
+    fecha_inicio,
+    plazo_meses: int,
+    tasa: float,
+    tasa_tipo: str,
+    modalidad: str,
+    periodicidad: str,
+) -> str:
+    principal = float(principal or 0.0)
+    plazo_meses = int(plazo_meses or 0)
+    tasa = float(tasa or 0.0)
+    start_ts = _date_or_nat(fecha_inicio)
+    if principal <= 0 or plazo_meses <= 0 or pd.isna(start_ts):
+        return "[]"
+
+    periodicidad = str(periodicidad or "Mensual").strip() or "Mensual"
+    modalidad = str(modalidad or "Cuotas periodicas").strip() or "Cuotas periodicas"
+    tasa_tipo = str(tasa_tipo or "Anual").strip() or "Anual"
+
+    step_months = 6 if periodicidad == "Semestral" else 1
+    periods = max(1, plazo_meses // step_months)
+    period_rate = tasa / 100.0
+    if tasa_tipo == "Anual":
+        period_rate = period_rate / 12.0
+    if periodicidad == "15nal":
+        period_rate = period_rate / 2.0
+        periods = max(1, plazo_meses * 2)
+
+    entries: list[dict] = []
+    saldo = principal
+    capital_const = principal / periods if modalidad == "Cuotas periodicas" else 0.0
+
+    for idx in range(1, periods + 1):
+        if periodicidad == "15nal":
+            fecha = start_ts + pd.Timedelta(days=15 * idx)
+        else:
+            fecha = start_ts + pd.DateOffset(months=step_months * idx)
+
+        interes = saldo * period_rate
+        if modalidad == "Pago unico al vencimiento":
+            capital = saldo if idx == periods else 0.0
+        else:
+            capital = capital_const if idx < periods else saldo
+        cuota = capital + interes
+        saldo = max(0.0, saldo - capital)
+        entries.append(
+            {
+                "n": idx,
+                "fecha": pd.Timestamp(fecha).date().isoformat(),
+                "interes": round(interes, 2),
+                "capital": round(capital, 2),
+                "cuota_total": round(cuota, 2),
+                "saldo_pendiente": round(saldo, 2),
+            }
+        )
+    return _serialize_schedule(entries)
+
 
 def _current_user() -> str:
     """
@@ -320,77 +528,198 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in [
         COL_FECHA, COL_DESC, COL_CONC, COL_MONTO, COL_CAT, COL_ESC,
         COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB,
-        COL_COB, COL_FCOBRO, COL_REC, COL_REC_PER, COL_REC_REG, COL_ROWID, COL_USER
+        COL_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_REC, COL_REC_PER, COL_REC_REG,
+        COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT, COL_ING_DET, COL_ING_NAT,
+        COL_TRAT_BAL_ING, COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO,
+        COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO,
+        COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO, COL_ROWID, COL_USER,
     ]:
         if col not in out.columns:
-            if col in {COL_MONTO}:
+            if col == COL_MONTO:
                 out[col] = 0.0
-            elif col in {COL_FECHA, COL_FCOBRO}:
+            elif col in {COL_FECHA, COL_FCOBRO, COL_FCOBRO_REAL, COL_REC_HASTA, COL_FIN_FEC_INI}:
                 out[col] = pd.NaT
-            elif col in {COL_EMP}:
+            elif col == COL_EMP:
                 out[col] = EMPRESA_DEFAULT
-            elif col in {COL_POR_COB, COL_COB, COL_REC}:
+            elif col in {COL_POR_COB, COL_COB, COL_REC, COL_FIN_TOGGLE}:
                 out[col] = "No"
             elif col == COL_REC_PER:
                 out[col] = "Mensual"
             elif col == COL_REC_REG:
                 out[col] = "Inicio de cada mes"
+            elif col == COL_REC_DUR:
+                out[col] = "Indefinida"
+            elif col == COL_ING_NAT:
+                out[col] = "Operativo"
+            elif col == COL_TRAT_BAL_ING:
+                out[col] = "Cuenta por cobrar"
+            elif col == COL_FIN_TIPO:
+                out[col] = "Financiamiento recibido"
+            elif col == COL_FIN_TASA_TIPO:
+                out[col] = "Anual"
+            elif col == COL_FIN_MODALIDAD:
+                out[col] = "Cuotas periodicas"
+            elif col == COL_FIN_PERIOD:
+                out[col] = "Mensual"
+            elif col in {COL_FIN_MONTO, COL_FIN_TASA}:
+                out[col] = 0.0
+            elif col in {COL_FIN_PLAZO, COL_REC_CANT}:
+                out[col] = 0
             else:
                 out[col] = ""
-    out[COL_FECHA] = _ts(out[COL_FECHA]); out[COL_FCOBRO] = _ts(out[COL_FCOBRO])
+
+    out[COL_FECHA] = _ts(out[COL_FECHA])
+    out[COL_FCOBRO] = _ts(out[COL_FCOBRO])
+    out[COL_FCOBRO_REAL] = _ts(out[COL_FCOBRO_REAL])
+    out[COL_REC_HASTA] = _ts(out[COL_REC_HASTA])
+    out[COL_FIN_FEC_INI] = _ts(out[COL_FIN_FEC_INI])
     out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
-    out[COL_EMP]   = out[COL_EMP].astype("string").str.upper().str.strip().where(
+    out[COL_FIN_MONTO] = pd.to_numeric(out[COL_FIN_MONTO], errors="coerce").fillna(0.0).astype(float)
+    out[COL_FIN_TASA] = pd.to_numeric(out[COL_FIN_TASA], errors="coerce").fillna(0.0).astype(float)
+    out[COL_FIN_PLAZO] = pd.to_numeric(out[COL_FIN_PLAZO], errors="coerce").fillna(0).astype(int)
+    out[COL_REC_CANT] = pd.to_numeric(out[COL_REC_CANT], errors="coerce").fillna(0).astype(int)
+    out[COL_EMP] = out[COL_EMP].astype("string").str.upper().str.strip().where(
         out[COL_EMP].astype("string").str.upper().str.strip().isin(EMPRESAS_OPCIONES),
-        other=EMPRESA_DEFAULT
+        other=EMPRESA_DEFAULT,
     )
     out[COL_POR_COB] = out[COL_POR_COB].map(_si_no_norm)
-    out[COL_COB]     = out[COL_COB].map(_si_no_norm)
-    out[COL_REC]     = out[COL_REC].map(_si_no_norm)
-    out = _ensure_text(out, [COL_DESC, COL_CONC, COL_CAT, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB, COL_COB, COL_REC, COL_REC_PER, COL_REC_REG, COL_ROWID, COL_USER])
+    out[COL_COB] = out[COL_COB].map(_si_no_norm)
+    out[COL_REC] = out[COL_REC].map(_si_no_norm)
+    out[COL_FIN_TOGGLE] = out[COL_FIN_TOGGLE].map(_si_no_norm)
+    out = _ensure_text(
+        out,
+        [
+            COL_DESC, COL_CONC, COL_CAT, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP,
+            COL_POR_COB, COL_COB, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
+            COL_ROWID, COL_USER, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING,
+            COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
+            COL_FIN_PERIOD, COL_FIN_CRONO,
+        ],
+    )
     out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
     out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
     out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
-    rec_mask = out[COL_REC].map(_si_no_norm).eq("Sí")
-    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG]] = ""
+    rec_mask = out[COL_REC].map(_bool_from_toggle)
+    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT]] = ["", "", "", pd.NaT, 0]
     out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
     out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
+    out.loc[rec_mask & (out[COL_REC_DUR].astype(str).str.strip() == ""), COL_REC_DUR] = "Indefinida"
+    out.loc[out[COL_ING_NAT].astype(str).str.strip() == "", COL_ING_NAT] = out[COL_CAT].map(_derive_ing_nature)
+    estado_series = out[COL_POR_COB].map(lambda x: "Pendiente" if _si_no_norm(x) != "No" else "Realizado")
+    balance_mask = out[COL_TRAT_BAL_ING].astype(str).str.strip() == ""
+    out.loc[balance_mask, COL_TRAT_BAL_ING] = [
+        _derive_ing_balance(cat, estado)
+        for cat, estado in zip(out.loc[balance_mask, COL_CAT], estado_series.loc[balance_mask])
+    ]
+    fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle) | out[COL_CAT].astype(str).eq("Financiamiento recibido")
+    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", ""]
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
+
 
 def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = _canon_cols(df.copy())
-    for col in [COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_ESC, COL_REF_RID,
-                COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_REC, COL_REC_PER, COL_REC_REG, COL_PROV, COL_FPAGO, COL_ROWID, COL_USER]:
+    for col in [
+        COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_ESC, COL_REF_RID,
+        COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_REC,
+        COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT,
+        COL_PROV, COL_FPAGO, COL_FPAGO_REAL, COL_GAS_SUB, COL_GAS_DET,
+        COL_TRAT_BAL_GAS, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA,
+        COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL,
+        COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI,
+        COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
+        COL_FIN_PERIOD, COL_FIN_CRONO, COL_ROWID, COL_USER,
+    ]:
         if col not in out.columns:
-            if col == COL_MONTO: out[col] = 0.0
-            elif col in {COL_FECHA, COL_FPAGO}: out[col] = pd.NaT
-            elif col == COL_EMP: out[col] = EMPRESA_DEFAULT
-            elif col in {COL_POR_PAG, COL_REC}: out[col] = "No"
-            elif col == COL_REC_PER: out[col] = "Mensual"
-            elif col == COL_REC_REG: out[col] = "Inicio de cada mes"
-            else: out[col] = ""
+            if col == COL_MONTO:
+                out[col] = 0.0
+            elif col in {COL_FECHA, COL_FPAGO, COL_FPAGO_REAL, COL_REC_HASTA, COL_AF_FEC_INI, COL_FIN_FEC_INI}:
+                out[col] = pd.NaT
+            elif col == COL_EMP:
+                out[col] = EMPRESA_DEFAULT
+            elif col in {COL_POR_PAG, COL_REC, COL_AF_TOGGLE, COL_AF_DEP_TOGGLE, COL_FIN_TOGGLE}:
+                out[col] = "No"
+            elif col == COL_REC_PER:
+                out[col] = "Mensual"
+            elif col == COL_REC_REG:
+                out[col] = "Inicio de cada mes"
+            elif col == COL_REC_DUR:
+                out[col] = "Indefinida"
+            elif col == COL_GAS_SUB:
+                out[col] = "Operativo variable"
+            elif col == COL_TRAT_BAL_GAS:
+                out[col] = "Gasto del periodo"
+            elif col == COL_AF_TIPO:
+                out[col] = "Tangible"
+            elif col == COL_AF_VIDA:
+                out[col] = 5
+            elif col in {COL_AF_VAL_RES, COL_AF_DEP_MENSUAL, COL_FIN_MONTO, COL_FIN_TASA}:
+                out[col] = 0.0
+            elif col in {COL_FIN_PLAZO, COL_REC_CANT}:
+                out[col] = 0
+            elif col == COL_FIN_TIPO:
+                out[col] = "Financiamiento otorgado"
+            elif col == COL_FIN_TASA_TIPO:
+                out[col] = "Anual"
+            elif col == COL_FIN_MODALIDAD:
+                out[col] = "Cuotas periodicas"
+            elif col == COL_FIN_PERIOD:
+                out[col] = "Mensual"
+            else:
+                out[col] = ""
+
     out[COL_FECHA] = _ts(out[COL_FECHA])
     out[COL_FPAGO] = _ts(out[COL_FPAGO])
+    out[COL_FPAGO_REAL] = _ts(out[COL_FPAGO_REAL])
+    out[COL_REC_HASTA] = _ts(out[COL_REC_HASTA])
+    out[COL_AF_FEC_INI] = _ts(out[COL_AF_FEC_INI])
+    out[COL_FIN_FEC_INI] = _ts(out[COL_FIN_FEC_INI])
     out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
-    out[COL_EMP]   = out[COL_EMP].astype("string").str.upper().str.strip().where(
+    out[COL_AF_VAL_RES] = pd.to_numeric(out[COL_AF_VAL_RES], errors="coerce").fillna(0.0).astype(float)
+    out[COL_AF_DEP_MENSUAL] = pd.to_numeric(out[COL_AF_DEP_MENSUAL], errors="coerce").fillna(0.0).astype(float)
+    out[COL_FIN_MONTO] = pd.to_numeric(out[COL_FIN_MONTO], errors="coerce").fillna(0.0).astype(float)
+    out[COL_FIN_TASA] = pd.to_numeric(out[COL_FIN_TASA], errors="coerce").fillna(0.0).astype(float)
+    out[COL_FIN_PLAZO] = pd.to_numeric(out[COL_FIN_PLAZO], errors="coerce").fillna(0).astype(int)
+    out[COL_REC_CANT] = pd.to_numeric(out[COL_REC_CANT], errors="coerce").fillna(0).astype(int)
+    out[COL_AF_VIDA] = pd.to_numeric(out[COL_AF_VIDA], errors="coerce").fillna(5).astype(int)
+    out[COL_EMP] = out[COL_EMP].astype("string").str.upper().str.strip().where(
         out[COL_EMP].astype("string").str.upper().str.strip().isin(EMPRESAS_OPCIONES),
-        other=EMPRESA_DEFAULT
+        other=EMPRESA_DEFAULT,
     )
     out[COL_POR_PAG] = out[COL_POR_PAG].map(_si_no_norm)
-    out[COL_REC]     = out[COL_REC].map(_si_no_norm)
-    out = _ensure_text(out, [COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_REC, COL_REC_PER, COL_REC_REG, COL_PROV, COL_ROWID, COL_USER])
+    out[COL_REC] = out[COL_REC].map(_si_no_norm)
+    out[COL_AF_TOGGLE] = out[COL_AF_TOGGLE].map(_si_no_norm)
+    out[COL_AF_DEP_TOGGLE] = out[COL_AF_DEP_TOGGLE].map(_si_no_norm)
+    out[COL_FIN_TOGGLE] = out[COL_FIN_TOGGLE].map(_si_no_norm)
+    out = _ensure_text(
+        out,
+        [
+            COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM,
+            COL_EMP, COL_POR_PAG, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
+            COL_PROV, COL_ROWID, COL_USER, COL_GAS_SUB, COL_GAS_DET,
+            COL_TRAT_BAL_GAS, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_DEP_TOGGLE,
+            COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
+            COL_FIN_PERIOD, COL_FIN_CRONO,
+        ],
+    )
     out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
     out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
     out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
-    rec_mask = out[COL_REC].map(_si_no_norm).eq("Sí")
-    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG]] = ""
+    rec_mask = out[COL_REC].map(_bool_from_toggle)
+    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT]] = ["", "", "", pd.NaT, 0]
     out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
     out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
+    out.loc[rec_mask & (out[COL_REC_DUR].astype(str).str.strip() == ""), COL_REC_DUR] = "Indefinida"
+    out.loc[out[COL_GAS_SUB].astype(str).str.strip() == "", COL_GAS_SUB] = out[COL_CAT].map(_derive_gas_sub)
+    af_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo")
+    out.loc[~af_mask, [COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA, COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL]] = ["No", "", 0, pd.NaT, 0.0, "No", 0.0]
+    fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle)
+    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", ""]
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
 
-# -------------------- Normalizadores (Catálogo) --------------------
+# -------------------- Normalizadores (Cat??logo) --------------------
 def ensure_clientes_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if COL_CLI_ID not in out.columns:  out[COL_CLI_ID] = ""
@@ -676,11 +1005,38 @@ def _reset_entry_state(prefix: str) -> None:
         "porcob_quick",
         "porpag_quick",
         "fecha_cobro_quick",
+        "fecha_cobro_real_quick",
         "fecha_pago_quick",
+        "fecha_pago_real_quick",
         "recurrente_quick",
         "rec_period_quick",
         "rec_rule_quick",
+        "rec_duracion_quick",
+        "rec_hasta_quick",
+        "rec_cantidad_quick",
         "categoria_quick",
+        "estado_quick",
+        "detalle_ing_quick",
+        "naturaleza_ing_quick",
+        "trat_balance_ing_quick",
+        "subclas_gas_quick",
+        "detalle_gas_quick",
+        "trat_balance_gas_quick",
+        "activo_fijo_quick",
+        "activo_tipo_quick",
+        "activo_vida_quick",
+        "activo_inicio_quick",
+        "activo_residual_quick",
+        "activo_dep_quick",
+        "fin_toggle_quick",
+        "fin_tipo_quick",
+        "fin_monto_quick",
+        "fin_fecha_inicio_quick",
+        "fin_plazo_quick",
+        "fin_tasa_quick",
+        "fin_tasa_tipo_quick",
+        "fin_modalidad_quick",
+        "fin_periodicidad_quick",
         "desc_quick",
         "proveedor_quick",
         "skip_project_sync",
@@ -939,6 +1295,44 @@ with k1: st.metric("Capital actual", _format_money_es(saldo_actual))
 with k2: st.metric("Cuentas por cobrar", _format_money_es(cxc_futuras))
 with k3: st.metric("Cuentas por pagar", _format_money_es(cxp_activas))
 
+with st.expander("Informacion de interes", expanded=False):
+    st.markdown("#### Reportes")
+    st.markdown(
+        "- `Flujo de caja actual`: usa fecha real de cobro/pago y cualquier movimiento real de dinero.\n"
+        "- `Flujo de caja proyectado`: usa fechas esperadas, recurrencias y cronogramas futuros.\n"
+        "- `Estado de resultados`: usa la fecha del hecho economico y la clasificacion gerencial.\n"
+        "- `Balance general`: usa caja, cuentas abiertas, activos, pasivos y patrimonio estimado."
+    )
+    st.markdown("#### Informacion de interes")
+    st.markdown(
+        "- `Fecha del hecho economico`: sirve para resultados/devengo.\n"
+        "- `Fecha esperada`: sirve para proyecciones.\n"
+        "- `Fecha real`: sirve para flujo de caja real.\n"
+        "- `Estado pendiente`: el cobro o pago aun no ocurre.\n"
+        "- `Estado realizado`: el dinero ya entro o salio.\n"
+        "- `Activo fijo`: compra que seguira dando valor en el tiempo.\n"
+        "- `Financiamiento recibido`: entra caja y nace pasivo.\n"
+        "- `Financiamiento otorgado`: sale caja y nace cuenta por cobrar.\n"
+        "- `Gasto del periodo`: consumo del mismo periodo.\n"
+        "- `Anticipo / prepago`: pago adelantado aun no consumido.\n"
+        "- `Valor residual`: valor estimado del activo al final de su vida util."
+    )
+    st.markdown("#### Reglas automaticas clave")
+    st.markdown(
+        "- Ingresos normales: pendiente pide fecha esperada; realizado pide fecha real.\n"
+        "- Gastos normales: pendiente pide fecha esperada; realizado pide fecha real.\n"
+        "- Recurrencia: solo abre frecuencia y duracion si se marca `Si`.\n"
+        "- Financiamiento: capital no va al resultado; solo intereses si van al resultado.\n"
+        "- Activo fijo: no pega completo al gasto; pasa por depreciacion/amortizacion si aplica."
+    )
+    st.markdown("#### Pendiente para robustecer")
+    st.markdown(
+        "- Manejo de inventario.\n"
+        "- Devengo automatico de prepagos.\n"
+        "- Cierre mensual persistente.\n"
+        "- Conciliacion bancaria."
+    )
+
 # La visualización analítica fue trasladada al "Panel Financiero Gerencial".
 
 
@@ -1150,10 +1544,12 @@ if ing_should_expand:
 _render_form_scroll_restore("finance-ing-form-anchor", ing_should_scroll)
 with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     _prepare_entry_defaults("ing")
-    if _si_no_norm(st.session_state.get("ing_recurrente_quick", "No")) != "No":
+    if _bool_from_toggle(st.session_state.get("ing_recurrente_quick", "No")):
+        st.session_state["ing_estado_quick"] = "Pendiente"
         st.session_state["ing_porcob_quick"] = YES_NO_OPTIONS[1]
 
-    c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 1.2, 1.0])
+    st.markdown("#### 1. Datos base")
+    c1, c2, c3, c4, c5 = st.columns([1.0, 1.0, 1.0, 1.1, 1.0])
     with c1:
         empresa_ing = st.selectbox(
             "Empresa",
@@ -1164,7 +1560,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         )
     with c2:
         fecha_nueva = st.date_input(
-            "Fecha",
+            "Fecha del hecho economico",
             value=_today(),
             key="ing_fecha_quick",
             on_change=lambda: _mark_form_force_open("ing"),
@@ -1178,23 +1574,13 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             on_change=lambda: _mark_form_force_open("ing"),
         )
     with c4:
-        ing_recurring_enabled = _si_no_norm(st.session_state.get("ing_recurrente_quick", "No")) != "No"
-        por_cobrar_nuevo = st.selectbox(
-            "Por_cobrar",
-            YES_NO_OPTIONS,
-            index=1 if ing_recurring_enabled else 0,
-            key="ing_porcob_quick",
-            disabled=ing_recurring_enabled,
-            on_change=lambda: _mark_form_force_open("ing"),
+        estado_ing = st.radio(
+            "Estado",
+            STATE_OPTIONS,
+            horizontal=True,
+            key="ing_estado_quick",
         )
     with c5:
-        fecha_cobro_esperada = st.date_input(
-            "Fecha esperada de cobro",
-            value=_today(),
-            key="ing_fecha_cobro_quick",
-            on_change=lambda: _mark_form_force_open("ing"),
-        )
-    with c6:
         recurrente_ing = st.selectbox(
             "Recurrente",
             YES_NO_OPTIONS,
@@ -1202,42 +1588,34 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             key="ing_recurrente_quick",
             on_change=lambda: _mark_form_force_open("ing"),
         )
-    rec_period_ing = ""
-    rec_rule_ing = ""
-    if _si_no_norm(recurrente_ing) != "No":
-        r1, r2 = st.columns([1, 1.35])
-        with r1:
-            rec_period_ing = st.selectbox(
-                "Periodo recurrencia",
-                REC_PERIOD_OPTIONS,
-                index=0,
-                key="ing_rec_period_quick",
+
+    if _bool_from_toggle(recurrente_ing):
+        estado_ing = "Pendiente"
+        st.session_state["ing_estado_quick"] = "Pendiente"
+
+    c6, c7 = st.columns([1, 1])
+    fecha_cobro_esperada = pd.NaT
+    fecha_cobro_real = pd.NaT
+    if estado_ing == "Pendiente":
+        with c6:
+            fecha_cobro_esperada = st.date_input(
+                "Fecha esperada de cobro",
+                value=_today(),
+                key="ing_fecha_cobro_quick",
                 on_change=lambda: _mark_form_force_open("ing"),
             )
-        with r2:
-            if rec_period_ing == "15nal":
-                rec_rule_ing = "Dia 1 y 15 de cada mes"
-                st.text_input("Regla fecha recurrencia", value=rec_rule_ing, disabled=True, key="ing_rec_rule_quick_locked")
-            else:
-                rec_rule_ing = st.selectbox(
-                    "Regla fecha recurrencia",
-                    [x for x in REC_RULE_OPTIONS if x != "Dia 1 y 15 de cada mes"],
-                    index=0,
-                    key="ing_rec_rule_quick",
-                    on_change=lambda: _mark_form_force_open("ing"),
-                )
-    categoria_ing = st.selectbox(
-        "Categoria",
-        ["Proyectos", "Oficina", "Miscelaneos"],
-        index=0,
-        key="ing_categoria_quick",
-        on_change=lambda: _mark_form_force_open("ing"),
-    )
+    else:
+        with c6:
+            fecha_cobro_real = st.date_input(
+                "Fecha real de cobro",
+                value=_today(),
+                key="ing_fecha_cobro_real_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
 
     ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
     client_options = _client_options_for_company(ing_company_code)
     _ensure_client_selection("ing", client_options)
-
     st.selectbox(
         "Cliente",
         client_options,
@@ -1259,6 +1637,125 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         on_change=lambda: _mark_form_force_open("ing"),
     )
 
+    st.markdown("#### 2. Recurrencia")
+    rec_period_ing = ""
+    rec_rule_ing = ""
+    rec_dur_ing = ""
+    rec_hasta_ing = pd.NaT
+    rec_cant_ing = 0
+    if _bool_from_toggle(recurrente_ing):
+        r1, r2, r3 = st.columns([1, 1.2, 1])
+        with r1:
+            rec_period_ing = st.selectbox(
+                "Frecuencia",
+                REC_PERIOD_OPTIONS,
+                index=0,
+                key="ing_rec_period_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
+        with r2:
+            if rec_period_ing == "15nal":
+                rec_rule_ing = "Dia 1 y 15 de cada mes"
+                st.text_input("Regla fecha recurrencia", value=rec_rule_ing, disabled=True, key="ing_rec_rule_quick_locked")
+            else:
+                rec_rule_ing = st.selectbox(
+                    "Regla fecha recurrencia",
+                    [x for x in REC_RULE_OPTIONS if x != "Dia 1 y 15 de cada mes"],
+                    index=0,
+                    key="ing_rec_rule_quick",
+                    on_change=lambda: _mark_form_force_open("ing"),
+                )
+        with r3:
+            rec_dur_ing = st.selectbox(
+                "Duracion",
+                REC_DURATION_OPTIONS,
+                index=0,
+                key="ing_rec_duracion_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
+        if rec_dur_ing == "Hasta fecha":
+            rec_hasta_ing = st.date_input(
+                "Recurrencia hasta fecha",
+                value=_today(),
+                key="ing_rec_hasta_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
+        elif rec_dur_ing == "Por cantidad de periodos":
+            rec_cant_ing = st.number_input(
+                "Cantidad de periodos",
+                min_value=1,
+                step=1,
+                key="ing_rec_cantidad_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
+
+    st.markdown("#### 3. Clasificacion del ingreso")
+    categoria_ing = st.selectbox(
+        "Categoria principal",
+        ING_CATEGORY_OPTIONS,
+        index=0,
+        key="ing_categoria_quick",
+        on_change=lambda: _mark_form_force_open("ing"),
+    )
+    detalle_ing = st.selectbox(
+        "Detalle",
+        ING_DETAIL_OPTIONS,
+        index=0,
+        key="ing_detalle_ing_quick",
+        on_change=lambda: _mark_form_force_open("ing"),
+    )
+    naturaleza_default = _derive_ing_nature(categoria_ing)
+    naturaleza_ing = st.selectbox(
+        "Naturaleza ingreso",
+        ING_NATURE_OPTIONS,
+        index=ING_NATURE_OPTIONS.index(naturaleza_default if naturaleza_default in ING_NATURE_OPTIONS else "Operativo"),
+        key="ing_naturaleza_ing_quick",
+        on_change=lambda: _mark_form_force_open("ing"),
+    )
+
+    st.markdown("#### 4. Tratamiento en balance")
+    balance_ing_default = _derive_ing_balance(categoria_ing, estado_ing)
+    tratamiento_ing = st.selectbox(
+        "Tratamiento balance ingreso",
+        ING_BALANCE_OPTIONS,
+        index=ING_BALANCE_OPTIONS.index(balance_ing_default if balance_ing_default in ING_BALANCE_OPTIONS else "Cuenta por cobrar"),
+        key="ing_trat_balance_ing_quick",
+        on_change=lambda: _mark_form_force_open("ing"),
+    )
+
+    st.markdown("#### 5. Financiamiento")
+    fin_ing_default = YES_NO_OPTIONS[1] if categoria_ing == "Financiamiento recibido" else YES_NO_OPTIONS[0]
+    fin_ing_toggle = st.selectbox(
+        "?Corresponde a financiamiento recibido?",
+        YES_NO_OPTIONS,
+        index=YES_NO_OPTIONS.index(fin_ing_default),
+        key="ing_fin_toggle_quick",
+        on_change=lambda: _mark_form_force_open("ing"),
+    )
+    fin_ing_on = _bool_from_toggle(fin_ing_toggle) or categoria_ing == "Financiamiento recibido"
+    fin_tipo_ing = ""
+    fin_monto_ing = 0.0
+    fin_fecha_inicio_ing = pd.NaT
+    fin_plazo_ing = 0
+    fin_tasa_ing = 0.0
+    fin_tasa_tipo_ing = "Anual"
+    fin_modalidad_ing = "Cuotas periodicas"
+    fin_periodicidad_ing = "Mensual"
+    if fin_ing_on:
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            fin_tipo_ing = st.selectbox("Tipo", ["Financiamiento recibido"], key="ing_fin_tipo_quick")
+            fin_monto_ing = st.number_input("Monto principal", min_value=0.0, step=1.0, key="ing_fin_monto_quick")
+            fin_fecha_inicio_ing = st.date_input("Fecha inicio", value=fecha_nueva, key="ing_fin_fecha_inicio_quick")
+        with f2:
+            fin_plazo_ing = st.number_input("Plazo en meses", min_value=1, step=1, value=1, key="ing_fin_plazo_quick")
+            fin_tasa_ing = st.number_input("Tasa", min_value=0.0, step=0.1, key="ing_fin_tasa_quick")
+            fin_tasa_tipo_ing = st.selectbox("Tipo de tasa", FIN_RATE_TYPE_OPTIONS, index=1, key="ing_fin_tasa_tipo_quick")
+        with f3:
+            fin_modalidad_ing = st.selectbox("Modalidad", FIN_MODALITY_OPTIONS, index=0, key="ing_fin_modalidad_quick")
+            fin_periodicidad_ing = st.selectbox("Periodicidad", REC_PERIOD_OPTIONS, index=1, key="ing_fin_periodicidad_quick")
+            st.caption("Capital no va al resultado; solo intereses si van al resultado.")
+
     submitted_ing = st.button("Guardar ingreso", type="primary", key="btn_guardar_ing_quick")
 
     if submitted_ing:
@@ -1272,9 +1769,24 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             cliente_nombre = linked_client_name or cliente_nombre
 
         rid = uuid.uuid4().hex
-        por_cobrar_final = YES_NO_OPTIONS[1] if _si_no_norm(recurrente_ing) != "No" else por_cobrar_nuevo
+        estado_ing_final = "Pendiente" if _bool_from_toggle(recurrente_ing) else estado_ing
+        por_cobrar_final = _estado_to_yes_no(estado_ing_final)
         cobrado = "No" if _si_no_norm(por_cobrar_final) != "No" else "Si"
-        fecha_cobro = _ts(fecha_cobro_esperada)
+        fecha_cobro = _ts(fecha_cobro_esperada) if estado_ing_final == "Pendiente" else pd.NaT
+        fecha_real_cobro = _ts(fecha_cobro_real) if estado_ing_final == "Realizado" else pd.NaT
+        categoria_final = "Financiamiento recibido" if fin_ing_on else categoria_ing
+        naturaleza_final = "Financiamiento" if fin_ing_on else (naturaleza_ing or naturaleza_default)
+        tratamiento_balance_final = "Pasivo financiero" if fin_ing_on else (tratamiento_ing or balance_ing_default)
+        cronograma_fin = _build_financing_schedule(
+            principal=fin_monto_ing,
+            fecha_inicio=fin_fecha_inicio_ing,
+            plazo_meses=fin_plazo_ing,
+            tasa=fin_tasa_ing,
+            tasa_tipo=fin_tasa_tipo_ing,
+            modalidad=fin_modalidad_ing,
+            periodicidad=fin_periodicidad_ing,
+        ) if fin_ing_on else ""
+
         nueva = {
             COL_ROWID: rid,
             COL_FECHA: _ts(fecha_nueva),
@@ -1288,10 +1800,27 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             COL_POR_COB: por_cobrar_final,
             COL_COB: cobrado,
             COL_FCOBRO: fecha_cobro,
+            COL_FCOBRO_REAL: fecha_real_cobro,
             COL_REC: recurrente_ing,
-            COL_REC_PER: rec_period_ing if _si_no_norm(recurrente_ing) != "No" else "",
-            COL_REC_REG: rec_rule_ing if _si_no_norm(recurrente_ing) != "No" else "",
-            COL_CAT: categoria_ing,
+            COL_REC_PER: rec_period_ing if _bool_from_toggle(recurrente_ing) else "",
+            COL_REC_REG: rec_rule_ing if _bool_from_toggle(recurrente_ing) else "",
+            COL_REC_DUR: rec_dur_ing if _bool_from_toggle(recurrente_ing) else "",
+            COL_REC_HASTA: _ts(rec_hasta_ing) if _bool_from_toggle(recurrente_ing) and rec_dur_ing == "Hasta fecha" else pd.NaT,
+            COL_REC_CANT: int(rec_cant_ing) if _bool_from_toggle(recurrente_ing) and rec_dur_ing == "Por cantidad de periodos" else 0,
+            COL_CAT: categoria_final,
+            COL_ING_DET: detalle_ing,
+            COL_ING_NAT: naturaleza_final,
+            COL_TRAT_BAL_ING: tratamiento_balance_final,
+            COL_FIN_TOGGLE: YES_NO_OPTIONS[1] if fin_ing_on else YES_NO_OPTIONS[0],
+            COL_FIN_TIPO: fin_tipo_ing if fin_ing_on else "",
+            COL_FIN_MONTO: float(fin_monto_ing) if fin_ing_on else 0.0,
+            COL_FIN_FEC_INI: _ts(fin_fecha_inicio_ing) if fin_ing_on else pd.NaT,
+            COL_FIN_PLAZO: int(fin_plazo_ing) if fin_ing_on else 0,
+            COL_FIN_TASA: float(fin_tasa_ing) if fin_ing_on else 0.0,
+            COL_FIN_TASA_TIPO: fin_tasa_tipo_ing if fin_ing_on else "",
+            COL_FIN_MODALIDAD: fin_modalidad_ing if fin_ing_on else "",
+            COL_FIN_PERIOD: fin_periodicidad_ing if fin_ing_on else "",
+            COL_FIN_CRONO: cronograma_fin,
             COL_ESC: "Real",
             COL_USER: _current_user(),
         }
@@ -1307,7 +1836,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
 # Tabla Ingresos (OCULTANDO "Concepto" en la vista)
 st.markdown("### Ingresos (tabla)")
 ing_cols_view = [c for c in df_ing_f.columns if c not in (COL_ROWID, COL_ESC, COL_CONC)] + [COL_ROWID]
-ing_cat_options = ["", "Proyectos", "Oficina", "Miscelaneos"]
+ing_cat_options = [""] + ING_CATEGORY_OPTIONS.copy()
 if COL_CAT in df_ing_f.columns:
     existing_cats = [
         c for c in df_ing_f[COL_CAT].fillna("").astype(str).str.strip().unique() if c
@@ -1320,8 +1849,15 @@ ing_colcfg = {
     COL_REC:     st.column_config.SelectboxColumn(COL_REC, options=YES_NO_OPTIONS),
     COL_REC_PER: st.column_config.SelectboxColumn(COL_REC_PER, options=REC_PERIOD_OPTIONS),
     COL_REC_REG: st.column_config.SelectboxColumn(COL_REC_REG, options=REC_RULE_OPTIONS),
+    COL_REC_DUR: st.column_config.SelectboxColumn(COL_REC_DUR, options=REC_DURATION_OPTIONS),
     COL_FCOBRO:  st.column_config.DateColumn("Fecha esperada de cobro"),
+    COL_FCOBRO_REAL: st.column_config.DateColumn("Fecha real de cobro"),
     COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=ing_cat_options),
+    COL_ING_DET: st.column_config.SelectboxColumn(COL_ING_DET, options=ING_DETAIL_OPTIONS),
+    COL_ING_NAT: st.column_config.SelectboxColumn(COL_ING_NAT, options=ING_NATURE_OPTIONS),
+    COL_TRAT_BAL_ING: st.column_config.SelectboxColumn(COL_TRAT_BAL_ING, options=ING_BALANCE_OPTIONS),
+    COL_FIN_TOGGLE: st.column_config.SelectboxColumn(COL_FIN_TOGGLE, options=YES_NO_OPTIONS),
+    COL_FIN_TIPO: st.column_config.SelectboxColumn(COL_FIN_TIPO, options=["", "Financiamiento recibido"]),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     COL_DESC:    st.column_config.TextColumn(COL_DESC),
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
@@ -1332,8 +1868,9 @@ df_ing_editor = df_ing_f[ing_cols_view].copy()
 if COL_MONTO in df_ing_editor.columns:
     df_ing_editor[COL_MONTO] = df_ing_editor[COL_MONTO].map(_format_number_es)
 ing_order = [x for x in [
-    COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_EMP, COL_POR_COB, COL_REC, COL_REC_PER, COL_REC_REG, COL_FCOBRO,
-    COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_DESC, COL_USER, COL_ROWID
+    COL_FECHA, COL_MONTO, COL_CAT, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING, COL_EMP,
+    COL_POR_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
+    COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_DESC, COL_FIN_TOGGLE, COL_FIN_TIPO, COL_USER, COL_ROWID
 ] if x in ing_cols_view]
 edited_ing = st.data_editor(
     df_ing_editor, num_rows="dynamic", hide_index=True, width="stretch",
@@ -1413,11 +1950,13 @@ if gas_should_expand:
 _render_form_scroll_restore("finance-gas-form-anchor", gas_should_scroll)
 with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     _prepare_entry_defaults("gas")
-    if _si_no_norm(st.session_state.get("gas_recurrente_quick", "No")) != "No":
+    if _bool_from_toggle(st.session_state.get("gas_recurrente_quick", "No")):
+        st.session_state["gas_estado_quick"] = "Pendiente"
         st.session_state["gas_porpag_quick"] = YES_NO_OPTIONS[1]
 
-    g1, g2, g3, g4, g5, g6, g7 = st.columns([1, 1, 1, 1.6, 1, 1.3, 1.0])
-    with g1:
+    st.markdown("#### 1. Datos base")
+    c1, c2, c3, c4, c5 = st.columns([1.0, 1.0, 1.0, 1.1, 1.0])
+    with c1:
         empresa_g = st.selectbox(
             "Empresa",
             EMPRESAS_OPCIONES,
@@ -1425,22 +1964,14 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             key="gas_empresa_quick",
             on_change=lambda: _mark_form_force_open("gas"),
         )
-    with g2:
+    with c2:
         fecha_g = st.date_input(
-            "Fecha",
+            "Fecha del hecho economico",
             value=_today(),
             key="gas_fecha_quick",
             on_change=lambda: _mark_form_force_open("gas"),
         )
-    with g3:
-        categoria_g = st.selectbox(
-            "Categoria",
-            ["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos"],
-            index=0,
-            key="gas_categoria_quick",
-            on_change=lambda: _mark_form_force_open("gas"),
-        )
-    with g4:
+    with c3:
         monto_g = st.number_input(
             "Monto",
             min_value=0.0,
@@ -1448,24 +1979,14 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             key="gas_monto_quick",
             on_change=lambda: _mark_form_force_open("gas"),
         )
-    with g5:
-        gas_recurring_enabled = _si_no_norm(st.session_state.get("gas_recurrente_quick", "No")) != "No"
-        por_pagar_nuevo = st.selectbox(
-            "Por_pagar",
-            YES_NO_OPTIONS,
-            index=1 if gas_recurring_enabled else 0,
-            key="gas_porpag_quick",
-            disabled=gas_recurring_enabled,
-            on_change=lambda: _mark_form_force_open("gas"),
+    with c4:
+        estado_g = st.radio(
+            "Estado",
+            STATE_OPTIONS,
+            horizontal=True,
+            key="gas_estado_quick",
         )
-    with g6:
-        fecha_pago_esperada = st.date_input(
-            "Fecha esperada de pago",
-            value=_today(),
-            key="gas_fecha_pago_quick",
-            on_change=lambda: _mark_form_force_open("gas"),
-        )
-    with g7:
+    with c5:
         recurrente_gas = st.selectbox(
             "Recurrente",
             YES_NO_OPTIONS,
@@ -1473,19 +1994,92 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             key="gas_recurrente_quick",
             on_change=lambda: _mark_form_force_open("gas"),
         )
+
+    if _bool_from_toggle(recurrente_gas):
+        estado_g = "Pendiente"
+        st.session_state["gas_estado_quick"] = "Pendiente"
+
+    c6, c7 = st.columns([1, 1])
+    fecha_pago_esperada = pd.NaT
+    fecha_pago_real = pd.NaT
+    if estado_g == "Pendiente":
+        with c6:
+            fecha_pago_esperada = st.date_input(
+                "Fecha esperada de pago",
+                value=_today(),
+                key="gas_fecha_pago_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+    else:
+        with c6:
+            fecha_pago_real = st.date_input(
+                "Fecha real de pago",
+                value=_today(),
+                key="gas_fecha_pago_real_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+
+    categoria_g = st.selectbox(
+        "Categoria principal",
+        GAS_CATEGORY_OPTIONS,
+        index=0,
+        key="gas_categoria_quick",
+        on_change=lambda: _mark_form_force_open("gas"),
+    )
+
+    gas_company_code = (empresa_g or EMPRESA_DEFAULT).strip().upper()
+    gas_client_options = _client_options_for_company(gas_company_code)
+    _ensure_client_selection("gas", gas_client_options)
+
+    if categoria_g == "Proyectos":
+        st.selectbox(
+            "Cliente",
+            gas_client_options,
+            key="gas_cliente_raw",
+            on_change=lambda prefix="gas": _on_client_change(prefix, mark_open=True),
+        )
+        gas_project_options = _build_project_options("gas")
+        if st.session_state.get("gas_proyecto_raw") not in gas_project_options:
+            st.session_state["gas_proyecto_raw"] = gas_project_options[0] if gas_project_options else ""
+        st.selectbox(
+            "Proyecto",
+            gas_project_options,
+            key="gas_proyecto_raw",
+            on_change=lambda prefix="gas": _on_project_change(prefix, mark_open=True),
+        )
+    else:
+        cliente_id_g = ""
+        cliente_nombre_g = ""
+        proyecto_id_g = ""
+
+    prov_g = st.text_input(
+        "Proveedor",
+        key="gas_proveedor_quick",
+        on_change=lambda: _mark_form_force_open("gas"),
+    )
+    desc_g = st.text_input(
+        "Descripcion",
+        key="gas_desc_quick",
+        on_change=lambda: _mark_form_force_open("gas"),
+    )
+
+    st.markdown("#### 2. Recurrencia")
     rec_period_gas = ""
     rec_rule_gas = ""
-    if _si_no_norm(recurrente_gas) != "No":
-        rg1, rg2 = st.columns([1, 1.35])
-        with rg1:
+    rec_dur_gas = ""
+    rec_hasta_gas = pd.NaT
+    rec_cant_gas = 0
+    if _bool_from_toggle(recurrente_gas):
+        r1, r2, r3 = st.columns([1, 1.2, 1])
+        with r1:
             rec_period_gas = st.selectbox(
-                "Periodo recurrencia",
+                "Frecuencia",
                 REC_PERIOD_OPTIONS,
                 index=0,
                 key="gas_rec_period_quick",
                 on_change=lambda: _mark_form_force_open("gas"),
             )
-        with rg2:
+        with r2:
             if rec_period_gas == "15nal":
                 rec_rule_gas = "Dia 1 y 15 de cada mes"
                 st.text_input("Regla fecha recurrencia", value=rec_rule_gas, disabled=True, key="gas_rec_rule_quick_locked")
@@ -1497,57 +2091,143 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
                     key="gas_rec_rule_quick",
                     on_change=lambda: _mark_form_force_open("gas"),
                 )
+        with r3:
+            rec_dur_gas = st.selectbox(
+                "Duracion",
+                REC_DURATION_OPTIONS,
+                index=0,
+                key="gas_rec_duracion_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        if rec_dur_gas == "Hasta fecha":
+            rec_hasta_gas = st.date_input(
+                "Recurrencia hasta fecha",
+                value=_today(),
+                key="gas_rec_hasta_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        elif rec_dur_gas == "Por cantidad de periodos":
+            rec_cant_gas = st.number_input(
+                "Cantidad de periodos",
+                min_value=1,
+                step=1,
+                key="gas_rec_cantidad_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
 
-    cliente_id_g = ""
-    cliente_nombre_g = ""
-    proyecto_id_g = ""
-    if categoria_g == "Proyectos":
-        gas_company_code = (empresa_g or EMPRESA_DEFAULT).strip().upper()
-        client_options = _client_options_for_company(gas_company_code)
-        _ensure_client_selection("gas", client_options)
-        st.selectbox(
-            "Cliente",
-            client_options,
-            key="gas_cliente_raw",
-            on_change=lambda prefix="gas": _on_client_change(prefix, mark_open=True),
-        )
-        project_options_g = _build_project_options("gas")
-        if st.session_state.get("gas_proyecto_raw") not in project_options_g:
-            st.session_state["gas_proyecto_raw"] = project_options_g[0] if project_options_g else ""
-        st.selectbox(
-            "Proyecto",
-            project_options_g,
-            key="gas_proyecto_raw",
-            on_change=lambda prefix="gas": _on_project_change(prefix, mark_open=True),
-        )
-        cliente_id_g = st.session_state.get("gas_cliente_id", "")
-        cliente_nombre_g = st.session_state.get("gas_cliente_nombre", "")
-        proyecto_id_g = st.session_state.get("gas_proyecto_id", "")
-        linked_client_id_g = st.session_state.get("gas_proyecto_cliente_id")
-        linked_client_name_g = st.session_state.get("gas_proyecto_cliente_nombre")
-        if linked_client_id_g:
-            cliente_id_g = linked_client_id_g
-            cliente_nombre_g = linked_client_name_g or cliente_nombre_g
-
-    desc_g = st.text_input(
-        "Descripcion",
-        key="gas_desc_quick",
+    st.markdown("#### 3. Clasificacion del gasto")
+    subclas_gas_default = _derive_gas_sub(categoria_g)
+    subclas_gas = st.selectbox(
+        "Subclasificacion gerencial",
+        GAS_SUB_OPTIONS,
+        index=GAS_SUB_OPTIONS.index(subclas_gas_default if subclas_gas_default in GAS_SUB_OPTIONS else "Operativo variable"),
+        key="gas_subclas_gas_quick",
         on_change=lambda: _mark_form_force_open("gas"),
     )
-    prov_g = st.text_input(
-        "Proveedor",
-        key="gas_proveedor_quick",
+    detalle_gas = st.selectbox(
+        "Detalle",
+        GAS_DETAIL_OPTIONS,
+        index=0,
+        key="gas_detalle_gas_quick",
         on_change=lambda: _mark_form_force_open("gas"),
     )
+
+    st.markdown("#### 4. Tratamiento en balance")
+    tratamiento_gas = st.selectbox(
+        "Tratamiento balance gasto",
+        GAS_BALANCE_OPTIONS,
+        index=0,
+        key="gas_trat_balance_gas_quick",
+        on_change=lambda: _mark_form_force_open("gas"),
+    )
+
+    st.markdown("#### 5. Activo fijo")
+    activo_dep_toggle = YES_NO_OPTIONS[0]
+    activo_tipo = ""
+    activo_vida = 5
+    activo_inicio = pd.NaT
+    activo_residual = 0.0
+    activo_dep_mensual = 0.0
+    if tratamiento_gas == "Activo fijo":
+        st.caption("Usar solo para compras de activos relevantes o inversiones de largo plazo y el tiempo se basa en la vida util del activo a adquirir")
+        af1, af2, af3 = st.columns(3)
+        with af1:
+            activo_dep_toggle = st.selectbox("?Depreciar / amortizar?", YES_NO_OPTIONS, index=0, key="gas_activo_dep_quick")
+            activo_tipo = st.selectbox("Tipo", AF_TYPE_OPTIONS, index=0, key="gas_activo_tipo_quick")
+        with af2:
+            activo_vida = st.selectbox("Vida util (anios)", AF_LIFE_OPTIONS, index=2, key="gas_activo_vida_quick")
+            activo_inicio = st.date_input("Fecha de inicio", value=fecha_g, key="gas_activo_inicio_quick")
+        with af3:
+            activo_residual = st.number_input("Valor residual", min_value=0.0, step=1.0, key="gas_activo_residual_quick")
+        if _bool_from_toggle(activo_dep_toggle):
+            activo_dep_mensual = max(0.0, float(monto_g) - float(activo_residual)) / max(1, int(activo_vida) * 12)
+            st.caption(f"Depreciacion/amortizacion mensual estimada: {_format_money_es(activo_dep_mensual)}")
+
+    st.markdown("#### 6. Financiamiento")
+    fin_gas_toggle = st.selectbox(
+        "?Tiene financiamiento asociado?",
+        YES_NO_OPTIONS,
+        index=0,
+        key="gas_fin_toggle_quick",
+        on_change=lambda: _mark_form_force_open("gas"),
+    )
+    fin_gas_on = _bool_from_toggle(fin_gas_toggle)
+    fin_tipo_gas = ""
+    fin_monto_gas = 0.0
+    fin_fecha_inicio_gas = pd.NaT
+    fin_plazo_gas = 0
+    fin_tasa_gas = 0.0
+    fin_tasa_tipo_gas = "Anual"
+    fin_modalidad_gas = "Cuotas periodicas"
+    fin_periodicidad_gas = "Mensual"
+    if fin_gas_on:
+        if tratamiento_gas == "Cuenta por cobrar / prestamo otorgado":
+            fin_type_options = ["Financiamiento otorgado"]
+        elif tratamiento_gas == "Activo fijo":
+            fin_type_options = ["Activo fijo financiado"]
+        else:
+            fin_type_options = ["Financiamiento otorgado", "Activo fijo financiado"]
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            fin_tipo_gas = st.selectbox("Tipo", fin_type_options, index=0, key="gas_fin_tipo_quick")
+            fin_monto_gas = st.number_input("Monto principal", min_value=0.0, step=1.0, key="gas_fin_monto_quick")
+            fin_fecha_inicio_gas = st.date_input("Fecha inicio", value=fecha_g, key="gas_fin_fecha_inicio_quick")
+        with f2:
+            fin_plazo_gas = st.number_input("Plazo en meses", min_value=1, step=1, value=1, key="gas_fin_plazo_quick")
+            fin_tasa_gas = st.number_input("Tasa", min_value=0.0, step=0.1, key="gas_fin_tasa_quick")
+            fin_tasa_tipo_gas = st.selectbox("Tipo de tasa", FIN_RATE_TYPE_OPTIONS, index=1, key="gas_fin_tasa_tipo_quick")
+        with f3:
+            fin_modalidad_gas = st.selectbox("Modalidad", FIN_MODALITY_OPTIONS, index=0, key="gas_fin_modalidad_quick")
+            fin_periodicidad_gas = st.selectbox("Periodicidad", REC_PERIOD_OPTIONS, index=1, key="gas_fin_periodicidad_quick")
+            st.caption("Capital no va al resultado; solo intereses si van al resultado.")
 
     submitted_gas = st.button("Guardar gasto", type="primary", key="btn_guardar_gas_quick")
 
     if submitted_gas:
+        cliente_id_g = st.session_state.get("gas_cliente_id", "")
+        cliente_nombre_g = st.session_state.get("gas_cliente_nombre", "")
+        proyecto_id_g = st.session_state.get("gas_proyecto_id", "")
         if categoria_g != "Proyectos":
             cliente_id_g = ""
             cliente_nombre_g = ""
             proyecto_id_g = ""
-        por_pagar_final = YES_NO_OPTIONS[1] if _si_no_norm(recurrente_gas) != "No" else por_pagar_nuevo
+
+        estado_g_final = "Pendiente" if _bool_from_toggle(recurrente_gas) else estado_g
+        por_pagar_final = _estado_to_yes_no(estado_g_final)
+        fecha_pago_exp = _ts(fecha_pago_esperada) if estado_g_final == "Pendiente" else pd.NaT
+        fecha_pago_real_final = _ts(fecha_pago_real) if estado_g_final == "Realizado" else pd.NaT
+        activo_fijo_on = tratamiento_gas == "Activo fijo"
+        dep_on = activo_fijo_on and _bool_from_toggle(activo_dep_toggle)
+        cronograma_fin = _build_financing_schedule(
+            principal=fin_monto_gas,
+            fecha_inicio=fin_fecha_inicio_gas,
+            plazo_meses=fin_plazo_gas,
+            tasa=fin_tasa_gas,
+            tasa_tipo=fin_tasa_tipo_gas,
+            modalidad=fin_modalidad_gas,
+            periodicidad=fin_periodicidad_gas,
+        ) if fin_gas_on else ""
+
         nueva_g = {
             COL_ROWID: uuid.uuid4().hex,
             COL_FECHA: _ts(fecha_g),
@@ -1558,13 +2238,37 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
             COL_POR_PAG: por_pagar_final,
             COL_REC: recurrente_gas,
-            COL_REC_PER: rec_period_gas if _si_no_norm(recurrente_gas) != "No" else "",
-            COL_REC_REG: rec_rule_gas if _si_no_norm(recurrente_gas) != "No" else "",
-            COL_FPAGO: _ts(fecha_pago_esperada),
+            COL_REC_PER: rec_period_gas if _bool_from_toggle(recurrente_gas) else "",
+            COL_REC_REG: rec_rule_gas if _bool_from_toggle(recurrente_gas) else "",
+            COL_REC_DUR: rec_dur_gas if _bool_from_toggle(recurrente_gas) else "",
+            COL_REC_HASTA: _ts(rec_hasta_gas) if _bool_from_toggle(recurrente_gas) and rec_dur_gas == "Hasta fecha" else pd.NaT,
+            COL_REC_CANT: int(rec_cant_gas) if _bool_from_toggle(recurrente_gas) and rec_dur_gas == "Por cantidad de periodos" else 0,
+            COL_FPAGO: fecha_pago_exp,
+            COL_FPAGO_REAL: fecha_pago_real_final,
             COL_PROY: (proyecto_id_g or "").strip(),
             COL_CLI_ID: (cliente_id_g or "").strip(),
             COL_CLI_NOM: (cliente_nombre_g or "").strip(),
             COL_PROV: (prov_g or "").strip(),
+            COL_GAS_SUB: subclas_gas,
+            COL_GAS_DET: detalle_gas,
+            COL_TRAT_BAL_GAS: tratamiento_gas,
+            COL_AF_TOGGLE: YES_NO_OPTIONS[1] if activo_fijo_on else YES_NO_OPTIONS[0],
+            COL_AF_TIPO: activo_tipo if activo_fijo_on else "",
+            COL_AF_VIDA: int(activo_vida) if activo_fijo_on else 0,
+            COL_AF_FEC_INI: _ts(activo_inicio) if activo_fijo_on else pd.NaT,
+            COL_AF_VAL_RES: float(activo_residual) if activo_fijo_on else 0.0,
+            COL_AF_DEP_TOGGLE: YES_NO_OPTIONS[1] if dep_on else YES_NO_OPTIONS[0],
+            COL_AF_DEP_MENSUAL: float(activo_dep_mensual) if dep_on else 0.0,
+            COL_FIN_TOGGLE: YES_NO_OPTIONS[1] if fin_gas_on else YES_NO_OPTIONS[0],
+            COL_FIN_TIPO: fin_tipo_gas if fin_gas_on else "",
+            COL_FIN_MONTO: float(fin_monto_gas) if fin_gas_on else 0.0,
+            COL_FIN_FEC_INI: _ts(fin_fecha_inicio_gas) if fin_gas_on else pd.NaT,
+            COL_FIN_PLAZO: int(fin_plazo_gas) if fin_gas_on else 0,
+            COL_FIN_TASA: float(fin_tasa_gas) if fin_gas_on else 0.0,
+            COL_FIN_TASA_TIPO: fin_tasa_tipo_gas if fin_gas_on else "",
+            COL_FIN_MODALIDAD: fin_modalidad_gas if fin_gas_on else "",
+            COL_FIN_PERIOD: fin_periodicidad_gas if fin_gas_on else "",
+            COL_FIN_CRONO: cronograma_fin,
             COL_USER: _current_user(),
         }
         st.session_state.df_gas = pd.concat([st.session_state.df_gas, pd.DataFrame([nueva_g])], ignore_index=True)
@@ -1583,12 +2287,21 @@ gas_colcfg = {
     COL_REC:     st.column_config.SelectboxColumn(COL_REC, options=YES_NO_OPTIONS),
     COL_REC_PER: st.column_config.SelectboxColumn(COL_REC_PER, options=REC_PERIOD_OPTIONS),
     COL_REC_REG: st.column_config.SelectboxColumn(COL_REC_REG, options=REC_RULE_OPTIONS),
+    COL_REC_DUR: st.column_config.SelectboxColumn(COL_REC_DUR, options=REC_DURATION_OPTIONS),
     COL_FPAGO:   st.column_config.DateColumn("Fecha esperada de pago"),
+    COL_FPAGO_REAL: st.column_config.DateColumn("Fecha real de pago"),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     COL_CAT:     st.column_config.SelectboxColumn(
         COL_CAT,
-        options=["Proyectos", "Gastos fijos", "Gastos operativos", "Oficina", "Miscelaneos", "Comisiones"],
+        options=GAS_CATEGORY_OPTIONS,
     ),
+    COL_GAS_SUB: st.column_config.SelectboxColumn(COL_GAS_SUB, options=GAS_SUB_OPTIONS),
+    COL_GAS_DET: st.column_config.SelectboxColumn(COL_GAS_DET, options=GAS_DETAIL_OPTIONS),
+    COL_TRAT_BAL_GAS: st.column_config.SelectboxColumn(COL_TRAT_BAL_GAS, options=GAS_BALANCE_OPTIONS),
+    COL_AF_TOGGLE: st.column_config.SelectboxColumn(COL_AF_TOGGLE, options=YES_NO_OPTIONS),
+    COL_AF_DEP_TOGGLE: st.column_config.SelectboxColumn(COL_AF_DEP_TOGGLE, options=YES_NO_OPTIONS),
+    COL_FIN_TOGGLE: st.column_config.SelectboxColumn(COL_FIN_TOGGLE, options=YES_NO_OPTIONS),
+    COL_FIN_TIPO: st.column_config.SelectboxColumn(COL_FIN_TIPO, options=["", "Financiamiento otorgado", "Activo fijo financiado"]),
     COL_CONC:    st.column_config.TextColumn("Descripcion"),
     COL_PROV:    st.column_config.TextColumn("Proveedor"),
     COL_EMP:     st.column_config.TextColumn(COL_EMP),
@@ -1597,7 +2310,9 @@ gas_colcfg = {
     COL_USER:    st.column_config.TextColumn(COL_USER, disabled=True),
 }
 gas_order = [x for x in [
-    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_EMP, COL_POR_PAG, COL_REC, COL_REC_PER, COL_REC_REG, COL_FPAGO,
+    COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_GAS_SUB, COL_GAS_DET, COL_TRAT_BAL_GAS, COL_EMP,
+    COL_POR_PAG, COL_FPAGO, COL_FPAGO_REAL, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
+    COL_AF_TOGGLE, COL_AF_DEP_TOGGLE, COL_FIN_TOGGLE, COL_FIN_TIPO,
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_USER, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]
 
