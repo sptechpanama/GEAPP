@@ -1642,6 +1642,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
         "- Cantidades, costo unitario y valorizacion mas fina de inventario.\n"
+        "- Factoring con recurso o con reserva retenida.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
 
@@ -2435,6 +2436,201 @@ with st.expander("Registrar cobro parcial", expanded=False):
                     st.cache_data.clear()
                 st.success("Cobro parcial registrado.")
                 _safe_rerun()
+
+with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
+    st.caption(
+        "Usa esta seccion para liquidar completamente una cuenta por cobrar pendiente mediante factoring sin recurso. "
+        "Regla actual: dinero neto recibido + comision / descuento = saldo pendiente cedido."
+    )
+    st.caption(
+        "Esta primera fase no soporta reserva retenida ni factoring con recurso. "
+        "Si existe reserva o recurso, no lo registres aqui todavia."
+    )
+    ing_base_fact = ensure_ingresos_columns(st.session_state.df_ing.copy())
+    ing_fact_view = ing_base_fact[
+        (
+            pd.to_numeric(ing_base_fact.get(COL_MONTO), errors="coerce").fillna(0.0)
+            - pd.to_numeric(ing_base_fact.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0)
+        ).clip(lower=0.0) > 0
+    ].copy()
+    if ing_fact_view.empty:
+        st.info("No hay cuentas por cobrar pendientes para liquidar por factoring.")
+    else:
+        ing_fact_view["__saldo_pendiente"] = (
+            pd.to_numeric(ing_fact_view[COL_MONTO], errors="coerce").fillna(0.0)
+            - pd.to_numeric(ing_fact_view[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0)
+        ).clip(lower=0.0)
+        fact_options = {
+            f"{str(row.get(COL_DESC, '')).strip() or str(row.get(COL_ROWID, ''))} | saldo {_format_money_es(row['__saldo_pendiente'])}": str(row.get(COL_ROWID, ""))
+            for _, row in ing_fact_view.iterrows()
+        }
+        fact_sel_label = st.selectbox("Cuenta por cobrar a ceder", list(fact_options.keys()), key="ing_factoring_row_select")
+        fact_sel_id = fact_options.get(fact_sel_label, "")
+        fact_row = ing_fact_view[ing_fact_view[COL_ROWID].astype(str) == fact_sel_id].iloc[0]
+        saldo_fact = float(fact_row["__saldo_pendiente"])
+        existing_real = float(pd.to_numeric(pd.Series([fact_row.get(COL_COBRO_REAL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        current_events = _seed_partial_events_from_row(fact_row, COL_COBRO_REAL_MONTO, COL_FCOBRO_REAL)
+
+        f1, f2 = st.columns([1, 1])
+        with f1:
+            factoring_tipo = st.selectbox(
+                "Tipo de operacion",
+                ["Factoring sin recurso - liquidacion total"],
+                index=0,
+                key="ing_factoring_tipo",
+            )
+            factor_tipo_ctp_default = CONTRAPARTE_TYPE_OPTIONS.index("Tercero") if "Tercero" in CONTRAPARTE_TYPE_OPTIONS else 0
+            factor_tipo_ctp = st.selectbox(
+                "Tipo de entidad relacionada / contraparte",
+                CONTRAPARTE_TYPE_OPTIONS,
+                index=factor_tipo_ctp_default,
+                key="ing_factoring_ctp_tipo",
+            )
+            factor_nombre = st.text_input(
+                "Empresa de factoring / contraparte",
+                key="ing_factoring_ctp_nombre",
+                help="Nombre de la empresa de factoring o entidad que liquida la cuenta.",
+            )
+        with f2:
+            fecha_factoring = st.date_input("Fecha de desembolso / cesion", value=_today(), key="ing_factoring_fecha")
+            neto_factoring = st.number_input(
+                "Dinero neto recibido",
+                min_value=0.0,
+                max_value=max(0.0, saldo_fact),
+                step=1.0,
+                key="ing_factoring_neto",
+            )
+            comision_factoring = st.number_input(
+                "Comision / descuento del factor",
+                min_value=0.0,
+                max_value=max(0.0, saldo_fact),
+                step=1.0,
+                key="ing_factoring_comision",
+            )
+        nota_factoring = st.text_area(
+            "Observacion / nota",
+            key="ing_factoring_nota",
+            placeholder="Ej: cesion factura hospital X, descuento 7 dias.",
+        )
+        st.caption(
+            f"Monto total cuenta: {_format_money_es(fact_row.get(COL_MONTO, 0.0))} | "
+            f"Cobrado previo: {_format_money_es(existing_real)} | "
+            f"Saldo a ceder: {_format_money_es(saldo_fact)}"
+        )
+        if current_events:
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Fecha": _ts(evt["fecha"]), "Monto": float(evt["monto"]), "Nota": evt.get("nota", "")} for evt in current_events]
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Fecha": st.column_config.DateColumn("Fecha"), "Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
+            )
+        if st.button("Guardar factoring / cesion", key="btn_guardar_factoring"):
+            if not str(factor_nombre or "").strip():
+                st.error("Debes indicar la empresa de factoring / contraparte.")
+                st.stop()
+            if abs((float(neto_factoring) + float(comision_factoring)) - float(saldo_fact)) > 0.01:
+                st.error("El neto recibido mas la comision debe ser igual al saldo pendiente cedido.")
+                st.stop()
+            if float(neto_factoring) <= 0:
+                st.error("El dinero neto recibido debe ser mayor que cero.")
+                st.stop()
+
+            old_ing_df = st.session_state.df_ing.copy()
+            old_gas_df = st.session_state.df_gas.copy()
+            new_ing_df = old_ing_df.copy()
+            new_gas_df = old_gas_df.copy()
+            mask_ing = new_ing_df[COL_ROWID].astype(str) == fact_sel_id
+            if not mask_ing.any():
+                st.error("No se encontro la cuenta por cobrar seleccionada.")
+                st.stop()
+
+            base_row = new_ing_df.loc[mask_ing].iloc[0]
+            fact_events = _seed_partial_events_from_row(base_row, COL_COBRO_REAL_MONTO, COL_FCOBRO_REAL)
+            note_parts = [
+                f"Factoring sin recurso - neto recibido {_format_money_es(neto_factoring)}",
+                f"comision {_format_money_es(comision_factoring)}",
+                f"contraparte {str(factor_nombre).strip()}",
+            ]
+            if str(nota_factoring or "").strip():
+                note_parts.append(str(nota_factoring or "").strip())
+            fact_events.append(
+                {
+                    "fecha": _ts(fecha_factoring),
+                    "monto": float(saldo_fact),
+                    "nota": " | ".join(note_parts),
+                }
+            )
+            total_real, last_real = _partial_events_summary(fact_events)
+            total_monto = float(pd.to_numeric(pd.Series([base_row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+            total_real = min(total_real, total_monto)
+            new_ing_df.loc[mask_ing, COL_ING_PARTIALS] = _serialize_partial_events(fact_events)
+            new_ing_df.loc[mask_ing, COL_COBRO_REAL_MONTO] = float(total_real)
+            new_ing_df.loc[mask_ing, COL_FCOBRO_REAL] = last_real
+            new_ing_df.loc[mask_ing, COL_POR_COB] = "No"
+            new_ing_df.loc[mask_ing, COL_COB] = "Si"
+            new_ing_df.loc[mask_ing, COL_CTP_TIPO] = str(factor_tipo_ctp or "").strip()
+            new_ing_df.loc[mask_ing, COL_CTP_NOMBRE] = str(factor_nombre or "").strip()
+            new_ing_df = ensure_ingresos_columns(new_ing_df)
+
+            if float(comision_factoring) > 0:
+                desc_base = str(base_row.get(COL_DESC, "") or "").strip()
+                factoring_fee_row = {
+                    COL_ROWID: uuid.uuid4().hex,
+                    COL_FECHA: _ts(fecha_factoring),
+                    COL_DESC: f"Comision factoring - {desc_base}" if desc_base else "Comision factoring",
+                    COL_CONC: f"Comision factoring - {desc_base}" if desc_base else "Comision factoring",
+                    COL_MONTO: float(comision_factoring),
+                    COL_CAT: "Gasto financiero",
+                    COL_ESC: "Real",
+                    COL_REF_RID: str(base_row.get(COL_ROWID, "") or ""),
+                    COL_PROY: str(base_row.get(COL_PROY, "") or ""),
+                    COL_CLI_ID: str(base_row.get(COL_CLI_ID, "") or ""),
+                    COL_CLI_NOM: str(base_row.get(COL_CLI_NOM, "") or ""),
+                    COL_EMP: str(base_row.get(COL_EMP, EMPRESA_DEFAULT) or EMPRESA_DEFAULT),
+                    COL_POR_PAG: "No",
+                    COL_PROV: str(factor_nombre or "").strip(),
+                    COL_REC: "No",
+                    COL_FPAGO: pd.NaT,
+                    COL_FPAGO_REAL: _ts(fecha_factoring),
+                    COL_CTP_TIPO: str(factor_tipo_ctp or "").strip(),
+                    COL_CTP_NOMBRE: str(factor_nombre or "").strip(),
+                    COL_PAGO_REAL_MONTO: float(comision_factoring),
+                    COL_GAS_PARTIALS: _serialize_partial_events(
+                        [{"fecha": _ts(fecha_factoring), "monto": float(comision_factoring), "nota": "Comision factoring"}]
+                    ),
+                    COL_GAS_SUB: "Financiero",
+                    COL_GAS_DET: "Otros",
+                    COL_TRAT_BAL_GAS: "Gasto del periodo",
+                    COL_INV_MOV: "",
+                    COL_INV_ITEM: "",
+                    COL_USER: _current_user(),
+                }
+                new_gas_df = pd.concat([new_gas_df, pd.DataFrame([factoring_fee_row])], ignore_index=True)
+                new_gas_df = ensure_gastos_columns(new_gas_df)
+
+            wrote_ing = safe_write_worksheet(client, SHEET_ID, WS_ING, new_ing_df, old_df=old_ing_df)
+            if not wrote_ing:
+                st.error("No se pudo actualizar la cuenta por cobrar para registrar el factoring.")
+                st.stop()
+
+            wrote_gas = True
+            if float(comision_factoring) > 0:
+                wrote_gas = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas_df, old_df=old_gas_df)
+                if not wrote_gas:
+                    rollback_ok = safe_write_worksheet(client, SHEET_ID, WS_ING, old_ing_df, old_df=new_ing_df)
+                    if rollback_ok:
+                        st.error("No se pudo guardar la comision del factoring. Se revirtio la liquidacion del ingreso.")
+                    else:
+                        st.error("No se pudo guardar la comision del factoring y tampoco se pudo revertir automaticamente el ingreso. Revisa ambas hojas.")
+                    st.stop()
+
+            st.session_state.df_ing = new_ing_df
+            st.session_state.df_gas = new_gas_df
+            st.cache_data.clear()
+            st.success("Factoring / cesion registrado.")
+            _safe_rerun()
 
 
 # ============================================================
