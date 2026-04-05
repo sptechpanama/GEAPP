@@ -7,23 +7,23 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from core.finance_v2 import (
-    GlobalFilters,
-    apply_global_filters,
+from core.finance_v2.analysis import (
     build_analisis_gerencial,
-    build_balance_general_simplificado,
-    build_cashflow_actual,
-    build_cashflow_proyectado,
     build_cuentas_por_cobrar,
     build_cuentas_por_pagar,
+)
+from core.finance_v2.cashflow import build_cashflow_actual, build_cashflow_proyectado
+from core.finance_v2.helpers import format_money_es, format_number_es, format_percent_es
+from core.finance_v2.loaders import get_finance_sheet_config, load_finance_inputs
+from core.finance_v2.statements import (
+    build_balance_general_simplificado,
     build_estado_resultados,
     compute_balance_components,
-    format_money_es,
-    format_number_es,
-    format_percent_es,
+)
+from core.finance_v2.transforms import (
+    GlobalFilters,
+    apply_global_filters,
     get_filter_options,
-    get_finance_sheet_config,
-    load_finance_inputs,
     normalize_gastos,
     normalize_ingresos,
     split_real_vs_pending,
