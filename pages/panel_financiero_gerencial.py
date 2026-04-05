@@ -8,6 +8,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from core.finance_v2 import constants as f2c
 from core.finance_v2.analysis import (
     build_analisis_gerencial,
     build_cuentas_por_cobrar,
@@ -29,37 +30,37 @@ from core.finance_v2.transforms import (
     normalize_ingresos,
     split_real_vs_pending,
 )
-from core.finance_v2.constants import COL_FECHA
-from core.finance_v2.constants import (
-    COL_CATEGORIA,
-    COL_CLIENTE_NOMBRE,
-    COL_CONCEPTO,
-    COL_CONTRAPARTE,
-    COL_DESC,
-    COL_EMPRESA,
-    COL_FECHA_COBRO,
-    COL_FECHA_REAL_COBRO,
-    COL_FECHA_REAL_PAGO,
-    COL_FINANCIAMIENTO_CRONOGRAMA,
-    COL_FINANCIAMIENTO_FECHA_INICIO,
-    COL_FINANCIAMIENTO_MONTO,
-    COL_FINANCIAMIENTO_TIPO,
-    COL_INVENTARIO_ITEM,
-    COL_INVENTARIO_MOVIMIENTO,
-    COL_MONTO,
-    COL_MONTO_REAL_COBRADO,
-    COL_MONTO_REAL_PAGADO,
-    COL_POR_COBRAR,
-    COL_POR_PAGAR,
-    COL_PREPAGO_FECHA_INICIO,
-    COL_PREPAGO_MESES,
-    COL_PROVEEDOR,
-    COL_PROYECTO,
-    COL_TIPO_CONTRAPARTE,
-    COL_TRATAMIENTO_BALANCE_ING,
-    COL_TRATAMIENTO_BALANCE_GAS,
-)
 from ui.theme import apply_global_theme
+
+
+COL_FECHA = getattr(f2c, "COL_FECHA", "Fecha")
+COL_CATEGORIA = getattr(f2c, "COL_CATEGORIA", "Categoria")
+COL_CLIENTE_NOMBRE = getattr(f2c, "COL_CLIENTE_NOMBRE", "ClienteNombre")
+COL_CONCEPTO = getattr(f2c, "COL_CONCEPTO", "Concepto")
+COL_CONTRAPARTE = getattr(f2c, "COL_CONTRAPARTE", "Contraparte")
+COL_DESC = getattr(f2c, "COL_DESC", "Descripcion")
+COL_EMPRESA = getattr(f2c, "COL_EMPRESA", "Empresa")
+COL_FECHA_COBRO = getattr(f2c, "COL_FECHA_COBRO", "Fecha de cobro")
+COL_FECHA_REAL_COBRO = getattr(f2c, "COL_FECHA_REAL_COBRO", "Fecha real de cobro")
+COL_FECHA_REAL_PAGO = getattr(f2c, "COL_FECHA_REAL_PAGO", "Fecha real de pago")
+COL_FINANCIAMIENTO_CRONOGRAMA = getattr(f2c, "COL_FINANCIAMIENTO_CRONOGRAMA", "Cronograma financiamiento")
+COL_FINANCIAMIENTO_FECHA_INICIO = getattr(f2c, "COL_FINANCIAMIENTO_FECHA_INICIO", "Fecha inicio financiamiento")
+COL_FINANCIAMIENTO_MONTO = getattr(f2c, "COL_FINANCIAMIENTO_MONTO", "Monto principal financiamiento")
+COL_FINANCIAMIENTO_TIPO = getattr(f2c, "COL_FINANCIAMIENTO_TIPO", "Tipo financiamiento")
+COL_INVENTARIO_ITEM = getattr(f2c, "COL_INVENTARIO_ITEM", "Item inventario")
+COL_INVENTARIO_MOVIMIENTO = getattr(f2c, "COL_INVENTARIO_MOVIMIENTO", "Movimiento inventario")
+COL_MONTO = getattr(f2c, "COL_MONTO", "Monto")
+COL_MONTO_REAL_COBRADO = getattr(f2c, "COL_MONTO_REAL_COBRADO", "Monto real cobrado")
+COL_MONTO_REAL_PAGADO = getattr(f2c, "COL_MONTO_REAL_PAGADO", "Monto real pagado")
+COL_POR_COBRAR = getattr(f2c, "COL_POR_COBRAR", "Por_cobrar")
+COL_POR_PAGAR = getattr(f2c, "COL_POR_PAGAR", "Por_pagar")
+COL_PREPAGO_FECHA_INICIO = getattr(f2c, "COL_PREPAGO_FECHA_INICIO", "Fecha inicio prepago")
+COL_PREPAGO_MESES = getattr(f2c, "COL_PREPAGO_MESES", "Plazo prepago meses")
+COL_PROVEEDOR = getattr(f2c, "COL_PROVEEDOR", "Proveedor")
+COL_PROYECTO = getattr(f2c, "COL_PROYECTO", "Proyecto")
+COL_TIPO_CONTRAPARTE = getattr(f2c, "COL_TIPO_CONTRAPARTE", "Tipo contraparte")
+COL_TRATAMIENTO_BALANCE_ING = getattr(f2c, "COL_TRATAMIENTO_BALANCE_ING", "Tratamiento balance ingreso")
+COL_TRATAMIENTO_BALANCE_GAS = getattr(f2c, "COL_TRATAMIENTO_BALANCE_GAS", "Tratamiento balance gasto")
 
 
 st.set_page_config(page_title="Panel Financiero Gerencial", page_icon="\U0001f4c8", layout="wide")
