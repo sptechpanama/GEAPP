@@ -36,12 +36,18 @@ from .constants import (
     COL_FINANCIAMIENTO_TASA_TIPO,
     COL_FINANCIAMIENTO_TIPO,
     COL_FINANCIAMIENTO_TOGGLE,
+    COL_CONTRAPARTE,
+    COL_TIPO_CONTRAPARTE,
     COL_GASTO_DETALLE,
     COL_INGRESO_DETALLE,
     COL_MONTO,
+    COL_MONTO_REAL_COBRADO,
+    COL_MONTO_REAL_PAGADO,
     COL_NATURALEZA_INGRESO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
+    COL_PREPAGO_FECHA_INICIO,
+    COL_PREPAGO_MESES,
     COL_REC_PERIOD,
     COL_REC_RULE,
     COL_RECURRENTE,
@@ -115,6 +121,10 @@ def _derive_gas_balance(category: str) -> str:
     return "Gasto del periodo"
 
 
+def _coerce_non_negative_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").fillna(0.0).clip(lower=0.0)
+
+
 def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out = _ensure_columns(df_ing, INGRESOS_BASE_COLUMNS)
     out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
@@ -125,6 +135,7 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out[COL_MONTO] = out[COL_MONTO].map(parse_number_maybe_es)
     out[COL_FINANCIAMIENTO_MONTO] = out[COL_FINANCIAMIENTO_MONTO].map(parse_number_maybe_es)
     out[COL_FINANCIAMIENTO_TASA] = out[COL_FINANCIAMIENTO_TASA].map(parse_number_maybe_es)
+    out[COL_MONTO_REAL_COBRADO] = out[COL_MONTO_REAL_COBRADO].map(parse_number_maybe_es)
     out[COL_FINANCIAMIENTO_PLAZO] = pd.to_numeric(out[COL_FINANCIAMIENTO_PLAZO], errors="coerce").fillna(0).astype(int)
     out[COL_REC_COUNT] = pd.to_numeric(out[COL_REC_COUNT], errors="coerce").fillna(0).astype(int)
 
@@ -151,6 +162,8 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
         COL_FINANCIAMIENTO_MODALIDAD,
         COL_FINANCIAMIENTO_PERIODICIDAD,
         COL_FINANCIAMIENTO_CRONOGRAMA,
+        COL_TIPO_CONTRAPARTE,
+        COL_CONTRAPARTE,
     ]:
         out[col] = out[col].map(normalize_text)
 
@@ -168,7 +181,7 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PERIOD] == "Quincenal", COL_REC_PERIOD] = "15nal"
     out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
     out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
-    out.loc[out[COL_NATURALEZA_INGRESO] == "", COL_NATURALEZA_INGRESO] = out[COL_CATEGORIA].map(
+    out[COL_NATURALEZA_INGRESO] = out[COL_CATEGORIA].map(
         lambda x: "Capital" if normalize_text(x) == "Aporte de socio / capital" else (
             "Financiamiento" if normalize_text(x) == "Financiamiento recibido" else (
             "Financiero" if normalize_text(x) == "Ingreso financiero" else (
@@ -177,10 +190,19 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
             )
         )
     )
-    out.loc[out[COL_TRATAMIENTO_BALANCE_ING] == "", COL_TRATAMIENTO_BALANCE_ING] = [
+    treat_mask = out[COL_TRATAMIENTO_BALANCE_ING].isin(["", "Pasivo financiero", "Patrimonio", "Cuenta por cobrar", "Caja / banco"])
+    out.loc[treat_mask, COL_TRATAMIENTO_BALANCE_ING] = [
         _derive_ing_balance(cat, por_cobrar)
-        for cat, por_cobrar in zip(out[COL_CATEGORIA], out[COL_POR_COBRAR])
+        for cat, por_cobrar in zip(out.loc[treat_mask, COL_CATEGORIA], out.loc[treat_mask, COL_POR_COBRAR])
     ]
+    total_ing = _coerce_non_negative_numeric(out[COL_MONTO])
+    realized_ing = _coerce_non_negative_numeric(out[COL_MONTO_REAL_COBRADO]).clip(upper=total_ing)
+    full_realized_mask = out[COL_POR_COBRAR].eq("No")
+    realized_ing = realized_ing.where(~full_realized_mask, total_ing)
+    out[COL_MONTO_REAL_COBRADO] = realized_ing
+    out["__monto_realizado"] = realized_ing
+    out["__monto_pendiente"] = (total_ing - realized_ing).clip(lower=0.0)
+    out.loc[full_realized_mask, "__monto_pendiente"] = 0.0
     out["__is_financiamiento"] = (
         out[COL_FINANCIAMIENTO_TOGGLE].map(yes_no_flag).eq("Si")
         | out[COL_CATEGORIA].eq("Financiamiento recibido")
@@ -202,6 +224,9 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out[COL_ACTIVO_FIJO_DEP_MENSUAL] = out[COL_ACTIVO_FIJO_DEP_MENSUAL].map(parse_number_maybe_es)
     out[COL_FINANCIAMIENTO_MONTO] = out[COL_FINANCIAMIENTO_MONTO].map(parse_number_maybe_es)
     out[COL_FINANCIAMIENTO_TASA] = out[COL_FINANCIAMIENTO_TASA].map(parse_number_maybe_es)
+    out[COL_MONTO_REAL_PAGADO] = out[COL_MONTO_REAL_PAGADO].map(parse_number_maybe_es)
+    out[COL_PREPAGO_FECHA_INICIO] = pd.to_datetime(out[COL_PREPAGO_FECHA_INICIO], errors="coerce")
+    out[COL_PREPAGO_MESES] = pd.to_numeric(out[COL_PREPAGO_MESES], errors="coerce").fillna(0).astype(int)
     out[COL_FINANCIAMIENTO_PLAZO] = pd.to_numeric(out[COL_FINANCIAMIENTO_PLAZO], errors="coerce").fillna(0).astype(int)
     out[COL_REC_COUNT] = pd.to_numeric(out[COL_REC_COUNT], errors="coerce").fillna(0).astype(int)
     out[COL_ACTIVO_FIJO_VIDA] = pd.to_numeric(out[COL_ACTIVO_FIJO_VIDA], errors="coerce").fillna(0).astype(int)
@@ -233,6 +258,8 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
         COL_FINANCIAMIENTO_MODALIDAD,
         COL_FINANCIAMIENTO_PERIODICIDAD,
         COL_FINANCIAMIENTO_CRONOGRAMA,
+        COL_TIPO_CONTRAPARTE,
+        COL_CONTRAPARTE,
     ]:
         out[col] = out[col].map(normalize_text)
 
@@ -251,8 +278,20 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PERIOD] == "Quincenal", COL_REC_PERIOD] = "15nal"
     out.loc[out[COL_REC_PERIOD].isin(["Bimestral", "Trimestral"]), COL_REC_PERIOD] = "Mensual"
     out.loc[out[COL_REC_RULE] == "Fin de mes", COL_REC_RULE] = "Inicio de cada mes"
-    out.loc[out[COL_SUBCLASIFICACION_GERENCIAL] == "", COL_SUBCLASIFICACION_GERENCIAL] = out[COL_CATEGORIA].map(_derive_gas_sub)
-    out.loc[out[COL_TRATAMIENTO_BALANCE_GAS] == "", COL_TRATAMIENTO_BALANCE_GAS] = out[COL_CATEGORIA].map(_derive_gas_balance)
+    out[COL_SUBCLASIFICACION_GERENCIAL] = out[COL_CATEGORIA].map(_derive_gas_sub)
+    treat_mask = out[COL_TRATAMIENTO_BALANCE_GAS].isin(["", "Inversion / participacion en otra empresa", "Gasto del periodo"])
+    out.loc[treat_mask, COL_TRATAMIENTO_BALANCE_GAS] = out.loc[treat_mask, COL_CATEGORIA].map(_derive_gas_balance)
+    total_gas = _coerce_non_negative_numeric(out[COL_MONTO])
+    realized_gas = _coerce_non_negative_numeric(out[COL_MONTO_REAL_PAGADO]).clip(upper=total_gas)
+    full_paid_mask = out[COL_POR_PAGAR].eq("No")
+    realized_gas = realized_gas.where(~full_paid_mask, total_gas)
+    out[COL_MONTO_REAL_PAGADO] = realized_gas
+    out["__monto_realizado"] = realized_gas
+    out["__monto_pendiente"] = (total_gas - realized_gas).clip(lower=0.0)
+    out.loc[full_paid_mask, "__monto_pendiente"] = 0.0
+    prepago_mask = out[COL_TRATAMIENTO_BALANCE_GAS].eq("Anticipo / prepago")
+    out.loc[~prepago_mask, [COL_PREPAGO_MESES, COL_PREPAGO_FECHA_INICIO]] = [0, pd.NaT]
+    out.loc[prepago_mask & out[COL_PREPAGO_FECHA_INICIO].isna(), COL_PREPAGO_FECHA_INICIO] = out.loc[prepago_mask & out[COL_PREPAGO_FECHA_INICIO].isna(), COL_FECHA]
 
     fallback_candidates = [
         COL_FECHA_PAGO,
@@ -347,10 +386,14 @@ def apply_global_filters(
 
 
 def split_real_vs_pending(df_ing: pd.DataFrame, df_gas: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    ing_real = df_ing[df_ing[COL_POR_COBRAR] == "No"].copy()
-    ing_pend = df_ing[df_ing[COL_POR_COBRAR] == "Si"].copy()
-    gas_real = df_gas[df_gas[COL_POR_PAGAR] == "No"].copy()
-    gas_pend = df_gas[df_gas[COL_POR_PAGAR] == "Si"].copy()
+    ing_real_mask = pd.to_numeric(df_ing.get("__monto_realizado", pd.Series(0.0, index=df_ing.index)), errors="coerce").fillna(0.0).astype(float) > 0
+    ing_pend_mask = pd.to_numeric(df_ing.get("__monto_pendiente", pd.Series(0.0, index=df_ing.index)), errors="coerce").fillna(0.0).astype(float) > 0
+    gas_real_mask = pd.to_numeric(df_gas.get("__monto_realizado", pd.Series(0.0, index=df_gas.index)), errors="coerce").fillna(0.0).astype(float) > 0
+    gas_pend_mask = pd.to_numeric(df_gas.get("__monto_pendiente", pd.Series(0.0, index=df_gas.index)), errors="coerce").fillna(0.0).astype(float) > 0
+    ing_real = df_ing[ing_real_mask].copy()
+    ing_pend = df_ing[ing_pend_mask].copy()
+    gas_real = df_gas[gas_real_mask].copy()
+    gas_pend = df_gas[gas_pend_mask].copy()
     return {
         "ing_real": ing_real,
         "ing_pend": ing_pend,

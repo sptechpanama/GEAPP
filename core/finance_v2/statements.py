@@ -21,9 +21,13 @@ from .constants import (
     COL_FINANCIAMIENTO_TIPO,
     COL_GASTO_DETALLE,
     COL_MONTO,
+    COL_MONTO_REAL_COBRADO,
+    COL_MONTO_REAL_PAGADO,
     COL_NATURALEZA_INGRESO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
+    COL_PREPAGO_FECHA_INICIO,
+    COL_PREPAGO_MESES,
     COL_SUBCLASIFICACION_GERENCIAL,
     COL_TRATAMIENTO_BALANCE_ING,
     COL_TRATAMIENTO_BALANCE_GAS,
@@ -66,6 +70,10 @@ def _ensure_estado_schema(df: pd.DataFrame) -> pd.DataFrame:
         (COL_FINANCIAMIENTO_TIPO, ""),
         (COL_FINANCIAMIENTO_CRONOGRAMA, ""),
         (COL_GASTO_DETALLE, ""),
+        (COL_MONTO_REAL_COBRADO, 0.0),
+        (COL_MONTO_REAL_PAGADO, 0.0),
+        (COL_PREPAGO_MESES, 0),
+        (COL_PREPAGO_FECHA_INICIO, pd.NaT),
         (COL_ACTIVO_FIJO_DEP_TOGGLE, "No"),
         (COL_ACTIVO_FIJO_DEP_MENSUAL, 0.0),
         (COL_ACTIVO_FIJO_FECHA_INICIO, pd.NaT),
@@ -84,6 +92,10 @@ def _ensure_estado_schema(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_FINANCIAMIENTO_TIPO] = _safe_series(out, COL_FINANCIAMIENTO_TIPO, "").astype(str).fillna("")
     out[COL_FINANCIAMIENTO_CRONOGRAMA] = _safe_series(out, COL_FINANCIAMIENTO_CRONOGRAMA, "").astype(str).fillna("")
     out[COL_ACTIVO_FIJO_DEP_TOGGLE] = _safe_series(out, COL_ACTIVO_FIJO_DEP_TOGGLE, "No").astype(str).fillna("No")
+    out[COL_MONTO_REAL_COBRADO] = pd.to_numeric(_safe_series(out, COL_MONTO_REAL_COBRADO, 0.0), errors="coerce").fillna(0.0)
+    out[COL_MONTO_REAL_PAGADO] = pd.to_numeric(_safe_series(out, COL_MONTO_REAL_PAGADO, 0.0), errors="coerce").fillna(0.0)
+    out[COL_PREPAGO_MESES] = pd.to_numeric(_safe_series(out, COL_PREPAGO_MESES, 0), errors="coerce").fillna(0).astype(int)
+    out[COL_PREPAGO_FECHA_INICIO] = _safe_datetime_series(out, COL_PREPAGO_FECHA_INICIO)
     out[COL_ACTIVO_FIJO_DEP_MENSUAL] = pd.to_numeric(_safe_series(out, COL_ACTIVO_FIJO_DEP_MENSUAL, 0.0), errors="coerce").fillna(0.0)
     out[COL_ACTIVO_FIJO_FECHA_INICIO] = _safe_datetime_series(out, COL_ACTIVO_FIJO_FECHA_INICIO)
     out[COL_ACTIVO_FIJO_VALOR_RESIDUAL] = pd.to_numeric(_safe_series(out, COL_ACTIVO_FIJO_VALOR_RESIDUAL, 0.0), errors="coerce").fillna(0.0)
@@ -150,6 +162,60 @@ def _calc_depreciacion_periodo(gas: pd.DataFrame, fecha_desde: pd.Timestamp, fec
     return float(total)
 
 
+def _prepago_schedule(row: pd.Series) -> tuple[pd.Timestamp | pd.NaT, int, float]:
+    start_date = pd.to_datetime(row.get(COL_PREPAGO_FECHA_INICIO), errors="coerce")
+    if pd.isna(start_date):
+        start_date = pd.to_datetime(row.get(COL_FECHA), errors="coerce")
+    meses = int(pd.to_numeric(pd.Series([row.get(COL_PREPAGO_MESES, 0)]), errors="coerce").fillna(0).iloc[0])
+    total = float(row.get(COL_MONTO, 0.0) or 0.0)
+    return start_date, meses, total
+
+
+def _expand_prepagos_devengados(gas: pd.DataFrame, fecha_desde: pd.Timestamp, fecha_hasta: pd.Timestamp) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    prepagos = gas[_safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Anticipo / prepago")].copy()
+    if prepagos.empty:
+        return pd.DataFrame(columns=gas.columns)
+
+    start_period = fecha_desde.to_period("M")
+    end_period = fecha_hasta.to_period("M")
+    for _, row in prepagos.iterrows():
+        start_date, meses, total = _prepago_schedule(row)
+        if pd.isna(start_date) or meses <= 0 or total <= 0:
+            continue
+        monthly = total / float(meses)
+        period_start = start_date.to_period("M")
+        for idx in range(meses):
+            period = period_start + idx
+            if period < start_period or period > end_period:
+                continue
+            row_copy = row.to_dict()
+            row_copy[COL_FECHA] = period.to_timestamp()
+            row_copy[COL_MONTO] = monthly
+            row_copy[COL_TRATAMIENTO_BALANCE_GAS] = "Gasto del periodo"
+            rows.append(row_copy)
+    return pd.DataFrame(rows, columns=gas.columns) if rows else pd.DataFrame(columns=gas.columns)
+
+
+def _remaining_prepago_at_cutoff(gas: pd.DataFrame, cutoff: pd.Timestamp) -> float:
+    total_restante = 0.0
+    prepagos = gas[_safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Anticipo / prepago")].copy()
+    for _, row in prepagos.iterrows():
+        start_date, meses, total = _prepago_schedule(row)
+        if pd.isna(start_date) or meses <= 0 or total <= 0:
+            total_restante += total
+            continue
+        start_period = start_date.to_period("M")
+        cutoff_period = cutoff.to_period("M")
+        if cutoff_period < start_period:
+            total_restante += total
+            continue
+        months_elapsed = len(pd.period_range(start=start_period, end=cutoff_period, freq="M"))
+        consumed = min(total, (total / float(meses)) * max(0, months_elapsed))
+        total_restante += max(0.0, total - consumed)
+    return float(total_restante)
+
+
 def build_estado_resultados(
     df_ing: pd.DataFrame,
     df_gas: pd.DataFrame,
@@ -190,14 +256,15 @@ def build_estado_resultados(
     subclas = _safe_series(gas, COL_SUBCLASIFICACION_GERENCIAL, "").astype(str)
     trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
     period_mask = trat.eq("Gasto del periodo")
-    costos_directos = float(pd.to_numeric(gas.loc[period_mask & subclas.eq("Costo directo"), COL_MONTO], errors="coerce").fillna(0.0).sum())
-    gastos_operativos = float(pd.to_numeric(gas.loc[period_mask & subclas.isin(["Administrativo fijo", "Operativo variable", "Comercial / ventas", "No operativo"]), COL_MONTO], errors="coerce").fillna(0.0).sum())
-    gastos_financieros_base = float(pd.to_numeric(gas.loc[period_mask & subclas.eq("Financiero"), COL_MONTO], errors="coerce").fillna(0.0).sum())
-    impuestos_mask = (period_mask & subclas.eq("Impuestos")) | (
-        period_mask & _safe_series(gas, COL_CATEGORIA, "").eq("Impuestos")
-    )
+    prepago_devengado = _expand_prepagos_devengados(gas_all, fecha_desde_ts, fecha_hasta_ts)
+    gas_resultado = pd.concat([gas.loc[period_mask].copy(), prepago_devengado], ignore_index=True, sort=False)
+    subclas_result = _safe_series(gas_resultado, COL_SUBCLASIFICACION_GERENCIAL, "").astype(str)
+    costos_directos = float(pd.to_numeric(gas_resultado.loc[subclas_result.eq("Costo directo"), COL_MONTO], errors="coerce").fillna(0.0).sum())
+    gastos_operativos = float(pd.to_numeric(gas_resultado.loc[subclas_result.isin(["Administrativo fijo", "Operativo variable", "Comercial / ventas", "No operativo"]), COL_MONTO], errors="coerce").fillna(0.0).sum())
+    gastos_financieros_base = float(pd.to_numeric(gas_resultado.loc[subclas_result.eq("Financiero"), COL_MONTO], errors="coerce").fillna(0.0).sum())
+    impuestos_mask = subclas_result.eq("Impuestos") | _safe_series(gas_resultado, COL_CATEGORIA, "").eq("Impuestos")
     impuestos = float(
-        pd.to_numeric(gas.loc[impuestos_mask, COL_MONTO], errors="coerce")
+        pd.to_numeric(gas_resultado.loc[impuestos_mask, COL_MONTO], errors="coerce")
         .fillna(0.0)
         .sum()
     )
@@ -234,7 +301,7 @@ def build_estado_resultados(
     )
 
     ing_month = ingresos_resultado.copy()
-    gas_month = gas[period_mask].copy()
+    gas_month = gas_resultado.copy()
     ing_month["Mes"] = _safe_datetime_series(ing_month, COL_FECHA).dt.to_period("M")
     gas_month["Mes"] = _safe_datetime_series(gas_month, COL_FECHA).dt.to_period("M")
 
@@ -264,13 +331,13 @@ def build_estado_resultados(
     mensual["Utilidad"] = mensual["Ingresos"] - mensual["Gastos"]
 
     empresa_ing = ingresos_resultado.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Ingresos"})
-    empresa_gas = gas[period_mask].groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Gastos"})
+    empresa_gas = gas_resultado.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Gastos"})
     por_empresa = empresa_ing.merge(empresa_gas, on=COL_EMPRESA, how="outer").fillna(0.0)
     por_empresa["Utilidad"] = por_empresa["Ingresos"] - por_empresa["Gastos"]
     por_empresa = por_empresa.sort_values("Utilidad", ascending=False)
 
     gasto_categoria = (
-        gas[period_mask].groupby(COL_CATEGORIA, as_index=False)[COL_MONTO]
+        gas_resultado.groupby(COL_CATEGORIA, as_index=False)[COL_MONTO]
         .sum()
         .rename(columns={COL_CATEGORIA: "Categoria", COL_MONTO: "Gasto"})
         .sort_values("Gasto", ascending=False)
@@ -282,6 +349,8 @@ def build_estado_resultados(
         "Activo fijo no pega completo al gasto; se reconoce via depreciacion/amortizacion cuando aplica.",
         "Aportes de socio / capital e inversiones / participaciones en otras empresas no entran al resultado; se reflejan en caja y balance.",
     ]
+    if not prepago_devengado.empty:
+        notes.append("Los anticipos / prepagos se devengan mensualmente segun su plazo configurado.")
     if not include_miscelaneos:
         notes.append("Politica aplicada: categoria Miscelaneos excluida de rentabilidad y estado de resultados.")
 
@@ -331,18 +400,7 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         .fillna(0.0)
         .sum()
     )
-    anticipos = float(
-        pd.to_numeric(
-            gas.loc[
-                vigente_mask
-                & _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Anticipo / prepago"),
-                COL_MONTO,
-            ],
-            errors="coerce",
-        )
-        .fillna(0.0)
-        .sum()
-    )
+    anticipos = _remaining_prepago_at_cutoff(gas.loc[vigente_mask].copy(), cutoff)
 
     ing_trat = _safe_series(ing, COL_TRATAMIENTO_BALANCE_ING, "").astype(str)
     ing_estado = _safe_series(ing, COL_POR_COBRAR, "No").astype(str)
@@ -355,7 +413,10 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         & (ing_event_date <= cutoff)
     )
     aportes_capital = float(
-        pd.to_numeric(ing.loc[aportes_mask, COL_MONTO], errors="coerce").fillna(0.0).sum()
+        pd.to_numeric(
+            _safe_series(ing.loc[aportes_mask], "__monto_realizado", _safe_series(ing.loc[aportes_mask], COL_MONTO, 0.0)),
+            errors="coerce",
+        ).fillna(0.0).sum()
     )
 
     for frame, sign in ((ing, "recibido"), (gas, "gasto")):
@@ -394,7 +455,10 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         & (gas_event_date <= cutoff)
     )
     inversiones_participaciones = float(
-        pd.to_numeric(gas.loc[inversiones_mask, COL_MONTO], errors="coerce").fillna(0.0).sum()
+        pd.to_numeric(
+            _safe_series(gas.loc[inversiones_mask], "__monto_realizado", _safe_series(gas.loc[inversiones_mask], COL_MONTO, 0.0)),
+            errors="coerce",
+        ).fillna(0.0).sum()
     )
 
     activos_rows = gas[

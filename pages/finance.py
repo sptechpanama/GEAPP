@@ -126,9 +126,15 @@ COL_USER  = "Usuario"
 COL_ING_DET = "Detalle ingreso"
 COL_ING_NAT = "Naturaleza ingreso"
 COL_TRAT_BAL_ING = "Tratamiento balance ingreso"
+COL_CTP_TIPO = "Tipo contraparte"
+COL_CTP_NOMBRE = "Contraparte"
+COL_COBRO_REAL_MONTO = "Monto real cobrado"
 COL_GAS_SUB = "Subclasificacion gerencial"
 COL_GAS_DET = "Detalle gasto"
 COL_TRAT_BAL_GAS = "Tratamiento balance gasto"
+COL_PAGO_REAL_MONTO = "Monto real pagado"
+COL_PREPAGO_MESES = "Plazo prepago meses"
+COL_PREPAGO_FEC_INI = "Fecha inicio prepago"
 COL_AF_TOGGLE = "Activo fijo"
 COL_AF_TIPO = "Tipo activo fijo"
 COL_AF_VIDA = "Vida util activo anios"
@@ -159,8 +165,9 @@ REC_RULE_OPTIONS = [
     "Mismo dia de fecha esperada",
 ]
 
-STATE_OPTIONS = ["Pendiente", "Realizado"]
+STATE_OPTIONS = ["Pendiente", "Parcial", "Realizado"]
 REC_DURATION_OPTIONS = ["Indefinida", "Hasta fecha", "Por cantidad de periodos"]
+CONTRAPARTE_TYPE_OPTIONS = ["", "Socio", "Banco", "Empresa relacionada", "Empresa invertida", "Cliente", "Proveedor", "Tercero", "Otro"]
 ING_CATEGORY_OPTIONS = [
     "Proyectos",
     "Oficina",
@@ -287,7 +294,7 @@ def _si_no_norm(x) -> str:
     return "Sí" if s in {"si","sí","sí","yes","y","true","1"} else "No"
 
 def _estado_to_yes_no(estado: str) -> str:
-    return YES_NO_OPTIONS[1] if str(estado or "").strip() == "Pendiente" else YES_NO_OPTIONS[0]
+    return YES_NO_OPTIONS[1] if str(estado or "").strip() in {"Pendiente", "Parcial"} else YES_NO_OPTIONS[0]
 
 
 def _bool_from_toggle(value) -> bool:
@@ -338,6 +345,120 @@ def _derive_gas_balance(category: str) -> str:
 
 def _help_for_option(mapping: dict[str, str], selected: str, fallback: str = "") -> str:
     return mapping.get(str(selected or "").strip(), fallback)
+
+
+def _counterparty_required_for_ing(category: str, treatment: str, fin_on: bool) -> bool:
+    return fin_on or category == "Aporte de socio / capital" or treatment in {"Patrimonio", "Pasivo financiero"}
+
+
+def _counterparty_required_for_gas(category: str, treatment: str, fin_on: bool) -> bool:
+    return fin_on or category == "Inversiones" or treatment in {
+        "Inversion / participacion en otra empresa",
+        "Cuenta por cobrar / prestamo otorgado",
+    }
+
+
+def _autoderive_ing_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = ensure_ingresos_columns(df)
+    out[COL_ING_NAT] = out[COL_CAT].map(_derive_ing_nature)
+    special_mask = out[COL_CAT].astype(str).isin(["Aporte de socio / capital", "Financiamiento recibido"])
+    estado_series = out[COL_POR_COB].map(lambda x: "Pendiente" if _si_no_norm(x) != "No" else "Realizado")
+    out.loc[special_mask, COL_TRAT_BAL_ING] = [
+        _derive_ing_balance(cat, estado)
+        for cat, estado in zip(out.loc[special_mask, COL_CAT], estado_series.loc[special_mask])
+    ]
+    full_real_mask = out[COL_POR_COB].map(_si_no_norm).eq("No")
+    complete_partial_mask = (
+        out[COL_POR_COB].map(_si_no_norm).ne("No")
+        & pd.to_numeric(out[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).ge(pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0))
+        & _ts(out[COL_FCOBRO_REAL]).notna()
+    )
+    out.loc[complete_partial_mask, COL_POR_COB] = "No"
+    out.loc[full_real_mask | complete_partial_mask, COL_COBRO_REAL_MONTO] = pd.to_numeric(out.loc[full_real_mask | complete_partial_mask, COL_MONTO], errors="coerce").fillna(0.0)
+    return ensure_ingresos_columns(out)
+
+
+def _autoderive_gas_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = ensure_gastos_columns(df)
+    out[COL_GAS_SUB] = out[COL_CAT].map(_derive_gas_sub)
+    inv_mask = out[COL_CAT].astype(str).eq("Inversiones")
+    out.loc[inv_mask, COL_TRAT_BAL_GAS] = "Inversion / participacion en otra empresa"
+    complete_partial_mask = (
+        out[COL_POR_PAG].map(_si_no_norm).ne("No")
+        & pd.to_numeric(out[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).ge(pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0))
+        & _ts(out[COL_FPAGO_REAL]).notna()
+    )
+    out.loc[complete_partial_mask, COL_POR_PAG] = "No"
+    full_paid_mask = out[COL_POR_PAG].map(_si_no_norm).eq("No")
+    out.loc[full_paid_mask | complete_partial_mask, COL_PAGO_REAL_MONTO] = pd.to_numeric(out.loc[full_paid_mask | complete_partial_mask, COL_MONTO], errors="coerce").fillna(0.0)
+    return ensure_gastos_columns(out)
+
+
+def _validate_ing_df(df: pd.DataFrame) -> list[str]:
+    errors: list[str] = []
+    for idx, row in df.iterrows():
+        monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        monto_real = float(pd.to_numeric(pd.Series([row.get(COL_COBRO_REAL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        por_cobrar = _si_no_norm(row.get(COL_POR_COB, "No"))
+        fecha_esp = _ts(row.get(COL_FCOBRO))
+        fecha_real = _ts(row.get(COL_FCOBRO_REAL))
+        categoria = str(row.get(COL_CAT, "") or "").strip()
+        tratamiento = str(row.get(COL_TRAT_BAL_ING, "") or "").strip()
+        contraparte = str(row.get(COL_CTP_NOMBRE, "") or "").strip()
+        fin_on = _bool_from_toggle(row.get(COL_FIN_TOGGLE, "No")) or categoria == "Financiamiento recibido"
+        label = str(row.get(COL_DESC, "") or row.get(COL_ROWID, f"fila {idx+1}")).strip() or f"fila {idx+1}"
+        if monto <= 0:
+            errors.append(f"Ingresos: `{label}` tiene monto no valido.")
+        if por_cobrar != "No" and pd.isna(fecha_esp):
+            errors.append(f"Ingresos: `{label}` requiere Fecha esperada de cobro.")
+        if por_cobrar == "No" and pd.isna(fecha_real):
+            errors.append(f"Ingresos: `{label}` requiere Fecha real de cobro.")
+        if por_cobrar != "No" and monto_real > 0 and pd.isna(fecha_real):
+            errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial pero sin Fecha real de cobro.")
+        if por_cobrar != "No" and monto_real >= monto and monto > 0:
+            errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial igual o mayor al total; marque realizado si ya se cobro todo.")
+        if por_cobrar == "No" and abs(monto_real - monto) > 0.01:
+            errors.append(f"Ingresos: `{label}` marcado realizado debe tener monto real cobrado igual al monto total.")
+        if _counterparty_required_for_ing(categoria, tratamiento, fin_on) and not contraparte:
+            errors.append(f"Ingresos: `{label}` requiere Contraparte.")
+    return errors
+
+
+def _validate_gas_df(df: pd.DataFrame) -> list[str]:
+    errors: list[str] = []
+    for idx, row in df.iterrows():
+        monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        monto_real = float(pd.to_numeric(pd.Series([row.get(COL_PAGO_REAL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        por_pagar = _si_no_norm(row.get(COL_POR_PAG, "No"))
+        fecha_esp = _ts(row.get(COL_FPAGO))
+        fecha_real = _ts(row.get(COL_FPAGO_REAL))
+        categoria = str(row.get(COL_CAT, "") or "").strip()
+        tratamiento = str(row.get(COL_TRAT_BAL_GAS, "") or "").strip()
+        contraparte = str(row.get(COL_CTP_NOMBRE, "") or "").strip()
+        fin_on = _bool_from_toggle(row.get(COL_FIN_TOGGLE, "No"))
+        label = str(row.get(COL_CONC, "") or row.get(COL_ROWID, f"fila {idx+1}")).strip() or f"fila {idx+1}"
+        if monto <= 0:
+            errors.append(f"Gastos: `{label}` tiene monto no valido.")
+        if por_pagar != "No" and pd.isna(fecha_esp):
+            errors.append(f"Gastos: `{label}` requiere Fecha esperada de pago.")
+        if por_pagar == "No" and pd.isna(fecha_real):
+            errors.append(f"Gastos: `{label}` requiere Fecha real de pago.")
+        if por_pagar != "No" and monto_real > 0 and pd.isna(fecha_real):
+            errors.append(f"Gastos: `{label}` tiene monto pagado parcial pero sin Fecha real de pago.")
+        if por_pagar != "No" and monto_real >= monto and monto > 0:
+            errors.append(f"Gastos: `{label}` tiene monto pagado parcial igual o mayor al total; marque realizado si ya se pago todo.")
+        if por_pagar == "No" and abs(monto_real - monto) > 0.01:
+            errors.append(f"Gastos: `{label}` marcado realizado debe tener monto real pagado igual al monto total.")
+        if tratamiento == "Anticipo / prepago":
+            plazo = int(pd.to_numeric(pd.Series([row.get(COL_PREPAGO_MESES, 0)]), errors="coerce").fillna(0).iloc[0])
+            fecha_inicio = _ts(row.get(COL_PREPAGO_FEC_INI))
+            if plazo <= 0:
+                errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Plazo prepago meses.")
+            if pd.isna(fecha_inicio):
+                errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Fecha inicio prepago.")
+        if _counterparty_required_for_gas(categoria, tratamiento, fin_on) and not contraparte:
+            errors.append(f"Gastos: `{label}` requiere Contraparte.")
+    return errors
 
 
 def _date_or_nat(value):
@@ -587,7 +708,8 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in [
         COL_FECHA, COL_DESC, COL_CONC, COL_MONTO, COL_CAT, COL_ESC,
         COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB,
-        COL_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_REC, COL_REC_PER, COL_REC_REG,
+        COL_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_CTP_TIPO, COL_CTP_NOMBRE, COL_COBRO_REAL_MONTO,
+        COL_REC, COL_REC_PER, COL_REC_REG,
         COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT, COL_ING_DET, COL_ING_NAT,
         COL_TRAT_BAL_ING, COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO,
         COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO,
@@ -620,7 +742,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
                 out[col] = "Cuotas periodicas"
             elif col == COL_FIN_PERIOD:
                 out[col] = "Mensual"
-            elif col in {COL_FIN_MONTO, COL_FIN_TASA}:
+            elif col in {COL_FIN_MONTO, COL_FIN_TASA, COL_COBRO_REAL_MONTO}:
                 out[col] = 0.0
             elif col in {COL_FIN_PLAZO, COL_REC_CANT}:
                 out[col] = 0
@@ -633,6 +755,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_REC_HASTA] = _ts(out[COL_REC_HASTA])
     out[COL_FIN_FEC_INI] = _ts(out[COL_FIN_FEC_INI])
     out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
+    out[COL_COBRO_REAL_MONTO] = pd.to_numeric(out[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).clip(lower=0.0).astype(float)
     out[COL_FIN_MONTO] = pd.to_numeric(out[COL_FIN_MONTO], errors="coerce").fillna(0.0).astype(float)
     out[COL_FIN_TASA] = pd.to_numeric(out[COL_FIN_TASA], errors="coerce").fillna(0.0).astype(float)
     out[COL_FIN_PLAZO] = pd.to_numeric(out[COL_FIN_PLAZO], errors="coerce").fillna(0).astype(int)
@@ -650,7 +773,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         [
             COL_DESC, COL_CONC, COL_CAT, COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP,
             COL_POR_COB, COL_COB, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
-            COL_ROWID, COL_USER, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING,
+            COL_ROWID, COL_USER, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING, COL_CTP_TIPO, COL_CTP_NOMBRE,
             COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
             COL_FIN_PERIOD, COL_FIN_CRONO,
         ],
@@ -663,13 +786,16 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
     out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
     out.loc[rec_mask & (out[COL_REC_DUR].astype(str).str.strip() == ""), COL_REC_DUR] = "Indefinida"
-    out.loc[out[COL_ING_NAT].astype(str).str.strip() == "", COL_ING_NAT] = out[COL_CAT].map(_derive_ing_nature)
+    out[COL_ING_NAT] = out[COL_CAT].map(_derive_ing_nature)
     estado_series = out[COL_POR_COB].map(lambda x: "Pendiente" if _si_no_norm(x) != "No" else "Realizado")
     balance_mask = out[COL_TRAT_BAL_ING].astype(str).str.strip() == ""
     out.loc[balance_mask, COL_TRAT_BAL_ING] = [
         _derive_ing_balance(cat, estado)
         for cat, estado in zip(out.loc[balance_mask, COL_CAT], estado_series.loc[balance_mask])
     ]
+    total_ing = out[COL_MONTO].clip(lower=0.0)
+    out.loc[out[COL_POR_COB].map(_si_no_norm) == "No", COL_COBRO_REAL_MONTO] = total_ing.loc[out[COL_POR_COB].map(_si_no_norm) == "No"]
+    out[COL_COBRO_REAL_MONTO] = out[COL_COBRO_REAL_MONTO].clip(upper=total_ing)
     fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle) | out[COL_CAT].astype(str).eq("Financiamiento recibido")
     out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", ""]
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
@@ -682,8 +808,8 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
         COL_FECHA, COL_CONC, COL_MONTO, COL_CAT, COL_ESC, COL_REF_RID,
         COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_REC,
         COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT,
-        COL_PROV, COL_FPAGO, COL_FPAGO_REAL, COL_GAS_SUB, COL_GAS_DET,
-        COL_TRAT_BAL_GAS, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA,
+        COL_PROV, COL_FPAGO, COL_FPAGO_REAL, COL_CTP_TIPO, COL_CTP_NOMBRE, COL_PAGO_REAL_MONTO,
+        COL_GAS_SUB, COL_GAS_DET, COL_TRAT_BAL_GAS, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA,
         COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL,
         COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI,
         COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
@@ -692,7 +818,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             if col == COL_MONTO:
                 out[col] = 0.0
-            elif col in {COL_FECHA, COL_FPAGO, COL_FPAGO_REAL, COL_REC_HASTA, COL_AF_FEC_INI, COL_FIN_FEC_INI}:
+            elif col in {COL_FECHA, COL_FPAGO, COL_FPAGO_REAL, COL_REC_HASTA, COL_AF_FEC_INI, COL_FIN_FEC_INI, COL_PREPAGO_FEC_INI}:
                 out[col] = pd.NaT
             elif col == COL_EMP:
                 out[col] = EMPRESA_DEFAULT
@@ -712,9 +838,9 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
                 out[col] = "Tangible"
             elif col == COL_AF_VIDA:
                 out[col] = 5
-            elif col in {COL_AF_VAL_RES, COL_AF_DEP_MENSUAL, COL_FIN_MONTO, COL_FIN_TASA}:
+            elif col in {COL_AF_VAL_RES, COL_AF_DEP_MENSUAL, COL_FIN_MONTO, COL_FIN_TASA, COL_PAGO_REAL_MONTO}:
                 out[col] = 0.0
-            elif col in {COL_FIN_PLAZO, COL_REC_CANT}:
+            elif col in {COL_FIN_PLAZO, COL_REC_CANT, COL_PREPAGO_MESES}:
                 out[col] = 0
             elif col == COL_FIN_TIPO:
                 out[col] = "Financiamiento otorgado"
@@ -731,9 +857,11 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_FPAGO] = _ts(out[COL_FPAGO])
     out[COL_FPAGO_REAL] = _ts(out[COL_FPAGO_REAL])
     out[COL_REC_HASTA] = _ts(out[COL_REC_HASTA])
+    out[COL_PREPAGO_FEC_INI] = _ts(out[COL_PREPAGO_FEC_INI])
     out[COL_AF_FEC_INI] = _ts(out[COL_AF_FEC_INI])
     out[COL_FIN_FEC_INI] = _ts(out[COL_FIN_FEC_INI])
     out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
+    out[COL_PAGO_REAL_MONTO] = pd.to_numeric(out[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).clip(lower=0.0).astype(float)
     out[COL_AF_VAL_RES] = pd.to_numeric(out[COL_AF_VAL_RES], errors="coerce").fillna(0.0).astype(float)
     out[COL_AF_DEP_MENSUAL] = pd.to_numeric(out[COL_AF_DEP_MENSUAL], errors="coerce").fillna(0.0).astype(float)
     out[COL_FIN_MONTO] = pd.to_numeric(out[COL_FIN_MONTO], errors="coerce").fillna(0.0).astype(float)
@@ -755,7 +883,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
         [
             COL_CONC, COL_CAT, COL_REF_RID, COL_PROY, COL_CLI_ID, COL_CLI_NOM,
             COL_EMP, COL_POR_PAG, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
-            COL_PROV, COL_ROWID, COL_USER, COL_GAS_SUB, COL_GAS_DET,
+            COL_PROV, COL_ROWID, COL_USER, COL_GAS_SUB, COL_GAS_DET, COL_CTP_TIPO, COL_CTP_NOMBRE,
             COL_TRAT_BAL_GAS, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_DEP_TOGGLE,
             COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
             COL_FIN_PERIOD, COL_FIN_CRONO,
@@ -769,8 +897,14 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
     out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
     out.loc[rec_mask & (out[COL_REC_DUR].astype(str).str.strip() == ""), COL_REC_DUR] = "Indefinida"
-    out.loc[out[COL_GAS_SUB].astype(str).str.strip() == "", COL_GAS_SUB] = out[COL_CAT].map(_derive_gas_sub)
+    out[COL_GAS_SUB] = out[COL_CAT].map(_derive_gas_sub)
     out.loc[out[COL_TRAT_BAL_GAS].astype(str).str.strip() == "", COL_TRAT_BAL_GAS] = out[COL_CAT].map(_derive_gas_balance)
+    total_gas = out[COL_MONTO].clip(lower=0.0)
+    out.loc[out[COL_POR_PAG].map(_si_no_norm) == "No", COL_PAGO_REAL_MONTO] = total_gas.loc[out[COL_POR_PAG].map(_si_no_norm) == "No"]
+    out[COL_PAGO_REAL_MONTO] = out[COL_PAGO_REAL_MONTO].clip(upper=total_gas)
+    prepago_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Anticipo / prepago")
+    out.loc[~prepago_mask, [COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI]] = [0, pd.NaT]
+    out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_PREPAGO_FEC_INI] = out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_FECHA]
     af_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo")
     out.loc[~af_mask, [COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA, COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL]] = ["No", "", 0, pd.NaT, 0.0, "No", 0.0]
     fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle)
@@ -1320,13 +1454,17 @@ if search_q.strip():
     df_gas_f = _match_df(df_gas_f)
 
 
-# Reales (excluyen por cobrar / por pagar)
-df_ing_reales  = df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "No"].copy()
-df_gas_reales  = df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "No"].copy()
-
 # -------------------- KPIs principales --------------------
-ing_total = float(df_ing_reales[COL_MONTO].sum()) if COL_MONTO in df_ing_reales.columns else 0.0
-gas_total = float(df_gas_reales[COL_MONTO].sum()) if COL_MONTO in df_gas_reales.columns else 0.0
+ing_total = (
+    float(pd.to_numeric(df_ing_f.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0).sum())
+    if COL_COBRO_REAL_MONTO in df_ing_f.columns
+    else 0.0
+)
+gas_total = (
+    float(pd.to_numeric(df_gas_f.get(COL_PAGO_REAL_MONTO), errors="coerce").fillna(0.0).sum())
+    if COL_PAGO_REAL_MONTO in df_gas_f.columns
+    else 0.0
+)
 
 k1, k2 = st.columns(2)
 with k1:
@@ -1343,12 +1481,30 @@ with k2:
     )
 
 # ---- Flujo y saldo actual ----
-cash = preparar_cashflow(df_ing_reales, df_gas_reales)
+cash = preparar_cashflow(df_ing_f, df_gas_f)
 saldo_actual = float(cash["Saldo"].iloc[-1]) if not cash.empty else 0.0
 
 # KPI: Capital actual + CxC futuras + CxP activas
-cxp_activas = float(df_gas_f[df_gas_f[COL_POR_PAG].map(_si_no_norm) == "Sí"][COL_MONTO].sum()) if not df_gas_f.empty else 0.0
-cxc_futuras = float(df_ing_f[df_ing_f[COL_POR_COB].map(_si_no_norm) == "Sí"][COL_MONTO].sum()) if not df_ing_f.empty else 0.0
+cxp_activas = (
+    float(
+        (
+            pd.to_numeric(df_gas_f.get(COL_MONTO), errors="coerce").fillna(0.0)
+            - pd.to_numeric(df_gas_f.get(COL_PAGO_REAL_MONTO), errors="coerce").fillna(0.0)
+        ).clip(lower=0.0).sum()
+    )
+    if not df_gas_f.empty
+    else 0.0
+)
+cxc_futuras = (
+    float(
+        (
+            pd.to_numeric(df_ing_f.get(COL_MONTO), errors="coerce").fillna(0.0)
+            - pd.to_numeric(df_ing_f.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0)
+        ).clip(lower=0.0).sum()
+    )
+    if not df_ing_f.empty
+    else 0.0
+)
 
 k1, k2, k3 = st.columns(3)
 with k1: st.metric("Capital actual", _format_money_es(saldo_actual))
@@ -1387,10 +1543,11 @@ with st.expander("Informacion de interes", expanded=False):
     )
     st.markdown("#### Pendiente para robustecer")
     st.markdown(
-        "- Manejo de inventario.\n"
-        "- Devengo automatico de prepagos.\n"
+        "- Manejo operativo de inventario (entradas, salidas y costo consumido).\n"
+        "- Cobros y pagos parciales multiples sobre un mismo registro.\n"
         "- Cierre mensual persistente.\n"
-        "- Conciliacion bancaria."
+        "- Conciliacion bancaria.\n"
+        "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
 
 # La visualización analítica fue trasladada al "Panel Financiero Gerencial".
@@ -1659,15 +1816,40 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     if _bool_from_toggle(recurrente_ing):
         estado_ing = "Pendiente"
 
-    c6, c7 = st.columns([1, 1])
+    c6, c7, c8 = st.columns([1, 1, 1])
     fecha_cobro_esperada = pd.NaT
     fecha_cobro_real = pd.NaT
+    monto_cobrado_real = 0.0
     if estado_ing == "Pendiente":
         with c6:
             fecha_cobro_esperada = st.date_input(
                 "Fecha esperada de cobro",
                 value=_today(),
                 key="ing_fecha_cobro_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
+    elif estado_ing == "Parcial":
+        with c6:
+            fecha_cobro_esperada = st.date_input(
+                "Fecha esperada de cobro",
+                value=_today(),
+                key="ing_fecha_cobro_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
+        with c7:
+            fecha_cobro_real = st.date_input(
+                "Fecha real de cobro",
+                value=_today(),
+                key="ing_fecha_cobro_real_quick",
+                on_change=lambda: _mark_form_force_open("ing"),
+            )
+        with c8:
+            monto_cobrado_real = st.number_input(
+                "Monto real cobrado",
+                min_value=0.0,
+                max_value=float(monto_nuevo),
+                step=1.0,
+                key="ing_monto_cobrado_real_quick",
                 on_change=lambda: _mark_form_force_open("ing"),
             )
     else:
@@ -1678,6 +1860,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
                 key="ing_fecha_cobro_real_quick",
                 on_change=lambda: _mark_form_force_open("ing"),
             )
+        monto_cobrado_real = float(monto_nuevo)
 
     ing_company_code = (empresa_ing or EMPRESA_DEFAULT).strip().upper()
     client_options = _client_options_for_company(ing_company_code)
@@ -1771,6 +1954,21 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         key="ing_detalle_ing_quick",
         on_change=lambda: _mark_form_force_open("ing"),
     )
+    cp1, cp2 = st.columns([1, 2])
+    with cp1:
+        tipo_contraparte_ing = st.selectbox(
+            "Tipo contraparte",
+            CONTRAPARTE_TYPE_OPTIONS,
+            index=0,
+            key="ing_ctp_tipo_quick",
+            on_change=lambda: _mark_form_force_open("ing"),
+        )
+    with cp2:
+        contraparte_ing = st.text_input(
+            "Contraparte",
+            key="ing_ctp_nombre_quick",
+            on_change=lambda: _mark_form_force_open("ing"),
+        )
     naturaleza_default = _derive_ing_nature(categoria_ing)
     naturaleza_ing = naturaleza_default
     st.text_input(
@@ -1849,11 +2047,20 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         estado_ing_final = "Pendiente" if _bool_from_toggle(recurrente_ing) else estado_ing
         por_cobrar_final = _estado_to_yes_no(estado_ing_final)
         cobrado = "No" if _si_no_norm(por_cobrar_final) != "No" else "Si"
-        fecha_cobro = _ts(fecha_cobro_esperada) if estado_ing_final == "Pendiente" else pd.NaT
-        fecha_real_cobro = _ts(fecha_cobro_real) if estado_ing_final == "Realizado" else pd.NaT
+        fecha_cobro = _ts(fecha_cobro_esperada) if estado_ing_final in {"Pendiente", "Parcial"} else pd.NaT
+        fecha_real_cobro = _ts(fecha_cobro_real) if estado_ing_final in {"Parcial", "Realizado"} else pd.NaT
         categoria_final = "Financiamiento recibido" if fin_ing_on else categoria_ing
         naturaleza_final = "Financiamiento" if fin_ing_on else (naturaleza_ing or naturaleza_default)
         tratamiento_balance_final = "Pasivo financiero" if fin_ing_on else (tratamiento_ing or balance_ing_default)
+        monto_cobrado_real_final = float(monto_nuevo) if estado_ing_final == "Realizado" else float(monto_cobrado_real or 0.0)
+        if monto_cobrado_real_final > float(monto_nuevo):
+            monto_cobrado_real_final = float(monto_nuevo)
+        if _counterparty_required_for_ing(categoria_final, tratamiento_balance_final, fin_ing_on) and not str(contraparte_ing or "").strip():
+            st.error("Debes indicar la contraparte para este tipo de ingreso.")
+            st.stop()
+        if estado_ing_final == "Parcial" and (monto_cobrado_real_final <= 0 or monto_cobrado_real_final >= float(monto_nuevo)):
+            st.error("Para un ingreso parcial, el monto real cobrado debe ser mayor que 0 y menor que el monto total.")
+            st.stop()
         cronograma_fin = _build_financing_schedule(
             principal=fin_monto_ing,
             fecha_inicio=fin_fecha_inicio_ing,
@@ -1878,6 +2085,9 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             COL_COB: cobrado,
             COL_FCOBRO: fecha_cobro,
             COL_FCOBRO_REAL: fecha_real_cobro,
+            COL_CTP_TIPO: (tipo_contraparte_ing or "").strip(),
+            COL_CTP_NOMBRE: (contraparte_ing or "").strip(),
+            COL_COBRO_REAL_MONTO: float(monto_cobrado_real_final),
             COL_REC: recurrente_ing,
             COL_REC_PER: rec_period_ing if _bool_from_toggle(recurrente_ing) else "",
             COL_REC_REG: rec_rule_ing if _bool_from_toggle(recurrente_ing) else "",
@@ -1929,10 +2139,13 @@ ing_colcfg = {
     COL_REC_DUR: st.column_config.SelectboxColumn(COL_REC_DUR, options=REC_DURATION_OPTIONS),
     COL_FCOBRO:  st.column_config.DateColumn("Fecha esperada de cobro"),
     COL_FCOBRO_REAL: st.column_config.DateColumn("Fecha real de cobro"),
+    COL_COBRO_REAL_MONTO: st.column_config.NumberColumn("Monto real cobrado", format="$%0.2f"),
     COL_CAT:     st.column_config.SelectboxColumn("Categoria operativa", options=ing_cat_options),
     COL_ING_DET: st.column_config.SelectboxColumn(COL_ING_DET, options=ING_DETAIL_OPTIONS),
-    COL_ING_NAT: st.column_config.SelectboxColumn(COL_ING_NAT, options=ING_NATURE_OPTIONS),
+    COL_ING_NAT: st.column_config.TextColumn("Naturaleza ingreso", disabled=True),
     COL_TRAT_BAL_ING: st.column_config.SelectboxColumn(COL_TRAT_BAL_ING, options=ING_BALANCE_OPTIONS),
+    COL_CTP_TIPO: st.column_config.SelectboxColumn("Tipo contraparte", options=CONTRAPARTE_TYPE_OPTIONS),
+    COL_CTP_NOMBRE: st.column_config.TextColumn("Contraparte"),
     COL_FIN_TOGGLE: st.column_config.SelectboxColumn(COL_FIN_TOGGLE, options=YES_NO_OPTIONS),
     COL_FIN_TIPO: st.column_config.SelectboxColumn(COL_FIN_TIPO, options=["", "Financiamiento recibido"]),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
@@ -1946,7 +2159,8 @@ if COL_MONTO in df_ing_editor.columns:
     df_ing_editor[COL_MONTO] = df_ing_editor[COL_MONTO].map(_format_number_es)
 ing_order = [x for x in [
     COL_FECHA, COL_MONTO, COL_CAT, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING, COL_EMP,
-    COL_POR_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
+    COL_POR_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_COBRO_REAL_MONTO, COL_CTP_TIPO, COL_CTP_NOMBRE,
+    COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_DESC, COL_FIN_TOGGLE, COL_FIN_TIPO, COL_USER, COL_ROWID
 ] if x in ing_cols_view]
 edited_ing = st.data_editor(
@@ -1956,8 +2170,10 @@ edited_ing = st.data_editor(
 edited_ing = _editor_state_to_dataframe(
     df_ing_editor,
     "tabla_ingresos",
-    numeric_cols={COL_MONTO},
+    numeric_cols={COL_MONTO, COL_COBRO_REAL_MONTO},
 )
+edited_ing = _autoderive_ing_df(edited_ing)
+ing_table_errors = _validate_ing_df(edited_ing)
 
 if COL_POR_COB in st.session_state.df_ing.columns and COL_FCOBRO in st.session_state.df_ing.columns:
     miss_cobro_mask = (
@@ -2007,13 +2223,18 @@ else:
             df_ing_f = _match_df(df_ing_f)
 
 # === ALTAS/EDICIONES (sync normal) ===
-sync_cambios(
-    edited_df=edited_ing, filtered_df=df_ing_f,
-    base_df_key="df_ing", worksheet_name=WS_ING,
-    session_state=st.session_state, write_worksheet=write_worksheet,
-    client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
-    ensure_columns_fn=ensure_ingresos_columns,
-)
+if ing_table_errors:
+    st.error("No se guardaron cambios en Ingresos hasta corregir la tabla editable.")
+    for msg in ing_table_errors[:12]:
+        st.caption(f"- {msg}")
+else:
+    sync_cambios(
+        edited_df=edited_ing, filtered_df=df_ing_f,
+        base_df_key="df_ing", worksheet_name=WS_ING,
+        session_state=st.session_state, write_worksheet=write_worksheet,
+        client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
+        ensure_columns_fn=_autoderive_ing_df,
+    )
 
 
 # ============================================================
@@ -2082,15 +2303,40 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     if _bool_from_toggle(recurrente_gas):
         estado_g = "Pendiente"
 
-    c6, c7 = st.columns([1, 1])
+    c6, c7, c8 = st.columns([1, 1, 1])
     fecha_pago_esperada = pd.NaT
     fecha_pago_real = pd.NaT
+    monto_pagado_real = 0.0
     if estado_g == "Pendiente":
         with c6:
             fecha_pago_esperada = st.date_input(
                 "Fecha esperada de pago",
                 value=_today(),
                 key="gas_fecha_pago_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+    elif estado_g == "Parcial":
+        with c6:
+            fecha_pago_esperada = st.date_input(
+                "Fecha esperada de pago",
+                value=_today(),
+                key="gas_fecha_pago_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        with c7:
+            fecha_pago_real = st.date_input(
+                "Fecha real de pago",
+                value=_today(),
+                key="gas_fecha_pago_real_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        with c8:
+            monto_pagado_real = st.number_input(
+                "Monto real pagado",
+                min_value=0.0,
+                max_value=float(monto_g),
+                step=1.0,
+                key="gas_monto_pagado_real_quick",
                 on_change=lambda: _mark_form_force_open("gas"),
             )
     else:
@@ -2101,6 +2347,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
                 key="gas_fecha_pago_real_quick",
                 on_change=lambda: _mark_form_force_open("gas"),
             )
+        monto_pagado_real = float(monto_g)
 
     categoria_g = st.selectbox(
         "Categoria operativa",
@@ -2146,6 +2393,21 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         key="gas_proveedor_quick",
         on_change=lambda: _mark_form_force_open("gas"),
     )
+    cp1, cp2 = st.columns([1, 2])
+    with cp1:
+        tipo_contraparte_g = st.selectbox(
+            "Tipo contraparte",
+            CONTRAPARTE_TYPE_OPTIONS,
+            index=0,
+            key="gas_ctp_tipo_quick",
+            on_change=lambda: _mark_form_force_open("gas"),
+        )
+    with cp2:
+        contraparte_g = st.text_input(
+            "Contraparte",
+            key="gas_ctp_nombre_quick",
+            on_change=lambda: _mark_form_force_open("gas"),
+        )
     desc_g = st.text_input(
         "Descripcion",
         key="gas_desc_quick",
@@ -2232,6 +2494,9 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
+    prepago_meses = 0
+    prepago_inicio = pd.NaT
+
     st.markdown("#### Activo fijo")
     activo_dep_toggle = YES_NO_OPTIONS[0]
     activo_tipo = ""
@@ -2253,6 +2518,26 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         if _bool_from_toggle(activo_dep_toggle):
             activo_dep_mensual = max(0.0, float(monto_g) - float(activo_residual)) / max(1, int(activo_vida) * 12)
             st.caption(f"Depreciacion/amortizacion mensual estimada: {_format_money_es(activo_dep_mensual)}")
+    elif tratamiento_gas == "Anticipo / prepago":
+        st.markdown("#### Devengo de prepago")
+        pg1, pg2 = st.columns(2)
+        with pg1:
+            prepago_meses = st.number_input(
+                "Plazo prepago meses",
+                min_value=1,
+                step=1,
+                value=12,
+                key="gas_prepago_meses_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        with pg2:
+            prepago_inicio = st.date_input(
+                "Fecha inicio prepago",
+                value=fecha_g,
+                key="gas_prepago_inicio_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        st.caption("El gasto se devengara mensualmente en el panel gerencial durante el plazo indicado.")
 
     st.markdown("#### Financiamiento")
     fin_gas_toggle = st.selectbox(
@@ -2309,10 +2594,22 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
 
         estado_g_final = "Pendiente" if _bool_from_toggle(recurrente_gas) else estado_g
         por_pagar_final = _estado_to_yes_no(estado_g_final)
-        fecha_pago_exp = _ts(fecha_pago_esperada) if estado_g_final == "Pendiente" else pd.NaT
-        fecha_pago_real_final = _ts(fecha_pago_real) if estado_g_final == "Realizado" else pd.NaT
+        fecha_pago_exp = _ts(fecha_pago_esperada) if estado_g_final in {"Pendiente", "Parcial"} else pd.NaT
+        fecha_pago_real_final = _ts(fecha_pago_real) if estado_g_final in {"Parcial", "Realizado"} else pd.NaT
         activo_fijo_on = tratamiento_gas == "Activo fijo"
         dep_on = activo_fijo_on and _bool_from_toggle(activo_dep_toggle)
+        monto_pagado_real_final = float(monto_g) if estado_g_final == "Realizado" else float(monto_pagado_real or 0.0)
+        if monto_pagado_real_final > float(monto_g):
+            monto_pagado_real_final = float(monto_g)
+        if _counterparty_required_for_gas(categoria_g, tratamiento_gas, fin_gas_on) and not str(contraparte_g or "").strip():
+            st.error("Debes indicar la contraparte para este tipo de gasto.")
+            st.stop()
+        if estado_g_final == "Parcial" and (monto_pagado_real_final <= 0 or monto_pagado_real_final >= float(monto_g)):
+            st.error("Para un gasto parcial, el monto real pagado debe ser mayor que 0 y menor que el monto total.")
+            st.stop()
+        if tratamiento_gas == "Anticipo / prepago" and int(prepago_meses or 0) <= 0:
+            st.error("Debes indicar el plazo del prepago en meses.")
+            st.stop()
         cronograma_fin = _build_financing_schedule(
             principal=fin_monto_gas,
             fecha_inicio=fin_fecha_inicio_gas,
@@ -2332,6 +2629,9 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             COL_CAT: categoria_g,
             COL_EMP: (empresa_g or EMPRESA_DEFAULT).strip(),
             COL_POR_PAG: por_pagar_final,
+            COL_CTP_TIPO: (tipo_contraparte_g or "").strip(),
+            COL_CTP_NOMBRE: (contraparte_g or "").strip(),
+            COL_PAGO_REAL_MONTO: float(monto_pagado_real_final),
             COL_REC: recurrente_gas,
             COL_REC_PER: rec_period_gas if _bool_from_toggle(recurrente_gas) else "",
             COL_REC_REG: rec_rule_gas if _bool_from_toggle(recurrente_gas) else "",
@@ -2347,6 +2647,8 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             COL_GAS_SUB: subclas_gas,
             COL_GAS_DET: detalle_gas,
             COL_TRAT_BAL_GAS: tratamiento_gas,
+            COL_PREPAGO_MESES: int(prepago_meses) if tratamiento_gas == "Anticipo / prepago" else 0,
+            COL_PREPAGO_FEC_INI: _ts(prepago_inicio) if tratamiento_gas == "Anticipo / prepago" else pd.NaT,
             COL_AF_TOGGLE: YES_NO_OPTIONS[1] if activo_fijo_on else YES_NO_OPTIONS[0],
             COL_AF_TIPO: activo_tipo if activo_fijo_on else "",
             COL_AF_VIDA: int(activo_vida) if activo_fijo_on else 0,
@@ -2385,14 +2687,19 @@ gas_colcfg = {
     COL_REC_DUR: st.column_config.SelectboxColumn(COL_REC_DUR, options=REC_DURATION_OPTIONS),
     COL_FPAGO:   st.column_config.DateColumn("Fecha esperada de pago"),
     COL_FPAGO_REAL: st.column_config.DateColumn("Fecha real de pago"),
+    COL_PAGO_REAL_MONTO: st.column_config.NumberColumn("Monto real pagado", format="$%0.2f"),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     COL_CAT:     st.column_config.SelectboxColumn(
         "Categoria operativa",
         options=GAS_CATEGORY_OPTIONS,
     ),
-    COL_GAS_SUB: st.column_config.SelectboxColumn("Clasificacion gerencial", options=GAS_SUB_OPTIONS),
+    COL_GAS_SUB: st.column_config.TextColumn("Clasificacion gerencial", disabled=True),
     COL_GAS_DET: st.column_config.SelectboxColumn(COL_GAS_DET, options=GAS_DETAIL_OPTIONS),
     COL_TRAT_BAL_GAS: st.column_config.SelectboxColumn(COL_TRAT_BAL_GAS, options=GAS_BALANCE_OPTIONS),
+    COL_PREPAGO_MESES: st.column_config.NumberColumn("Plazo prepago meses", format="%d"),
+    COL_PREPAGO_FEC_INI: st.column_config.DateColumn("Fecha inicio prepago"),
+    COL_CTP_TIPO: st.column_config.SelectboxColumn("Tipo contraparte", options=CONTRAPARTE_TYPE_OPTIONS),
+    COL_CTP_NOMBRE: st.column_config.TextColumn("Contraparte"),
     COL_AF_TOGGLE: st.column_config.SelectboxColumn(COL_AF_TOGGLE, options=YES_NO_OPTIONS),
     COL_AF_DEP_TOGGLE: st.column_config.SelectboxColumn(COL_AF_DEP_TOGGLE, options=YES_NO_OPTIONS),
     COL_FIN_TOGGLE: st.column_config.SelectboxColumn(COL_FIN_TOGGLE, options=YES_NO_OPTIONS),
@@ -2406,7 +2713,8 @@ gas_colcfg = {
 }
 gas_order = [x for x in [
     COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_GAS_SUB, COL_GAS_DET, COL_TRAT_BAL_GAS, COL_EMP,
-    COL_POR_PAG, COL_FPAGO, COL_FPAGO_REAL, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
+    COL_POR_PAG, COL_FPAGO, COL_FPAGO_REAL, COL_PAGO_REAL_MONTO, COL_CTP_TIPO, COL_CTP_NOMBRE,
+    COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI,
     COL_AF_TOGGLE, COL_AF_DEP_TOGGLE, COL_FIN_TOGGLE, COL_FIN_TIPO,
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_USER, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]
@@ -2432,8 +2740,10 @@ edited_gas = _editor_state_to_dataframe(
         )
     )(df_gas_f[gas_cols_view].copy()),
     "tabla_gastos",
-    numeric_cols={COL_MONTO},
+    numeric_cols={COL_MONTO, COL_PAGO_REAL_MONTO, COL_PREPAGO_MESES},
 )
+edited_gas = _autoderive_gas_df(edited_gas)
+gas_table_errors = _validate_gas_df(edited_gas)
 
 if COL_POR_PAG in st.session_state.df_gas.columns and COL_FPAGO in st.session_state.df_gas.columns:
     miss_pago_mask = (
@@ -2483,13 +2793,18 @@ else:
             df_gas_f = _match_df(df_gas_f)
 
 # === ALTAS/EDICIONES (sync normal) ===
-sync_cambios(
-    edited_df=edited_gas, filtered_df=df_gas_f,
-    base_df_key="df_gas", worksheet_name=WS_GAS,
-    session_state=st.session_state, write_worksheet=write_worksheet,
-    client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
-    ensure_columns_fn=ensure_gastos_columns,
-)
+if gas_table_errors:
+    st.error("No se guardaron cambios en Gastos hasta corregir la tabla editable.")
+    for msg in gas_table_errors[:12]:
+        st.caption(f"- {msg}")
+else:
+    sync_cambios(
+        edited_df=edited_gas, filtered_df=df_gas_f,
+        base_df_key="df_gas", worksheet_name=WS_GAS,
+        session_state=st.session_state, write_worksheet=write_worksheet,
+        client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
+        ensure_columns_fn=_autoderive_gas_df,
+    )
 
 
 

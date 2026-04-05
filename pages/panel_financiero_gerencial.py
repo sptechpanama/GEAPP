@@ -33,15 +33,27 @@ from core.finance_v2.constants import (
     COL_CATEGORIA,
     COL_CLIENTE_NOMBRE,
     COL_CONCEPTO,
+    COL_CONTRAPARTE,
     COL_DESC,
     COL_EMPRESA,
     COL_FECHA_COBRO,
+    COL_FECHA_REAL_COBRO,
+    COL_FECHA_REAL_PAGO,
+    COL_FINANCIAMIENTO_FECHA_INICIO,
+    COL_FINANCIAMIENTO_MONTO,
+    COL_FINANCIAMIENTO_TIPO,
     COL_MONTO,
+    COL_MONTO_REAL_COBRADO,
+    COL_MONTO_REAL_PAGADO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
+    COL_PREPAGO_FECHA_INICIO,
+    COL_PREPAGO_MESES,
     COL_PROVEEDOR,
     COL_PROYECTO,
+    COL_TIPO_CONTRAPARTE,
     COL_TRATAMIENTO_BALANCE_ING,
+    COL_TRATAMIENTO_BALANCE_GAS,
 )
 from ui.theme import apply_global_theme
 
@@ -316,16 +328,19 @@ def _prepare_expected_dates_for_balance(split: dict[str, pd.DataFrame]) -> tuple
         ing_p = ing_p[(trat_ing == "") | (trat_ing == "Cuenta por cobrar")].copy()
     ing_p["fecha_origen"] = pd.to_datetime(ing_p.get(COL_FECHA), errors="coerce")
     ing_p["fecha_esperada"] = pd.to_datetime(ing_p.get(COL_FECHA_COBRO), errors="coerce")
-    ing_p["monto"] = pd.to_numeric(ing_p.get(COL_MONTO), errors="coerce").fillna(0.0)
+    ing_p["monto"] = pd.to_numeric(ing_p.get("__monto_pendiente", ing_p.get(COL_MONTO)), errors="coerce").fillna(0.0)
 
     gas_p = split["gas_pend"].copy()
+    if COL_TRATAMIENTO_BALANCE_GAS in gas_p.columns:
+        trat_gas = gas_p[COL_TRATAMIENTO_BALANCE_GAS].astype(str)
+        gas_p = gas_p[trat_gas != "Cancelacion de pasivo / deuda"].copy()
     gas_p["fecha_origen"] = pd.to_datetime(gas_p.get(COL_FECHA), errors="coerce")
     gas_p["fecha_esperada"] = pd.to_datetime(gas_p.get("__fecha_pago_estimada"), errors="coerce")
     gas_p.loc[gas_p["fecha_esperada"].isna(), "fecha_esperada"] = pd.to_datetime(
         gas_p.loc[gas_p["fecha_esperada"].isna(), COL_FECHA],
         errors="coerce",
     )
-    gas_p["monto"] = pd.to_numeric(gas_p.get(COL_MONTO), errors="coerce").fillna(0.0)
+    gas_p["monto"] = pd.to_numeric(gas_p.get("__monto_pendiente", gas_p.get(COL_MONTO)), errors="coerce").fillna(0.0)
     return ing_p, gas_p
 
 
@@ -479,6 +494,88 @@ def _build_verificar_por_corregir(
         "Asignar Fecha esperada de pago.",
     )
 
+    ing_real_amount = pd.to_numeric(ing_f.get(COL_MONTO_REAL_COBRADO), errors="coerce").fillna(0.0)
+    gas_real_amount = pd.to_numeric(gas_f.get(COL_MONTO_REAL_PAGADO), errors="coerce").fillna(0.0)
+    ing_real_date = pd.to_datetime(ing_f.get(COL_FECHA_REAL_COBRO), errors="coerce")
+    gas_real_date = pd.to_datetime(gas_f.get(COL_FECHA_REAL_PAGO), errors="coerce")
+    ing_counterparty = ing_f.get(COL_CONTRAPARTE, pd.Series("", index=ing_f.index)).astype(str).str.strip()
+    gas_counterparty = gas_f.get(COL_CONTRAPARTE, pd.Series("", index=gas_f.index)).astype(str).str.strip()
+    ing_balance = ing_f.get(COL_TRATAMIENTO_BALANCE_ING, pd.Series("", index=ing_f.index)).astype(str).str.strip()
+    gas_balance = gas_f.get(COL_TRATAMIENTO_BALANCE_GAS, pd.Series("", index=gas_f.index)).astype(str).str.strip()
+
+    ing_partial_missing_date = ing_f[COL_POR_COBRAR].map(lambda x: str(x).strip().lower()).ne("no") & ing_real_amount.gt(0) & ing_real_date.isna() if COL_POR_COBRAR in ing_f.columns else pd.Series(False, index=ing_f.index)
+    gas_partial_missing_date = gas_f[COL_POR_PAGAR].map(lambda x: str(x).strip().lower()).ne("no") & gas_real_amount.gt(0) & gas_real_date.isna() if COL_POR_PAGAR in gas_f.columns else pd.Series(False, index=gas_f.index)
+    prepago_missing_cfg = gas_balance.eq("Anticipo / prepago") & (
+        pd.to_numeric(gas_f.get(COL_PREPAGO_MESES), errors="coerce").fillna(0).le(0)
+        | pd.to_datetime(gas_f.get(COL_PREPAGO_FECHA_INICIO), errors="coerce").isna()
+    )
+    ing_counterparty_missing = ing_balance.isin(["Patrimonio", "Pasivo financiero"]) & ing_counterparty.eq("")
+    gas_counterparty_missing = gas_balance.isin(["Inversion / participacion en otra empresa", "Cuenta por cobrar / prestamo otorgado"]) & gas_counterparty.eq("")
+
+    checks.append(
+        {
+            "check": "Cobros/pagos parciales consistentes",
+            "status": "OK" if int(ing_partial_missing_date.sum() + gas_partial_missing_date.sum()) == 0 else "REVISAR",
+            "detalle": (
+                f"Ingresos parciales sin fecha real: {int(ing_partial_missing_date.sum())} | "
+                f"Gastos parciales sin fecha real: {int(gas_partial_missing_date.sum())}"
+            ),
+        }
+    )
+    checks.append(
+        {
+            "check": "Prepagos configurados",
+            "status": "OK" if int(prepago_missing_cfg.sum()) == 0 else "REVISAR",
+            "detalle": f"Registros de prepago incompletos: {int(prepago_missing_cfg.sum())}",
+        }
+    )
+    checks.append(
+        {
+            "check": "Contrapartes en movimientos especiales",
+            "status": "OK" if int(ing_counterparty_missing.sum() + gas_counterparty_missing.sum()) == 0 else "REVISAR",
+            "detalle": (
+                f"Ingresos especiales sin contraparte: {int(ing_counterparty_missing.sum())} | "
+                f"Gastos especiales sin contraparte: {int(gas_counterparty_missing.sum())}"
+            ),
+        }
+    )
+
+    _append_issue(
+        ing_f,
+        "Ingresos",
+        ing_partial_missing_date,
+        "Cobro parcial sin fecha real",
+        "Completar Fecha real de cobro o dejar el monto real en cero.",
+    )
+    _append_issue(
+        gas_f,
+        "Gastos",
+        gas_partial_missing_date,
+        "Pago parcial sin fecha real",
+        "Completar Fecha real de pago o dejar el monto real en cero.",
+    )
+    _append_issue(
+        gas_f,
+        "Gastos",
+        prepago_missing_cfg,
+        "Prepago incompleto",
+        "Completar plazo y fecha inicio del prepago.",
+    )
+    _append_issue(
+        ing_f,
+        "Ingresos",
+        ing_counterparty_missing,
+        "Movimiento especial sin contraparte",
+        "Completar la contraparte del aporte o financiamiento.",
+    )
+    _append_issue(
+        gas_f,
+        "Gastos",
+        gas_counterparty_missing,
+        "Movimiento especial sin contraparte",
+        "Completar la contraparte de la inversion o prestamo.",
+    )
+
     # Deteccion de posibles gastos fijos no cargados.
     # Debe tolerar hojas incompletas o fechas invalidas sin romper la pagina.
     gas_fecha_series = (
@@ -549,6 +646,64 @@ def _build_verificar_por_corregir(
     return checks, issues_df
 
 
+def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    def _num(df: pd.DataFrame, col: str, fallback: str | None = None) -> pd.Series:
+        if df is None or df.empty:
+            return pd.Series(dtype="float64")
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        if fallback and fallback in df.columns:
+            return pd.to_numeric(df[fallback], errors="coerce").fillna(0.0)
+        return pd.Series(0.0, index=df.index)
+
+    def _date(df: pd.DataFrame, col: str, fallback: str | None = None) -> pd.Series:
+        if df is None or df.empty:
+            return pd.Series(dtype="datetime64[ns]")
+        if col in df.columns:
+            return pd.to_datetime(df[col], errors="coerce")
+        if fallback and fallback in df.columns:
+            return pd.to_datetime(df[fallback], errors="coerce")
+        return pd.Series(pd.NaT, index=df.index)
+
+    def _make_view(df: pd.DataFrame, label: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        out = pd.DataFrame(
+            {
+                "tipo_registro": label,
+                "empresa": df.get(COL_EMPRESA, pd.Series("", index=df.index)).astype(str),
+                "tipo_contraparte": df.get(COL_TIPO_CONTRAPARTE, pd.Series("", index=df.index)).astype(str),
+                "contraparte": df.get(COL_CONTRAPARTE, pd.Series("", index=df.index)).astype(str),
+                "fecha_movimiento": _date(df, COL_FECHA),
+                "fecha_inicio": _date(df, COL_FINANCIAMIENTO_FECHA_INICIO, COL_FECHA),
+                "tipo_financiamiento": df.get(COL_FINANCIAMIENTO_TIPO, pd.Series("", index=df.index)).astype(str),
+                "monto_principal_registrado": _num(df, COL_FINANCIAMIENTO_MONTO, COL_MONTO),
+                "monto_operativo_registrado": _num(df, COL_MONTO),
+            }
+        )
+        return out.reset_index(drop=True)
+
+    ing_balance = ing_scope.get(COL_TRATAMIENTO_BALANCE_ING, pd.Series("", index=ing_scope.index)).astype(str).str.strip()
+    gas_balance = gas_scope.get(COL_TRATAMIENTO_BALANCE_GAS, pd.Series("", index=gas_scope.index)).astype(str).str.strip()
+
+    aportes = _make_view(ing_scope[ing_balance.eq("Patrimonio")].copy(), "Aporte de socio / capital")
+    deuda = _make_view(ing_scope[ing_balance.eq("Pasivo financiero")].copy(), "Financiamiento recibido")
+    prestamos_otorgados = _make_view(
+        gas_scope[gas_balance.eq("Cuenta por cobrar / prestamo otorgado")].copy(),
+        "Prestamo otorgado",
+    )
+    inversiones = _make_view(
+        gas_scope[gas_balance.eq("Inversion / participacion en otra empresa")].copy(),
+        "Inversion / participacion",
+    )
+    return {
+        "aportes": aportes,
+        "deuda": deuda,
+        "prestamos_otorgados": prestamos_otorgados,
+        "inversiones": inversiones,
+    }
+
+
 st.title("Panel Financiero Gerencial")
 st.caption(
     "Vista gerencial y analitica construida sobre los mismos datos de Finanzas 1. "
@@ -566,9 +721,10 @@ with st.expander("Informacion de interes", expanded=False):
     st.markdown("#### Pendiente para robustecer")
     st.markdown(
         "- Manejo operativo de inventario.\n"
-        "- Devengo automatico de prepagos.\n"
+        "- Cobros y pagos parciales multiples sobre un mismo registro.\n"
         "- Cierre mensual persistente.\n"
-        "- Conciliacion bancaria."
+        "- Conciliacion bancaria.\n"
+        "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
 
 if "finanzas2_cache_token" not in st.session_state:
@@ -824,6 +980,7 @@ balance = build_balance_general_simplificado(
     prestamos_recibidos=float(balance_components.get("prestamos_recibidos", 0.0)),
     aportes_capital=float(balance_components.get("aportes_capital", 0.0)),
 )
+debt_views = _build_deuda_inversion_views(ing_scope, gas_scope)
 
 analisis = build_analisis_gerencial(ing_f, gas_f, cxc_df, include_miscelaneos=include_misc)
 
@@ -1351,6 +1508,40 @@ with tab_i:
             },
         )
         _series_to_csv_download(issues_view, "finanzas2_por_corregir.csv", "Exportar por corregir")
+
+with st.expander("Deudas e inversiones", expanded=False):
+    st.caption(
+        "Resumen especifico de financiamientos, prestamos otorgados, inversiones y aportes de capital. "
+        "Los montos de detalle se muestran por principal o monto registrado; el saldo contable agregado se refleja en el balance."
+    )
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Prestamos recibidos", format_money_es(float(balance_components.get("prestamos_recibidos", 0.0))))
+    d2.metric("Prestamos otorgados", format_money_es(float(balance_components.get("prestamos_otorgados", 0.0))))
+    d3.metric("Inversiones / participaciones", format_money_es(float(balance_components.get("inversiones_participaciones", 0.0))))
+    d4.metric("Aportes de capital", format_money_es(float(balance_components.get("aportes_capital", 0.0))))
+
+    for title, key in [
+        ("Financiamientos recibidos", "deuda"),
+        ("Prestamos otorgados", "prestamos_otorgados"),
+        ("Inversiones / participaciones", "inversiones"),
+        ("Aportes de socio / capital", "aportes"),
+    ]:
+        st.markdown(f"#### {title}")
+        df_view = debt_views.get(key, pd.DataFrame())
+        if df_view.empty:
+            st.info("Sin registros en el alcance filtrado.")
+            continue
+        st.dataframe(
+            df_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "fecha_movimiento": st.column_config.DateColumn("Fecha movimiento"),
+                "fecha_inicio": st.column_config.DateColumn("Fecha inicio"),
+                "monto_principal_registrado": st.column_config.NumberColumn("Principal registrado", format="$%0.2f"),
+                "monto_operativo_registrado": st.column_config.NumberColumn("Monto registrado", format="$%0.2f"),
+            },
+        )
 
 st.markdown("---")
 st.caption(

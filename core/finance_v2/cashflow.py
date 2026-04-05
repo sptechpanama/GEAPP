@@ -43,24 +43,30 @@ def _build_cash_movements(df_ing_real: pd.DataFrame, df_gas_real: pd.DataFrame) 
     ing = df_ing_real.copy()
     ing_fecha = pd.to_datetime(ing.get(COL_FECHA_REAL_COBRO), errors="coerce")
     ing_fecha = ing_fecha.fillna(pd.to_datetime(ing.get(COL_FECHA), errors="coerce"))
+    ing_monto = pd.to_numeric(ing.get("__monto_realizado"), errors="coerce")
+    if ing_monto.isna().all():
+        ing_monto = pd.to_numeric(ing.get(COL_MONTO), errors="coerce")
     ing = pd.DataFrame(
         {
             COL_FECHA: ing_fecha,
             COL_EMPRESA: ing.get(COL_EMPRESA, ""),
             "tipo": "entrada",
-            "flujo": pd.to_numeric(ing.get(COL_MONTO), errors="coerce").fillna(0.0),
+            "flujo": ing_monto.fillna(0.0),
         }
     )
 
     gas = df_gas_real.copy()
     gas_fecha = pd.to_datetime(gas.get(COL_FECHA_REAL_PAGO), errors="coerce")
     gas_fecha = gas_fecha.fillna(pd.to_datetime(gas.get(COL_FECHA), errors="coerce"))
+    gas_monto = pd.to_numeric(gas.get("__monto_realizado"), errors="coerce")
+    if gas_monto.isna().all():
+        gas_monto = pd.to_numeric(gas.get(COL_MONTO), errors="coerce")
     gas = pd.DataFrame(
         {
             COL_FECHA: gas_fecha,
             COL_EMPRESA: gas.get(COL_EMPRESA, ""),
             "tipo": "salida",
-            "flujo": -pd.to_numeric(gas.get(COL_MONTO), errors="coerce").fillna(0.0),
+            "flujo": -gas_monto.fillna(0.0),
         }
     )
 
@@ -263,7 +269,9 @@ def build_cashflow_proyectado(
     if not cxc.empty:
         cxc.loc[cxc["fecha_evento"].isna(), "fecha_evento"] = pd.to_datetime(cxc.loc[cxc["fecha_evento"].isna(), COL_FECHA], errors="coerce")
     cxc["fecha_fuente"] = "fecha_cobro"
-    cxc["monto_evento"] = pd.to_numeric(cxc.get(COL_MONTO), errors="coerce").fillna(0.0)
+    cxc["monto_evento"] = pd.to_numeric(cxc.get("__monto_pendiente"), errors="coerce").fillna(
+        pd.to_numeric(cxc.get(COL_MONTO), errors="coerce").fillna(0.0)
+    )
     cxc["tipo_evento"] = "cobro"
     cxc["__is_recurrente"] = cxc.get(COL_RECURRENTE, pd.Series("No", index=cxc.index)).map(yes_no_flag).eq("Si") if not cxc.empty else pd.Series(dtype=bool)
 
@@ -273,13 +281,17 @@ def build_cashflow_proyectado(
     if not cxp.empty:
         cxp.loc[cxp["fecha_evento"].isna(), "fecha_evento"] = pd.to_datetime(cxp.loc[cxp["fecha_evento"].isna(), COL_FECHA], errors="coerce")
     cxp["fecha_fuente"] = "fecha_pago_estimada"
-    cxp["monto_evento"] = -pd.to_numeric(cxp.get(COL_MONTO), errors="coerce").fillna(0.0)
+    cxp["monto_evento"] = -pd.to_numeric(cxp.get("__monto_pendiente"), errors="coerce").fillna(
+        pd.to_numeric(cxp.get(COL_MONTO), errors="coerce").fillna(0.0)
+    )
     cxp["tipo_evento"] = "pago"
     cxp["__is_recurrente"] = cxp.get(COL_RECURRENTE, pd.Series("No", index=cxp.index)).map(yes_no_flag).eq("Si") if not cxp.empty else pd.Series(dtype=bool)
 
     recurring_cxc = int(cxc["__is_recurrente"].sum()) if not cxc.empty and "__is_recurrente" in cxc.columns else 0
     recurring_cxp = int(cxp["__is_recurrente"].sum()) if not cxp.empty and "__is_recurrente" in cxp.columns else 0
 
+    cxc = cxc[cxc["monto_evento"] > 0].copy()
+    cxp = cxp[cxp["monto_evento"] < 0].copy()
     cxc_events = _expand_recurrent_events(cxc, today_norm, horizon_end)
     cxp_events = _expand_recurrent_events(cxp, today_norm, horizon_end)
     financing_events = _build_financing_events(df_ing, df_gas, today_norm, horizon_end)
