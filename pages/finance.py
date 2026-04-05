@@ -1757,7 +1757,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
 
     st.markdown("#### Clasificacion del ingreso")
     categoria_ing = st.selectbox(
-        "Categoria principal",
+        "Categoria operativa",
         ING_CATEGORY_OPTIONS,
         index=0,
         key="ing_categoria_quick",
@@ -1777,7 +1777,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         "Naturaleza ingreso (automatica)",
         value=naturaleza_ing,
         disabled=True,
-        help="Se deduce automaticamente desde Categoria principal.",
+        help="Se deduce automaticamente desde Categoria operativa.",
     )
 
     st.markdown("#### Tratamiento en balance")
@@ -1929,7 +1929,7 @@ ing_colcfg = {
     COL_REC_DUR: st.column_config.SelectboxColumn(COL_REC_DUR, options=REC_DURATION_OPTIONS),
     COL_FCOBRO:  st.column_config.DateColumn("Fecha esperada de cobro"),
     COL_FCOBRO_REAL: st.column_config.DateColumn("Fecha real de cobro"),
-    COL_CAT:     st.column_config.SelectboxColumn(COL_CAT, options=ing_cat_options),
+    COL_CAT:     st.column_config.SelectboxColumn("Categoria operativa", options=ing_cat_options),
     COL_ING_DET: st.column_config.SelectboxColumn(COL_ING_DET, options=ING_DETAIL_OPTIONS),
     COL_ING_NAT: st.column_config.SelectboxColumn(COL_ING_NAT, options=ING_NATURE_OPTIONS),
     COL_TRAT_BAL_ING: st.column_config.SelectboxColumn(COL_TRAT_BAL_ING, options=ING_BALANCE_OPTIONS),
@@ -2103,7 +2103,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             )
 
     categoria_g = st.selectbox(
-        "Categoria principal",
+        "Categoria operativa",
         GAS_CATEGORY_OPTIONS,
         index=0,
         key="gas_categoria_quick",
@@ -2206,13 +2206,12 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
 
     st.markdown("#### Clasificacion del gasto")
     subclas_gas_default = _derive_gas_sub(categoria_g)
-    subclas_gas = st.selectbox(
-        "Subclasificacion gerencial",
-        GAS_SUB_OPTIONS,
-        index=GAS_SUB_OPTIONS.index(subclas_gas_default if subclas_gas_default in GAS_SUB_OPTIONS else "Operativo variable"),
-        key="gas_subclas_gas_quick",
-        help=_help_for_option(GAS_SUB_HELP, st.session_state.get("gas_subclas_gas_quick", subclas_gas_default)),
-        on_change=lambda: _mark_form_force_open("gas"),
+    subclas_gas = subclas_gas_default
+    st.text_input(
+        "Clasificacion gerencial (automatica)",
+        value=subclas_gas,
+        disabled=True,
+        help=_help_for_option(GAS_SUB_HELP, subclas_gas_default),
     )
     detalle_gas = st.selectbox(
         "Detalle",
@@ -2388,10 +2387,10 @@ gas_colcfg = {
     COL_FPAGO_REAL: st.column_config.DateColumn("Fecha real de pago"),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
     COL_CAT:     st.column_config.SelectboxColumn(
-        COL_CAT,
+        "Categoria operativa",
         options=GAS_CATEGORY_OPTIONS,
     ),
-    COL_GAS_SUB: st.column_config.SelectboxColumn(COL_GAS_SUB, options=GAS_SUB_OPTIONS),
+    COL_GAS_SUB: st.column_config.SelectboxColumn("Clasificacion gerencial", options=GAS_SUB_OPTIONS),
     COL_GAS_DET: st.column_config.SelectboxColumn(COL_GAS_DET, options=GAS_DETAIL_OPTIONS),
     COL_TRAT_BAL_GAS: st.column_config.SelectboxColumn(COL_TRAT_BAL_GAS, options=GAS_BALANCE_OPTIONS),
     COL_AF_TOGGLE: st.column_config.SelectboxColumn(COL_AF_TOGGLE, options=YES_NO_OPTIONS),
