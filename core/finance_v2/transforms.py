@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import date
+import json
 
 import pandas as pd
 
@@ -43,6 +44,10 @@ from .constants import (
     COL_MONTO,
     COL_MONTO_REAL_COBRADO,
     COL_MONTO_REAL_PAGADO,
+    COL_EVENTOS_PARCIALES_ING,
+    COL_EVENTOS_PARCIALES_GAS,
+    COL_INVENTARIO_MOVIMIENTO,
+    COL_INVENTARIO_ITEM,
     COL_NATURALEZA_INGRESO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
@@ -125,6 +130,26 @@ def _coerce_non_negative_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").fillna(0.0).clip(lower=0.0)
 
 
+def _parse_partial_events(raw_value) -> list[dict[str, object]]:
+    try:
+        data = json.loads(str(raw_value or "[]"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        fecha = pd.to_datetime(item.get("fecha"), errors="coerce")
+        monto = float(pd.to_numeric(pd.Series([item.get("monto", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        nota = str(item.get("nota", "") or "").strip()
+        if pd.isna(fecha) or monto <= 0:
+            continue
+        rows.append({"fecha": fecha, "monto": monto, "nota": nota})
+    return rows
+
+
 def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out = _ensure_columns(df_ing, INGRESOS_BASE_COLUMNS)
     out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
@@ -164,6 +189,7 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
         COL_FINANCIAMIENTO_CRONOGRAMA,
         COL_TIPO_CONTRAPARTE,
         COL_CONTRAPARTE,
+        COL_EVENTOS_PARCIALES_ING,
     ]:
         out[col] = out[col].map(normalize_text)
 
@@ -197,9 +223,15 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     ]
     total_ing = _coerce_non_negative_numeric(out[COL_MONTO])
     realized_ing = _coerce_non_negative_numeric(out[COL_MONTO_REAL_COBRADO]).clip(upper=total_ing)
+    event_realized = out[COL_EVENTOS_PARCIALES_ING].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
+    event_realized = pd.to_numeric(event_realized, errors="coerce").fillna(0.0).clip(lower=0.0)
+    realized_ing = event_realized.where(event_realized > 0, realized_ing).clip(upper=total_ing)
     full_realized_mask = out[COL_POR_COBRAR].eq("No")
     realized_ing = realized_ing.where(~full_realized_mask, total_ing)
     out[COL_MONTO_REAL_COBRADO] = realized_ing
+    out.loc[event_realized > 0, COL_FECHA_REAL_COBRO] = out.loc[event_realized > 0, COL_EVENTOS_PARCIALES_ING].map(
+        lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)
+    )
     out["__monto_realizado"] = realized_ing
     out["__monto_pendiente"] = (total_ing - realized_ing).clip(lower=0.0)
     out.loc[full_realized_mask, "__monto_pendiente"] = 0.0
@@ -260,6 +292,9 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
         COL_FINANCIAMIENTO_CRONOGRAMA,
         COL_TIPO_CONTRAPARTE,
         COL_CONTRAPARTE,
+        COL_EVENTOS_PARCIALES_GAS,
+        COL_INVENTARIO_MOVIMIENTO,
+        COL_INVENTARIO_ITEM,
     ]:
         out[col] = out[col].map(normalize_text)
 
@@ -283,15 +318,24 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out.loc[treat_mask, COL_TRATAMIENTO_BALANCE_GAS] = out.loc[treat_mask, COL_CATEGORIA].map(_derive_gas_balance)
     total_gas = _coerce_non_negative_numeric(out[COL_MONTO])
     realized_gas = _coerce_non_negative_numeric(out[COL_MONTO_REAL_PAGADO]).clip(upper=total_gas)
+    event_realized = out[COL_EVENTOS_PARCIALES_GAS].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
+    event_realized = pd.to_numeric(event_realized, errors="coerce").fillna(0.0).clip(lower=0.0)
+    realized_gas = event_realized.where(event_realized > 0, realized_gas).clip(upper=total_gas)
     full_paid_mask = out[COL_POR_PAGAR].eq("No")
     realized_gas = realized_gas.where(~full_paid_mask, total_gas)
     out[COL_MONTO_REAL_PAGADO] = realized_gas
+    out.loc[event_realized > 0, COL_FECHA_REAL_PAGO] = out.loc[event_realized > 0, COL_EVENTOS_PARCIALES_GAS].map(
+        lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)
+    )
     out["__monto_realizado"] = realized_gas
     out["__monto_pendiente"] = (total_gas - realized_gas).clip(lower=0.0)
     out.loc[full_paid_mask, "__monto_pendiente"] = 0.0
     prepago_mask = out[COL_TRATAMIENTO_BALANCE_GAS].eq("Anticipo / prepago")
     out.loc[~prepago_mask, [COL_PREPAGO_MESES, COL_PREPAGO_FECHA_INICIO]] = [0, pd.NaT]
     out.loc[prepago_mask & out[COL_PREPAGO_FECHA_INICIO].isna(), COL_PREPAGO_FECHA_INICIO] = out.loc[prepago_mask & out[COL_PREPAGO_FECHA_INICIO].isna(), COL_FECHA]
+    inventory_mask = out[COL_TRATAMIENTO_BALANCE_GAS].eq("Inventario")
+    out.loc[~inventory_mask, [COL_INVENTARIO_MOVIMIENTO, COL_INVENTARIO_ITEM]] = ["", ""]
+    out.loc[inventory_mask & out[COL_INVENTARIO_MOVIMIENTO].eq(""), COL_INVENTARIO_MOVIMIENTO] = "Entrada"
 
     fallback_candidates = [
         COL_FECHA_PAGO,

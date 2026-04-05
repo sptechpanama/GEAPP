@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 
 
@@ -10,7 +12,33 @@ def _extract_income_movements(df_ing: pd.DataFrame) -> pd.DataFrame:
     if df_ing is None or df_ing.empty or "Monto" not in df_ing or "Fecha" not in df_ing:
         return pd.DataFrame(columns=["Fecha", "Monto"])
 
+    def _parse_events(raw):
+        try:
+            data = json.loads(str(raw or "[]"))
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        rows = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            fecha = pd.to_datetime(item.get("fecha"), errors="coerce")
+            monto = float(pd.to_numeric(pd.Series([item.get("monto", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+            if pd.isna(fecha) or monto <= 0:
+                continue
+            rows.append({"Fecha": fecha, "Monto": monto})
+        return rows
+
     out = df_ing.copy()
+    partial_rows: list[dict] = []
+    for _, row in out.iterrows():
+        events = _parse_events(row.get("Detalle cobros parciales"))
+        for evt in events:
+            partial_rows.append(evt)
+    if partial_rows:
+        return pd.DataFrame(partial_rows).sort_values("Fecha").reset_index(drop=True)
+
     total = pd.to_numeric(out.get("Monto"), errors="coerce").fillna(0.0)
     real_amount = pd.to_numeric(out.get("Monto real cobrado"), errors="coerce").fillna(0.0)
     estado = out.get("Por_cobrar", pd.Series("No", index=out.index)).map(_yes_no_norm)
@@ -34,7 +62,33 @@ def _extract_expense_movements(df_gas: pd.DataFrame) -> pd.DataFrame:
     if df_gas is None or df_gas.empty or "Monto" not in df_gas or "Fecha" not in df_gas:
         return pd.DataFrame(columns=["Fecha", "Monto"])
 
+    def _parse_events(raw):
+        try:
+            data = json.loads(str(raw or "[]"))
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        rows = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            fecha = pd.to_datetime(item.get("fecha"), errors="coerce")
+            monto = float(pd.to_numeric(pd.Series([item.get("monto", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+            if pd.isna(fecha) or monto <= 0:
+                continue
+            rows.append({"Fecha": fecha, "Monto": -monto})
+        return rows
+
     out = df_gas.copy()
+    partial_rows: list[dict] = []
+    for _, row in out.iterrows():
+        events = _parse_events(row.get("Detalle pagos parciales"))
+        for evt in events:
+            partial_rows.append(evt)
+    if partial_rows:
+        return pd.DataFrame(partial_rows).sort_values("Fecha").reset_index(drop=True)
+
     total = pd.to_numeric(out.get("Monto"), errors="coerce").fillna(0.0)
     real_amount = pd.to_numeric(out.get("Monto real pagado"), errors="coerce").fillna(0.0)
     estado = out.get("Por_pagar", pd.Series("No", index=out.index)).map(_yes_no_norm)

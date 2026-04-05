@@ -9,6 +9,8 @@ import pandas as pd
 from .constants import (
     COL_CLIENTE_NOMBRE,
     COL_EMPRESA,
+    COL_EVENTOS_PARCIALES_GAS,
+    COL_EVENTOS_PARCIALES_ING,
     COL_FECHA,
     COL_FECHA_COBRO,
     COL_FECHA_PAGO,
@@ -39,35 +41,76 @@ def _safe_schedule(raw_value) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def _build_cash_movements(df_ing_real: pd.DataFrame, df_gas_real: pd.DataFrame) -> pd.DataFrame:
-    ing = df_ing_real.copy()
-    ing_fecha = pd.to_datetime(ing.get(COL_FECHA_REAL_COBRO), errors="coerce")
-    ing_fecha = ing_fecha.fillna(pd.to_datetime(ing.get(COL_FECHA), errors="coerce"))
-    ing_monto = pd.to_numeric(ing.get("__monto_realizado"), errors="coerce")
-    if ing_monto.isna().all():
-        ing_monto = pd.to_numeric(ing.get(COL_MONTO), errors="coerce")
-    ing = pd.DataFrame(
-        {
-            COL_FECHA: ing_fecha,
-            COL_EMPRESA: ing.get(COL_EMPRESA, ""),
-            "tipo": "entrada",
-            "flujo": ing_monto.fillna(0.0),
-        }
-    )
+def _safe_partial_events(raw_value) -> list[dict]:
+    try:
+        data = json.loads(str(raw_value or "[]"))
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
 
-    gas = df_gas_real.copy()
-    gas_fecha = pd.to_datetime(gas.get(COL_FECHA_REAL_PAGO), errors="coerce")
-    gas_fecha = gas_fecha.fillna(pd.to_datetime(gas.get(COL_FECHA), errors="coerce"))
-    gas_monto = pd.to_numeric(gas.get("__monto_realizado"), errors="coerce")
-    if gas_monto.isna().all():
-        gas_monto = pd.to_numeric(gas.get(COL_MONTO), errors="coerce")
-    gas = pd.DataFrame(
-        {
-            COL_FECHA: gas_fecha,
-            COL_EMPRESA: gas.get(COL_EMPRESA, ""),
-            "tipo": "salida",
-            "flujo": -gas_monto.fillna(0.0),
-        }
+
+def _expand_real_cash_events(
+    frame: pd.DataFrame,
+    *,
+    partials_col: str,
+    real_date_col: str,
+    sign: float,
+    tipo: str,
+) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=[COL_FECHA, COL_EMPRESA, "tipo", "flujo"])
+
+    rows: list[dict[str, object]] = []
+    for _, row in frame.iterrows():
+        partials = _safe_partial_events(row.get(partials_col))
+        if partials:
+            for event in partials:
+                event_date = pd.to_datetime(event.get("fecha"), errors="coerce")
+                event_amount = float(pd.to_numeric(pd.Series([event.get("monto", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+                if pd.isna(event_date) or event_amount == 0:
+                    continue
+                rows.append(
+                    {
+                        COL_FECHA: event_date,
+                        COL_EMPRESA: row.get(COL_EMPRESA, ""),
+                        "tipo": tipo,
+                        "flujo": sign * event_amount,
+                    }
+                )
+            continue
+
+        event_date = pd.to_datetime(row.get(real_date_col), errors="coerce")
+        if pd.isna(event_date):
+            event_date = pd.to_datetime(row.get(COL_FECHA), errors="coerce")
+        event_amount = float(pd.to_numeric(pd.Series([row.get("__monto_realizado", row.get(COL_MONTO, 0.0))]), errors="coerce").fillna(0.0).iloc[0])
+        if pd.isna(event_date) or event_amount == 0:
+            continue
+        rows.append(
+            {
+                COL_FECHA: event_date,
+                COL_EMPRESA: row.get(COL_EMPRESA, ""),
+                "tipo": tipo,
+                "flujo": sign * event_amount,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=[COL_FECHA, COL_EMPRESA, "tipo", "flujo"])
+
+
+def _build_cash_movements(df_ing_real: pd.DataFrame, df_gas_real: pd.DataFrame) -> pd.DataFrame:
+    ing = _expand_real_cash_events(
+        df_ing_real,
+        partials_col=COL_EVENTOS_PARCIALES_ING,
+        real_date_col=COL_FECHA_REAL_COBRO,
+        sign=1.0,
+        tipo="entrada",
+    )
+    gas = _expand_real_cash_events(
+        df_gas_real,
+        partials_col=COL_EVENTOS_PARCIALES_GAS,
+        real_date_col=COL_FECHA_REAL_PAGO,
+        sign=-1.0,
+        tipo="salida",
     )
 
     out = pd.concat([ing, gas], ignore_index=True)

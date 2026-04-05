@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, timedelta
 
@@ -39,9 +40,12 @@ from core.finance_v2.constants import (
     COL_FECHA_COBRO,
     COL_FECHA_REAL_COBRO,
     COL_FECHA_REAL_PAGO,
+    COL_FINANCIAMIENTO_CRONOGRAMA,
     COL_FINANCIAMIENTO_FECHA_INICIO,
     COL_FINANCIAMIENTO_MONTO,
     COL_FINANCIAMIENTO_TIPO,
+    COL_INVENTARIO_ITEM,
+    COL_INVENTARIO_MOVIMIENTO,
     COL_MONTO,
     COL_MONTO_REAL_COBRADO,
     COL_MONTO_REAL_PAGADO,
@@ -509,6 +513,10 @@ def _build_verificar_por_corregir(
         pd.to_numeric(gas_f.get(COL_PREPAGO_MESES), errors="coerce").fillna(0).le(0)
         | pd.to_datetime(gas_f.get(COL_PREPAGO_FECHA_INICIO), errors="coerce").isna()
     )
+    inventory_missing_cfg = gas_balance.eq("Inventario") & (
+        gas_f.get(COL_INVENTARIO_MOVIMIENTO, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq("")
+        | gas_f.get(COL_INVENTARIO_ITEM, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq("")
+    )
     ing_counterparty_missing = ing_balance.isin(["Patrimonio", "Pasivo financiero"]) & ing_counterparty.eq("")
     gas_counterparty_missing = gas_balance.isin(["Inversion / participacion en otra empresa", "Cuenta por cobrar / prestamo otorgado"]) & gas_counterparty.eq("")
 
@@ -527,6 +535,13 @@ def _build_verificar_por_corregir(
             "check": "Prepagos configurados",
             "status": "OK" if int(prepago_missing_cfg.sum()) == 0 else "REVISAR",
             "detalle": f"Registros de prepago incompletos: {int(prepago_missing_cfg.sum())}",
+        }
+    )
+    checks.append(
+        {
+            "check": "Inventario con datos minimos",
+            "status": "OK" if int(inventory_missing_cfg.sum()) == 0 else "REVISAR",
+            "detalle": f"Registros de inventario incompletos: {int(inventory_missing_cfg.sum())}",
         }
     )
     checks.append(
@@ -560,6 +575,13 @@ def _build_verificar_por_corregir(
         prepago_missing_cfg,
         "Prepago incompleto",
         "Completar plazo y fecha inicio del prepago.",
+    )
+    _append_issue(
+        gas_f,
+        "Gastos",
+        inventory_missing_cfg,
+        "Inventario incompleto",
+        "Completar movimiento inventario e item / referencia.",
     )
     _append_issue(
         ing_f,
@@ -646,6 +668,42 @@ def _build_verificar_por_corregir(
     return checks, issues_df
 
 
+def _safe_schedule_view(raw_value) -> list[dict]:
+    try:
+        data = json.loads(str(raw_value or "[]"))
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _schedule_position(row: pd.Series, as_of: pd.Timestamp) -> dict[str, object]:
+    principal = float(pd.to_numeric(pd.Series([row.get(COL_FINANCIAMIENTO_MONTO, row.get(COL_MONTO, 0.0))]), errors="coerce").fillna(0.0).iloc[0])
+    saldo = principal
+    next_date = pd.NaT
+    next_capital = 0.0
+    next_interes = 0.0
+    next_cuota = 0.0
+    for item in _safe_schedule_view(row.get(COL_FINANCIAMIENTO_CRONOGRAMA, "[]")):
+        due = pd.to_datetime(item.get("fecha"), errors="coerce")
+        if pd.isna(due):
+            continue
+        if due <= as_of:
+            saldo = float(item.get("saldo_pendiente", saldo) or saldo)
+            continue
+        next_date = due
+        next_capital = float(item.get("capital", 0.0) or 0.0)
+        next_interes = float(item.get("interes", 0.0) or 0.0)
+        next_cuota = float(item.get("cuota_total", 0.0) or 0.0)
+        break
+    return {
+        "saldo_estimado": max(0.0, float(saldo)),
+        "proxima_fecha": next_date,
+        "proximo_capital": float(next_capital),
+        "proximo_interes": float(next_interes),
+        "proxima_cuota": float(next_cuota),
+    }
+
+
 def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFrame) -> dict[str, pd.DataFrame]:
     def _num(df: pd.DataFrame, col: str, fallback: str | None = None) -> pd.Series:
         if df is None or df.empty:
@@ -668,6 +726,7 @@ def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFram
     def _make_view(df: pd.DataFrame, label: str) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
+        schedule_df = pd.DataFrame([_schedule_position(row, pd.Timestamp(date.today())) for _, row in df.iterrows()])
         out = pd.DataFrame(
             {
                 "tipo_registro": label,
@@ -681,6 +740,8 @@ def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFram
                 "monto_operativo_registrado": _num(df, COL_MONTO),
             }
         )
+        if not schedule_df.empty:
+            out = pd.concat([out.reset_index(drop=True), schedule_df.reset_index(drop=True)], axis=1)
         return out.reset_index(drop=True)
 
     ing_balance = ing_scope.get(COL_TRATAMIENTO_BALANCE_ING, pd.Series("", index=ing_scope.index)).astype(str).str.strip()
@@ -704,6 +765,74 @@ def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFram
     }
 
 
+def _build_inventory_operativo_view(gas_scope: pd.DataFrame) -> pd.DataFrame:
+    if gas_scope is None or gas_scope.empty:
+        return pd.DataFrame()
+    trat = gas_scope.get(COL_TRATAMIENTO_BALANCE_GAS, pd.Series("", index=gas_scope.index)).astype(str).str.strip()
+    inv = gas_scope[trat.eq("Inventario")].copy()
+    if inv.empty:
+        return pd.DataFrame()
+    inv["fecha"] = pd.to_datetime(inv.get(COL_FECHA), errors="coerce")
+    inv["monto_registrado"] = pd.to_numeric(inv.get(COL_MONTO), errors="coerce").fillna(0.0).abs()
+    inv["movimiento_inventario"] = inv.get(COL_INVENTARIO_MOVIMIENTO, pd.Series("", index=inv.index)).astype(str).str.strip()
+    inv["item_inventario"] = inv.get(COL_INVENTARIO_ITEM, pd.Series("", index=inv.index)).astype(str).str.strip()
+    inv["impacto_inventario"] = inv["monto_registrado"]
+    inv.loc[inv["movimiento_inventario"].isin(["Salida / consumo", "Ajuste negativo"]), "impacto_inventario"] *= -1.0
+    view = pd.DataFrame(
+        {
+            "fecha": inv["fecha"],
+            "empresa": inv.get(COL_EMPRESA, pd.Series("", index=inv.index)).astype(str),
+            "item_inventario": inv["item_inventario"],
+            "movimiento_inventario": inv["movimiento_inventario"],
+            "categoria": inv.get(COL_CATEGORIA, pd.Series("", index=inv.index)).astype(str),
+            "monto_registrado": inv["monto_registrado"],
+            "impacto_inventario": inv["impacto_inventario"],
+        }
+    )
+    return view.sort_values(["fecha", "empresa"], na_position="last").reset_index(drop=True)
+
+
+def _build_prepagos_view(gas_scope: pd.DataFrame, cutoff_date: date) -> pd.DataFrame:
+    if gas_scope is None or gas_scope.empty:
+        return pd.DataFrame()
+    trat = gas_scope.get(COL_TRATAMIENTO_BALANCE_GAS, pd.Series("", index=gas_scope.index)).astype(str).str.strip()
+    prep = gas_scope[trat.eq("Anticipo / prepago")].copy()
+    if prep.empty:
+        return pd.DataFrame()
+
+    cutoff_ts = pd.Timestamp(cutoff_date)
+    rows = []
+    for _, row in prep.iterrows():
+        start = pd.to_datetime(row.get(COL_PREPAGO_FECHA_INICIO), errors="coerce")
+        if pd.isna(start):
+            start = pd.to_datetime(row.get(COL_FECHA), errors="coerce")
+        meses = int(pd.to_numeric(pd.Series([row.get(COL_PREPAGO_MESES, 0)]), errors="coerce").fillna(0).iloc[0])
+        monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        devengado = 0.0
+        saldo = monto
+        if pd.notna(start) and meses > 0 and monto > 0:
+            start_period = start.to_period("M")
+            cutoff_period = cutoff_ts.to_period("M")
+            if cutoff_period >= start_period:
+                months_elapsed = len(pd.period_range(start=start_period, end=cutoff_period, freq="M"))
+                devengado = min(monto, (monto / float(meses)) * max(0, months_elapsed))
+                saldo = max(0.0, monto - devengado)
+        rows.append(
+            {
+                "empresa": str(row.get(COL_EMPRESA, "") or ""),
+                "contraparte": str(row.get(COL_CONTRAPARTE, "") or ""),
+                "fecha_hecho": pd.to_datetime(row.get(COL_FECHA), errors="coerce"),
+                "fecha_inicio_devengo": start,
+                "meses_prepago": meses,
+                "monto_total": monto,
+                "devengado_estimado": float(devengado),
+                "saldo_prepago": float(saldo),
+                "categoria": str(row.get(COL_CATEGORIA, "") or ""),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["fecha_inicio_devengo", "empresa"], na_position="last").reset_index(drop=True)
+
+
 st.title("Panel Financiero Gerencial")
 st.caption(
     "Vista gerencial y analitica construida sobre los mismos datos de Finanzas 1. "
@@ -720,8 +849,7 @@ with st.expander("Informacion de interes", expanded=False):
     )
     st.markdown("#### Pendiente para robustecer")
     st.markdown(
-        "- Manejo operativo de inventario.\n"
-        "- Cobros y pagos parciales multiples sobre un mismo registro.\n"
+        "- Control operativo de inventario por cantidades y costo unitario.\n"
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
@@ -981,6 +1109,8 @@ balance = build_balance_general_simplificado(
     aportes_capital=float(balance_components.get("aportes_capital", 0.0)),
 )
 debt_views = _build_deuda_inversion_views(ing_scope, gas_scope)
+inventory_view = _build_inventory_operativo_view(gas_scope)
+prepagos_view = _build_prepagos_view(gas_scope, balance_hasta)
 
 analisis = build_analisis_gerencial(ing_f, gas_f, cxc_df, include_miscelaneos=include_misc)
 
@@ -1086,6 +1216,7 @@ with tab_b:
         ("Saldo acumulado", format_money_es(cash_actual["metricas"]["efectivo_actual"])),
     ]
     _render_kpi_row(kpis_actual, cols=4)
+    st.caption("`Flujo neto` = entradas menos salidas del periodo. `Saldo acumulado` = caja acumulada despues de sumar los movimientos reales del periodo en orden cronologico.")
 
     serie_actual_raw = cash_actual["serie"]
     serie_actual = _aggregate_cash_series(serie_actual_raw, period_cash_actual)
@@ -1147,6 +1278,7 @@ with tab_c:
         ("Saldo final proyectado", format_money_es(proyectado["metricas"]["saldo_proyectado_final"])),
     ]
     _render_kpi_row(kpis_proj, cols=5)
+    st.caption("`Flujo neto proyectado` = cobros futuros menos pagos futuros. `Saldo final proyectado` = saldo inicial mas ese flujo neto acumulado en el horizonte.")
 
     for note in proyectado.get("notas", []):
         st.caption(f"- {note}")
@@ -1509,10 +1641,60 @@ with tab_i:
         )
         _series_to_csv_download(issues_view, "finanzas2_por_corregir.csv", "Exportar por corregir")
 
+with st.expander("Inventario operativo", expanded=False):
+    st.caption(
+        "Vista administrativa de apoyo para entradas, salidas y ajustes de inventario. "
+        "El saldo del inventario en balance se calcula por monto neto de movimientos registrados."
+    )
+    inv_entradas = float(inventory_view.loc[inventory_view["impacto_inventario"] > 0, "impacto_inventario"].sum()) if not inventory_view.empty else 0.0
+    inv_salidas = float(abs(inventory_view.loc[inventory_view["impacto_inventario"] < 0, "impacto_inventario"].sum())) if not inventory_view.empty else 0.0
+    i1, i2, i3 = st.columns(3)
+    i1.metric("Entradas inventario", format_money_es(inv_entradas))
+    i2.metric("Salidas / consumos", format_money_es(inv_salidas))
+    i3.metric("Saldo neto inventario", format_money_es(float(balance_components.get("inventario", 0.0))))
+    if inventory_view.empty:
+        st.info("Sin movimientos de inventario en el alcance filtrado.")
+    else:
+        st.dataframe(
+            inventory_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "fecha": st.column_config.DateColumn("Fecha"),
+                "monto_registrado": st.column_config.NumberColumn("Monto registrado", format="$%0.2f"),
+                "impacto_inventario": st.column_config.NumberColumn("Impacto inventario", format="$%0.2f"),
+            },
+        )
+
+with st.expander("Prepagos activos", expanded=False):
+    st.caption(
+        "Vista administrativa de apoyo para anticipos / prepagos. "
+        "Muestra el monto total registrado, lo ya devengado estimado y el saldo que sigue activo en balance."
+    )
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Prepagos activos", str(len(prepagos_view)))
+    p2.metric("Devengado estimado", format_money_es(float(prepagos_view.get("devengado_estimado", pd.Series(dtype=float)).sum()) if not prepagos_view.empty else 0.0))
+    p3.metric("Saldo prepago", format_money_es(float(balance_components.get("anticipos_prepagos", 0.0))))
+    if prepagos_view.empty:
+        st.info("Sin prepagos activos en el alcance filtrado.")
+    else:
+        st.dataframe(
+            prepagos_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "fecha_hecho": st.column_config.DateColumn("Fecha hecho"),
+                "fecha_inicio_devengo": st.column_config.DateColumn("Inicio devengo"),
+                "monto_total": st.column_config.NumberColumn("Monto total", format="$%0.2f"),
+                "devengado_estimado": st.column_config.NumberColumn("Devengado estimado", format="$%0.2f"),
+                "saldo_prepago": st.column_config.NumberColumn("Saldo prepago", format="$%0.2f"),
+            },
+        )
+
 with st.expander("Deudas e inversiones", expanded=False):
     st.caption(
-        "Resumen especifico de financiamientos, prestamos otorgados, inversiones y aportes de capital. "
-        "Los montos de detalle se muestran por principal o monto registrado; el saldo contable agregado se refleja en el balance."
+        "Vista administrativa de apoyo para financiamientos, prestamos otorgados, inversiones y aportes de capital. "
+        "Aqui se muestra principal registrado, saldo estimado y la proxima cuota cuando existe cronograma."
     )
     d1, d2, d3, d4 = st.columns(4)
     d1.metric("Prestamos recibidos", format_money_es(float(balance_components.get("prestamos_recibidos", 0.0))))
@@ -1538,13 +1720,19 @@ with st.expander("Deudas e inversiones", expanded=False):
             column_config={
                 "fecha_movimiento": st.column_config.DateColumn("Fecha movimiento"),
                 "fecha_inicio": st.column_config.DateColumn("Fecha inicio"),
+                "proxima_fecha": st.column_config.DateColumn("Proxima fecha"),
                 "monto_principal_registrado": st.column_config.NumberColumn("Principal registrado", format="$%0.2f"),
                 "monto_operativo_registrado": st.column_config.NumberColumn("Monto registrado", format="$%0.2f"),
+                "saldo_estimado": st.column_config.NumberColumn("Saldo estimado", format="$%0.2f"),
+                "proximo_capital": st.column_config.NumberColumn("Proximo capital", format="$%0.2f"),
+                "proximo_interes": st.column_config.NumberColumn("Proximo interes", format="$%0.2f"),
+                "proxima_cuota": st.column_config.NumberColumn("Proxima cuota", format="$%0.2f"),
             },
         )
 
 st.markdown("---")
 st.caption(
     "Panel Financiero Gerencial prioriza lectura gerencial. Finanzas 1 se mantiene intacta para captura/operacion. "
-    "Para un modelo contable mas robusto faltaria: calendario de pagos formal, catalogo contable y clasificacion de costos directos estandarizada."
+    "Pendientes mayores: cierre mensual persistente, conciliacion bancaria, inventario con cantidades/costo unitario y valuacion avanzada de inversiones / participaciones."
 )
+

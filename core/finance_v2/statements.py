@@ -24,6 +24,8 @@ from .constants import (
     COL_MONTO_REAL_COBRADO,
     COL_MONTO_REAL_PAGADO,
     COL_NATURALEZA_INGRESO,
+    COL_INVENTARIO_ITEM,
+    COL_INVENTARIO_MOVIMIENTO,
     COL_POR_COBRAR,
     COL_POR_PAGAR,
     COL_PREPAGO_FECHA_INICIO,
@@ -72,6 +74,8 @@ def _ensure_estado_schema(df: pd.DataFrame) -> pd.DataFrame:
         (COL_GASTO_DETALLE, ""),
         (COL_MONTO_REAL_COBRADO, 0.0),
         (COL_MONTO_REAL_PAGADO, 0.0),
+        (COL_INVENTARIO_MOVIMIENTO, ""),
+        (COL_INVENTARIO_ITEM, ""),
         (COL_PREPAGO_MESES, 0),
         (COL_PREPAGO_FECHA_INICIO, pd.NaT),
         (COL_ACTIVO_FIJO_DEP_TOGGLE, "No"),
@@ -92,6 +96,8 @@ def _ensure_estado_schema(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_FINANCIAMIENTO_TIPO] = _safe_series(out, COL_FINANCIAMIENTO_TIPO, "").astype(str).fillna("")
     out[COL_FINANCIAMIENTO_CRONOGRAMA] = _safe_series(out, COL_FINANCIAMIENTO_CRONOGRAMA, "").astype(str).fillna("")
     out[COL_ACTIVO_FIJO_DEP_TOGGLE] = _safe_series(out, COL_ACTIVO_FIJO_DEP_TOGGLE, "No").astype(str).fillna("No")
+    out[COL_INVENTARIO_MOVIMIENTO] = _safe_series(out, COL_INVENTARIO_MOVIMIENTO, "").astype(str).fillna("")
+    out[COL_INVENTARIO_ITEM] = _safe_series(out, COL_INVENTARIO_ITEM, "").astype(str).fillna("")
     out[COL_MONTO_REAL_COBRADO] = pd.to_numeric(_safe_series(out, COL_MONTO_REAL_COBRADO, 0.0), errors="coerce").fillna(0.0)
     out[COL_MONTO_REAL_PAGADO] = pd.to_numeric(_safe_series(out, COL_MONTO_REAL_PAGADO, 0.0), errors="coerce").fillna(0.0)
     out[COL_PREPAGO_MESES] = pd.to_numeric(_safe_series(out, COL_PREPAGO_MESES, 0), errors="coerce").fillna(0).astype(int)
@@ -216,6 +222,30 @@ def _remaining_prepago_at_cutoff(gas: pd.DataFrame, cutoff: pd.Timestamp) -> flo
     return float(total_restante)
 
 
+def _inventory_signed_amounts(gas: pd.DataFrame) -> pd.Series:
+    if gas is None or gas.empty:
+        return pd.Series(dtype="float64")
+    movimiento = _safe_series(gas, COL_INVENTARIO_MOVIMIENTO, "").astype(str).str.strip()
+    monto = pd.to_numeric(_safe_series(gas, COL_MONTO, 0.0), errors="coerce").fillna(0.0).abs()
+    signed = monto.copy()
+    signed.loc[movimiento.isin(["Salida / consumo", "Ajuste negativo"])] *= -1.0
+    return signed
+
+
+def _expand_inventory_consumption(gas: pd.DataFrame) -> pd.DataFrame:
+    if gas is None or gas.empty:
+        return pd.DataFrame(columns=(gas.columns if isinstance(gas, pd.DataFrame) else []))
+    trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
+    mov = _safe_series(gas, COL_INVENTARIO_MOVIMIENTO, "").astype(str)
+    consumo = gas[trat.eq("Inventario") & mov.isin(["Salida / consumo", "Ajuste negativo"])].copy()
+    if consumo.empty:
+        return pd.DataFrame(columns=gas.columns)
+    consumo[COL_MONTO] = pd.to_numeric(consumo.get(COL_MONTO), errors="coerce").fillna(0.0).abs()
+    consumo[COL_TRATAMIENTO_BALANCE_GAS] = "Gasto del periodo"
+    consumo.loc[_safe_series(consumo, COL_SUBCLASIFICACION_GERENCIAL, "").eq(""), COL_SUBCLASIFICACION_GERENCIAL] = "Costo directo"
+    return consumo
+
+
 def build_estado_resultados(
     df_ing: pd.DataFrame,
     df_gas: pd.DataFrame,
@@ -257,7 +287,8 @@ def build_estado_resultados(
     trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
     period_mask = trat.eq("Gasto del periodo")
     prepago_devengado = _expand_prepagos_devengados(gas_all, fecha_desde_ts, fecha_hasta_ts)
-    gas_resultado = pd.concat([gas.loc[period_mask].copy(), prepago_devengado], ignore_index=True, sort=False)
+    inventario_consumido = _expand_inventory_consumption(gas)
+    gas_resultado = pd.concat([gas.loc[period_mask].copy(), prepago_devengado, inventario_consumido], ignore_index=True, sort=False)
     subclas_result = _safe_series(gas_resultado, COL_SUBCLASIFICACION_GERENCIAL, "").astype(str)
     costos_directos = float(pd.to_numeric(gas_resultado.loc[subclas_result.eq("Costo directo"), COL_MONTO], errors="coerce").fillna(0.0).sum())
     gastos_operativos = float(pd.to_numeric(gas_resultado.loc[subclas_result.isin(["Administrativo fijo", "Operativo variable", "Comercial / ventas", "No operativo"]), COL_MONTO], errors="coerce").fillna(0.0).sum())
@@ -351,6 +382,8 @@ def build_estado_resultados(
     ]
     if not prepago_devengado.empty:
         notes.append("Los anticipos / prepagos se devengan mensualmente segun su plazo configurado.")
+    if not inventario_consumido.empty:
+        notes.append("Las salidas / consumos de inventario impactan resultados como costo directo u operativo segun su clasificacion.")
     if not include_miscelaneos:
         notes.append("Politica aplicada: categoria Miscelaneos excluida de rentabilidad y estado de resultados.")
 
@@ -388,18 +421,9 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
     aportes_capital = 0.0
     gas_dates = _safe_datetime_series(gas, COL_FECHA)
     vigente_mask = gas_dates.notna() & (gas_dates <= cutoff)
-    inventario = float(
-        pd.to_numeric(
-            gas.loc[
-                vigente_mask
-                & _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Inventario"),
-                COL_MONTO,
-            ],
-            errors="coerce",
-        )
-        .fillna(0.0)
-        .sum()
-    )
+    inventario_mask = vigente_mask & _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Inventario")
+    inventario = float(_inventory_signed_amounts(gas.loc[inventario_mask].copy()).sum()) if inventario_mask.any() else 0.0
+    inventario = max(0.0, inventario)
     anticipos = _remaining_prepago_at_cutoff(gas.loc[vigente_mask].copy(), cutoff)
 
     ing_trat = _safe_series(ing, COL_TRATAMIENTO_BALANCE_ING, "").astype(str)
@@ -540,7 +564,8 @@ def build_balance_general_simplificado(
 
     notes = [
         "Balance general gerencial y simplificado: incorpora caja, cuentas abiertas, prestamos, inventario, prepagos, inversiones y activos fijos netos cuando existen.",
-        "Sin inventario operativo detallado, devengo automatico de prepagos ni conciliacion bancaria, algunos saldos siguen siendo aproximados.",
+        "Los prepagos se consumen de forma lineal segun el plazo configurado; sin cierre persistente ni conciliacion bancaria, algunos saldos siguen siendo aproximados.",
+        "El inventario usa movimientos de entrada/salida por monto; aun falta una valorizacion mas fina por cantidades y costo unitario.",
     ]
 
     return {

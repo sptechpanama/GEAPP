@@ -129,12 +129,16 @@ COL_TRAT_BAL_ING = "Tratamiento balance ingreso"
 COL_CTP_TIPO = "Tipo contraparte"
 COL_CTP_NOMBRE = "Contraparte"
 COL_COBRO_REAL_MONTO = "Monto real cobrado"
+COL_ING_PARTIALS = "Detalle cobros parciales"
 COL_GAS_SUB = "Subclasificacion gerencial"
 COL_GAS_DET = "Detalle gasto"
 COL_TRAT_BAL_GAS = "Tratamiento balance gasto"
 COL_PAGO_REAL_MONTO = "Monto real pagado"
+COL_GAS_PARTIALS = "Detalle pagos parciales"
 COL_PREPAGO_MESES = "Plazo prepago meses"
 COL_PREPAGO_FEC_INI = "Fecha inicio prepago"
+COL_INV_MOV = "Movimiento inventario"
+COL_INV_ITEM = "Item inventario"
 COL_AF_TOGGLE = "Activo fijo"
 COL_AF_TIPO = "Tipo activo fijo"
 COL_AF_VIDA = "Vida util activo anios"
@@ -278,6 +282,7 @@ BALANCE_GAS_HELP = {
     "Cuenta por cobrar / prestamo otorgado": "Que entra: dinero entregado que debe recuperarse. Ejemplos: prestamo a tercero; prestamo a empresa relacionada.",
     "Cancelacion de pasivo / deuda": "Que entra: pago de capital de deuda. Ejemplos: abono a prestamo; pago de capital de financiamiento.",
 }
+INV_MOV_OPTIONS = ["Entrada", "Salida / consumo", "Ajuste positivo", "Ajuste negativo"]
 
 
 # -------------------- Helpers generales --------------------
@@ -420,7 +425,7 @@ def _validate_ing_df(df: pd.DataFrame) -> list[str]:
         if por_cobrar == "No" and abs(monto_real - monto) > 0.01:
             errors.append(f"Ingresos: `{label}` marcado realizado debe tener monto real cobrado igual al monto total.")
         if _counterparty_required_for_ing(categoria, tratamiento, fin_on) and not contraparte:
-            errors.append(f"Ingresos: `{label}` requiere Contraparte.")
+            errors.append(f"Ingresos: `{label}` requiere Entidad relacionada / contraparte.")
     return errors
 
 
@@ -456,8 +461,15 @@ def _validate_gas_df(df: pd.DataFrame) -> list[str]:
                 errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Plazo prepago meses.")
             if pd.isna(fecha_inicio):
                 errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Fecha inicio prepago.")
+        if tratamiento == "Inventario":
+            inv_mov = str(row.get(COL_INV_MOV, "") or "").strip()
+            inv_item = str(row.get(COL_INV_ITEM, "") or "").strip()
+            if not inv_mov:
+                errors.append(f"Gastos: `{label}` con Inventario requiere Movimiento inventario.")
+            if not inv_item:
+                errors.append(f"Gastos: `{label}` con Inventario requiere Item inventario / referencia.")
         if _counterparty_required_for_gas(categoria, tratamiento, fin_on) and not contraparte:
-            errors.append(f"Gastos: `{label}` requiere Contraparte.")
+            errors.append(f"Gastos: `{label}` requiere Entidad relacionada / contraparte.")
     return errors
 
 
@@ -471,6 +483,68 @@ def _serialize_schedule(entries: list[dict]) -> str:
         return json.dumps(entries, ensure_ascii=False)
     except Exception:
         return "[]"
+
+
+def _parse_partial_events(raw_value) -> list[dict]:
+    try:
+        data = json.loads(str(raw_value or "[]"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    rows: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        fecha = _ts(item.get("fecha"))
+        monto = float(pd.to_numeric(pd.Series([item.get("monto", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        nota = str(item.get("nota", "") or "").strip()
+        if pd.isna(fecha) or monto <= 0:
+            continue
+        rows.append({"fecha": fecha, "monto": monto, "nota": nota})
+    rows.sort(key=lambda x: x["fecha"])
+    return rows
+
+
+def _serialize_partial_events(entries: list[dict]) -> str:
+    payload = []
+    for entry in entries:
+        fecha = _ts(entry.get("fecha"))
+        monto = float(pd.to_numeric(pd.Series([entry.get("monto", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        nota = str(entry.get("nota", "") or "").strip()
+        if pd.isna(fecha) or monto <= 0:
+            continue
+        payload.append({"fecha": fecha.date().isoformat(), "monto": monto, "nota": nota})
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return "[]"
+
+
+def _seed_partial_events_from_row(row: pd.Series, amount_col: str, date_col: str) -> list[dict]:
+    events = _parse_partial_events(row.get(COL_ING_PARTIALS if amount_col == COL_COBRO_REAL_MONTO else COL_GAS_PARTIALS))
+    if events:
+        return events
+    monto = float(pd.to_numeric(pd.Series([row.get(amount_col, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+    fecha = _ts(row.get(date_col))
+    if monto > 0 and not pd.isna(fecha):
+        return [{"fecha": fecha, "monto": monto, "nota": "Saldo real existente"}]
+    return []
+
+
+def _partial_events_summary(entries: list[dict]) -> tuple[float, pd.Timestamp | pd.NaT]:
+    if not entries:
+        return 0.0, pd.NaT
+    total = float(sum(float(x.get("monto", 0.0) or 0.0) for x in entries))
+    last_date = max((_ts(x.get("fecha")) for x in entries), default=pd.NaT)
+    return total, last_date
+
+
+def _render_table_error_block(title: str, errors: list[str]) -> None:
+    if not errors:
+        return
+    st.error(f"No se guardaron cambios en {title} hasta corregir la tabla editable.")
+    st.dataframe(pd.DataFrame({"detalle": errors}), use_container_width=True, hide_index=True)
 
 
 def _build_financing_schedule(
@@ -709,6 +783,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         COL_FECHA, COL_DESC, COL_CONC, COL_MONTO, COL_CAT, COL_ESC,
         COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB,
         COL_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_CTP_TIPO, COL_CTP_NOMBRE, COL_COBRO_REAL_MONTO,
+        COL_ING_PARTIALS,
         COL_REC, COL_REC_PER, COL_REC_REG,
         COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT, COL_ING_DET, COL_ING_NAT,
         COL_TRAT_BAL_ING, COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO,
@@ -776,6 +851,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
             COL_ROWID, COL_USER, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING, COL_CTP_TIPO, COL_CTP_NOMBRE,
             COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
             COL_FIN_PERIOD, COL_FIN_CRONO,
+            COL_ING_PARTIALS,
         ],
     )
     out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
@@ -794,6 +870,12 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         for cat, estado in zip(out.loc[balance_mask, COL_CAT], estado_series.loc[balance_mask])
     ]
     total_ing = out[COL_MONTO].clip(lower=0.0)
+    partial_events_total = out[COL_ING_PARTIALS].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
+    partial_events_total = pd.to_numeric(partial_events_total, errors="coerce").fillna(0.0).clip(lower=0.0)
+    out[COL_COBRO_REAL_MONTO] = partial_events_total.where(partial_events_total > 0, out[COL_COBRO_REAL_MONTO])
+    out.loc[partial_events_total > 0, COL_FCOBRO_REAL] = out.loc[partial_events_total > 0, COL_ING_PARTIALS].map(
+        lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)
+    )
     out.loc[out[COL_POR_COB].map(_si_no_norm) == "No", COL_COBRO_REAL_MONTO] = total_ing.loc[out[COL_POR_COB].map(_si_no_norm) == "No"]
     out[COL_COBRO_REAL_MONTO] = out[COL_COBRO_REAL_MONTO].clip(upper=total_ing)
     fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle) | out[COL_CAT].astype(str).eq("Financiamiento recibido")
@@ -809,7 +891,9 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
         COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_PAG, COL_REC,
         COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT,
         COL_PROV, COL_FPAGO, COL_FPAGO_REAL, COL_CTP_TIPO, COL_CTP_NOMBRE, COL_PAGO_REAL_MONTO,
+        COL_GAS_PARTIALS,
         COL_GAS_SUB, COL_GAS_DET, COL_TRAT_BAL_GAS, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA,
+        COL_INV_MOV, COL_INV_ITEM,
         COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL,
         COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI,
         COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
@@ -886,7 +970,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
             COL_PROV, COL_ROWID, COL_USER, COL_GAS_SUB, COL_GAS_DET, COL_CTP_TIPO, COL_CTP_NOMBRE,
             COL_TRAT_BAL_GAS, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_DEP_TOGGLE,
             COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
-            COL_FIN_PERIOD, COL_FIN_CRONO,
+            COL_FIN_PERIOD, COL_FIN_CRONO, COL_GAS_PARTIALS, COL_INV_MOV, COL_INV_ITEM,
         ],
     )
     out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
@@ -900,11 +984,20 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_GAS_SUB] = out[COL_CAT].map(_derive_gas_sub)
     out.loc[out[COL_TRAT_BAL_GAS].astype(str).str.strip() == "", COL_TRAT_BAL_GAS] = out[COL_CAT].map(_derive_gas_balance)
     total_gas = out[COL_MONTO].clip(lower=0.0)
+    partial_events_total = out[COL_GAS_PARTIALS].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
+    partial_events_total = pd.to_numeric(partial_events_total, errors="coerce").fillna(0.0).clip(lower=0.0)
+    out[COL_PAGO_REAL_MONTO] = partial_events_total.where(partial_events_total > 0, out[COL_PAGO_REAL_MONTO])
+    out.loc[partial_events_total > 0, COL_FPAGO_REAL] = out.loc[partial_events_total > 0, COL_GAS_PARTIALS].map(
+        lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)
+    )
     out.loc[out[COL_POR_PAG].map(_si_no_norm) == "No", COL_PAGO_REAL_MONTO] = total_gas.loc[out[COL_POR_PAG].map(_si_no_norm) == "No"]
     out[COL_PAGO_REAL_MONTO] = out[COL_PAGO_REAL_MONTO].clip(upper=total_gas)
     prepago_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Anticipo / prepago")
     out.loc[~prepago_mask, [COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI]] = [0, pd.NaT]
     out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_PREPAGO_FEC_INI] = out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_FECHA]
+    inventory_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Inventario")
+    out.loc[~inventory_mask, [COL_INV_MOV, COL_INV_ITEM]] = ["", ""]
+    out.loc[inventory_mask & out[COL_INV_MOV].astype(str).str.strip().eq(""), COL_INV_MOV] = "Entrada"
     af_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo")
     out.loc[~af_mask, [COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA, COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL]] = ["No", "", 0, pd.NaT, 0.0, "No", 0.0]
     fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle)
@@ -1529,7 +1622,10 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Activo fijo`: compra que seguira dando valor en el tiempo.\n"
         "- `Financiamiento recibido`: entra caja y nace pasivo.\n"
         "- `Financiamiento otorgado`: sale caja y nace cuenta por cobrar.\n"
+        "- `Entidad relacionada / contraparte`: quien esta del otro lado del movimiento. Ejemplos: banco, socio, empresa relacionada o empresa invertida.\n"
         "- `Gasto del periodo`: consumo del mismo periodo.\n"
+        "- `Saldo acumulado`: caja acumulada despues de sumar todos los movimientos reales hasta la fecha.\n"
+        "- `Flujo neto`: diferencia entre entradas y salidas del periodo analizado.\n"
         "- `Anticipo / prepago`: pago adelantado aun no consumido.\n"
         "- `Valor residual`: valor estimado del activo al final de su vida util."
     )
@@ -1543,12 +1639,45 @@ with st.expander("Informacion de interes", expanded=False):
     )
     st.markdown("#### Pendiente para robustecer")
     st.markdown(
-        "- Manejo operativo de inventario (entradas, salidas y costo consumido).\n"
-        "- Cobros y pagos parciales multiples sobre un mismo registro.\n"
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
+        "- Cantidades, costo unitario y valorizacion mas fina de inventario.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
+
+with st.expander("Saneamiento rapido de historicos", expanded=False):
+    st.caption("Usa esta seccion para normalizar registros antiguos y evitar bloqueos en la tabla editable.")
+    s1, s2 = st.columns(2)
+    with s1:
+        if st.button("Normalizar historicos de Ingresos", key="btn_fix_ing_hist"):
+            base = ensure_ingresos_columns(st.session_state.df_ing.copy())
+            missing_realized_date = base[COL_POR_COB].map(_si_no_norm).eq("No") & base[COL_FCOBRO_REAL].isna()
+            base.loc[missing_realized_date, COL_FCOBRO_REAL] = base.loc[missing_realized_date, COL_FECHA]
+            missing_realized_amount = base[COL_POR_COB].map(_si_no_norm).eq("No") & pd.to_numeric(base[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).le(0)
+            base.loc[missing_realized_amount, COL_COBRO_REAL_MONTO] = pd.to_numeric(base.loc[missing_realized_amount, COL_MONTO], errors="coerce").fillna(0.0)
+            missing_expected = base[COL_POR_COB].map(_si_no_norm).ne("No") & base[COL_FCOBRO].isna()
+            base.loc[missing_expected, COL_FCOBRO] = base.loc[missing_expected, COL_FECHA]
+            wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, base, old_df=df_ing_before)
+            if wrote:
+                st.session_state.df_ing = ensure_ingresos_columns(base)
+                st.cache_data.clear()
+            st.success("Historicos de ingresos normalizados.")
+            _safe_rerun()
+    with s2:
+        if st.button("Normalizar historicos de Gastos", key="btn_fix_gas_hist"):
+            base = ensure_gastos_columns(st.session_state.df_gas.copy())
+            missing_realized_date = base[COL_POR_PAG].map(_si_no_norm).eq("No") & base[COL_FPAGO_REAL].isna()
+            base.loc[missing_realized_date, COL_FPAGO_REAL] = base.loc[missing_realized_date, COL_FECHA]
+            missing_realized_amount = base[COL_POR_PAG].map(_si_no_norm).eq("No") & pd.to_numeric(base[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).le(0)
+            base.loc[missing_realized_amount, COL_PAGO_REAL_MONTO] = pd.to_numeric(base.loc[missing_realized_amount, COL_MONTO], errors="coerce").fillna(0.0)
+            missing_expected = base[COL_POR_PAG].map(_si_no_norm).ne("No") & base[COL_FPAGO].isna()
+            base.loc[missing_expected, COL_FPAGO] = base.loc[missing_expected, COL_FECHA]
+            wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, base, old_df=df_gas_before)
+            if wrote:
+                st.session_state.df_gas = ensure_gastos_columns(base)
+                st.cache_data.clear()
+            st.success("Historicos de gastos normalizados.")
+            _safe_rerun()
 
 # La visualización analítica fue trasladada al "Panel Financiero Gerencial".
 
@@ -1957,16 +2086,18 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
     cp1, cp2 = st.columns([1, 2])
     with cp1:
         tipo_contraparte_ing = st.selectbox(
-            "Tipo contraparte",
+            "Tipo de entidad relacionada / contraparte",
             CONTRAPARTE_TYPE_OPTIONS,
             index=0,
             key="ing_ctp_tipo_quick",
+            help="Contraparte = la entidad del otro lado del movimiento. Ejemplos: socio, banco, empresa relacionada o empresa invertida.",
             on_change=lambda: _mark_form_force_open("ing"),
         )
     with cp2:
         contraparte_ing = st.text_input(
-            "Contraparte",
+            "Entidad relacionada / contraparte",
             key="ing_ctp_nombre_quick",
+            help="Nombre de la entidad del otro lado del movimiento. Ejemplos: Banco General, Socio A, RIR Medical.",
             on_change=lambda: _mark_form_force_open("ing"),
         )
     naturaleza_default = _derive_ing_nature(categoria_ing)
@@ -2055,6 +2186,13 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         monto_cobrado_real_final = float(monto_nuevo) if estado_ing_final == "Realizado" else float(monto_cobrado_real or 0.0)
         if monto_cobrado_real_final > float(monto_nuevo):
             monto_cobrado_real_final = float(monto_nuevo)
+        partial_events_ing = []
+        if monto_cobrado_real_final > 0 and not pd.isna(fecha_real_cobro):
+            partial_events_ing = [{
+                "fecha": _ts(fecha_real_cobro),
+                "monto": float(monto_cobrado_real_final),
+                "nota": "Registro inicial",
+            }]
         if _counterparty_required_for_ing(categoria_final, tratamiento_balance_final, fin_ing_on) and not str(contraparte_ing or "").strip():
             st.error("Debes indicar la contraparte para este tipo de ingreso.")
             st.stop()
@@ -2088,6 +2226,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             COL_CTP_TIPO: (tipo_contraparte_ing or "").strip(),
             COL_CTP_NOMBRE: (contraparte_ing or "").strip(),
             COL_COBRO_REAL_MONTO: float(monto_cobrado_real_final),
+            COL_ING_PARTIALS: _serialize_partial_events(partial_events_ing),
             COL_REC: recurrente_ing,
             COL_REC_PER: rec_period_ing if _bool_from_toggle(recurrente_ing) else "",
             COL_REC_REG: rec_rule_ing if _bool_from_toggle(recurrente_ing) else "",
@@ -2144,8 +2283,8 @@ ing_colcfg = {
     COL_ING_DET: st.column_config.SelectboxColumn(COL_ING_DET, options=ING_DETAIL_OPTIONS),
     COL_ING_NAT: st.column_config.TextColumn("Naturaleza ingreso", disabled=True),
     COL_TRAT_BAL_ING: st.column_config.SelectboxColumn(COL_TRAT_BAL_ING, options=ING_BALANCE_OPTIONS),
-    COL_CTP_TIPO: st.column_config.SelectboxColumn("Tipo contraparte", options=CONTRAPARTE_TYPE_OPTIONS),
-    COL_CTP_NOMBRE: st.column_config.TextColumn("Contraparte"),
+    COL_CTP_TIPO: st.column_config.SelectboxColumn("Tipo entidad rel. / contraparte", options=CONTRAPARTE_TYPE_OPTIONS),
+    COL_CTP_NOMBRE: st.column_config.TextColumn("Entidad rel. / contraparte"),
     COL_FIN_TOGGLE: st.column_config.SelectboxColumn(COL_FIN_TOGGLE, options=YES_NO_OPTIONS),
     COL_FIN_TIPO: st.column_config.SelectboxColumn(COL_FIN_TIPO, options=["", "Financiamiento recibido"]),
     COL_MONTO:   st.column_config.TextColumn(COL_MONTO, help="Formato: 1.500,00"),
@@ -2224,9 +2363,7 @@ else:
 
 # === ALTAS/EDICIONES (sync normal) ===
 if ing_table_errors:
-    st.error("No se guardaron cambios en Ingresos hasta corregir la tabla editable.")
-    for msg in ing_table_errors[:12]:
-        st.caption(f"- {msg}")
+    _render_table_error_block("Ingresos", ing_table_errors[:50])
 else:
     sync_cambios(
         edited_df=edited_ing, filtered_df=df_ing_f,
@@ -2235,6 +2372,69 @@ else:
         client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
         ensure_columns_fn=_autoderive_ing_df,
     )
+
+with st.expander("Registrar cobro parcial", expanded=False):
+    ing_base_partial = ensure_ingresos_columns(st.session_state.df_ing.copy())
+    ing_pending_view = ing_base_partial[
+        (
+            pd.to_numeric(ing_base_partial.get(COL_MONTO), errors="coerce").fillna(0.0)
+            - pd.to_numeric(ing_base_partial.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0)
+        ).clip(lower=0.0) > 0
+    ].copy()
+    if ing_pending_view.empty:
+        st.info("No hay ingresos con saldo pendiente para registrar cobros parciales.")
+    else:
+        ing_pending_view["__saldo_pendiente"] = (
+            pd.to_numeric(ing_pending_view[COL_MONTO], errors="coerce").fillna(0.0)
+            - pd.to_numeric(ing_pending_view[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0)
+        ).clip(lower=0.0)
+        ing_options = {
+            f"{str(row.get(COL_DESC, '')).strip() or str(row.get(COL_ROWID, ''))} | pendiente {_format_money_es(row['__saldo_pendiente'])}": str(row.get(COL_ROWID, ""))
+            for _, row in ing_pending_view.iterrows()
+        }
+        ing_sel_label = st.selectbox("Ingreso con saldo pendiente", list(ing_options.keys()), key="ing_partial_row_select")
+        ing_sel_id = ing_options.get(ing_sel_label, "")
+        ing_row = ing_pending_view[ing_pending_view[COL_ROWID].astype(str) == ing_sel_id].iloc[0]
+        current_events = _seed_partial_events_from_row(ing_row, COL_COBRO_REAL_MONTO, COL_FCOBRO_REAL)
+        saldo_pendiente = float(ing_row["__saldo_pendiente"])
+        p1, p2, p3 = st.columns([1, 1, 2])
+        with p1:
+            monto_parcial = st.number_input("Monto a registrar", min_value=0.01, max_value=max(0.01, saldo_pendiente), step=1.0, key="ing_partial_amount")
+        with p2:
+            fecha_parcial = st.date_input("Fecha real del cobro", value=_today(), key="ing_partial_date")
+        with p3:
+            nota_parcial = st.text_input("Nota del cobro", key="ing_partial_note")
+        st.caption(f"Total ingreso: {_format_money_es(ing_row.get(COL_MONTO, 0.0))} | Cobrado acumulado: {_format_money_es(ing_row.get(COL_COBRO_REAL_MONTO, 0.0))} | Pendiente: {_format_money_es(saldo_pendiente)}")
+        if current_events:
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Fecha": _ts(evt["fecha"]), "Monto": float(evt["monto"]), "Nota": evt.get("nota", "")} for evt in current_events]
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Fecha": st.column_config.DateColumn("Fecha"), "Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
+            )
+        if st.button("Guardar cobro parcial", key="btn_guardar_ing_partial"):
+            updated = st.session_state.df_ing.copy()
+            mask = updated[COL_ROWID].astype(str) == ing_sel_id
+            if mask.any():
+                row = updated.loc[mask].iloc[0]
+                events = _seed_partial_events_from_row(row, COL_COBRO_REAL_MONTO, COL_FCOBRO_REAL)
+                events.append({"fecha": _ts(fecha_parcial), "monto": float(monto_parcial), "nota": str(nota_parcial or "").strip()})
+                total_real, last_real = _partial_events_summary(events)
+                total_monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+                total_real = min(total_real, total_monto)
+                updated.loc[mask, COL_ING_PARTIALS] = _serialize_partial_events(events)
+                updated.loc[mask, COL_COBRO_REAL_MONTO] = total_real
+                updated.loc[mask, COL_FCOBRO_REAL] = last_real
+                updated.loc[mask, COL_POR_COB] = "No" if total_real >= total_monto - 0.01 else "Sí"
+                updated = ensure_ingresos_columns(updated)
+                wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, updated, old_df=df_ing_before)
+                if wrote:
+                    st.session_state.df_ing = updated
+                    st.cache_data.clear()
+                st.success("Cobro parcial registrado.")
+                _safe_rerun()
 
 
 # ============================================================
@@ -2396,16 +2596,18 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     cp1, cp2 = st.columns([1, 2])
     with cp1:
         tipo_contraparte_g = st.selectbox(
-            "Tipo contraparte",
+            "Tipo de entidad relacionada / contraparte",
             CONTRAPARTE_TYPE_OPTIONS,
             index=0,
             key="gas_ctp_tipo_quick",
+            help="Contraparte = la entidad del otro lado del movimiento. Ejemplos: banco, socio, empresa relacionada o empresa invertida.",
             on_change=lambda: _mark_form_force_open("gas"),
         )
     with cp2:
         contraparte_g = st.text_input(
-            "Contraparte",
+            "Entidad relacionada / contraparte",
             key="gas_ctp_nombre_quick",
+            help="Nombre de la entidad del otro lado del movimiento. Ejemplos: Banco General, RIR Medical, Socio A.",
             on_change=lambda: _mark_form_force_open("gas"),
         )
     desc_g = st.text_input(
@@ -2496,6 +2698,8 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
 
     prepago_meses = 0
     prepago_inicio = pd.NaT
+    inventario_mov = ""
+    inventario_item = ""
 
     st.markdown("#### Activo fijo")
     activo_dep_toggle = YES_NO_OPTIONS[0]
@@ -2538,6 +2742,25 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
                 on_change=lambda: _mark_form_force_open("gas"),
             )
         st.caption("El gasto se devengara mensualmente en el panel gerencial durante el plazo indicado.")
+    elif tratamiento_gas == "Inventario":
+        st.markdown("#### Inventario operativo")
+        iv1, iv2 = st.columns([1, 2])
+        with iv1:
+            inventario_mov = st.selectbox(
+                "Movimiento inventario",
+                INV_MOV_OPTIONS,
+                index=0,
+                key="gas_inv_mov_quick",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        with iv2:
+            inventario_item = st.text_input(
+                "Item inventario / referencia",
+                key="gas_inv_item_quick",
+                help="Referencia corta del inventario. Ejemplos: sensor SpO2, transductor, kit de reactivos.",
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        st.caption("Entrada aumenta inventario. Salida / consumo y ajuste negativo lo disminuyen; en el panel pueden afectar resultado y balance.")
 
     st.markdown("#### Financiamiento")
     fin_gas_toggle = st.selectbox(
@@ -2601,6 +2824,13 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         monto_pagado_real_final = float(monto_g) if estado_g_final == "Realizado" else float(monto_pagado_real or 0.0)
         if monto_pagado_real_final > float(monto_g):
             monto_pagado_real_final = float(monto_g)
+        partial_events_gas = []
+        if monto_pagado_real_final > 0 and not pd.isna(fecha_pago_real_final):
+            partial_events_gas = [{
+                "fecha": _ts(fecha_pago_real_final),
+                "monto": float(monto_pagado_real_final),
+                "nota": "Registro inicial",
+            }]
         if _counterparty_required_for_gas(categoria_g, tratamiento_gas, fin_gas_on) and not str(contraparte_g or "").strip():
             st.error("Debes indicar la contraparte para este tipo de gasto.")
             st.stop()
@@ -2609,6 +2839,9 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             st.stop()
         if tratamiento_gas == "Anticipo / prepago" and int(prepago_meses or 0) <= 0:
             st.error("Debes indicar el plazo del prepago en meses.")
+            st.stop()
+        if tratamiento_gas == "Inventario" and not str(inventario_item or "").strip():
+            st.error("Debes indicar el item inventario / referencia.")
             st.stop()
         cronograma_fin = _build_financing_schedule(
             principal=fin_monto_gas,
@@ -2632,6 +2865,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             COL_CTP_TIPO: (tipo_contraparte_g or "").strip(),
             COL_CTP_NOMBRE: (contraparte_g or "").strip(),
             COL_PAGO_REAL_MONTO: float(monto_pagado_real_final),
+            COL_GAS_PARTIALS: _serialize_partial_events(partial_events_gas),
             COL_REC: recurrente_gas,
             COL_REC_PER: rec_period_gas if _bool_from_toggle(recurrente_gas) else "",
             COL_REC_REG: rec_rule_gas if _bool_from_toggle(recurrente_gas) else "",
@@ -2649,6 +2883,8 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             COL_TRAT_BAL_GAS: tratamiento_gas,
             COL_PREPAGO_MESES: int(prepago_meses) if tratamiento_gas == "Anticipo / prepago" else 0,
             COL_PREPAGO_FEC_INI: _ts(prepago_inicio) if tratamiento_gas == "Anticipo / prepago" else pd.NaT,
+            COL_INV_MOV: inventario_mov if tratamiento_gas == "Inventario" else "",
+            COL_INV_ITEM: (inventario_item or "").strip() if tratamiento_gas == "Inventario" else "",
             COL_AF_TOGGLE: YES_NO_OPTIONS[1] if activo_fijo_on else YES_NO_OPTIONS[0],
             COL_AF_TIPO: activo_tipo if activo_fijo_on else "",
             COL_AF_VIDA: int(activo_vida) if activo_fijo_on else 0,
@@ -2696,10 +2932,12 @@ gas_colcfg = {
     COL_GAS_SUB: st.column_config.TextColumn("Clasificacion gerencial", disabled=True),
     COL_GAS_DET: st.column_config.SelectboxColumn(COL_GAS_DET, options=GAS_DETAIL_OPTIONS),
     COL_TRAT_BAL_GAS: st.column_config.SelectboxColumn(COL_TRAT_BAL_GAS, options=GAS_BALANCE_OPTIONS),
+    COL_INV_MOV: st.column_config.SelectboxColumn("Movimiento inventario", options=[""] + INV_MOV_OPTIONS),
+    COL_INV_ITEM: st.column_config.TextColumn("Item inventario / referencia"),
     COL_PREPAGO_MESES: st.column_config.NumberColumn("Plazo prepago meses", format="%d"),
     COL_PREPAGO_FEC_INI: st.column_config.DateColumn("Fecha inicio prepago"),
-    COL_CTP_TIPO: st.column_config.SelectboxColumn("Tipo contraparte", options=CONTRAPARTE_TYPE_OPTIONS),
-    COL_CTP_NOMBRE: st.column_config.TextColumn("Contraparte"),
+    COL_CTP_TIPO: st.column_config.SelectboxColumn("Tipo entidad rel. / contraparte", options=CONTRAPARTE_TYPE_OPTIONS),
+    COL_CTP_NOMBRE: st.column_config.TextColumn("Entidad rel. / contraparte"),
     COL_AF_TOGGLE: st.column_config.SelectboxColumn(COL_AF_TOGGLE, options=YES_NO_OPTIONS),
     COL_AF_DEP_TOGGLE: st.column_config.SelectboxColumn(COL_AF_DEP_TOGGLE, options=YES_NO_OPTIONS),
     COL_FIN_TOGGLE: st.column_config.SelectboxColumn(COL_FIN_TOGGLE, options=YES_NO_OPTIONS),
@@ -2714,7 +2952,7 @@ gas_colcfg = {
 gas_order = [x for x in [
     COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_GAS_SUB, COL_GAS_DET, COL_TRAT_BAL_GAS, COL_EMP,
     COL_POR_PAG, COL_FPAGO, COL_FPAGO_REAL, COL_PAGO_REAL_MONTO, COL_CTP_TIPO, COL_CTP_NOMBRE,
-    COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI,
+    COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_INV_MOV, COL_INV_ITEM, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI,
     COL_AF_TOGGLE, COL_AF_DEP_TOGGLE, COL_FIN_TOGGLE, COL_FIN_TIPO,
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_USER, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]
@@ -2794,9 +3032,7 @@ else:
 
 # === ALTAS/EDICIONES (sync normal) ===
 if gas_table_errors:
-    st.error("No se guardaron cambios en Gastos hasta corregir la tabla editable.")
-    for msg in gas_table_errors[:12]:
-        st.caption(f"- {msg}")
+    _render_table_error_block("Gastos", gas_table_errors[:50])
 else:
     sync_cambios(
         edited_df=edited_gas, filtered_df=df_gas_f,
@@ -2805,6 +3041,69 @@ else:
         client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
         ensure_columns_fn=_autoderive_gas_df,
     )
+
+with st.expander("Registrar pago parcial", expanded=False):
+    gas_base_partial = ensure_gastos_columns(st.session_state.df_gas.copy())
+    gas_pending_view = gas_base_partial[
+        (
+            pd.to_numeric(gas_base_partial.get(COL_MONTO), errors="coerce").fillna(0.0)
+            - pd.to_numeric(gas_base_partial.get(COL_PAGO_REAL_MONTO), errors="coerce").fillna(0.0)
+        ).clip(lower=0.0) > 0
+    ].copy()
+    if gas_pending_view.empty:
+        st.info("No hay gastos con saldo pendiente para registrar pagos parciales.")
+    else:
+        gas_pending_view["__saldo_pendiente"] = (
+            pd.to_numeric(gas_pending_view[COL_MONTO], errors="coerce").fillna(0.0)
+            - pd.to_numeric(gas_pending_view[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0)
+        ).clip(lower=0.0)
+        gas_options = {
+            f"{str(row.get(COL_CONC, '')).strip() or str(row.get(COL_ROWID, ''))} | pendiente {_format_money_es(row['__saldo_pendiente'])}": str(row.get(COL_ROWID, ""))
+            for _, row in gas_pending_view.iterrows()
+        }
+        gas_sel_label = st.selectbox("Gasto con saldo pendiente", list(gas_options.keys()), key="gas_partial_row_select")
+        gas_sel_id = gas_options.get(gas_sel_label, "")
+        gas_row = gas_pending_view[gas_pending_view[COL_ROWID].astype(str) == gas_sel_id].iloc[0]
+        current_events = _seed_partial_events_from_row(gas_row, COL_PAGO_REAL_MONTO, COL_FPAGO_REAL)
+        saldo_pendiente = float(gas_row["__saldo_pendiente"])
+        p1, p2, p3 = st.columns([1, 1, 2])
+        with p1:
+            monto_parcial = st.number_input("Monto a registrar", min_value=0.01, max_value=max(0.01, saldo_pendiente), step=1.0, key="gas_partial_amount")
+        with p2:
+            fecha_parcial = st.date_input("Fecha real del pago", value=_today(), key="gas_partial_date")
+        with p3:
+            nota_parcial = st.text_input("Nota del pago", key="gas_partial_note")
+        st.caption(f"Total gasto: {_format_money_es(gas_row.get(COL_MONTO, 0.0))} | Pagado acumulado: {_format_money_es(gas_row.get(COL_PAGO_REAL_MONTO, 0.0))} | Pendiente: {_format_money_es(saldo_pendiente)}")
+        if current_events:
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Fecha": _ts(evt["fecha"]), "Monto": float(evt["monto"]), "Nota": evt.get("nota", "")} for evt in current_events]
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Fecha": st.column_config.DateColumn("Fecha"), "Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
+            )
+        if st.button("Guardar pago parcial", key="btn_guardar_gas_partial"):
+            updated = st.session_state.df_gas.copy()
+            mask = updated[COL_ROWID].astype(str) == gas_sel_id
+            if mask.any():
+                row = updated.loc[mask].iloc[0]
+                events = _seed_partial_events_from_row(row, COL_PAGO_REAL_MONTO, COL_FPAGO_REAL)
+                events.append({"fecha": _ts(fecha_parcial), "monto": float(monto_parcial), "nota": str(nota_parcial or "").strip()})
+                total_real, last_real = _partial_events_summary(events)
+                total_monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+                total_real = min(total_real, total_monto)
+                updated.loc[mask, COL_GAS_PARTIALS] = _serialize_partial_events(events)
+                updated.loc[mask, COL_PAGO_REAL_MONTO] = total_real
+                updated.loc[mask, COL_FPAGO_REAL] = last_real
+                updated.loc[mask, COL_POR_PAG] = "No" if total_real >= total_monto - 0.01 else "Sí"
+                updated = ensure_gastos_columns(updated)
+                wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, updated, old_df=df_gas_before)
+                if wrote:
+                    st.session_state.df_gas = updated
+                    st.cache_data.clear()
+                st.success("Pago parcial registrado.")
+                _safe_rerun()
 
 
 
