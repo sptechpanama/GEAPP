@@ -15,6 +15,7 @@ from ui.theme import apply_global_theme
 st.set_page_config(page_title="Finanzas Operativas", page_icon="📊", layout="wide")
 apply_global_theme()
 import pandas as pd
+import calendar
 from datetime import date
 
 
@@ -196,6 +197,31 @@ LC_BASE_COLUMNS = [
     LC_COL_NOTAS,
     COL_USER,
     LC_COL_UPDATED_AT,
+]
+
+WS_TARJETAS_CREDITO = "TarjetasCredito"
+TC_COL_ROWID = "RowID"
+TC_COL_EMPRESA = "Empresa"
+TC_COL_NOMBRE = "Nombre tarjeta"
+TC_COL_BANCO = "Banco"
+TC_COL_LIMITE = "Limite vigente"
+TC_COL_DIA_CORTE = "Dia corte"
+TC_COL_DIA_VENC = "Dia vencimiento"
+TC_COL_ACTIVA = "Activa"
+TC_COL_NOTAS = "Notas"
+TC_COL_UPDATED_AT = "Actualizado"
+TC_BASE_COLUMNS = [
+    TC_COL_ROWID,
+    TC_COL_EMPRESA,
+    TC_COL_NOMBRE,
+    TC_COL_BANCO,
+    TC_COL_LIMITE,
+    TC_COL_DIA_CORTE,
+    TC_COL_DIA_VENC,
+    TC_COL_ACTIVA,
+    TC_COL_NOTAS,
+    COL_USER,
+    TC_COL_UPDATED_AT,
 ]
 
 
@@ -1694,6 +1720,49 @@ def safe_write_credit_lines(client, sheet_id: str, new_df: pd.DataFrame, old_df:
     return safe_write_worksheet(client, sheet_id, WS_LINEAS_CREDITO, ensure_lineas_credito_columns(new_df), old_df=old_df, id_col=LC_COL_ROWID)
 
 
+def ensure_tarjetas_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    for col in TC_BASE_COLUMNS:
+        if col not in out.columns:
+            if col == TC_COL_LIMITE:
+                out[col] = 0.0
+            elif col in {TC_COL_DIA_CORTE, TC_COL_DIA_VENC}:
+                out[col] = 1
+            elif col == TC_COL_EMPRESA:
+                out[col] = EMPRESA_DEFAULT
+            elif col == TC_COL_ACTIVA:
+                out[col] = "Sí"
+            elif col == TC_COL_UPDATED_AT:
+                out[col] = pd.NaT
+            else:
+                out[col] = ""
+    out[TC_COL_LIMITE] = pd.to_numeric(out[TC_COL_LIMITE], errors="coerce").fillna(0.0).astype(float)
+    out[TC_COL_DIA_CORTE] = pd.to_numeric(out[TC_COL_DIA_CORTE], errors="coerce").fillna(1).clip(lower=1, upper=31).astype(int)
+    out[TC_COL_DIA_VENC] = pd.to_numeric(out[TC_COL_DIA_VENC], errors="coerce").fillna(1).clip(lower=1, upper=31).astype(int)
+    out[TC_COL_UPDATED_AT] = _ts(out[TC_COL_UPDATED_AT])
+    out[TC_COL_EMPRESA] = out[TC_COL_EMPRESA].astype("string").str.upper().str.strip().where(
+        out[TC_COL_EMPRESA].astype("string").str.upper().str.strip().isin(EMPRESAS_OPCIONES),
+        other=EMPRESA_DEFAULT,
+    )
+    out[TC_COL_ACTIVA] = out[TC_COL_ACTIVA].map(_si_no_norm)
+    out = _ensure_text(out, [TC_COL_ROWID, TC_COL_EMPRESA, TC_COL_NOMBRE, TC_COL_BANCO, TC_COL_ACTIVA, TC_COL_NOTAS, COL_USER])
+    out[TC_COL_ROWID] = out.apply(lambda row: str(row.get(TC_COL_ROWID, "")).strip() or uuid.uuid4().hex, axis=1)
+    return out
+
+
+def load_cards_df(client, sheet_id: str) -> pd.DataFrame:
+    _ensure_worksheet_exists(client, sheet_id, WS_TARJETAS_CREDITO, TC_BASE_COLUMNS)
+    try:
+        return ensure_tarjetas_columns(read_worksheet(client, sheet_id, WS_TARJETAS_CREDITO))
+    except Exception:
+        return ensure_tarjetas_columns(pd.DataFrame(columns=TC_BASE_COLUMNS))
+
+
+def safe_write_cards(client, sheet_id: str, new_df: pd.DataFrame, old_df: pd.DataFrame | None = None) -> bool:
+    _ensure_worksheet_exists(client, sheet_id, WS_TARJETAS_CREDITO, TC_BASE_COLUMNS)
+    return safe_write_worksheet(client, sheet_id, WS_TARJETAS_CREDITO, ensure_tarjetas_columns(new_df), old_df=old_df, id_col=TC_COL_ROWID)
+
+
 def _build_credit_line_ingreso_row(*, line_row: pd.Series, fecha_evento, monto: float, nota: str = "") -> dict:
     line_name = str(line_row.get(LC_COL_NOMBRE, "") or "").strip()
     bank_name = str(line_row.get(LC_COL_BANCO, "") or "").strip()
@@ -1798,6 +1867,179 @@ def _build_credit_line_gasto_row(
         COL_FIN_CRONO: "",
         COL_FIN_INSTRUMENTO: line_name,
         COL_FIN_REG_TIPO: registro_financiamiento,
+        COL_USER: _current_user(),
+    }
+
+
+def _safe_day_of_month(year: int, month: int, day: int) -> date:
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(max(1, int(day)), last_day))
+
+
+def _estimate_card_due_date(fecha_compra, dia_corte: int, dia_venc: int) -> pd.Timestamp:
+    compra = _ts(fecha_compra)
+    if pd.isna(compra):
+        return pd.NaT
+    compra_date = compra.date()
+    if compra_date.day <= int(dia_corte):
+        cut_year, cut_month = compra_date.year, compra_date.month
+    else:
+        if compra_date.month == 12:
+            cut_year, cut_month = compra_date.year + 1, 1
+        else:
+            cut_year, cut_month = compra_date.year, compra_date.month + 1
+    if cut_month == 12:
+        due_year, due_month = cut_year + 1, 1
+    else:
+        due_year, due_month = cut_year, cut_month + 1
+    return pd.Timestamp(_safe_day_of_month(due_year, due_month, int(dia_venc)))
+
+
+def _build_card_consumo_row(
+    *,
+    card_row: pd.Series,
+    fecha_evento,
+    monto: float,
+    descripcion: str,
+    categoria: str,
+    proveedor: str,
+    tratamiento: str,
+    detalle_gasto: str,
+    fecha_pago_esperada,
+    proyecto: str = "",
+    cliente_id: str = "",
+    cliente_nombre: str = "",
+    prepago_meses: int = 0,
+    prepago_inicio=None,
+    inventario_mov: str = "",
+    inventario_item: str = "",
+    inventario_fecha_llegada=None,
+    activo_fijo_tipo: str = "",
+    activo_fijo_vida: int = 0,
+    activo_fijo_inicio=None,
+    activo_fijo_residual: float = 0.0,
+    activo_fijo_dep_toggle: str = "No",
+    activo_fijo_dep_mensual: float = 0.0,
+) -> dict:
+    bank_name = str(card_row.get(TC_COL_BANCO, "") or "").strip()
+    card_name = str(card_row.get(TC_COL_NOMBRE, "") or "").strip()
+    activo_fijo_on = tratamiento == "Activo fijo"
+    dep_on = activo_fijo_on and _bool_from_toggle(activo_fijo_dep_toggle)
+    is_prepago = tratamiento == "Anticipo / prepago" and int(prepago_meses or 0) > 0
+    is_inventory = tratamiento == "Inventario"
+    return {
+        COL_ROWID: uuid.uuid4().hex,
+        COL_FECHA: _ts(fecha_evento),
+        COL_MONTO: float(monto),
+        COL_DESC: descripcion,
+        COL_CONC: descripcion,
+        COL_CAT: categoria,
+        COL_ESC: "Real",
+        COL_REF_RID: "",
+        COL_PROY: str(proyecto or "").strip(),
+        COL_CLI_ID: str(cliente_id or "").strip(),
+        COL_CLI_NOM: str(cliente_nombre or "").strip(),
+        COL_EMP: str(card_row.get(TC_COL_EMPRESA, EMPRESA_DEFAULT) or EMPRESA_DEFAULT).strip(),
+        COL_POR_PAG: "Sí",
+        COL_PROV: str(proveedor or "").strip(),
+        COL_REC: "No",
+        COL_FPAGO: _ts(fecha_pago_esperada),
+        COL_FPAGO_REAL: pd.NaT,
+        COL_CTP_TIPO: "Banco",
+        COL_CTP_NOMBRE: bank_name,
+        COL_PAGO_REAL_MONTO: 0.0,
+        COL_GAS_PARTIALS: "",
+        COL_GAS_SUB: _derive_gas_sub(categoria),
+        COL_GAS_DET: detalle_gasto,
+        COL_TRAT_BAL_GAS: tratamiento,
+        COL_PREPAGO_MESES: int(prepago_meses) if is_prepago else 0,
+        COL_PREPAGO_FEC_INI: _ts(prepago_inicio or fecha_evento) if is_prepago else pd.NaT,
+        COL_INV_MOV: inventario_mov if is_inventory else "",
+        COL_INV_ITEM: str(inventario_item or "").strip() if is_inventory else "",
+        COL_INV_FEC_LLEGADA: _ts(inventario_fecha_llegada) if is_inventory and inventario_mov in INVENTORY_POSITIVE_MOVEMENTS else pd.NaT,
+        COL_AF_TOGGLE: "Sí" if activo_fijo_on else "No",
+        COL_AF_TIPO: activo_fijo_tipo if activo_fijo_on else "",
+        COL_AF_VIDA: int(activo_fijo_vida) if activo_fijo_on else 0,
+        COL_AF_FEC_INI: _ts(activo_fijo_inicio or fecha_evento) if activo_fijo_on else pd.NaT,
+        COL_AF_VAL_RES: float(activo_fijo_residual) if activo_fijo_on else 0.0,
+        COL_AF_DEP_TOGGLE: "Sí" if dep_on else "No",
+        COL_AF_DEP_MENSUAL: float(activo_fijo_dep_mensual) if dep_on else 0.0,
+        COL_FIN_TOGGLE: "No",
+        COL_FIN_TIPO: "",
+        COL_FIN_MONTO: 0.0,
+        COL_FIN_FEC_INI: pd.NaT,
+        COL_FIN_PLAZO: 0,
+        COL_FIN_TASA: 0.0,
+        COL_FIN_TASA_TIPO: "",
+        COL_FIN_MODALIDAD: "",
+        COL_FIN_PERIOD: "",
+        COL_FIN_CRONO: "",
+        COL_FIN_INSTRUMENTO: card_name,
+        COL_FIN_REG_TIPO: "Consumo tarjeta",
+        COL_USER: _current_user(),
+    }
+
+
+def _build_card_charge_row(
+    *,
+    card_row: pd.Series,
+    fecha_evento,
+    monto: float,
+    descripcion: str,
+    detalle_gasto: str = "Otros",
+) -> dict:
+    bank_name = str(card_row.get(TC_COL_BANCO, "") or "").strip()
+    card_name = str(card_row.get(TC_COL_NOMBRE, "") or "").strip()
+    partials = [{"fecha": _ts(fecha_evento), "monto": float(monto), "nota": descripcion}]
+    return {
+        COL_ROWID: uuid.uuid4().hex,
+        COL_FECHA: _ts(fecha_evento),
+        COL_MONTO: float(monto),
+        COL_DESC: descripcion,
+        COL_CONC: descripcion,
+        COL_CAT: "Gasto financiero",
+        COL_ESC: "Real",
+        COL_REF_RID: "",
+        COL_PROY: "",
+        COL_CLI_ID: "",
+        COL_CLI_NOM: "",
+        COL_EMP: str(card_row.get(TC_COL_EMPRESA, EMPRESA_DEFAULT) or EMPRESA_DEFAULT).strip(),
+        COL_POR_PAG: "No",
+        COL_PROV: bank_name,
+        COL_REC: "No",
+        COL_FPAGO: pd.NaT,
+        COL_FPAGO_REAL: _ts(fecha_evento),
+        COL_CTP_TIPO: "Banco",
+        COL_CTP_NOMBRE: bank_name,
+        COL_PAGO_REAL_MONTO: float(monto),
+        COL_GAS_PARTIALS: _serialize_partial_events(partials),
+        COL_GAS_SUB: "Financiero",
+        COL_GAS_DET: detalle_gasto,
+        COL_TRAT_BAL_GAS: "Gasto del periodo",
+        COL_PREPAGO_MESES: 0,
+        COL_PREPAGO_FEC_INI: pd.NaT,
+        COL_INV_MOV: "",
+        COL_INV_ITEM: "",
+        COL_INV_FEC_LLEGADA: pd.NaT,
+        COL_AF_TOGGLE: "No",
+        COL_AF_TIPO: "",
+        COL_AF_VIDA: 0,
+        COL_AF_FEC_INI: pd.NaT,
+        COL_AF_VAL_RES: 0.0,
+        COL_AF_DEP_TOGGLE: "No",
+        COL_AF_DEP_MENSUAL: 0.0,
+        COL_FIN_TOGGLE: "No",
+        COL_FIN_TIPO: "",
+        COL_FIN_MONTO: 0.0,
+        COL_FIN_FEC_INI: pd.NaT,
+        COL_FIN_PLAZO: 0,
+        COL_FIN_TASA: 0.0,
+        COL_FIN_TASA_TIPO: "",
+        COL_FIN_MODALIDAD: "",
+        COL_FIN_PERIOD: "",
+        COL_FIN_CRONO: "",
+        COL_FIN_INSTRUMENTO: card_name,
+        COL_FIN_REG_TIPO: "Cargo tarjeta",
         COL_USER: _current_user(),
     }
 
@@ -1981,6 +2223,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Con factoring`: el valor recibido inicial entra a caja; el retenido queda como activo hasta la liquidacion final.\n"
         "- `Inventario en transito`: entrada de inventario cuya fecha de llegada / disponibilidad aun no ocurre.\n"
         "- `Linea de credito`: los desembolsos suben caja y pasivo; capital pagado baja deuda; el interes diario se sugiere automaticamente con la tasa vigente configurada y luego se registra como gasto financiero.\n"
+        "- `Tarjeta de credito`: el consumo crea un gasto pendiente; el pago de tarjeta liquida ese saldo sin duplicar el gasto; intereses y cargos se registran aparte como gasto financiero.\n"
         "- `Gasto del periodo`: consumo del mismo periodo.\n"
         "- `Saldo acumulado`: caja acumulada despues de sumar todos los movimientos reales hasta la fecha.\n"
         "- `Flujo neto`: diferencia entre entradas y salidas del periodo analizado.\n"
@@ -2001,6 +2244,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- Conciliacion bancaria.\n"
         "- Cantidades, costo unitario y valorizacion mas fina de inventario.\n"
         "- Historial de cambios de tasa diaria dentro del mismo periodo de uso de la linea.\n"
+        "- Tarjetas con multiples ciclos/cortes historicos y conciliacion contra estado de cuenta.\n"
         "- Factoring con recurso.\n"
         "- Proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
@@ -3232,6 +3476,70 @@ def _linea_credito_interest_preview(line_name: str, as_of_date, tasa_diaria_pct:
     }
 
 
+def _tarjeta_position(card_name: str) -> tuple[float, float, float]:
+    gas_df = ensure_gastos_columns(st.session_state.df_gas.copy())
+    card_name_norm = str(card_name or "").strip()
+    if not card_name_norm:
+        return 0.0, 0.0, 0.0
+    consumo_mask = (
+        gas_df[COL_FIN_INSTRUMENTO].astype(str).str.strip().eq(card_name_norm)
+        & gas_df[COL_FIN_REG_TIPO].astype(str).str.strip().eq("Consumo tarjeta")
+    )
+    consumos = float(pd.to_numeric(gas_df.loc[consumo_mask, COL_MONTO], errors="coerce").fillna(0.0).sum())
+    pagado = float(pd.to_numeric(gas_df.loc[consumo_mask, COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).sum())
+    saldo = max(0.0, consumos - pagado)
+    return consumos, pagado, saldo
+
+
+def _apply_card_payment(updated_df: pd.DataFrame, card_name: str, fecha_pago, monto_pago: float, nota: str) -> pd.DataFrame:
+    if float(monto_pago or 0.0) <= 0:
+        return ensure_gastos_columns(updated_df)
+    work = ensure_gastos_columns(updated_df.copy())
+    mask = (
+        work[COL_FIN_INSTRUMENTO].astype(str).str.strip().eq(str(card_name or "").strip())
+        & work[COL_FIN_REG_TIPO].astype(str).str.strip().eq("Consumo tarjeta")
+    )
+    pending = work.loc[mask].copy()
+    if pending.empty:
+        return work
+    pending["__saldo"] = (
+        pd.to_numeric(pending[COL_MONTO], errors="coerce").fillna(0.0)
+        - pd.to_numeric(pending[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0)
+    ).clip(lower=0.0)
+    pending = pending[pending["__saldo"] > 0].copy()
+    if pending.empty:
+        return work
+    pending["__fecha_pago_orden"] = pd.to_datetime(pending[COL_FPAGO], errors="coerce").fillna(pd.to_datetime(pending[COL_FECHA], errors="coerce"))
+    pending = pending.sort_values(["__fecha_pago_orden", COL_FECHA], na_position="last")
+    restante = float(monto_pago)
+    fecha_pago_ts = _ts(fecha_pago)
+    nota_base = str(nota or "").strip()
+    for idx, row in pending.iterrows():
+        if restante <= 0:
+            break
+        saldo_row = float(row["__saldo"])
+        abono = min(restante, saldo_row)
+        if abono <= 0:
+            continue
+        events = _seed_partial_events_from_row(row, COL_PAGO_REAL_MONTO, COL_FPAGO_REAL)
+        events.append(
+            {
+                "fecha": fecha_pago_ts,
+                "monto": float(abono),
+                "nota": nota_base or "Pago tarjeta",
+            }
+        )
+        total_real, last_real = _partial_events_summary(events)
+        total_monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        total_real = min(total_real, total_monto)
+        work.loc[idx, COL_GAS_PARTIALS] = _serialize_partial_events(events)
+        work.loc[idx, COL_PAGO_REAL_MONTO] = total_real
+        work.loc[idx, COL_FPAGO_REAL] = last_real
+        work.loc[idx, COL_POR_PAG] = "No" if total_real >= total_monto - 0.01 else "Sí"
+        restante -= abono
+    return ensure_gastos_columns(work)
+
+
 st.markdown("## Linea de credito")
 with st.expander("Gestionar linea de credito", expanded=False):
     st.caption(
@@ -3241,12 +3549,12 @@ with st.expander("Gestionar linea de credito", expanded=False):
     lineas_before = load_credit_lines_df(client, SHEET_ID)
     lineas_df = ensure_lineas_credito_columns(lineas_before.copy())
     lineas_activas = lineas_df[lineas_df[LC_COL_ACTIVA].map(_si_no_norm).eq("Sí")].copy()
-    tab_lc1, tab_lc2, tab_lc3, tab_lc4 = st.tabs(
+    tab_lc2, tab_lc3, tab_lc4, tab_lc1 = st.tabs(
         [
-            "Configurar / actualizar",
             "Registrar desembolso",
             "Registrar pago",
             "Registrar cargo asociado",
+            "Configurar / actualizar",
         ]
     )
 
@@ -3580,7 +3888,269 @@ with st.expander("Gestionar linea de credito", expanded=False):
                     st.stop()
                 st.session_state.df_gas = new_gas_df
                 st.cache_data.clear()
-                st.success("Cargo asociado registrado.")
+            st.success("Cargo asociado registrado.")
+            _safe_rerun()
+
+
+st.markdown("## Tarjeta de credito")
+with st.expander("Gestionar tarjeta de credito", expanded=False):
+    st.caption(
+        "Los consumos con tarjeta crean gastos pendientes y el pago de tarjeta liquida esos consumos sin duplicar el gasto. "
+        "Los intereses y cargos se registran aparte como gasto financiero."
+    )
+    cards_before = load_cards_df(client, SHEET_ID)
+    cards_df = ensure_tarjetas_columns(cards_before.copy())
+    cards_activas = cards_df[cards_df[TC_COL_ACTIVA].map(_si_no_norm).eq("Sí")].copy()
+    tab_tc2, tab_tc3, tab_tc1 = st.tabs(
+        [
+            "Registrar consumo",
+            "Registrar pago / cargo",
+            "Configurar / actualizar",
+        ]
+    )
+
+    with tab_tc1:
+        card_options = ["Nueva tarjeta"] + [
+            f"{str(row.get(TC_COL_EMPRESA, '')).strip()} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}"
+            for _, row in cards_df.iterrows()
+        ]
+        selected_card_label = st.selectbox("Tarjeta a editar", card_options, key="tc_config_sel")
+        selected_card = None
+        if selected_card_label != "Nueva tarjeta" and not cards_df.empty:
+            selected_idx = card_options.index(selected_card_label) - 1
+            if 0 <= selected_idx < len(cards_df):
+                selected_card = cards_df.iloc[selected_idx]
+        suffix = str(selected_card.get(TC_COL_ROWID, "new")) if selected_card is not None else "new"
+        tc_emp_default = str(selected_card.get(TC_COL_EMPRESA, EMPRESA_DEFAULT)).strip() if selected_card is not None else EMPRESA_DEFAULT
+        tc_emp_index = EMPRESAS_OPCIONES.index(tc_emp_default) if tc_emp_default in EMPRESAS_OPCIONES else EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            tc_empresa = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=tc_emp_index, key=f"tc_cfg_emp_{suffix}")
+            tc_nombre = st.text_input("Nombre tarjeta", value=str(selected_card.get(TC_COL_NOMBRE, "")) if selected_card is not None else "", key=f"tc_cfg_nombre_{suffix}")
+            tc_banco = st.text_input("Banco", value=str(selected_card.get(TC_COL_BANCO, "")) if selected_card is not None else "", key=f"tc_cfg_banco_{suffix}")
+        with c2:
+            tc_limite = st.number_input("Limite vigente", min_value=0.0, step=100.0, value=float(selected_card.get(TC_COL_LIMITE, 0.0)) if selected_card is not None else 0.0, key=f"tc_cfg_limite_{suffix}")
+            tc_dia_corte = st.number_input("Dia de corte", min_value=1, max_value=31, step=1, value=int(selected_card.get(TC_COL_DIA_CORTE, 10)) if selected_card is not None else 10, key=f"tc_cfg_corte_{suffix}")
+            tc_dia_venc = st.number_input("Dia de vencimiento", min_value=1, max_value=31, step=1, value=int(selected_card.get(TC_COL_DIA_VENC, 5)) if selected_card is not None else 5, key=f"tc_cfg_venc_{suffix}")
+        with c3:
+            tc_activa = st.selectbox("Activa", YES_NO_OPTIONS, index=YES_NO_OPTIONS.index(_si_no_norm(selected_card.get(TC_COL_ACTIVA, "Sí"))) if selected_card is not None and _si_no_norm(selected_card.get(TC_COL_ACTIVA, "Sí")) in YES_NO_OPTIONS else 1, key=f"tc_cfg_activa_{suffix}")
+            tc_notas = st.text_area("Notas", value=str(selected_card.get(TC_COL_NOTAS, "")) if selected_card is not None else "", key=f"tc_cfg_notas_{suffix}")
+        if st.button("Guardar configuracion tarjeta", key=f"btn_guardar_tc_cfg_{suffix}"):
+            if not str(tc_nombre or "").strip():
+                st.error("Debes indicar el nombre de la tarjeta.")
+                st.stop()
+            if not str(tc_banco or "").strip():
+                st.error("Debes indicar el banco.")
+                st.stop()
+            card_id = str(selected_card.get(TC_COL_ROWID, "")).strip() if selected_card is not None else uuid.uuid4().hex
+            new_row = {
+                TC_COL_ROWID: card_id,
+                TC_COL_EMPRESA: tc_empresa,
+                TC_COL_NOMBRE: str(tc_nombre or "").strip(),
+                TC_COL_BANCO: str(tc_banco or "").strip(),
+                TC_COL_LIMITE: float(tc_limite),
+                TC_COL_DIA_CORTE: int(tc_dia_corte),
+                TC_COL_DIA_VENC: int(tc_dia_venc),
+                TC_COL_ACTIVA: tc_activa,
+                TC_COL_NOTAS: str(tc_notas or "").strip(),
+                TC_COL_UPDATED_AT: _ts(_today()),
+                COL_USER: _current_user(),
+            }
+            new_cards_df = cards_df.copy()
+            if selected_card is not None and card_id in new_cards_df[TC_COL_ROWID].astype(str).tolist():
+                for col, val in new_row.items():
+                    new_cards_df.loc[new_cards_df[TC_COL_ROWID].astype(str) == card_id, col] = val
+            else:
+                new_cards_df = pd.concat([new_cards_df, pd.DataFrame([new_row])], ignore_index=True)
+            wrote = safe_write_cards(client, SHEET_ID, new_cards_df, old_df=cards_before)
+            if wrote:
+                st.cache_data.clear()
+                st.success("Configuracion de tarjeta guardada.")
+                _safe_rerun()
+            else:
+                st.info("No hubo cambios para guardar en la tarjeta seleccionada.")
+
+    with tab_tc2:
+        if cards_activas.empty:
+            st.info("Primero configura y activa al menos una tarjeta.")
+        else:
+            card_labels = {
+                f"{str(row.get(TC_COL_EMPRESA, '')).strip()} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}": str(row.get(TC_COL_ROWID, "")).strip()
+                for _, row in cards_activas.iterrows()
+            }
+            tc_sel = st.selectbox("Tarjeta activa", list(card_labels.keys()), key="tc_cons_sel")
+            tc_row = cards_activas[cards_activas[TC_COL_ROWID].astype(str) == card_labels.get(tc_sel, "")].iloc[0]
+            tc_name = str(tc_row.get(TC_COL_NOMBRE, "") or "").strip()
+            total_consumos_tc, pagado_tc, saldo_tc = _tarjeta_position(tc_name)
+            t1, t2, t3 = st.columns(3)
+            t1.metric("Consumos acumulados", _format_money_es(total_consumos_tc))
+            t2.metric("Pagado a consumos", _format_money_es(pagado_tc))
+            t3.metric("Saldo tarjeta", _format_money_es(saldo_tc))
+
+            fecha_consumo_tc = st.date_input("Fecha del hecho economico", value=_today(), key="tc_cons_fecha")
+            fecha_pago_sugerida = _estimate_card_due_date(
+                fecha_consumo_tc,
+                int(tc_row.get(TC_COL_DIA_CORTE, 10) or 10),
+                int(tc_row.get(TC_COL_DIA_VENC, 5) or 5),
+            )
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                monto_consumo_tc = st.number_input("Monto consumo", min_value=0.0, step=1.0, key="tc_cons_monto")
+                categoria_consumo_tc = st.selectbox("Categoria operativa", GAS_CATEGORY_OPTIONS, index=GAS_CATEGORY_OPTIONS.index("Gastos operativos") if "Gastos operativos" in GAS_CATEGORY_OPTIONS else 0, key="tc_cons_cat", help=_help_for_option(GAS_CATEGORY_HELP, st.session_state.get("tc_cons_cat", GAS_CATEGORY_OPTIONS[0])))
+            with c2:
+                proveedor_consumo_tc = st.text_input("Proveedor / comercio", key="tc_cons_proveedor")
+                detalle_consumo_tc = st.selectbox("Detalle gasto", GAS_DETAIL_OPTIONS, index=GAS_DETAIL_OPTIONS.index("Otros") if "Otros" in GAS_DETAIL_OPTIONS else 0, key="tc_cons_det")
+            with c3:
+                tratamiento_consumo_tc = st.selectbox("Tratamiento balance gasto", GAS_BALANCE_OPTIONS, index=GAS_BALANCE_OPTIONS.index("Gasto del periodo") if "Gasto del periodo" in GAS_BALANCE_OPTIONS else 0, key="tc_cons_trat", help=_help_for_option(BALANCE_GAS_HELP, st.session_state.get("tc_cons_trat", GAS_BALANCE_OPTIONS[0])))
+                fecha_pago_tc = st.date_input("Fecha esperada de pago tarjeta", value=_as_date_or_default(fecha_pago_sugerida, _today()), key="tc_cons_fpago")
+            desc_consumo_tc = st.text_area("Descripcion", key="tc_cons_desc", placeholder="Ej: compra de materiales con tarjeta / gasolina flota.")
+            st.caption(f"Corte dia {int(tc_row.get(TC_COL_DIA_CORTE, 10) or 10)} | Vencimiento dia {int(tc_row.get(TC_COL_DIA_VENC, 5) or 5)} | Pago sugerido: {fecha_pago_sugerida.date().isoformat() if not pd.isna(fecha_pago_sugerida) else 'sin fecha'}")
+
+            tc_prepago_meses = 0
+            tc_prepago_inicio = pd.NaT
+            tc_inv_mov = ""
+            tc_inv_item = ""
+            tc_inv_fecha_llegada = pd.NaT
+            tc_af_tipo = ""
+            tc_af_vida = 5
+            tc_af_inicio = pd.NaT
+            tc_af_residual = 0.0
+            tc_af_dep_toggle = "No"
+            tc_af_dep_mensual = 0.0
+
+            if tratamiento_consumo_tc == "Anticipo / prepago":
+                pg1, pg2 = st.columns(2)
+                with pg1:
+                    tc_prepago_meses = st.number_input("Plazo prepago meses", min_value=1, step=1, value=12, key="tc_cons_prep_meses")
+                with pg2:
+                    tc_prepago_inicio = st.date_input("Fecha inicio prepago", value=fecha_consumo_tc, key="tc_cons_prep_ini")
+            elif tratamiento_consumo_tc == "Inventario":
+                iv1, iv2, iv3 = st.columns([1, 2, 1])
+                with iv1:
+                    tc_inv_mov = st.selectbox("Movimiento inventario", INV_MOV_OPTIONS, index=0, key="tc_cons_inv_mov")
+                with iv2:
+                    tc_inv_item = st.text_input("Item inventario / referencia", key="tc_cons_inv_item")
+                with iv3:
+                    tc_inv_fecha_llegada = st.date_input("Fecha llegada / disponibilidad", value=fecha_consumo_tc, key="tc_cons_inv_llegada", disabled=tc_inv_mov not in INVENTORY_POSITIVE_MOVEMENTS)
+            elif tratamiento_consumo_tc == "Activo fijo":
+                af1, af2, af3 = st.columns(3)
+                with af1:
+                    tc_af_dep_toggle = st.selectbox("¿Depreciar / amortizar?", YES_NO_OPTIONS, index=0, key="tc_cons_af_dep")
+                    tc_af_tipo = st.selectbox("Tipo activo fijo", AF_TYPE_OPTIONS, index=0, key="tc_cons_af_tipo")
+                with af2:
+                    tc_af_vida = st.selectbox("Vida util (anios)", AF_LIFE_OPTIONS, index=2, key="tc_cons_af_vida")
+                    tc_af_inicio = st.date_input("Fecha inicio activo", value=fecha_consumo_tc, key="tc_cons_af_inicio")
+                with af3:
+                    tc_af_residual = st.number_input("Valor residual", min_value=0.0, step=1.0, key="tc_cons_af_resid")
+                if _bool_from_toggle(tc_af_dep_toggle):
+                    tc_af_dep_mensual = max(0.0, float(monto_consumo_tc) - float(tc_af_residual)) / max(1, int(tc_af_vida) * 12)
+                    st.caption(f"Depreciacion/amortizacion mensual estimada: {_format_money_es(tc_af_dep_mensual)}")
+
+            if st.button("Registrar consumo tarjeta", key="btn_registrar_tc_consumo"):
+                if float(monto_consumo_tc) <= 0:
+                    st.error("Debes indicar un monto de consumo mayor que cero.")
+                    st.stop()
+                if not str(desc_consumo_tc or "").strip():
+                    st.error("Debes indicar una descripcion.")
+                    st.stop()
+                if tratamiento_consumo_tc == "Inventario" and not str(tc_inv_item or "").strip():
+                    st.error("Debes indicar el item inventario / referencia.")
+                    st.stop()
+                if tratamiento_consumo_tc == "Anticipo / prepago" and int(tc_prepago_meses or 0) <= 0:
+                    st.error("Debes indicar el plazo del prepago.")
+                    st.stop()
+                new_row = _build_card_consumo_row(
+                    card_row=tc_row,
+                    fecha_evento=fecha_consumo_tc,
+                    monto=float(monto_consumo_tc),
+                    descripcion=str(desc_consumo_tc or "").strip(),
+                    categoria=categoria_consumo_tc,
+                    proveedor=str(proveedor_consumo_tc or "").strip(),
+                    tratamiento=tratamiento_consumo_tc,
+                    detalle_gasto=detalle_consumo_tc,
+                    fecha_pago_esperada=fecha_pago_tc,
+                    prepago_meses=int(tc_prepago_meses),
+                    prepago_inicio=tc_prepago_inicio,
+                    inventario_mov=tc_inv_mov,
+                    inventario_item=tc_inv_item,
+                    inventario_fecha_llegada=tc_inv_fecha_llegada,
+                    activo_fijo_tipo=tc_af_tipo,
+                    activo_fijo_vida=int(tc_af_vida or 0),
+                    activo_fijo_inicio=tc_af_inicio,
+                    activo_fijo_residual=float(tc_af_residual or 0.0),
+                    activo_fijo_dep_toggle=tc_af_dep_toggle,
+                    activo_fijo_dep_mensual=float(tc_af_dep_mensual or 0.0),
+                )
+                old_gas_df = st.session_state.df_gas.copy()
+                new_gas_df = pd.concat([old_gas_df, pd.DataFrame([new_row])], ignore_index=True)
+                new_gas_df = ensure_gastos_columns(new_gas_df)
+                wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas_df, old_df=old_gas_df)
+                if not wrote:
+                    st.error("No se pudo guardar el consumo de tarjeta.")
+                    st.stop()
+                st.session_state.df_gas = new_gas_df
+                st.cache_data.clear()
+                st.success("Consumo de tarjeta registrado.")
+                _safe_rerun()
+
+    with tab_tc3:
+        if cards_activas.empty:
+            st.info("Primero configura y activa al menos una tarjeta.")
+        else:
+            pay_labels = {
+                f"{str(row.get(TC_COL_EMPRESA, '')).strip()} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}": str(row.get(TC_COL_ROWID, "")).strip()
+                for _, row in cards_activas.iterrows()
+            }
+            tc_pay_sel = st.selectbox("Tarjeta activa", list(pay_labels.keys()), key="tc_pay_sel")
+            tc_pay_row = cards_activas[cards_activas[TC_COL_ROWID].astype(str) == pay_labels.get(tc_pay_sel, "")].iloc[0]
+            tc_pay_name = str(tc_pay_row.get(TC_COL_NOMBRE, "") or "").strip()
+            consumos_tc, pagado_tc, saldo_tc = _tarjeta_position(tc_pay_name)
+            p1, p2, p3 = st.columns(3)
+            p1.metric("Consumos acumulados", _format_money_es(consumos_tc))
+            p2.metric("Pagado a consumos", _format_money_es(pagado_tc))
+            p3.metric("Saldo pendiente tarjeta", _format_money_es(saldo_tc))
+            fecha_pago_tc = st.date_input("Fecha pago / cargo", value=_today(), key="tc_pay_fecha")
+            q1, q2, q3 = st.columns(3)
+            with q1:
+                pago_consumos_tc = st.number_input("Pago a consumos", min_value=0.0, step=1.0, key="tc_pay_capital")
+            with q2:
+                interes_tc = st.number_input("Interes pagado", min_value=0.0, step=1.0, key="tc_pay_interes")
+            with q3:
+                cargos_tc = st.number_input("Otros cargos", min_value=0.0, step=1.0, key="tc_pay_otros")
+            nota_tc = st.text_input("Nota pago / cargo", key="tc_pay_nota")
+            if st.button("Registrar pago / cargo tarjeta", key="btn_registrar_tc_pago"):
+                if float(pago_consumos_tc) <= 0 and float(interes_tc) <= 0 and float(cargos_tc) <= 0:
+                    st.error("Debes registrar al menos pago a consumos, interes u otros cargos.")
+                    st.stop()
+                if float(pago_consumos_tc) > saldo_tc + 0.01:
+                    st.error("El pago a consumos excede el saldo pendiente de la tarjeta.")
+                    st.stop()
+                old_gas_df = st.session_state.df_gas.copy()
+                new_gas_df = _apply_card_payment(old_gas_df, tc_pay_name, fecha_pago_tc, float(pago_consumos_tc), str(nota_tc or "").strip())
+                if float(interes_tc) > 0:
+                    desc = f"Interes tarjeta de credito - {tc_pay_name}"
+                    if str(nota_tc or "").strip():
+                        desc = f"{desc} | {str(nota_tc or '').strip()}"
+                    new_gas_df = pd.concat(
+                        [new_gas_df, pd.DataFrame([_build_card_charge_row(card_row=tc_pay_row, fecha_evento=fecha_pago_tc, monto=float(interes_tc), descripcion=desc, detalle_gasto='Intereses')])],
+                        ignore_index=True,
+                    )
+                if float(cargos_tc) > 0:
+                    desc = f"Cargos tarjeta de credito - {tc_pay_name}"
+                    if str(nota_tc or "").strip():
+                        desc = f"{desc} | {str(nota_tc or '').strip()}"
+                    new_gas_df = pd.concat(
+                        [new_gas_df, pd.DataFrame([_build_card_charge_row(card_row=tc_pay_row, fecha_evento=fecha_pago_tc, monto=float(cargos_tc), descripcion=desc, detalle_gasto='Otros')])],
+                        ignore_index=True,
+                    )
+                new_gas_df = ensure_gastos_columns(new_gas_df)
+                wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas_df, old_df=old_gas_df)
+                if not wrote:
+                    st.error("No se pudo guardar el pago / cargo de la tarjeta.")
+                    st.stop()
+                st.session_state.df_gas = new_gas_df
+                st.cache_data.clear()
+                st.success("Pago / cargo de tarjeta registrado.")
                 _safe_rerun()
 
 

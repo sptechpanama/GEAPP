@@ -848,6 +848,8 @@ def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFram
     capital_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Pago capital")
     interes_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Pago interes")
     cargo_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Cargo")
+    card_consumo_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Consumo tarjeta")
+    card_cargo_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Cargo tarjeta")
 
     line_disb = ing_scope[
         disb_mask
@@ -893,12 +895,60 @@ def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFram
             )
         lineas_credito = pd.DataFrame(rows).sort_values(["empresa", "linea_credito"], na_position="last").reset_index(drop=True)
 
+    card_cons = gas_scope[
+        card_consumo_mask
+        & gas_scope.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().ne("")
+    ].copy()
+    card_charges = gas_scope[
+        card_cargo_mask
+        & gas_scope.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().ne("")
+    ].copy()
+    if card_cons.empty and card_charges.empty:
+        tarjetas_credito = pd.DataFrame()
+    else:
+        rows = []
+        instrumentos = sorted({
+            *card_cons.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=card_cons.index)).astype(str).str.strip().tolist(),
+            *card_charges.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=card_charges.index)).astype(str).str.strip().tolist(),
+        })
+        instrumentos = [x for x in instrumentos if x]
+        for instrument in instrumentos:
+            gas_i = card_cons[card_cons.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=card_cons.index)).astype(str).str.strip() == instrument].copy()
+            cargos_i = card_charges[card_charges.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=card_charges.index)).astype(str).str.strip() == instrument].copy()
+            total_consumos = float(pd.to_numeric(gas_i.get(COL_MONTO), errors="coerce").fillna(0.0).sum()) if not gas_i.empty else 0.0
+            pagado_consumos = float(pd.to_numeric(gas_i.get(COL_MONTO_REAL_PAGADO), errors="coerce").fillna(0.0).sum()) if not gas_i.empty else 0.0
+            saldo_pendiente = max(0.0, total_consumos - pagado_consumos)
+            intereses_cargos = float(pd.to_numeric(cargos_i.get(COL_MONTO_REAL_PAGADO, cargos_i.get(COL_MONTO, 0.0)), errors="coerce").fillna(0.0).sum()) if not cargos_i.empty else 0.0
+            empresa = str(gas_i.get(COL_EMPRESA, pd.Series("", index=gas_i.index)).astype(str).iloc[0] if not gas_i.empty else cargos_i.get(COL_EMPRESA, pd.Series("", index=cargos_i.index)).astype(str).iloc[0]).strip()
+            banco = str(gas_i.get(COL_CONTRAPARTE, pd.Series("", index=gas_i.index)).astype(str).iloc[0] if not gas_i.empty else cargos_i.get(COL_CONTRAPARTE, pd.Series("", index=cargos_i.index)).astype(str).iloc[0]).strip()
+            if not banco:
+                banco = str(gas_i.get(COL_PROVEEDOR, pd.Series("", index=gas_i.index)).astype(str).iloc[0] if not gas_i.empty else cargos_i.get(COL_PROVEEDOR, pd.Series("", index=cargos_i.index)).astype(str).iloc[0]).strip()
+            pendiente_mask = (
+                pd.to_numeric(gas_i.get(COL_MONTO), errors="coerce").fillna(0.0)
+                - pd.to_numeric(gas_i.get(COL_MONTO_REAL_PAGADO), errors="coerce").fillna(0.0)
+            ) > 0.01 if not gas_i.empty else pd.Series(dtype=bool)
+            proxima_fecha = pd.to_datetime(gas_i.loc[pendiente_mask, COL_FECHA_PAGO], errors="coerce").min() if not gas_i.empty and pendiente_mask.any() else pd.NaT
+            rows.append(
+                {
+                    "empresa": empresa,
+                    "tarjeta_credito": instrument,
+                    "banco": banco,
+                    "proxima_fecha": proxima_fecha,
+                    "total_consumos": total_consumos,
+                    "pagado_a_consumos": pagado_consumos,
+                    "saldo_pendiente": saldo_pendiente,
+                    "intereses_y_cargos": intereses_cargos,
+                }
+            )
+        tarjetas_credito = pd.DataFrame(rows).sort_values(["empresa", "tarjeta_credito"], na_position="last").reset_index(drop=True)
+
     return {
         "aportes": aportes,
         "deuda": deuda,
         "prestamos_otorgados": prestamos_otorgados,
         "inversiones": inversiones,
         "lineas_credito": lineas_credito,
+        "tarjetas_credito": tarjetas_credito,
     }
 
 
@@ -1040,7 +1090,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Flujo de caja actual`: usa fecha real de cobro y fecha real de pago.\n"
         "- `Flujo de caja proyectado`: usa fechas esperadas, recurrencias y cronogramas futuros.\n"
         "- `Estado de resultados`: usa fecha del hecho economico; capital no va al resultado, solo intereses si entran al resultado.\n"
-        "- `Balance general`: integra caja, cuentas abiertas, prestamos, inventario disponible, inventario en transito, prepagos, retenidos con factoring y activos fijos netos cuando existen."
+        "- `Balance general`: integra caja, cuentas abiertas, prestamos, inventario disponible, inventario en transito, prepagos, retenidos con factoring, saldo de tarjeta dentro de cuentas por pagar y activos fijos netos cuando existen."
     )
     st.markdown("#### Pendiente para robustecer")
     st.markdown(
@@ -1048,6 +1098,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
         "- Historial de cambios de tasa diaria dentro del mismo periodo de uso de la linea.\n"
+        "- Tarjetas con multiples ciclos/cortes historicos y conciliacion contra estado de cuenta.\n"
         "- Factoring con recurso y proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
@@ -1901,19 +1952,22 @@ with st.expander("Prepagos activos", expanded=False):
 
 with st.expander("Deudas e inversiones", expanded=False):
     st.caption(
-        "Vista administrativa de apoyo para financiamientos, lineas de credito, prestamos otorgados, inversiones, aportes de capital y operaciones con factoring. "
-        "Aqui se muestra principal registrado, saldo estimado, retenidos pendientes y la proxima cuota cuando existe cronograma."
+        "Vista administrativa de apoyo para financiamientos, lineas de credito, tarjetas de credito, prestamos otorgados, inversiones, aportes de capital y operaciones con factoring. "
+        "Aqui se muestra principal registrado, saldo estimado, saldo pendiente, retenidos pendientes y la proxima cuota cuando existe cronograma."
     )
-    d1, d2, d3, d4, d5, d6 = st.columns(6)
+    d1, d2, d3, d4 = st.columns(4)
     d1.metric("Prestamos recibidos", format_money_es(float(balance_components.get("prestamos_recibidos", 0.0))))
     d2.metric("Prestamos otorgados", format_money_es(float(balance_components.get("prestamos_otorgados", 0.0))))
     d3.metric("Inversiones / participaciones", format_money_es(float(balance_components.get("inversiones_participaciones", 0.0))))
     d4.metric("Aportes de capital", format_money_es(float(balance_components.get("aportes_capital", 0.0))))
+    d5, d6, d7 = st.columns(3)
     d5.metric("Retenido con factoring", format_money_es(float(balance_components.get("factoring_retenido", 0.0))))
     d6.metric("Lineas de credito", format_money_es(float(debt_views.get("lineas_credito", pd.DataFrame()).get("saldo_estimado", pd.Series(dtype=float)).sum()) if not debt_views.get("lineas_credito", pd.DataFrame()).empty else 0.0))
+    d7.metric("Tarjetas de credito", format_money_es(float(debt_views.get("tarjetas_credito", pd.DataFrame()).get("saldo_pendiente", pd.Series(dtype=float)).sum()) if not debt_views.get("tarjetas_credito", pd.DataFrame()).empty else 0.0))
 
     for title, key in [
         ("Lineas de credito", "lineas_credito"),
+        ("Tarjetas de credito", "tarjetas_credito"),
         ("Financiamientos recibidos", "deuda"),
         ("Prestamos otorgados", "prestamos_otorgados"),
         ("Inversiones / participaciones", "inversiones"),
@@ -1940,6 +1994,10 @@ with st.expander("Deudas e inversiones", expanded=False):
                 "capital_pagado": st.column_config.NumberColumn("Capital pagado", format="$%0.2f"),
                 "interes_pagado": st.column_config.NumberColumn("Interes pagado", format="$%0.2f"),
                 "cargos_pagados": st.column_config.NumberColumn("Cargos pagados", format="$%0.2f"),
+                "total_consumos": st.column_config.NumberColumn("Total consumos", format="$%0.2f"),
+                "pagado_a_consumos": st.column_config.NumberColumn("Pagado a consumos", format="$%0.2f"),
+                "saldo_pendiente": st.column_config.NumberColumn("Saldo pendiente", format="$%0.2f"),
+                "intereses_y_cargos": st.column_config.NumberColumn("Intereses y cargos", format="$%0.2f"),
                 "saldo_estimado": st.column_config.NumberColumn("Saldo estimado", format="$%0.2f"),
                 "proximo_capital": st.column_config.NumberColumn("Proximo capital", format="$%0.2f"),
                 "proximo_interes": st.column_config.NumberColumn("Proximo interes", format="$%0.2f"),
