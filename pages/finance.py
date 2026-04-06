@@ -1771,40 +1771,6 @@ with st.expander("Informacion de interes", expanded=False):
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
 
-with st.expander("Saneamiento rapido de historicos", expanded=False):
-    st.caption("Usa esta seccion para normalizar registros antiguos y evitar bloqueos en la tabla editable.")
-    s1, s2 = st.columns(2)
-    with s1:
-        if st.button("Normalizar historicos de Ingresos", key="btn_fix_ing_hist"):
-            base = ensure_ingresos_columns(st.session_state.df_ing.copy())
-            missing_realized_date = base[COL_POR_COB].map(_si_no_norm).eq("No") & base[COL_FCOBRO_REAL].isna()
-            base.loc[missing_realized_date, COL_FCOBRO_REAL] = base.loc[missing_realized_date, COL_FECHA]
-            missing_realized_amount = base[COL_POR_COB].map(_si_no_norm).eq("No") & pd.to_numeric(base[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).le(0)
-            base.loc[missing_realized_amount, COL_COBRO_REAL_MONTO] = pd.to_numeric(base.loc[missing_realized_amount, COL_MONTO], errors="coerce").fillna(0.0)
-            missing_expected = base[COL_POR_COB].map(_si_no_norm).ne("No") & base[COL_FCOBRO].isna()
-            base.loc[missing_expected, COL_FCOBRO] = base.loc[missing_expected, COL_FECHA]
-            wrote = safe_write_worksheet(client, SHEET_ID, WS_ING, base, old_df=df_ing_before)
-            if wrote:
-                st.session_state.df_ing = ensure_ingresos_columns(base)
-                st.cache_data.clear()
-            st.success("Historicos de ingresos normalizados.")
-            _safe_rerun()
-    with s2:
-        if st.button("Normalizar historicos de Gastos", key="btn_fix_gas_hist"):
-            base = ensure_gastos_columns(st.session_state.df_gas.copy())
-            missing_realized_date = base[COL_POR_PAG].map(_si_no_norm).eq("No") & base[COL_FPAGO_REAL].isna()
-            base.loc[missing_realized_date, COL_FPAGO_REAL] = base.loc[missing_realized_date, COL_FECHA]
-            missing_realized_amount = base[COL_POR_PAG].map(_si_no_norm).eq("No") & pd.to_numeric(base[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).le(0)
-            base.loc[missing_realized_amount, COL_PAGO_REAL_MONTO] = pd.to_numeric(base.loc[missing_realized_amount, COL_MONTO], errors="coerce").fillna(0.0)
-            missing_expected = base[COL_POR_PAG].map(_si_no_norm).ne("No") & base[COL_FPAGO].isna()
-            base.loc[missing_expected, COL_FPAGO] = base.loc[missing_expected, COL_FECHA]
-            wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, base, old_df=df_gas_before)
-            if wrote:
-                st.session_state.df_gas = ensure_gastos_columns(base)
-                st.cache_data.clear()
-            st.success("Historicos de gastos normalizados.")
-            _safe_rerun()
-
 # La visualización analítica fue trasladada al "Panel Financiero Gerencial".
 
 
