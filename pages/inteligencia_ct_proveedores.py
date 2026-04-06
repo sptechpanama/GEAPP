@@ -3085,6 +3085,11 @@ def _read_study_payload_from_sheets(table_names: list[str]) -> tuple[dict[str, p
     except Exception as exc:
         return {}, "", str(exc)
 
+    try:
+        existing_titles = {ws.title for ws in sh.worksheets()}
+    except Exception as exc:
+        return {}, sheet_id, str(exc)
+
     out: dict[str, pd.DataFrame] = {}
     with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
         for table_name in table_names:
@@ -3093,9 +3098,7 @@ def _read_study_payload_from_sheets(table_names: list[str]) -> tuple[dict[str, p
             if not ws_name:
                 out[table_name] = pd.DataFrame(columns=cols)
                 continue
-            try:
-                sh.worksheet(ws_name)
-            except WorksheetNotFound:
+            if ws_name not in existing_titles:
                 out[table_name] = pd.DataFrame(columns=cols)
                 continue
             try:
