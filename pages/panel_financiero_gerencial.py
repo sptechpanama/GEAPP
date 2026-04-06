@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
 from datetime import date, timedelta
@@ -1218,18 +1219,22 @@ latest_balance_summary = (
     else {}
 )
 balance_components = compute_balance_components(ing_scope, gas_scope, cutoff_date=balance_hasta)
+balance_kwargs = {
+    "efectivo_actual": float(latest_balance_summary.get("efectivo", 0.0)),
+    "cuentas_por_cobrar": float(latest_balance_summary.get("cuentas_por_cobrar", 0.0)),
+    "cuentas_por_pagar": float(latest_balance_summary.get("cuentas_por_pagar", 0.0)),
+    "prestamos_otorgados": float(balance_components.get("prestamos_otorgados", 0.0)),
+    "inventario": float(balance_components.get("inventario", 0.0)),
+    "anticipos_prepagos": float(balance_components.get("anticipos_prepagos", 0.0)),
+    "inversiones_participaciones": float(balance_components.get("inversiones_participaciones", 0.0)),
+    "factoring_retenido": float(balance_components.get("factoring_retenido", 0.0)),
+    "activos_fijos_netos": float(balance_components.get("activos_fijos_netos", 0.0)),
+    "prestamos_recibidos": float(balance_components.get("prestamos_recibidos", 0.0)),
+    "aportes_capital": float(balance_components.get("aportes_capital", 0.0)),
+}
+supported_balance_params = set(inspect.signature(build_balance_general_simplificado).parameters)
 balance = build_balance_general_simplificado(
-    efectivo_actual=float(latest_balance_summary.get("efectivo", 0.0)),
-    cuentas_por_cobrar=float(latest_balance_summary.get("cuentas_por_cobrar", 0.0)),
-    cuentas_por_pagar=float(latest_balance_summary.get("cuentas_por_pagar", 0.0)),
-    prestamos_otorgados=float(balance_components.get("prestamos_otorgados", 0.0)),
-    inventario=float(balance_components.get("inventario", 0.0)),
-    anticipos_prepagos=float(balance_components.get("anticipos_prepagos", 0.0)),
-    inversiones_participaciones=float(balance_components.get("inversiones_participaciones", 0.0)),
-    factoring_retenido=float(balance_components.get("factoring_retenido", 0.0)),
-    activos_fijos_netos=float(balance_components.get("activos_fijos_netos", 0.0)),
-    prestamos_recibidos=float(balance_components.get("prestamos_recibidos", 0.0)),
-    aportes_capital=float(balance_components.get("aportes_capital", 0.0)),
+    **{key: value for key, value in balance_kwargs.items() if key in supported_balance_params}
 )
 debt_views = _build_deuda_inversion_views(ing_scope, gas_scope)
 inventory_view = _build_inventory_operativo_view(gas_scope)
