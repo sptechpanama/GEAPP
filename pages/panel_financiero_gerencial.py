@@ -47,9 +47,12 @@ COL_FECHA_REAL_COBRO = getattr(f2c, "COL_FECHA_REAL_COBRO", "Fecha real de cobro
 COL_FECHA_REAL_PAGO = getattr(f2c, "COL_FECHA_REAL_PAGO", "Fecha real de pago")
 COL_FINANCIAMIENTO_CRONOGRAMA = getattr(f2c, "COL_FINANCIAMIENTO_CRONOGRAMA", "Cronograma financiamiento")
 COL_FINANCIAMIENTO_FECHA_INICIO = getattr(f2c, "COL_FINANCIAMIENTO_FECHA_INICIO", "Fecha inicio financiamiento")
+COL_FINANCIAMIENTO_INSTRUMENTO = getattr(f2c, "COL_FINANCIAMIENTO_INSTRUMENTO", "Instrumento financiero")
 COL_FINANCIAMIENTO_MONTO = getattr(f2c, "COL_FINANCIAMIENTO_MONTO", "Monto principal financiamiento")
+COL_FINANCIAMIENTO_REG_TIPO = getattr(f2c, "COL_FINANCIAMIENTO_REG_TIPO", "Registro financiamiento")
 COL_FINANCIAMIENTO_TIPO = getattr(f2c, "COL_FINANCIAMIENTO_TIPO", "Tipo financiamiento")
 COL_INVENTARIO_ITEM = getattr(f2c, "COL_INVENTARIO_ITEM", "Item inventario")
+COL_INVENTARIO_FECHA_LLEGADA = getattr(f2c, "COL_INVENTARIO_FECHA_LLEGADA", "Fecha llegada inventario")
 COL_INVENTARIO_MOVIMIENTO = getattr(f2c, "COL_INVENTARIO_MOVIMIENTO", "Movimiento inventario")
 COL_MONTO = getattr(f2c, "COL_MONTO", "Monto")
 COL_MONTO_REAL_COBRADO = getattr(f2c, "COL_MONTO_REAL_COBRADO", "Monto real cobrado")
@@ -401,6 +404,7 @@ def _build_balance_snapshots(
             + cxc
             + float(extras.get("prestamos_otorgados", 0.0))
             + float(extras.get("inventario", 0.0))
+            + float(extras.get("inventario_en_transito", 0.0))
             + float(extras.get("anticipos_prepagos", 0.0))
             + float(extras.get("inversiones_participaciones", 0.0))
             + float(extras.get("factoring_retenido", 0.0))
@@ -426,6 +430,7 @@ def _build_balance_snapshots(
                 "cuentas_por_pagar": cxp,
                 "prestamos_otorgados": float(extras.get("prestamos_otorgados", 0.0)),
                 "inventario": float(extras.get("inventario", 0.0)),
+                "inventario_en_transito": float(extras.get("inventario_en_transito", 0.0)),
                 "anticipos_prepagos": float(extras.get("anticipos_prepagos", 0.0)),
                 "inversiones_participaciones": float(extras.get("inversiones_participaciones", 0.0)),
                 "factoring_retenido": float(extras.get("factoring_retenido", 0.0)),
@@ -838,33 +843,101 @@ def _build_deuda_inversion_views(ing_scope: pd.DataFrame, gas_scope: pd.DataFram
         gas_scope[gas_balance.eq("Inversion / participacion en otra empresa")].copy(),
         "Inversion / participacion",
     )
+
+    disb_mask = ing_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=ing_scope.index)).astype(str).str.strip().eq("Desembolso")
+    capital_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Pago capital")
+    interes_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Pago interes")
+    cargo_mask = gas_scope.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().eq("Cargo")
+
+    line_disb = ing_scope[
+        disb_mask
+        & ing_scope.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=ing_scope.index)).astype(str).str.strip().ne("")
+    ].copy()
+    line_pay = gas_scope[
+        (capital_mask | interes_mask | cargo_mask)
+        & gas_scope.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=gas_scope.index)).astype(str).str.strip().ne("")
+    ].copy()
+    if line_disb.empty and line_pay.empty:
+        lineas_credito = pd.DataFrame()
+    else:
+        rows = []
+        instrumentos = sorted({
+            *line_disb.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=line_disb.index)).astype(str).str.strip().tolist(),
+            *line_pay.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=line_pay.index)).astype(str).str.strip().tolist(),
+        })
+        instrumentos = [x for x in instrumentos if x]
+        for instrument in instrumentos:
+            ing_i = line_disb[line_disb.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=line_disb.index)).astype(str).str.strip() == instrument].copy()
+            gas_i = line_pay[line_pay.get(COL_FINANCIAMIENTO_INSTRUMENTO, pd.Series("", index=line_pay.index)).astype(str).str.strip() == instrument].copy()
+            total_desembolsado = float(pd.to_numeric(ing_i.get(COL_MONTO_REAL_COBRADO, ing_i.get(COL_MONTO, 0.0)), errors="coerce").fillna(0.0).sum()) if not ing_i.empty else 0.0
+            capital_pagado = float(pd.to_numeric(gas_i.loc[gas_i.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_i.index)).astype(str).str.strip().eq("Pago capital"), COL_MONTO_REAL_PAGADO], errors="coerce").fillna(0.0).sum()) if not gas_i.empty else 0.0
+            interes_pagado = float(pd.to_numeric(gas_i.loc[gas_i.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_i.index)).astype(str).str.strip().eq("Pago interes"), COL_MONTO_REAL_PAGADO], errors="coerce").fillna(0.0).sum()) if not gas_i.empty else 0.0
+            cargos_pagados = float(pd.to_numeric(gas_i.loc[gas_i.get(COL_FINANCIAMIENTO_REG_TIPO, pd.Series("", index=gas_i.index)).astype(str).str.strip().eq("Cargo"), COL_MONTO_REAL_PAGADO], errors="coerce").fillna(0.0).sum()) if not gas_i.empty else 0.0
+            empresa = str(ing_i.get(COL_EMPRESA, pd.Series("", index=ing_i.index)).astype(str).iloc[0] if not ing_i.empty else gas_i.get(COL_EMPRESA, pd.Series("", index=gas_i.index)).astype(str).iloc[0]).strip()
+            banco = str(ing_i.get(COL_CONTRAPARTE, pd.Series("", index=ing_i.index)).astype(str).iloc[0] if not ing_i.empty else gas_i.get(COL_CONTRAPARTE, pd.Series("", index=gas_i.index)).astype(str).iloc[0]).strip()
+            fecha_primera = pd.to_datetime(ing_i.get(COL_FECHA_REAL_COBRO, ing_i.get(COL_FECHA)), errors="coerce").min() if not ing_i.empty else pd.NaT
+            fecha_ultimo_pago = pd.to_datetime(gas_i.get(COL_FECHA_REAL_PAGO, gas_i.get(COL_FECHA)), errors="coerce").max() if not gas_i.empty else pd.NaT
+            rows.append(
+                {
+                    "empresa": empresa,
+                    "linea_credito": instrument,
+                    "banco": banco,
+                    "fecha_primer_desembolso": fecha_primera,
+                    "fecha_ultimo_pago": fecha_ultimo_pago,
+                    "total_desembolsado": total_desembolsado,
+                    "capital_pagado": capital_pagado,
+                    "interes_pagado": interes_pagado,
+                    "cargos_pagados": cargos_pagados,
+                    "saldo_estimado": max(0.0, total_desembolsado - capital_pagado),
+                }
+            )
+        lineas_credito = pd.DataFrame(rows).sort_values(["empresa", "linea_credito"], na_position="last").reset_index(drop=True)
+
     return {
         "aportes": aportes,
         "deuda": deuda,
         "prestamos_otorgados": prestamos_otorgados,
         "inversiones": inversiones,
+        "lineas_credito": lineas_credito,
     }
 
 
-def _build_inventory_operativo_view(gas_scope: pd.DataFrame) -> pd.DataFrame:
+def _build_inventory_operativo_view(gas_scope: pd.DataFrame, cutoff_date: date | pd.Timestamp) -> pd.DataFrame:
     if gas_scope is None or gas_scope.empty:
         return pd.DataFrame()
     trat = gas_scope.get(COL_TRATAMIENTO_BALANCE_GAS, pd.Series("", index=gas_scope.index)).astype(str).str.strip()
     inv = gas_scope[trat.eq("Inventario")].copy()
     if inv.empty:
         return pd.DataFrame()
+    cutoff_ts = pd.Timestamp(cutoff_date)
     inv["fecha"] = pd.to_datetime(inv.get(COL_FECHA), errors="coerce")
+    inv["fecha_llegada_inventario"] = pd.to_datetime(inv.get(COL_INVENTARIO_FECHA_LLEGADA), errors="coerce")
     inv["monto_registrado"] = pd.to_numeric(inv.get(COL_MONTO), errors="coerce").fillna(0.0).abs()
     inv["movimiento_inventario"] = inv.get(COL_INVENTARIO_MOVIMIENTO, pd.Series("", index=inv.index)).astype(str).str.strip()
     inv["item_inventario"] = inv.get(COL_INVENTARIO_ITEM, pd.Series("", index=inv.index)).astype(str).str.strip()
+    arrival = inv["fecha_llegada_inventario"].where(inv["fecha_llegada_inventario"].notna(), inv["fecha"])
+    inv["estado_inventario"] = "Disponible"
+    inv.loc[
+        inv["movimiento_inventario"].isin(["Entrada", "Ajuste positivo"]) & (arrival > cutoff_ts),
+        "estado_inventario",
+    ] = "En transito"
+    inv.loc[
+        inv["movimiento_inventario"].isin(["Salida / consumo", "Ajuste negativo"]),
+        "estado_inventario",
+    ] = inv.loc[
+        inv["movimiento_inventario"].isin(["Salida / consumo", "Ajuste negativo"]),
+        "movimiento_inventario",
+    ]
     inv["impacto_inventario"] = inv["monto_registrado"]
     inv.loc[inv["movimiento_inventario"].isin(["Salida / consumo", "Ajuste negativo"]), "impacto_inventario"] *= -1.0
     view = pd.DataFrame(
         {
             "fecha": inv["fecha"],
+            "fecha_llegada_inventario": inv["fecha_llegada_inventario"],
             "empresa": inv.get(COL_EMPRESA, pd.Series("", index=inv.index)).astype(str),
             "item_inventario": inv["item_inventario"],
             "movimiento_inventario": inv["movimiento_inventario"],
+            "estado_inventario": inv["estado_inventario"],
             "categoria": inv.get(COL_CATEGORIA, pd.Series("", index=inv.index)).astype(str),
             "monto_registrado": inv["monto_registrado"],
             "impacto_inventario": inv["impacto_inventario"],
@@ -967,13 +1040,14 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Flujo de caja actual`: usa fecha real de cobro y fecha real de pago.\n"
         "- `Flujo de caja proyectado`: usa fechas esperadas, recurrencias y cronogramas futuros.\n"
         "- `Estado de resultados`: usa fecha del hecho economico; capital no va al resultado, solo intereses si entran al resultado.\n"
-        "- `Balance general`: integra caja, cuentas abiertas, prestamos, inventario, prepagos, retenidos con factoring y activos fijos netos cuando existen."
+        "- `Balance general`: integra caja, cuentas abiertas, prestamos, inventario disponible, inventario en transito, prepagos, retenidos con factoring y activos fijos netos cuando existen."
     )
     st.markdown("#### Pendiente para robustecer")
     st.markdown(
         "- Control operativo de inventario por cantidades y costo unitario.\n"
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
+        "- Calculo automatico del interes diario en lineas revolventes.\n"
         "- Factoring con recurso y proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
@@ -1225,6 +1299,7 @@ balance_kwargs = {
     "cuentas_por_pagar": float(latest_balance_summary.get("cuentas_por_pagar", 0.0)),
     "prestamos_otorgados": float(balance_components.get("prestamos_otorgados", 0.0)),
     "inventario": float(balance_components.get("inventario", 0.0)),
+    "inventario_en_transito": float(balance_components.get("inventario_en_transito", 0.0)),
     "anticipos_prepagos": float(balance_components.get("anticipos_prepagos", 0.0)),
     "inversiones_participaciones": float(balance_components.get("inversiones_participaciones", 0.0)),
     "factoring_retenido": float(balance_components.get("factoring_retenido", 0.0)),
@@ -1237,7 +1312,7 @@ balance = build_balance_general_simplificado(
     **{key: value for key, value in balance_kwargs.items() if key in supported_balance_params}
 )
 debt_views = _build_deuda_inversion_views(ing_scope, gas_scope)
-inventory_view = _build_inventory_operativo_view(gas_scope)
+inventory_view = _build_inventory_operativo_view(gas_scope, balance_hasta)
 prepagos_view = _build_prepagos_view(gas_scope, balance_hasta)
 factoring_view = _build_factoring_view(ing_scope)
 
@@ -1553,6 +1628,7 @@ with tab_e:
                 {"Cuenta": "Cuentas por cobrar", "Monto": float(latest["cuentas_por_cobrar"])},
                 {"Cuenta": "Prestamos otorgados", "Monto": float(latest.get("prestamos_otorgados", 0.0))},
                 {"Cuenta": "Inventario", "Monto": float(latest.get("inventario", 0.0))},
+                {"Cuenta": "Inventario en transito", "Monto": float(latest.get("inventario_en_transito", 0.0))},
                 {"Cuenta": "Anticipos / prepagos", "Monto": float(latest.get("anticipos_prepagos", 0.0))},
                 {"Cuenta": "Inversiones / participaciones", "Monto": float(latest.get("inversiones_participaciones", 0.0))},
                 {"Cuenta": "Retenido con factoring", "Monto": float(latest.get("factoring_retenido", 0.0))},
@@ -1773,15 +1849,16 @@ with tab_i:
 
 with st.expander("Inventario operativo", expanded=False):
     st.caption(
-        "Vista administrativa de apoyo para entradas, salidas y ajustes de inventario. "
-        "El saldo del inventario en balance se calcula por monto neto de movimientos registrados."
+        "Vista administrativa de apoyo para entradas, salidas, ajustes e inventario en transito. "
+        "El saldo del inventario en balance se separa entre disponible y en transito segun la fecha de llegada / disponibilidad."
     )
     inv_entradas = float(inventory_view.loc[inventory_view["impacto_inventario"] > 0, "impacto_inventario"].sum()) if not inventory_view.empty else 0.0
     inv_salidas = float(abs(inventory_view.loc[inventory_view["impacto_inventario"] < 0, "impacto_inventario"].sum())) if not inventory_view.empty else 0.0
-    i1, i2, i3 = st.columns(3)
+    i1, i2, i3, i4 = st.columns(4)
     i1.metric("Entradas inventario", format_money_es(inv_entradas))
     i2.metric("Salidas / consumos", format_money_es(inv_salidas))
-    i3.metric("Saldo neto inventario", format_money_es(float(balance_components.get("inventario", 0.0))))
+    i3.metric("Inventario disponible", format_money_es(float(balance_components.get("inventario", 0.0))))
+    i4.metric("Inventario en transito", format_money_es(float(balance_components.get("inventario_en_transito", 0.0))))
     if inventory_view.empty:
         st.info("Sin movimientos de inventario en el alcance filtrado.")
     else:
@@ -1791,6 +1868,7 @@ with st.expander("Inventario operativo", expanded=False):
             hide_index=True,
             column_config={
                 "fecha": st.column_config.DateColumn("Fecha"),
+                "fecha_llegada_inventario": st.column_config.DateColumn("Fecha llegada"),
                 "monto_registrado": st.column_config.NumberColumn("Monto registrado", format="$%0.2f"),
                 "impacto_inventario": st.column_config.NumberColumn("Impacto inventario", format="$%0.2f"),
             },
@@ -1823,17 +1901,19 @@ with st.expander("Prepagos activos", expanded=False):
 
 with st.expander("Deudas e inversiones", expanded=False):
     st.caption(
-        "Vista administrativa de apoyo para financiamientos, prestamos otorgados, inversiones, aportes de capital y operaciones con factoring. "
+        "Vista administrativa de apoyo para financiamientos, lineas de credito, prestamos otorgados, inversiones, aportes de capital y operaciones con factoring. "
         "Aqui se muestra principal registrado, saldo estimado, retenidos pendientes y la proxima cuota cuando existe cronograma."
     )
-    d1, d2, d3, d4, d5 = st.columns(5)
+    d1, d2, d3, d4, d5, d6 = st.columns(6)
     d1.metric("Prestamos recibidos", format_money_es(float(balance_components.get("prestamos_recibidos", 0.0))))
     d2.metric("Prestamos otorgados", format_money_es(float(balance_components.get("prestamos_otorgados", 0.0))))
     d3.metric("Inversiones / participaciones", format_money_es(float(balance_components.get("inversiones_participaciones", 0.0))))
     d4.metric("Aportes de capital", format_money_es(float(balance_components.get("aportes_capital", 0.0))))
     d5.metric("Retenido con factoring", format_money_es(float(balance_components.get("factoring_retenido", 0.0))))
+    d6.metric("Lineas de credito", format_money_es(float(debt_views.get("lineas_credito", pd.DataFrame()).get("saldo_estimado", pd.Series(dtype=float)).sum()) if not debt_views.get("lineas_credito", pd.DataFrame()).empty else 0.0))
 
     for title, key in [
+        ("Lineas de credito", "lineas_credito"),
         ("Financiamientos recibidos", "deuda"),
         ("Prestamos otorgados", "prestamos_otorgados"),
         ("Inversiones / participaciones", "inversiones"),
@@ -1849,11 +1929,17 @@ with st.expander("Deudas e inversiones", expanded=False):
             use_container_width=True,
             hide_index=True,
             column_config={
+                "fecha_primer_desembolso": st.column_config.DateColumn("Primer desembolso"),
+                "fecha_ultimo_pago": st.column_config.DateColumn("Ultimo pago"),
                 "fecha_movimiento": st.column_config.DateColumn("Fecha movimiento"),
                 "fecha_inicio": st.column_config.DateColumn("Fecha inicio"),
                 "proxima_fecha": st.column_config.DateColumn("Proxima fecha"),
                 "monto_principal_registrado": st.column_config.NumberColumn("Principal registrado", format="$%0.2f"),
                 "monto_operativo_registrado": st.column_config.NumberColumn("Monto registrado", format="$%0.2f"),
+                "total_desembolsado": st.column_config.NumberColumn("Total desembolsado", format="$%0.2f"),
+                "capital_pagado": st.column_config.NumberColumn("Capital pagado", format="$%0.2f"),
+                "interes_pagado": st.column_config.NumberColumn("Interes pagado", format="$%0.2f"),
+                "cargos_pagados": st.column_config.NumberColumn("Cargos pagados", format="$%0.2f"),
                 "saldo_estimado": st.column_config.NumberColumn("Saldo estimado", format="$%0.2f"),
                 "proximo_capital": st.column_config.NumberColumn("Proximo capital", format="$%0.2f"),
                 "proximo_interes": st.column_config.NumberColumn("Proximo interes", format="$%0.2f"),
@@ -1885,6 +1971,6 @@ with st.expander("Deudas e inversiones", expanded=False):
 st.markdown("---")
 st.caption(
     "Panel Financiero Gerencial prioriza lectura gerencial. Finanzas 1 se mantiene intacta para captura/operacion. "
-    "Pendientes mayores: cierre mensual persistente, conciliacion bancaria, inventario con cantidades/costo unitario y valuacion avanzada de inversiones / participaciones."
+    "Pendientes mayores: cierre mensual persistente, conciliacion bancaria, inventario con cantidades/costo unitario, interes diario automatico para lineas revolventes y valuacion avanzada de inversiones / participaciones."
 )
 

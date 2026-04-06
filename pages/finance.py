@@ -139,6 +139,7 @@ COL_PREPAGO_MESES = "Plazo prepago meses"
 COL_PREPAGO_FEC_INI = "Fecha inicio prepago"
 COL_INV_MOV = "Movimiento inventario"
 COL_INV_ITEM = "Item inventario"
+COL_INV_FEC_LLEGADA = "Fecha llegada inventario"
 COL_AF_TOGGLE = "Activo fijo"
 COL_AF_TIPO = "Tipo activo fijo"
 COL_AF_VIDA = "Vida util activo anios"
@@ -156,7 +157,46 @@ COL_FIN_TASA_TIPO = "Tipo tasa financiamiento"
 COL_FIN_MODALIDAD = "Modalidad financiamiento"
 COL_FIN_PERIOD = "Periodicidad financiamiento"
 COL_FIN_CRONO = "Cronograma financiamiento"
+COL_FIN_INSTRUMENTO = "Instrumento financiero"
+COL_FIN_REG_TIPO = "Registro financiamiento"
 COL_FACT_DET = "Detalle factoring"
+
+WS_LINEAS_CREDITO = "LineasCredito"
+LC_COL_ROWID = "RowID"
+LC_COL_EMPRESA = "Empresa"
+LC_COL_NOMBRE = "Nombre linea"
+LC_COL_BANCO = "Banco"
+LC_COL_LIMITE = "Limite vigente"
+LC_COL_TASA_DIARIA = "Tasa diaria pct"
+LC_COL_TASA_DESDE = "Fecha vigencia tasa"
+LC_COL_CARGO_ANUAL_PCT = "Cargo anual pct"
+LC_COL_CARGO_DESEMBOLSO = "Cargo desembolso fijo"
+LC_COL_CARGO_BANCA_MENSUAL = "Cargo banca en linea mensual"
+LC_COL_SEGURO_INCENDIO_1 = "Seguro incendio 1 anual"
+LC_COL_SEGURO_INCENDIO_2 = "Seguro incendio 2 anual"
+LC_COL_POLIZA_VIDA_MENSUAL = "Poliza vida mensual"
+LC_COL_ACTIVA = "Activa"
+LC_COL_NOTAS = "Notas"
+LC_COL_UPDATED_AT = "Actualizado"
+LC_BASE_COLUMNS = [
+    LC_COL_ROWID,
+    LC_COL_EMPRESA,
+    LC_COL_NOMBRE,
+    LC_COL_BANCO,
+    LC_COL_LIMITE,
+    LC_COL_TASA_DIARIA,
+    LC_COL_TASA_DESDE,
+    LC_COL_CARGO_ANUAL_PCT,
+    LC_COL_CARGO_DESEMBOLSO,
+    LC_COL_CARGO_BANCA_MENSUAL,
+    LC_COL_SEGURO_INCENDIO_1,
+    LC_COL_SEGURO_INCENDIO_2,
+    LC_COL_POLIZA_VIDA_MENSUAL,
+    LC_COL_ACTIVA,
+    LC_COL_NOTAS,
+    COL_USER,
+    LC_COL_UPDATED_AT,
+]
 
 
 EMPRESAS_OPCIONES = ["RS-SP", "RIR"]
@@ -284,6 +324,15 @@ BALANCE_GAS_HELP = {
     "Cancelacion de pasivo / deuda": "Que entra: pago de capital de deuda. Ejemplos: abono a prestamo; pago de capital de financiamiento.",
 }
 INV_MOV_OPTIONS = ["Entrada", "Salida / consumo", "Ajuste positivo", "Ajuste negativo"]
+INVENTORY_POSITIVE_MOVEMENTS = {"Entrada", "Ajuste positivo"}
+LINE_CHARGE_OPTIONS = [
+    "Instalacion anual de linea",
+    "Banca en linea mensual",
+    "Seguro incendio 1 anual",
+    "Seguro incendio 2 anual",
+    "Poliza de vida mensual",
+    "Cargo manual",
+]
 
 
 # -------------------- Helpers generales --------------------
@@ -484,6 +533,11 @@ def _validate_gas_df(df: pd.DataFrame) -> list[str]:
 def _date_or_nat(value):
     ts = _ts(value)
     return ts if not pd.isna(ts) else pd.NaT
+
+
+def _as_date_or_default(value, default_date: date) -> date:
+    ts = _ts(value)
+    return ts.date() if not pd.isna(ts) else default_date
 
 
 def _serialize_schedule(entries: list[dict]) -> str:
@@ -909,7 +963,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT, COL_ING_DET, COL_ING_NAT,
         COL_TRAT_BAL_ING, COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO,
         COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO,
-        COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO, COL_ROWID, COL_USER,
+        COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO, COL_ROWID, COL_USER,
     ]:
         if col not in out.columns:
             if col == COL_MONTO:
@@ -971,7 +1025,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
             COL_POR_COB, COL_COB, COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR,
             COL_ROWID, COL_USER, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING, COL_CTP_TIPO, COL_CTP_NOMBRE,
             COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
-            COL_FIN_PERIOD, COL_FIN_CRONO,
+            COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO,
             COL_ING_PARTIALS,
         ],
     )
@@ -1001,8 +1055,13 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     full_cash_mask = out[COL_POR_COB].map(_si_no_norm).eq("No") & ~factoring_mask
     out.loc[full_cash_mask, COL_COBRO_REAL_MONTO] = total_ing.loc[full_cash_mask]
     out[COL_COBRO_REAL_MONTO] = out[COL_COBRO_REAL_MONTO].clip(upper=total_ing)
-    fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle) | out[COL_CAT].astype(str).eq("Financiamiento recibido")
-    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", ""]
+    fin_mask = (
+        out[COL_FIN_TOGGLE].map(_bool_from_toggle)
+        | out[COL_CAT].astype(str).eq("Financiamiento recibido")
+        | out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne("")
+        | out[COL_FIN_REG_TIPO].astype(str).str.strip().ne("")
+    )
+    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", "", "", ""]
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -1016,16 +1075,16 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
         COL_PROV, COL_FPAGO, COL_FPAGO_REAL, COL_CTP_TIPO, COL_CTP_NOMBRE, COL_PAGO_REAL_MONTO,
         COL_GAS_PARTIALS,
         COL_GAS_SUB, COL_GAS_DET, COL_TRAT_BAL_GAS, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA,
-        COL_INV_MOV, COL_INV_ITEM,
+        COL_INV_MOV, COL_INV_ITEM, COL_INV_FEC_LLEGADA,
         COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL,
         COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI,
         COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
-        COL_FIN_PERIOD, COL_FIN_CRONO, COL_ROWID, COL_USER,
+        COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO, COL_ROWID, COL_USER,
     ]:
         if col not in out.columns:
             if col == COL_MONTO:
                 out[col] = 0.0
-            elif col in {COL_FECHA, COL_FPAGO, COL_FPAGO_REAL, COL_REC_HASTA, COL_AF_FEC_INI, COL_FIN_FEC_INI, COL_PREPAGO_FEC_INI}:
+            elif col in {COL_FECHA, COL_FPAGO, COL_FPAGO_REAL, COL_REC_HASTA, COL_AF_FEC_INI, COL_FIN_FEC_INI, COL_PREPAGO_FEC_INI, COL_INV_FEC_LLEGADA}:
                 out[col] = pd.NaT
             elif col == COL_EMP:
                 out[col] = EMPRESA_DEFAULT
@@ -1065,6 +1124,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_FPAGO_REAL] = _ts(out[COL_FPAGO_REAL])
     out[COL_REC_HASTA] = _ts(out[COL_REC_HASTA])
     out[COL_PREPAGO_FEC_INI] = _ts(out[COL_PREPAGO_FEC_INI])
+    out[COL_INV_FEC_LLEGADA] = _ts(out[COL_INV_FEC_LLEGADA])
     out[COL_AF_FEC_INI] = _ts(out[COL_AF_FEC_INI])
     out[COL_FIN_FEC_INI] = _ts(out[COL_FIN_FEC_INI])
     out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
@@ -1093,7 +1153,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
             COL_PROV, COL_ROWID, COL_USER, COL_GAS_SUB, COL_GAS_DET, COL_CTP_TIPO, COL_CTP_NOMBRE,
             COL_TRAT_BAL_GAS, COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_DEP_TOGGLE,
             COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD,
-            COL_FIN_PERIOD, COL_FIN_CRONO, COL_GAS_PARTIALS, COL_INV_MOV, COL_INV_ITEM,
+            COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO, COL_GAS_PARTIALS, COL_INV_MOV, COL_INV_ITEM,
         ],
     )
     out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
@@ -1119,12 +1179,19 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[~prepago_mask, [COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI]] = [0, pd.NaT]
     out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_PREPAGO_FEC_INI] = out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_FECHA]
     inventory_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Inventario")
-    out.loc[~inventory_mask, [COL_INV_MOV, COL_INV_ITEM]] = ["", ""]
+    out.loc[~inventory_mask, [COL_INV_MOV, COL_INV_ITEM, COL_INV_FEC_LLEGADA]] = ["", "", pd.NaT]
     out.loc[inventory_mask & out[COL_INV_MOV].astype(str).str.strip().eq(""), COL_INV_MOV] = "Entrada"
+    inv_positive_mask = inventory_mask & out[COL_INV_MOV].astype(str).isin(INVENTORY_POSITIVE_MOVEMENTS)
+    out.loc[inv_positive_mask & out[COL_INV_FEC_LLEGADA].isna(), COL_INV_FEC_LLEGADA] = out.loc[inv_positive_mask & out[COL_INV_FEC_LLEGADA].isna(), COL_FECHA]
+    out.loc[inventory_mask & ~out[COL_INV_MOV].astype(str).isin(INVENTORY_POSITIVE_MOVEMENTS), COL_INV_FEC_LLEGADA] = pd.NaT
     af_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo")
     out.loc[~af_mask, [COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA, COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL]] = ["No", "", 0, pd.NaT, 0.0, "No", 0.0]
-    fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle)
-    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", ""]
+    fin_mask = (
+        out[COL_FIN_TOGGLE].map(_bool_from_toggle)
+        | out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne("")
+        | out[COL_FIN_REG_TIPO].astype(str).str.strip().ne("")
+    )
+    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", "", "", ""]
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -1570,6 +1637,171 @@ def safe_write_worksheet(client, sheet_id, worksheet, new_df, old_df=None, id_co
         return False
 
 
+def ensure_lineas_credito_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    for col in LC_BASE_COLUMNS:
+        if col not in out.columns:
+            if col in {LC_COL_LIMITE, LC_COL_TASA_DIARIA, LC_COL_CARGO_ANUAL_PCT, LC_COL_CARGO_DESEMBOLSO, LC_COL_CARGO_BANCA_MENSUAL, LC_COL_SEGURO_INCENDIO_1, LC_COL_SEGURO_INCENDIO_2, LC_COL_POLIZA_VIDA_MENSUAL}:
+                out[col] = 0.0
+            elif col in {LC_COL_TASA_DESDE, LC_COL_UPDATED_AT}:
+                out[col] = pd.NaT
+            elif col == LC_COL_EMPRESA:
+                out[col] = EMPRESA_DEFAULT
+            elif col == LC_COL_ACTIVA:
+                out[col] = "Sí"
+            else:
+                out[col] = ""
+    out[LC_COL_LIMITE] = pd.to_numeric(out[LC_COL_LIMITE], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_TASA_DIARIA] = pd.to_numeric(out[LC_COL_TASA_DIARIA], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_CARGO_ANUAL_PCT] = pd.to_numeric(out[LC_COL_CARGO_ANUAL_PCT], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_CARGO_DESEMBOLSO] = pd.to_numeric(out[LC_COL_CARGO_DESEMBOLSO], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_CARGO_BANCA_MENSUAL] = pd.to_numeric(out[LC_COL_CARGO_BANCA_MENSUAL], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_SEGURO_INCENDIO_1] = pd.to_numeric(out[LC_COL_SEGURO_INCENDIO_1], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_SEGURO_INCENDIO_2] = pd.to_numeric(out[LC_COL_SEGURO_INCENDIO_2], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_POLIZA_VIDA_MENSUAL] = pd.to_numeric(out[LC_COL_POLIZA_VIDA_MENSUAL], errors="coerce").fillna(0.0).astype(float)
+    out[LC_COL_TASA_DESDE] = _ts(out[LC_COL_TASA_DESDE])
+    out[LC_COL_UPDATED_AT] = _ts(out[LC_COL_UPDATED_AT])
+    out[LC_COL_EMPRESA] = out[LC_COL_EMPRESA].astype("string").str.upper().str.strip().where(
+        out[LC_COL_EMPRESA].astype("string").str.upper().str.strip().isin(EMPRESAS_OPCIONES),
+        other=EMPRESA_DEFAULT,
+    )
+    out[LC_COL_ACTIVA] = out[LC_COL_ACTIVA].map(_si_no_norm)
+    out = _ensure_text(out, [LC_COL_ROWID, LC_COL_EMPRESA, LC_COL_NOMBRE, LC_COL_BANCO, LC_COL_ACTIVA, LC_COL_NOTAS, COL_USER])
+    out[LC_COL_ROWID] = out.apply(lambda row: str(row.get(LC_COL_ROWID, "")).strip() or uuid.uuid4().hex, axis=1)
+    return out
+
+
+def _ensure_worksheet_exists(client, sheet_id: str, worksheet_name: str, headers: list[str]) -> None:
+    sh = client.open_by_key(sheet_id)
+    try:
+        sh.worksheet(worksheet_name)
+        return
+    except Exception:
+        ws = sh.add_worksheet(title=worksheet_name, rows=200, cols=max(24, len(headers) + 4))
+        ws.update("A1", [headers])
+
+
+def load_credit_lines_df(client, sheet_id: str) -> pd.DataFrame:
+    _ensure_worksheet_exists(client, sheet_id, WS_LINEAS_CREDITO, LC_BASE_COLUMNS)
+    try:
+        return ensure_lineas_credito_columns(read_worksheet(client, sheet_id, WS_LINEAS_CREDITO))
+    except Exception:
+        return ensure_lineas_credito_columns(pd.DataFrame(columns=LC_BASE_COLUMNS))
+
+
+def safe_write_credit_lines(client, sheet_id: str, new_df: pd.DataFrame, old_df: pd.DataFrame | None = None) -> bool:
+    _ensure_worksheet_exists(client, sheet_id, WS_LINEAS_CREDITO, LC_BASE_COLUMNS)
+    return safe_write_worksheet(client, sheet_id, WS_LINEAS_CREDITO, ensure_lineas_credito_columns(new_df), old_df=old_df, id_col=LC_COL_ROWID)
+
+
+def _build_credit_line_ingreso_row(*, line_row: pd.Series, fecha_evento, monto: float, nota: str = "") -> dict:
+    line_name = str(line_row.get(LC_COL_NOMBRE, "") or "").strip()
+    bank_name = str(line_row.get(LC_COL_BANCO, "") or "").strip()
+    desc = f"Desembolso linea de credito - {line_name}" if line_name else "Desembolso linea de credito"
+    if str(nota or "").strip():
+        desc = f"{desc} | {str(nota or '').strip()}"
+    return {
+        COL_ROWID: uuid.uuid4().hex,
+        COL_FECHA: _ts(fecha_evento),
+        COL_MONTO: float(monto),
+        COL_PROY: "",
+        COL_CLI_ID: "",
+        COL_CLI_NOM: "",
+        COL_EMP: str(line_row.get(LC_COL_EMPRESA, EMPRESA_DEFAULT) or EMPRESA_DEFAULT).strip(),
+        COL_DESC: desc,
+        COL_CONC: desc,
+        COL_POR_COB: "No",
+        COL_COB: "Si",
+        COL_FCOBRO: pd.NaT,
+        COL_FCOBRO_REAL: _ts(fecha_evento),
+        COL_CTP_TIPO: "Banco",
+        COL_CTP_NOMBRE: bank_name,
+        COL_COBRO_REAL_MONTO: float(monto),
+        COL_ING_PARTIALS: _serialize_partial_events([{"fecha": _ts(fecha_evento), "monto": float(monto), "nota": desc}]),
+        COL_REC: "No",
+        COL_CAT: "Financiamiento recibido",
+        COL_ING_DET: "Prestamo recibido",
+        COL_ING_NAT: "Financiamiento",
+        COL_TRAT_BAL_ING: "Pasivo financiero",
+        COL_FIN_TOGGLE: "Sí",
+        COL_FIN_TIPO: "Financiamiento recibido",
+        COL_FIN_MONTO: float(monto),
+        COL_FIN_FEC_INI: _ts(fecha_evento),
+        COL_FIN_PLAZO: 0,
+        COL_FIN_TASA: 0.0,
+        COL_FIN_TASA_TIPO: "",
+        COL_FIN_MODALIDAD: "",
+        COL_FIN_PERIOD: "",
+        COL_FIN_CRONO: "",
+        COL_FIN_INSTRUMENTO: line_name,
+        COL_FIN_REG_TIPO: "Desembolso",
+        COL_ESC: "Real",
+        COL_USER: _current_user(),
+    }
+
+
+def _build_credit_line_gasto_row(
+    *,
+    line_row: pd.Series,
+    fecha_evento,
+    monto: float,
+    descripcion: str,
+    tratamiento: str,
+    detalle_gasto: str = "Otros",
+    registro_financiamiento: str = "",
+    prepago_meses: int = 0,
+    prepago_inicio=None,
+) -> dict:
+    bank_name = str(line_row.get(LC_COL_BANCO, "") or "").strip()
+    line_name = str(line_row.get(LC_COL_NOMBRE, "") or "").strip()
+    partials = [{"fecha": _ts(fecha_evento), "monto": float(monto), "nota": descripcion}]
+    is_prepago = tratamiento == "Anticipo / prepago" and int(prepago_meses or 0) > 0
+    return {
+        COL_ROWID: uuid.uuid4().hex,
+        COL_FECHA: _ts(fecha_evento),
+        COL_MONTO: float(monto),
+        COL_DESC: descripcion,
+        COL_CONC: descripcion,
+        COL_CAT: "Gasto financiero",
+        COL_ESC: "Real",
+        COL_REF_RID: "",
+        COL_PROY: "",
+        COL_CLI_ID: "",
+        COL_CLI_NOM: "",
+        COL_EMP: str(line_row.get(LC_COL_EMPRESA, EMPRESA_DEFAULT) or EMPRESA_DEFAULT).strip(),
+        COL_POR_PAG: "No",
+        COL_PROV: bank_name,
+        COL_REC: "No",
+        COL_FPAGO: pd.NaT,
+        COL_FPAGO_REAL: _ts(fecha_evento),
+        COL_CTP_TIPO: "Banco",
+        COL_CTP_NOMBRE: bank_name,
+        COL_PAGO_REAL_MONTO: float(monto),
+        COL_GAS_PARTIALS: _serialize_partial_events(partials),
+        COL_GAS_SUB: "Financiero",
+        COL_GAS_DET: detalle_gasto,
+        COL_TRAT_BAL_GAS: tratamiento,
+        COL_PREPAGO_MESES: int(prepago_meses) if is_prepago else 0,
+        COL_PREPAGO_FEC_INI: _ts(prepago_inicio or fecha_evento) if is_prepago else pd.NaT,
+        COL_INV_MOV: "",
+        COL_INV_ITEM: "",
+        COL_INV_FEC_LLEGADA: pd.NaT,
+        COL_FIN_TOGGLE: "No",
+        COL_FIN_TIPO: "",
+        COL_FIN_MONTO: 0.0,
+        COL_FIN_FEC_INI: pd.NaT,
+        COL_FIN_PLAZO: 0,
+        COL_FIN_TASA: 0.0,
+        COL_FIN_TASA_TIPO: "",
+        COL_FIN_MODALIDAD: "",
+        COL_FIN_PERIOD: "",
+        COL_FIN_CRONO: "",
+        COL_FIN_INSTRUMENTO: line_name,
+        COL_FIN_REG_TIPO: registro_financiamiento,
+        COL_USER: _current_user(),
+    }
+
+
 def _ensure_operational_schema_persisted_once(client, sheet_id: str) -> None:
     """
     Garantiza que las hojas operativas tengan las columnas requeridas
@@ -1747,6 +1979,8 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Financiamiento otorgado`: sale caja y nace cuenta por cobrar.\n"
         "- `Entidad relacionada / contraparte`: quien esta del otro lado del movimiento. Ejemplos: banco, socio, empresa relacionada o empresa invertida.\n"
         "- `Con factoring`: el valor recibido inicial entra a caja; el retenido queda como activo hasta la liquidacion final.\n"
+        "- `Inventario en transito`: entrada de inventario cuya fecha de llegada / disponibilidad aun no ocurre.\n"
+        "- `Linea de credito`: los desembolsos suben caja y pasivo; capital pagado baja deuda; intereses y cargos van a gasto financiero segun el cobro real del banco.\n"
         "- `Gasto del periodo`: consumo del mismo periodo.\n"
         "- `Saldo acumulado`: caja acumulada despues de sumar todos los movimientos reales hasta la fecha.\n"
         "- `Flujo neto`: diferencia entre entradas y salidas del periodo analizado.\n"
@@ -1766,6 +2000,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
         "- Cantidades, costo unitario y valorizacion mas fina de inventario.\n"
+        "- Calculo automatico del interes diario en lineas revolventes.\n"
         "- Factoring con recurso.\n"
         "- Proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
@@ -2890,6 +3125,360 @@ with st.expander("Liquidar retenido con factoring", expanded=False):
             _safe_rerun()
 
 
+def _linea_credito_position(line_name: str) -> tuple[float, float, float]:
+    ing_df = ensure_ingresos_columns(st.session_state.df_ing.copy())
+    gas_df = ensure_gastos_columns(st.session_state.df_gas.copy())
+    line_name_norm = str(line_name or "").strip()
+    if not line_name_norm:
+        return 0.0, 0.0, 0.0
+    disb_mask = (
+        ing_df[COL_FIN_INSTRUMENTO].astype(str).str.strip().eq(line_name_norm)
+        & ing_df[COL_FIN_REG_TIPO].astype(str).str.strip().eq("Desembolso")
+    )
+    pay_mask = (
+        gas_df[COL_FIN_INSTRUMENTO].astype(str).str.strip().eq(line_name_norm)
+        & gas_df[COL_FIN_REG_TIPO].astype(str).str.strip().eq("Pago capital")
+    )
+    desembolsado = float(pd.to_numeric(ing_df.loc[disb_mask, COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).sum())
+    capital_pagado = float(pd.to_numeric(gas_df.loc[pay_mask, COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).sum())
+    saldo = max(0.0, desembolsado - capital_pagado)
+    return desembolsado, capital_pagado, saldo
+
+
+st.markdown("## Linea de credito")
+with st.expander("Gestionar linea de credito", expanded=False):
+    st.caption(
+        "Esta seccion gestiona lineas revolventes sin forzar un cronograma mensual falso. "
+        "La tasa diaria, limite y cargos se guardan como referencia; los intereses se registran segun la liquidacion real del banco."
+    )
+    lineas_before = load_credit_lines_df(client, SHEET_ID)
+    lineas_df = ensure_lineas_credito_columns(lineas_before.copy())
+    lineas_activas = lineas_df[lineas_df[LC_COL_ACTIVA].map(_si_no_norm).eq("Sí")].copy()
+    tab_lc1, tab_lc2, tab_lc3, tab_lc4 = st.tabs(
+        [
+            "Configurar / actualizar",
+            "Registrar desembolso",
+            "Registrar pago",
+            "Registrar cargo asociado",
+        ]
+    )
+
+    with tab_lc1:
+        line_options = ["Nueva linea"] + [
+            f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}"
+            for _, row in lineas_df.iterrows()
+        ]
+        selected_line_label = st.selectbox("Linea a editar", line_options, key="lc_config_sel")
+        selected_line = None
+        if selected_line_label != "Nueva linea" and not lineas_df.empty:
+            selected_idx = line_options.index(selected_line_label) - 1
+            if 0 <= selected_idx < len(lineas_df):
+                selected_line = lineas_df.iloc[selected_idx]
+        suffix = str(selected_line.get(LC_COL_ROWID, "new")) if selected_line is not None else "new"
+        lc_emp_default = str(selected_line.get(LC_COL_EMPRESA, EMPRESA_DEFAULT)).strip() if selected_line is not None else EMPRESA_DEFAULT
+        lc_emp_index = EMPRESAS_OPCIONES.index(lc_emp_default) if lc_emp_default in EMPRESAS_OPCIONES else EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            lc_empresa = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=lc_emp_index, key=f"lc_cfg_emp_{suffix}")
+            lc_nombre = st.text_input("Nombre linea", value=str(selected_line.get(LC_COL_NOMBRE, "")) if selected_line is not None else "", key=f"lc_cfg_nombre_{suffix}")
+            lc_banco = st.text_input("Banco", value=str(selected_line.get(LC_COL_BANCO, "")) if selected_line is not None else "", key=f"lc_cfg_banco_{suffix}")
+        with c2:
+            lc_limite = st.number_input("Limite vigente", min_value=0.0, step=100.0, value=float(selected_line.get(LC_COL_LIMITE, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_limite_{suffix}")
+            lc_tasa_diaria = st.number_input("Tasa diaria pct", min_value=0.0, step=0.0001, format="%.6f", value=float(selected_line.get(LC_COL_TASA_DIARIA, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_tasa_{suffix}")
+            lc_tasa_desde = st.date_input("Fecha vigencia tasa", value=_as_date_or_default(selected_line.get(LC_COL_TASA_DESDE), _today()) if selected_line is not None else _today(), key=f"lc_cfg_tasa_desde_{suffix}")
+            lc_cargo_anual = st.number_input("Cargo anual pct sobre limite", min_value=0.0, step=0.1, value=float(selected_line.get(LC_COL_CARGO_ANUAL_PCT, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_anual_{suffix}")
+            lc_cargo_desembolso = st.number_input("Cargo desembolso fijo", min_value=0.0, step=1.0, value=float(selected_line.get(LC_COL_CARGO_DESEMBOLSO, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_desembolso_{suffix}")
+        with c3:
+            lc_banca = st.number_input("Cargo banca en linea mensual", min_value=0.0, step=0.01, value=float(selected_line.get(LC_COL_CARGO_BANCA_MENSUAL, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_banca_{suffix}")
+            lc_seg1 = st.number_input("Seguro incendio 1 anual", min_value=0.0, step=0.01, value=float(selected_line.get(LC_COL_SEGURO_INCENDIO_1, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_seg1_{suffix}")
+            lc_seg2 = st.number_input("Seguro incendio 2 anual", min_value=0.0, step=0.01, value=float(selected_line.get(LC_COL_SEGURO_INCENDIO_2, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_seg2_{suffix}")
+            lc_poliza = st.number_input("Poliza vida mensual", min_value=0.0, step=0.01, value=float(selected_line.get(LC_COL_POLIZA_VIDA_MENSUAL, 0.0)) if selected_line is not None else 0.0, key=f"lc_cfg_poliza_{suffix}")
+            lc_activa = st.selectbox("Activa", YES_NO_OPTIONS, index=YES_NO_OPTIONS.index(_si_no_norm(selected_line.get(LC_COL_ACTIVA, "Sí"))) if selected_line is not None and _si_no_norm(selected_line.get(LC_COL_ACTIVA, "Sí")) in YES_NO_OPTIONS else 1, key=f"lc_cfg_activa_{suffix}")
+        lc_notas = st.text_area("Notas", value=str(selected_line.get(LC_COL_NOTAS, "")) if selected_line is not None else "", key=f"lc_cfg_notas_{suffix}")
+        if st.button("Guardar configuracion linea", key=f"btn_guardar_lc_cfg_{suffix}"):
+            if not str(lc_nombre or "").strip():
+                st.error("Debes indicar el nombre de la linea.")
+                st.stop()
+            if not str(lc_banco or "").strip():
+                st.error("Debes indicar el banco.")
+                st.stop()
+            line_id = str(selected_line.get(LC_COL_ROWID, "")).strip() if selected_line is not None else uuid.uuid4().hex
+            new_row = {
+                LC_COL_ROWID: line_id,
+                LC_COL_EMPRESA: lc_empresa,
+                LC_COL_NOMBRE: str(lc_nombre or "").strip(),
+                LC_COL_BANCO: str(lc_banco or "").strip(),
+                LC_COL_LIMITE: float(lc_limite),
+                LC_COL_TASA_DIARIA: float(lc_tasa_diaria),
+                LC_COL_TASA_DESDE: _ts(lc_tasa_desde),
+                LC_COL_CARGO_ANUAL_PCT: float(lc_cargo_anual),
+                LC_COL_CARGO_DESEMBOLSO: float(lc_cargo_desembolso),
+                LC_COL_CARGO_BANCA_MENSUAL: float(lc_banca),
+                LC_COL_SEGURO_INCENDIO_1: float(lc_seg1),
+                LC_COL_SEGURO_INCENDIO_2: float(lc_seg2),
+                LC_COL_POLIZA_VIDA_MENSUAL: float(lc_poliza),
+                LC_COL_ACTIVA: lc_activa,
+                LC_COL_NOTAS: str(lc_notas or "").strip(),
+                LC_COL_UPDATED_AT: _ts(_today()),
+                COL_USER: _current_user(),
+            }
+            new_lineas_df = lineas_df.copy()
+            if selected_line is not None and line_id in new_lineas_df[LC_COL_ROWID].astype(str).tolist():
+                for col, val in new_row.items():
+                    new_lineas_df.loc[new_lineas_df[LC_COL_ROWID].astype(str) == line_id, col] = val
+            else:
+                new_lineas_df = pd.concat([new_lineas_df, pd.DataFrame([new_row])], ignore_index=True)
+            wrote = safe_write_credit_lines(client, SHEET_ID, new_lineas_df, old_df=lineas_before)
+            if wrote:
+                st.cache_data.clear()
+                st.success("Configuracion de linea guardada.")
+                _safe_rerun()
+            else:
+                st.info("No hubo cambios para guardar en la linea seleccionada.")
+
+    with tab_lc2:
+        if lineas_activas.empty:
+            st.info("Primero configura y activa al menos una linea de credito.")
+        else:
+            disb_labels = {
+                f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
+                for _, row in lineas_activas.iterrows()
+            }
+            disb_sel = st.selectbox("Linea activa", list(disb_labels.keys()), key="lc_disb_sel")
+            disb_row = lineas_activas[lineas_activas[LC_COL_ROWID].astype(str) == disb_labels.get(disb_sel, "")].iloc[0]
+            disb_name = str(disb_row.get(LC_COL_NOMBRE, "") or "").strip()
+            total_desembolsado, capital_pagado, saldo_actual = _linea_credito_position(disb_name)
+            limite_linea = float(pd.to_numeric(pd.Series([disb_row.get(LC_COL_LIMITE, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+            disponible_linea = max(0.0, limite_linea - saldo_actual) if limite_linea > 0 else 0.0
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Desembolsado acumulado", _format_money_es(total_desembolsado))
+            d2.metric("Capital pagado", _format_money_es(capital_pagado))
+            d3.metric("Saldo estimado linea", _format_money_es(saldo_actual))
+            st.caption(
+                f"Limite vigente: {_format_money_es(limite_linea)} | Disponible estimado: {_format_money_es(disponible_linea) if limite_linea > 0 else 'Sin limite configurado'}"
+            )
+            fecha_desembolso = st.date_input("Fecha desembolso", value=_today(), key="lc_disb_fecha")
+            monto_desembolso = st.number_input("Monto desembolso", min_value=0.0, step=100.0, key="lc_disb_monto")
+            auto_cargo_desembolso = st.selectbox("Generar cargo fijo por desembolso", YES_NO_OPTIONS, index=1 if float(disb_row.get(LC_COL_CARGO_DESEMBOLSO, 0.0) or 0.0) > 0 else 0, key="lc_disb_auto_fee")
+            nota_desembolso = st.text_input("Nota desembolso", key="lc_disb_nota")
+            if st.button("Registrar desembolso linea", key="btn_registrar_lc_desembolso"):
+                if float(monto_desembolso) <= 0:
+                    st.error("Debes indicar un monto de desembolso mayor que cero.")
+                    st.stop()
+                if limite_linea > 0 and float(monto_desembolso) > disponible_linea + 0.01:
+                    st.error("El desembolso excede el limite disponible estimado de la linea.")
+                    st.stop()
+                old_ing_df = st.session_state.df_ing.copy()
+                old_gas_df = st.session_state.df_gas.copy()
+                new_ing_df = pd.concat(
+                    [old_ing_df, pd.DataFrame([_build_credit_line_ingreso_row(line_row=disb_row, fecha_evento=fecha_desembolso, monto=float(monto_desembolso), nota=nota_desembolso)])],
+                    ignore_index=True,
+                )
+                new_ing_df = ensure_ingresos_columns(new_ing_df)
+                new_gas_df = old_gas_df.copy()
+                cargo_desembolso = float(pd.to_numeric(pd.Series([disb_row.get(LC_COL_CARGO_DESEMBOLSO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+                if _bool_from_toggle(auto_cargo_desembolso) and cargo_desembolso > 0:
+                    desc_cargo = f"Cargo desembolso linea de credito - {disb_name}"
+                    if str(nota_desembolso or "").strip():
+                        desc_cargo = f"{desc_cargo} | {str(nota_desembolso or '').strip()}"
+                    new_gas_df = pd.concat(
+                        [
+                            new_gas_df,
+                            pd.DataFrame(
+                                [
+                                    _build_credit_line_gasto_row(
+                                        line_row=disb_row,
+                                        fecha_evento=fecha_desembolso,
+                                        monto=cargo_desembolso,
+                                        descripcion=desc_cargo,
+                                        tratamiento="Gasto del periodo",
+                                        detalle_gasto="Otros",
+                                        registro_financiamiento="Cargo",
+                                    )
+                                ]
+                            ),
+                        ],
+                        ignore_index=True,
+                    )
+                    new_gas_df = ensure_gastos_columns(new_gas_df)
+                wrote_ing = safe_write_worksheet(client, SHEET_ID, WS_ING, new_ing_df, old_df=old_ing_df)
+                if not wrote_ing:
+                    st.error("No se pudo guardar el desembolso de la linea.")
+                    st.stop()
+                if len(new_gas_df) != len(old_gas_df):
+                    wrote_gas = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas_df, old_df=old_gas_df)
+                    if not wrote_gas:
+                        rollback_ok = safe_write_worksheet(client, SHEET_ID, WS_ING, old_ing_df, old_df=new_ing_df)
+                        if rollback_ok:
+                            st.error("No se pudo guardar el cargo de desembolso. Se revirtio el desembolso para evitar inconsistencias.")
+                        else:
+                            st.error("No se pudo guardar el cargo de desembolso y tampoco revertir automaticamente el ingreso. Revisa ambas hojas.")
+                        st.stop()
+                st.session_state.df_ing = new_ing_df
+                st.session_state.df_gas = new_gas_df
+                st.cache_data.clear()
+                st.success("Desembolso de linea registrado.")
+                _safe_rerun()
+
+    with tab_lc3:
+        if lineas_activas.empty:
+            st.info("Primero configura y activa al menos una linea de credito.")
+        else:
+            pay_labels = {
+                f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
+                for _, row in lineas_activas.iterrows()
+            }
+            pay_sel = st.selectbox("Linea activa", list(pay_labels.keys()), key="lc_pay_sel")
+            pay_row = lineas_activas[lineas_activas[LC_COL_ROWID].astype(str) == pay_labels.get(pay_sel, "")].iloc[0]
+            pay_name = str(pay_row.get(LC_COL_NOMBRE, "") or "").strip()
+            total_desembolsado, capital_pagado, saldo_actual = _linea_credito_position(pay_name)
+            p1, p2, p3 = st.columns(3)
+            p1.metric("Desembolsado acumulado", _format_money_es(total_desembolsado))
+            p2.metric("Capital pagado", _format_money_es(capital_pagado))
+            p3.metric("Saldo estimado linea", _format_money_es(saldo_actual))
+            fecha_pago_linea = st.date_input("Fecha pago linea", value=_today(), key="lc_pay_fecha")
+            q1, q2, q3 = st.columns(3)
+            with q1:
+                capital_linea = st.number_input("Capital pagado", min_value=0.0, step=100.0, key="lc_pay_capital")
+            with q2:
+                interes_linea = st.number_input("Interes pagado", min_value=0.0, step=1.0, key="lc_pay_interes")
+            with q3:
+                otros_linea = st.number_input("Otros cargos pagados", min_value=0.0, step=1.0, key="lc_pay_otros")
+            nota_pago_linea = st.text_input("Nota pago linea", key="lc_pay_nota")
+            if st.button("Registrar pago linea", key="btn_registrar_lc_pago"):
+                if float(capital_linea) <= 0 and float(interes_linea) <= 0 and float(otros_linea) <= 0:
+                    st.error("Debes registrar al menos capital, interes u otros cargos.")
+                    st.stop()
+                if float(capital_linea) > saldo_actual + 0.01:
+                    st.error("El capital pagado excede el saldo estimado actual de la linea.")
+                    st.stop()
+                old_gas_df = st.session_state.df_gas.copy()
+                rows_new = []
+                nota_base = str(nota_pago_linea or "").strip()
+                if float(capital_linea) > 0:
+                    desc = f"Pago capital linea de credito - {pay_name}"
+                    if nota_base:
+                        desc = f"{desc} | {nota_base}"
+                    rows_new.append(
+                        _build_credit_line_gasto_row(
+                            line_row=pay_row,
+                            fecha_evento=fecha_pago_linea,
+                            monto=float(capital_linea),
+                            descripcion=desc,
+                            tratamiento="Cancelacion de pasivo / deuda",
+                            detalle_gasto="Otros",
+                            registro_financiamiento="Pago capital",
+                        )
+                    )
+                if float(interes_linea) > 0:
+                    desc = f"Interes linea de credito - {pay_name}"
+                    if nota_base:
+                        desc = f"{desc} | {nota_base}"
+                    rows_new.append(
+                        _build_credit_line_gasto_row(
+                            line_row=pay_row,
+                            fecha_evento=fecha_pago_linea,
+                            monto=float(interes_linea),
+                            descripcion=desc,
+                            tratamiento="Gasto del periodo",
+                            detalle_gasto="Intereses",
+                            registro_financiamiento="Pago interes",
+                        )
+                    )
+                if float(otros_linea) > 0:
+                    desc = f"Cargos linea de credito - {pay_name}"
+                    if nota_base:
+                        desc = f"{desc} | {nota_base}"
+                    rows_new.append(
+                        _build_credit_line_gasto_row(
+                            line_row=pay_row,
+                            fecha_evento=fecha_pago_linea,
+                            monto=float(otros_linea),
+                            descripcion=desc,
+                            tratamiento="Gasto del periodo",
+                            detalle_gasto="Otros",
+                            registro_financiamiento="Cargo",
+                        )
+                    )
+                new_gas_df = pd.concat([old_gas_df, pd.DataFrame(rows_new)], ignore_index=True)
+                new_gas_df = ensure_gastos_columns(new_gas_df)
+                wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas_df, old_df=old_gas_df)
+                if not wrote:
+                    st.error("No se pudo guardar el pago de la linea.")
+                    st.stop()
+                st.session_state.df_gas = new_gas_df
+                st.cache_data.clear()
+                st.success("Pago de linea registrado.")
+                _safe_rerun()
+
+    with tab_lc4:
+        if lineas_activas.empty:
+            st.info("Primero configura y activa al menos una linea de credito.")
+        else:
+            cargo_labels = {
+                f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
+                for _, row in lineas_activas.iterrows()
+            }
+            cargo_sel = st.selectbox("Linea activa", list(cargo_labels.keys()), key="lc_charge_sel")
+            cargo_row = lineas_activas[lineas_activas[LC_COL_ROWID].astype(str) == cargo_labels.get(cargo_sel, "")].iloc[0]
+            cargo_tipo = st.selectbox("Tipo de cargo", LINE_CHARGE_OPTIONS, key="lc_charge_type")
+            cargo_fecha = st.date_input("Fecha cargo", value=_today(), key="lc_charge_fecha")
+            default_charge_amount = 0.0
+            charge_treatment = "Gasto del periodo"
+            charge_prepago_meses = 0
+            if cargo_tipo == "Instalacion anual de linea":
+                default_charge_amount = float(cargo_row.get(LC_COL_LIMITE, 0.0) or 0.0) * float(cargo_row.get(LC_COL_CARGO_ANUAL_PCT, 0.0) or 0.0) / 100.0
+                charge_treatment = "Anticipo / prepago"
+                charge_prepago_meses = 12
+            elif cargo_tipo == "Banca en linea mensual":
+                default_charge_amount = float(cargo_row.get(LC_COL_CARGO_BANCA_MENSUAL, 0.0) or 0.0)
+            elif cargo_tipo == "Seguro incendio 1 anual":
+                default_charge_amount = float(cargo_row.get(LC_COL_SEGURO_INCENDIO_1, 0.0) or 0.0)
+                charge_treatment = "Anticipo / prepago"
+                charge_prepago_meses = 12
+            elif cargo_tipo == "Seguro incendio 2 anual":
+                default_charge_amount = float(cargo_row.get(LC_COL_SEGURO_INCENDIO_2, 0.0) or 0.0)
+                charge_treatment = "Anticipo / prepago"
+                charge_prepago_meses = 12
+            elif cargo_tipo == "Poliza vida mensual":
+                default_charge_amount = float(cargo_row.get(LC_COL_POLIZA_VIDA_MENSUAL, 0.0) or 0.0)
+            cargo_monto = st.number_input("Monto cargo", min_value=0.0, step=0.01, value=float(default_charge_amount), key="lc_charge_amount")
+            cargo_nota = st.text_input("Nota cargo", key="lc_charge_note")
+            st.caption(
+                "Instalacion anual de linea y seguros anuales se registran como prepago a 12 meses. "
+                "Los cargos mensuales se registran como gasto del periodo."
+            )
+            if st.button("Registrar cargo asociado", key="btn_registrar_lc_charge"):
+                if float(cargo_monto) <= 0:
+                    st.error("Debes indicar un monto mayor que cero para el cargo.")
+                    st.stop()
+                old_gas_df = st.session_state.df_gas.copy()
+                charge_desc = f"{cargo_tipo} - {str(cargo_row.get(LC_COL_NOMBRE, '')).strip()}"
+                if str(cargo_nota or "").strip():
+                    charge_desc = f"{charge_desc} | {str(cargo_nota or '').strip()}"
+                charge_row = _build_credit_line_gasto_row(
+                    line_row=cargo_row,
+                    fecha_evento=cargo_fecha,
+                    monto=float(cargo_monto),
+                    descripcion=charge_desc,
+                    tratamiento=charge_treatment,
+                    detalle_gasto="Otros",
+                    registro_financiamiento="Cargo",
+                    prepago_meses=charge_prepago_meses,
+                    prepago_inicio=cargo_fecha,
+                )
+                new_gas_df = pd.concat([old_gas_df, pd.DataFrame([charge_row])], ignore_index=True)
+                new_gas_df = ensure_gastos_columns(new_gas_df)
+                wrote = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas_df, old_df=old_gas_df)
+                if not wrote:
+                    st.error("No se pudo guardar el cargo asociado de la linea.")
+                    st.stop()
+                st.session_state.df_gas = new_gas_df
+                st.cache_data.clear()
+                st.success("Cargo asociado registrado.")
+                _safe_rerun()
+
+
 # ============================================================
 # GASTOS - Anadir gasto (rapido)
 # ============================================================
@@ -3153,6 +3742,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
     prepago_inicio = pd.NaT
     inventario_mov = ""
     inventario_item = ""
+    inventario_fecha_llegada = pd.NaT
 
     st.markdown("#### Activo fijo")
     activo_dep_toggle = YES_NO_OPTIONS[0]
@@ -3197,7 +3787,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         st.caption("El gasto se devengara mensualmente en el panel gerencial durante el plazo indicado.")
     elif tratamiento_gas == "Inventario":
         st.markdown("#### Inventario operativo")
-        iv1, iv2 = st.columns([1, 2])
+        iv1, iv2, iv3 = st.columns([1, 2, 1])
         with iv1:
             inventario_mov = st.selectbox(
                 "Movimiento inventario",
@@ -3213,7 +3803,16 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
                 help="Referencia corta del inventario. Ejemplos: sensor SpO2, transductor, kit de reactivos.",
                 on_change=lambda: _mark_form_force_open("gas"),
             )
-        st.caption("Entrada aumenta inventario. Salida / consumo y ajuste negativo lo disminuyen; en el panel pueden afectar resultado y balance.")
+        with iv3:
+            inventario_fecha_llegada = st.date_input(
+                "Fecha llegada / disponibilidad",
+                value=fecha_g,
+                key="gas_inv_fecha_llegada_quick",
+                help="Solo aplica para entradas o ajustes positivos. Antes de esa fecha se considera inventario en transito.",
+                disabled=inventario_mov not in INVENTORY_POSITIVE_MOVEMENTS,
+                on_change=lambda: _mark_form_force_open("gas"),
+            )
+        st.caption("Entrada aumenta inventario. Si la fecha de llegada es futura, el panel lo mostrara como inventario en transito hasta esa fecha.")
 
     st.markdown("#### Financiamiento")
     fin_gas_toggle = st.selectbox(
@@ -3338,6 +3937,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             COL_PREPAGO_FEC_INI: _ts(prepago_inicio) if tratamiento_gas == "Anticipo / prepago" else pd.NaT,
             COL_INV_MOV: inventario_mov if tratamiento_gas == "Inventario" else "",
             COL_INV_ITEM: (inventario_item or "").strip() if tratamiento_gas == "Inventario" else "",
+            COL_INV_FEC_LLEGADA: _ts(inventario_fecha_llegada) if tratamiento_gas == "Inventario" and inventario_mov in INVENTORY_POSITIVE_MOVEMENTS else pd.NaT,
             COL_AF_TOGGLE: YES_NO_OPTIONS[1] if activo_fijo_on else YES_NO_OPTIONS[0],
             COL_AF_TIPO: activo_tipo if activo_fijo_on else "",
             COL_AF_VIDA: int(activo_vida) if activo_fijo_on else 0,
@@ -3387,6 +3987,7 @@ gas_colcfg = {
     COL_TRAT_BAL_GAS: st.column_config.SelectboxColumn(COL_TRAT_BAL_GAS, options=GAS_BALANCE_OPTIONS),
     COL_INV_MOV: st.column_config.SelectboxColumn("Movimiento inventario", options=[""] + INV_MOV_OPTIONS),
     COL_INV_ITEM: st.column_config.TextColumn("Item inventario / referencia"),
+    COL_INV_FEC_LLEGADA: st.column_config.DateColumn("Fecha llegada inventario"),
     COL_PREPAGO_MESES: st.column_config.NumberColumn("Plazo prepago meses", format="%d"),
     COL_PREPAGO_FEC_INI: st.column_config.DateColumn("Fecha inicio prepago"),
     COL_CTP_TIPO: st.column_config.SelectboxColumn("Tipo entidad rel. / contraparte", options=CONTRAPARTE_TYPE_OPTIONS),
@@ -3405,7 +4006,7 @@ gas_colcfg = {
 gas_order = [x for x in [
     COL_FECHA, COL_CONC, COL_PROV, COL_MONTO, COL_CAT, COL_GAS_SUB, COL_GAS_DET, COL_TRAT_BAL_GAS, COL_EMP,
     COL_POR_PAG, COL_FPAGO, COL_FPAGO_REAL, COL_PAGO_REAL_MONTO, COL_CTP_TIPO, COL_CTP_NOMBRE,
-    COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_INV_MOV, COL_INV_ITEM, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI,
+    COL_REC, COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_INV_MOV, COL_INV_ITEM, COL_INV_FEC_LLEGADA, COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI,
     COL_AF_TOGGLE, COL_AF_DEP_TOGGLE, COL_FIN_TOGGLE, COL_FIN_TIPO,
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_USER, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]

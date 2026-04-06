@@ -17,10 +17,13 @@ from .constants import (
     COL_FECHA_REAL_COBRO,
     COL_FECHA_REAL_PAGO,
     COL_FINANCIAMIENTO_CRONOGRAMA,
+    COL_FINANCIAMIENTO_INSTRUMENTO,
     COL_FINANCIAMIENTO_MONTO,
+    COL_FINANCIAMIENTO_REG_TIPO,
     COL_FINANCIAMIENTO_TIPO,
     COL_FACTORING_DETALLE,
     COL_GASTO_DETALLE,
+    COL_INVENTARIO_FECHA_LLEGADA,
     COL_MONTO,
     COL_MONTO_REAL_COBRADO,
     COL_MONTO_REAL_PAGADO,
@@ -72,11 +75,14 @@ def _ensure_estado_schema(df: pd.DataFrame) -> pd.DataFrame:
         (COL_TRATAMIENTO_BALANCE_GAS, ""),
         (COL_FINANCIAMIENTO_TIPO, ""),
         (COL_FINANCIAMIENTO_CRONOGRAMA, ""),
+        (COL_FINANCIAMIENTO_INSTRUMENTO, ""),
+        (COL_FINANCIAMIENTO_REG_TIPO, ""),
         (COL_GASTO_DETALLE, ""),
         (COL_MONTO_REAL_COBRADO, 0.0),
         (COL_MONTO_REAL_PAGADO, 0.0),
         (COL_INVENTARIO_MOVIMIENTO, ""),
         (COL_INVENTARIO_ITEM, ""),
+        (COL_INVENTARIO_FECHA_LLEGADA, pd.NaT),
         (COL_PREPAGO_MESES, 0),
         (COL_PREPAGO_FECHA_INICIO, pd.NaT),
         (COL_ACTIVO_FIJO_DEP_TOGGLE, "No"),
@@ -96,9 +102,12 @@ def _ensure_estado_schema(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_TRATAMIENTO_BALANCE_GAS] = _safe_series(out, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str).fillna("")
     out[COL_FINANCIAMIENTO_TIPO] = _safe_series(out, COL_FINANCIAMIENTO_TIPO, "").astype(str).fillna("")
     out[COL_FINANCIAMIENTO_CRONOGRAMA] = _safe_series(out, COL_FINANCIAMIENTO_CRONOGRAMA, "").astype(str).fillna("")
+    out[COL_FINANCIAMIENTO_INSTRUMENTO] = _safe_series(out, COL_FINANCIAMIENTO_INSTRUMENTO, "").astype(str).fillna("")
+    out[COL_FINANCIAMIENTO_REG_TIPO] = _safe_series(out, COL_FINANCIAMIENTO_REG_TIPO, "").astype(str).fillna("")
     out[COL_ACTIVO_FIJO_DEP_TOGGLE] = _safe_series(out, COL_ACTIVO_FIJO_DEP_TOGGLE, "No").astype(str).fillna("No")
     out[COL_INVENTARIO_MOVIMIENTO] = _safe_series(out, COL_INVENTARIO_MOVIMIENTO, "").astype(str).fillna("")
     out[COL_INVENTARIO_ITEM] = _safe_series(out, COL_INVENTARIO_ITEM, "").astype(str).fillna("")
+    out[COL_INVENTARIO_FECHA_LLEGADA] = _safe_datetime_series(out, COL_INVENTARIO_FECHA_LLEGADA)
     out[COL_MONTO_REAL_COBRADO] = pd.to_numeric(_safe_series(out, COL_MONTO_REAL_COBRADO, 0.0), errors="coerce").fillna(0.0)
     out[COL_MONTO_REAL_PAGADO] = pd.to_numeric(_safe_series(out, COL_MONTO_REAL_PAGADO, 0.0), errors="coerce").fillna(0.0)
     out[COL_PREPAGO_MESES] = pd.to_numeric(_safe_series(out, COL_PREPAGO_MESES, 0), errors="coerce").fillna(0).astype(int)
@@ -276,6 +285,33 @@ def _inventory_signed_amounts(gas: pd.DataFrame) -> pd.Series:
     signed = monto.copy()
     signed.loc[movimiento.isin(["Salida / consumo", "Ajuste negativo"])] *= -1.0
     return signed
+
+
+def _inventory_split_at_cutoff(gas: pd.DataFrame, cutoff: pd.Timestamp) -> tuple[float, float]:
+    if gas is None or gas.empty:
+        return 0.0, 0.0
+    work = gas.copy()
+    work[COL_FECHA] = pd.to_datetime(_safe_series(work, COL_FECHA, pd.NaT), errors="coerce")
+    work[COL_INVENTARIO_FECHA_LLEGADA] = pd.to_datetime(
+        _safe_series(work, COL_INVENTARIO_FECHA_LLEGADA, pd.NaT),
+        errors="coerce",
+    )
+    work[COL_INVENTARIO_MOVIMIENTO] = _safe_series(work, COL_INVENTARIO_MOVIMIENTO, "").astype(str).str.strip()
+    work[COL_MONTO] = pd.to_numeric(_safe_series(work, COL_MONTO, 0.0), errors="coerce").fillna(0.0).abs()
+    work = work[work[COL_FECHA].notna() & (work[COL_FECHA] <= cutoff)].copy()
+    if work.empty:
+        return 0.0, 0.0
+
+    positive_mask = work[COL_INVENTARIO_MOVIMIENTO].isin(["Entrada", "Ajuste positivo"])
+    negative_mask = work[COL_INVENTARIO_MOVIMIENTO].isin(["Salida / consumo", "Ajuste negativo"])
+    arrival_dates = work[COL_INVENTARIO_FECHA_LLEGADA].where(work[COL_INVENTARIO_FECHA_LLEGADA].notna(), work[COL_FECHA])
+
+    inventario_disponible = float(
+        work.loc[positive_mask & (arrival_dates <= cutoff), COL_MONTO].sum()
+        - work.loc[negative_mask, COL_MONTO].sum()
+    )
+    inventario_transito = float(work.loc[positive_mask & (arrival_dates > cutoff), COL_MONTO].sum())
+    return max(0.0, inventario_disponible), max(0.0, inventario_transito)
 
 
 def _expand_inventory_consumption(gas: pd.DataFrame) -> pd.DataFrame:
@@ -469,8 +505,10 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
     gas_dates = _safe_datetime_series(gas, COL_FECHA)
     vigente_mask = gas_dates.notna() & (gas_dates <= cutoff)
     inventario_mask = vigente_mask & _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Inventario")
-    inventario = float(_inventory_signed_amounts(gas.loc[inventario_mask].copy()).sum()) if inventario_mask.any() else 0.0
-    inventario = max(0.0, inventario)
+    inventario, inventario_en_transito = _inventory_split_at_cutoff(
+        gas.loc[inventario_mask].copy(),
+        cutoff,
+    ) if inventario_mask.any() else (0.0, 0.0)
     anticipos = _remaining_prepago_at_cutoff(gas.loc[vigente_mask].copy(), cutoff)
 
     ing_trat = _safe_series(ing, COL_TRATAMIENTO_BALANCE_ING, "").astype(str)
@@ -515,6 +553,69 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
                 elif fin_type == "Activo fijo financiado":
                     prestamos_recibidos += float(max(0.0, saldo))
 
+    ing_fin_type = _safe_series(ing, COL_FINANCIAMIENTO_TIPO, "").astype(str).str.strip()
+    ing_reg_type = _safe_series(ing, COL_FINANCIAMIENTO_REG_TIPO, "").astype(str).str.strip()
+    ing_fin_sched = _safe_series(ing, COL_FINANCIAMIENTO_CRONOGRAMA, "").astype(str).str.strip()
+    ing_fin_event_date = _safe_datetime_series(ing, COL_FECHA_REAL_COBRO).fillna(_safe_datetime_series(ing, COL_FECHA))
+    manual_disbursements_mask = (
+        ing_trat.eq("Pasivo financiero")
+        & ing_fin_type.eq("Financiamiento recibido")
+        & ing_fin_sched.eq("")
+        & ing_fin_event_date.notna()
+        & (ing_fin_event_date <= cutoff)
+        & ing_reg_type.isin(["", "Desembolso"])
+    )
+    manual_disbursement_amount = pd.to_numeric(
+        _safe_series(ing.loc[manual_disbursements_mask], COL_MONTO_REAL_COBRADO, 0.0),
+        errors="coerce",
+    ).fillna(0.0)
+    manual_disbursement_amount = manual_disbursement_amount.where(
+        manual_disbursement_amount > 0,
+        pd.to_numeric(
+            _safe_series(ing.loc[manual_disbursements_mask], COL_FINANCIAMIENTO_MONTO, 0.0),
+            errors="coerce",
+        ).fillna(0.0),
+    )
+    manual_disbursement_amount = manual_disbursement_amount.where(
+        manual_disbursement_amount > 0,
+        pd.to_numeric(
+            _safe_series(ing.loc[manual_disbursements_mask], COL_MONTO, 0.0),
+            errors="coerce",
+        ).fillna(0.0),
+    )
+    manual_disbursements = float(
+        manual_disbursement_amount.sum()
+    )
+
+    gas_reg_type = _safe_series(gas, COL_FINANCIAMIENTO_REG_TIPO, "").astype(str).str.strip()
+    gas_fin_instrument = _safe_series(gas, COL_FINANCIAMIENTO_INSTRUMENTO, "").astype(str).str.strip()
+    gas_fin_sched = _safe_series(gas, COL_FINANCIAMIENTO_CRONOGRAMA, "").astype(str).str.strip()
+    gas_fin_event_date = _safe_datetime_series(gas, COL_FECHA_REAL_PAGO).fillna(_safe_datetime_series(gas, COL_FECHA))
+    manual_repayments_mask = (
+        gas_trat.eq("Cancelacion de pasivo / deuda")
+        & gas_fin_sched.eq("")
+        & gas_fin_event_date.notna()
+        & (gas_fin_event_date <= cutoff)
+        & gas_reg_type.eq("Pago capital")
+        & gas_fin_instrument.ne("")
+    )
+    manual_capital_repayments = float(
+        pd.to_numeric(
+            _safe_series(gas.loc[manual_repayments_mask], COL_MONTO_REAL_PAGADO, 0.0),
+            errors="coerce",
+        ).fillna(0.0).where(
+            pd.to_numeric(
+                _safe_series(gas.loc[manual_repayments_mask], COL_MONTO_REAL_PAGADO, 0.0),
+                errors="coerce",
+            ).fillna(0.0) > 0,
+            pd.to_numeric(
+                _safe_series(gas.loc[manual_repayments_mask], COL_MONTO, 0.0),
+                errors="coerce",
+            ).fillna(0.0),
+        ).sum()
+    )
+    prestamos_recibidos += max(0.0, manual_disbursements - manual_capital_repayments)
+
     gas_trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
     gas_estado = _safe_series(gas, COL_POR_PAGAR, "No").astype(str)
     gas_real_date = _safe_datetime_series(gas, COL_FECHA_REAL_PAGO)
@@ -554,6 +655,7 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         "prestamos_otorgados": float(prestamos_otorgados),
         "prestamos_recibidos": float(prestamos_recibidos),
         "inventario": float(inventario),
+        "inventario_en_transito": float(inventario_en_transito),
         "anticipos_prepagos": float(anticipos),
         "activos_fijos_netos": float(activos_fijos_netos),
         "inversiones_participaciones": float(inversiones_participaciones),
@@ -569,6 +671,7 @@ def build_balance_general_simplificado(
     cuentas_por_pagar: float,
     prestamos_otorgados: float = 0.0,
     inventario: float = 0.0,
+    inventario_en_transito: float = 0.0,
     anticipos_prepagos: float = 0.0,
     activos_fijos_netos: float = 0.0,
     inversiones_participaciones: float = 0.0,
@@ -583,6 +686,7 @@ def build_balance_general_simplificado(
             {"Cuenta": "Cuentas por cobrar", "Monto": float(cuentas_por_cobrar)},
             {"Cuenta": "Prestamos otorgados", "Monto": float(prestamos_otorgados)},
             {"Cuenta": "Inventario", "Monto": float(inventario)},
+            {"Cuenta": "Inventario en transito", "Monto": float(inventario_en_transito)},
             {"Cuenta": "Anticipos / prepagos", "Monto": float(anticipos_prepagos)},
             {"Cuenta": "Activos fijos netos", "Monto": float(activos_fijos_netos)},
             {"Cuenta": "Inversiones / participaciones", "Monto": float(inversiones_participaciones)},
@@ -615,6 +719,7 @@ def build_balance_general_simplificado(
 
     notes = [
         "Balance general gerencial y simplificado: incorpora caja, cuentas abiertas, prestamos, inventario, prepagos, retenidos con factoring, inversiones y activos fijos netos cuando existen.",
+        "El inventario en transito se muestra separado del inventario disponible y no se incorpora al capital de trabajo hasta su llegada / disponibilidad.",
         "Los prepagos se consumen de forma lineal segun el plazo configurado; sin cierre persistente ni conciliacion bancaria, algunos saldos siguen siendo aproximados.",
         "El inventario usa movimientos de entrada/salida por monto; aun falta una valorizacion mas fina por cantidades y costo unitario.",
     ]

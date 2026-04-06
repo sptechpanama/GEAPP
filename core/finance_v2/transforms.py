@@ -29,10 +29,12 @@ from .constants import (
     COL_FECHA_PAGO,
     COL_FINANCIAMIENTO_CRONOGRAMA,
     COL_FINANCIAMIENTO_FECHA_INICIO,
+    COL_FINANCIAMIENTO_INSTRUMENTO,
     COL_FINANCIAMIENTO_MODALIDAD,
     COL_FINANCIAMIENTO_MONTO,
     COL_FINANCIAMIENTO_PERIODICIDAD,
     COL_FINANCIAMIENTO_PLAZO,
+    COL_FINANCIAMIENTO_REG_TIPO,
     COL_FINANCIAMIENTO_TASA,
     COL_FINANCIAMIENTO_TASA_TIPO,
     COL_FINANCIAMIENTO_TIPO,
@@ -47,6 +49,7 @@ from .constants import (
     COL_EVENTOS_PARCIALES_ING,
     COL_EVENTOS_PARCIALES_GAS,
     COL_FACTORING_DETALLE,
+    COL_INVENTARIO_FECHA_LLEGADA,
     COL_INVENTARIO_MOVIMIENTO,
     COL_INVENTARIO_ITEM,
     COL_NATURALEZA_INGRESO,
@@ -230,6 +233,8 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
         COL_FINANCIAMIENTO_MODALIDAD,
         COL_FINANCIAMIENTO_PERIODICIDAD,
         COL_FINANCIAMIENTO_CRONOGRAMA,
+        COL_FINANCIAMIENTO_INSTRUMENTO,
+        COL_FINANCIAMIENTO_REG_TIPO,
         COL_TIPO_CONTRAPARTE,
         COL_CONTRAPARTE,
         COL_EVENTOS_PARCIALES_ING,
@@ -299,6 +304,7 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out[COL_REC_UNTIL] = pd.to_datetime(out[COL_REC_UNTIL], errors="coerce")
     out[COL_ACTIVO_FIJO_FECHA_INICIO] = pd.to_datetime(out[COL_ACTIVO_FIJO_FECHA_INICIO], errors="coerce")
     out[COL_FINANCIAMIENTO_FECHA_INICIO] = pd.to_datetime(out[COL_FINANCIAMIENTO_FECHA_INICIO], errors="coerce")
+    out[COL_INVENTARIO_FECHA_LLEGADA] = pd.to_datetime(out[COL_INVENTARIO_FECHA_LLEGADA], errors="coerce")
     out[COL_MONTO] = out[COL_MONTO].map(parse_number_maybe_es)
     out[COL_ACTIVO_FIJO_VALOR_RESIDUAL] = out[COL_ACTIVO_FIJO_VALOR_RESIDUAL].map(parse_number_maybe_es)
     out[COL_ACTIVO_FIJO_DEP_MENSUAL] = out[COL_ACTIVO_FIJO_DEP_MENSUAL].map(parse_number_maybe_es)
@@ -338,6 +344,8 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
         COL_FINANCIAMIENTO_MODALIDAD,
         COL_FINANCIAMIENTO_PERIODICIDAD,
         COL_FINANCIAMIENTO_CRONOGRAMA,
+        COL_FINANCIAMIENTO_INSTRUMENTO,
+        COL_FINANCIAMIENTO_REG_TIPO,
         COL_TIPO_CONTRAPARTE,
         COL_CONTRAPARTE,
         COL_EVENTOS_PARCIALES_GAS,
@@ -382,8 +390,20 @@ def normalize_gastos(df_gas: pd.DataFrame) -> pd.DataFrame:
     out.loc[~prepago_mask, [COL_PREPAGO_MESES, COL_PREPAGO_FECHA_INICIO]] = [0, pd.NaT]
     out.loc[prepago_mask & out[COL_PREPAGO_FECHA_INICIO].isna(), COL_PREPAGO_FECHA_INICIO] = out.loc[prepago_mask & out[COL_PREPAGO_FECHA_INICIO].isna(), COL_FECHA]
     inventory_mask = out[COL_TRATAMIENTO_BALANCE_GAS].eq("Inventario")
-    out.loc[~inventory_mask, [COL_INVENTARIO_MOVIMIENTO, COL_INVENTARIO_ITEM]] = ["", ""]
+    out.loc[~inventory_mask, [COL_INVENTARIO_MOVIMIENTO, COL_INVENTARIO_ITEM, COL_INVENTARIO_FECHA_LLEGADA]] = ["", "", pd.NaT]
     out.loc[inventory_mask & out[COL_INVENTARIO_MOVIMIENTO].eq(""), COL_INVENTARIO_MOVIMIENTO] = "Entrada"
+    positive_inventory_mask = inventory_mask & out[COL_INVENTARIO_MOVIMIENTO].isin(["Entrada", "Ajuste positivo"])
+    out.loc[
+        positive_inventory_mask & out[COL_INVENTARIO_FECHA_LLEGADA].isna(),
+        COL_INVENTARIO_FECHA_LLEGADA,
+    ] = out.loc[
+        positive_inventory_mask & out[COL_INVENTARIO_FECHA_LLEGADA].isna(),
+        COL_FECHA,
+    ]
+    out.loc[
+        inventory_mask & ~out[COL_INVENTARIO_MOVIMIENTO].isin(["Entrada", "Ajuste positivo"]),
+        COL_INVENTARIO_FECHA_LLEGADA,
+    ] = pd.NaT
 
     fallback_candidates = [
         COL_FECHA_PAGO,
