@@ -1047,7 +1047,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- Control operativo de inventario por cantidades y costo unitario.\n"
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
-        "- Calculo automatico del interes diario en lineas revolventes.\n"
+        "- Historial de cambios de tasa diaria dentro del mismo periodo de uso de la linea.\n"
         "- Factoring con recurso y proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
@@ -1971,6 +1971,6 @@ with st.expander("Deudas e inversiones", expanded=False):
 st.markdown("---")
 st.caption(
     "Panel Financiero Gerencial prioriza lectura gerencial. Finanzas 1 se mantiene intacta para captura/operacion. "
-    "Pendientes mayores: cierre mensual persistente, conciliacion bancaria, inventario con cantidades/costo unitario, interes diario automatico para lineas revolventes y valuacion avanzada de inversiones / participaciones."
+    "Pendientes mayores: cierre mensual persistente, conciliacion bancaria, inventario con cantidades/costo unitario, historial de cambios de tasa diaria para lineas revolventes y valuacion avanzada de inversiones / participaciones."
 )
 

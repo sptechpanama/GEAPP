@@ -1980,7 +1980,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Entidad relacionada / contraparte`: quien esta del otro lado del movimiento. Ejemplos: banco, socio, empresa relacionada o empresa invertida.\n"
         "- `Con factoring`: el valor recibido inicial entra a caja; el retenido queda como activo hasta la liquidacion final.\n"
         "- `Inventario en transito`: entrada de inventario cuya fecha de llegada / disponibilidad aun no ocurre.\n"
-        "- `Linea de credito`: los desembolsos suben caja y pasivo; capital pagado baja deuda; intereses y cargos van a gasto financiero segun el cobro real del banco.\n"
+        "- `Linea de credito`: los desembolsos suben caja y pasivo; capital pagado baja deuda; el interes diario se sugiere automaticamente con la tasa vigente configurada y luego se registra como gasto financiero.\n"
         "- `Gasto del periodo`: consumo del mismo periodo.\n"
         "- `Saldo acumulado`: caja acumulada despues de sumar todos los movimientos reales hasta la fecha.\n"
         "- `Flujo neto`: diferencia entre entradas y salidas del periodo analizado.\n"
@@ -2000,7 +2000,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
         "- Cantidades, costo unitario y valorizacion mas fina de inventario.\n"
-        "- Calculo automatico del interes diario en lineas revolventes.\n"
+        "- Historial de cambios de tasa diaria dentro del mismo periodo de uso de la linea.\n"
         "- Factoring con recurso.\n"
         "- Proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
@@ -3145,11 +3145,98 @@ def _linea_credito_position(line_name: str) -> tuple[float, float, float]:
     return desembolsado, capital_pagado, saldo
 
 
+def _linea_credito_interest_preview(line_name: str, as_of_date, tasa_diaria_pct: float, tasa_desde=None) -> dict:
+    ing_df = ensure_ingresos_columns(st.session_state.df_ing.copy())
+    gas_df = ensure_gastos_columns(st.session_state.df_gas.copy())
+    line_name_norm = str(line_name or "").strip()
+    as_of_ts = _ts(as_of_date)
+    if not line_name_norm or pd.isna(as_of_ts) or float(tasa_diaria_pct or 0.0) <= 0:
+        return {"interest_start": pd.NaT, "days": 0, "opening_balance": 0.0, "interest_suggested": 0.0}
+
+    disb = ing_df[
+        ing_df[COL_FIN_INSTRUMENTO].astype(str).str.strip().eq(line_name_norm)
+        & ing_df[COL_FIN_REG_TIPO].astype(str).str.strip().eq("Desembolso")
+    ][[COL_FECHA, COL_FCOBRO_REAL, COL_COBRO_REAL_MONTO, COL_MONTO]].copy()
+    if not disb.empty:
+        disb["fecha_evento"] = pd.to_datetime(disb[COL_FCOBRO_REAL], errors="coerce").fillna(pd.to_datetime(disb[COL_FECHA], errors="coerce"))
+        disb["delta_capital"] = pd.to_numeric(disb[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0)
+        disb["delta_capital"] = disb["delta_capital"].where(disb["delta_capital"] > 0, pd.to_numeric(disb[COL_MONTO], errors="coerce").fillna(0.0))
+        disb = disb[["fecha_evento", "delta_capital"]]
+
+    capital_pay = gas_df[
+        gas_df[COL_FIN_INSTRUMENTO].astype(str).str.strip().eq(line_name_norm)
+        & gas_df[COL_FIN_REG_TIPO].astype(str).str.strip().eq("Pago capital")
+    ][[COL_FECHA, COL_FPAGO_REAL, COL_PAGO_REAL_MONTO, COL_MONTO]].copy()
+    if not capital_pay.empty:
+        capital_pay["fecha_evento"] = pd.to_datetime(capital_pay[COL_FPAGO_REAL], errors="coerce").fillna(pd.to_datetime(capital_pay[COL_FECHA], errors="coerce"))
+        capital_pay["delta_capital"] = -pd.to_numeric(capital_pay[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0)
+        fallback_cap = -pd.to_numeric(capital_pay[COL_MONTO], errors="coerce").fillna(0.0).abs()
+        capital_pay["delta_capital"] = capital_pay["delta_capital"].where(capital_pay["delta_capital"] < 0, fallback_cap)
+        capital_pay = capital_pay[["fecha_evento", "delta_capital"]]
+
+    interest_pay = gas_df[
+        gas_df[COL_FIN_INSTRUMENTO].astype(str).str.strip().eq(line_name_norm)
+        & gas_df[COL_FIN_REG_TIPO].astype(str).str.strip().eq("Pago interes")
+    ][[COL_FECHA, COL_FPAGO_REAL]].copy()
+    if not interest_pay.empty:
+        interest_pay["fecha_evento"] = pd.to_datetime(interest_pay[COL_FPAGO_REAL], errors="coerce").fillna(pd.to_datetime(interest_pay[COL_FECHA], errors="coerce"))
+
+    principal_events = pd.concat([df for df in [disb, capital_pay] if not df.empty], ignore_index=True) if (not disb.empty or not capital_pay.empty) else pd.DataFrame(columns=["fecha_evento", "delta_capital"])
+    if principal_events.empty:
+        return {"interest_start": pd.NaT, "days": 0, "opening_balance": 0.0, "interest_suggested": 0.0}
+
+    principal_events["fecha_evento"] = pd.to_datetime(principal_events["fecha_evento"], errors="coerce")
+    principal_events = principal_events[principal_events["fecha_evento"].notna()].sort_values("fecha_evento").reset_index(drop=True)
+    if principal_events.empty:
+        return {"interest_start": pd.NaT, "days": 0, "opening_balance": 0.0, "interest_suggested": 0.0}
+
+    last_interest_payment = pd.NaT
+    if not interest_pay.empty:
+        interest_pay = interest_pay[interest_pay["fecha_evento"].notna()]
+        interest_pay = interest_pay[interest_pay["fecha_evento"] < as_of_ts]
+        if not interest_pay.empty:
+            last_interest_payment = interest_pay["fecha_evento"].max()
+
+    interest_start = last_interest_payment if not pd.isna(last_interest_payment) else principal_events["fecha_evento"].min()
+    tasa_desde_ts = _ts(tasa_desde)
+    if not pd.isna(tasa_desde_ts):
+        interest_start = max(interest_start, tasa_desde_ts)
+    opening_balance = float(principal_events.loc[principal_events["fecha_evento"] <= interest_start, "delta_capital"].sum())
+    opening_balance = max(0.0, opening_balance)
+    current_balance = opening_balance
+    current_date = interest_start
+    interest_amount = 0.0
+    daily_rate = float(tasa_diaria_pct or 0.0) / 100.0
+
+    future_events = principal_events[(principal_events["fecha_evento"] > interest_start) & (principal_events["fecha_evento"] <= as_of_ts)].copy()
+    for _, evt in future_events.iterrows():
+        evt_date = pd.to_datetime(evt["fecha_evento"], errors="coerce")
+        if pd.isna(evt_date):
+            continue
+        days = max(0, int((evt_date.normalize() - current_date.normalize()).days))
+        if current_balance > 0 and days > 0:
+            interest_amount += current_balance * daily_rate * days
+        current_balance = max(0.0, current_balance + float(evt["delta_capital"] or 0.0))
+        current_date = evt_date
+
+    tail_days = max(0, int((as_of_ts.normalize() - current_date.normalize()).days))
+    if current_balance > 0 and tail_days > 0:
+        interest_amount += current_balance * daily_rate * tail_days
+
+    total_days = max(0, int((as_of_ts.normalize() - interest_start.normalize()).days))
+    return {
+        "interest_start": interest_start,
+        "days": total_days,
+        "opening_balance": float(opening_balance),
+        "interest_suggested": round(float(interest_amount), 2),
+    }
+
+
 st.markdown("## Linea de credito")
 with st.expander("Gestionar linea de credito", expanded=False):
     st.caption(
         "Esta seccion gestiona lineas revolventes sin forzar un cronograma mensual falso. "
-        "La tasa diaria, limite y cargos se guardan como referencia; los intereses se registran segun la liquidacion real del banco."
+        "La tasa diaria, limite y cargos se guardan como referencia; el interes diario se sugiere automaticamente con la tasa vigente y se registra al momento del pago."
     )
     lineas_before = load_credit_lines_df(client, SHEET_ID)
     lineas_df = ensure_lineas_credito_columns(lineas_before.copy())
@@ -3332,11 +3419,29 @@ with st.expander("Gestionar linea de credito", expanded=False):
             pay_row = lineas_activas[lineas_activas[LC_COL_ROWID].astype(str) == pay_labels.get(pay_sel, "")].iloc[0]
             pay_name = str(pay_row.get(LC_COL_NOMBRE, "") or "").strip()
             total_desembolsado, capital_pagado, saldo_actual = _linea_credito_position(pay_name)
+            tasa_diaria_linea = float(pd.to_numeric(pd.Series([pay_row.get(LC_COL_TASA_DIARIA, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+            tasa_desde_linea = _ts(pay_row.get(LC_COL_TASA_DESDE))
             p1, p2, p3 = st.columns(3)
             p1.metric("Desembolsado acumulado", _format_money_es(total_desembolsado))
             p2.metric("Capital pagado", _format_money_es(capital_pagado))
             p3.metric("Saldo estimado linea", _format_money_es(saldo_actual))
             fecha_pago_linea = st.date_input("Fecha pago linea", value=_today(), key="lc_pay_fecha")
+            interest_preview = _linea_credito_interest_preview(
+                pay_name,
+                fecha_pago_linea,
+                tasa_diaria_linea,
+                tasa_desde=tasa_desde_linea,
+            )
+            interest_ctx = f"{str(pay_row.get(LC_COL_ROWID, ''))}|{fecha_pago_linea.isoformat()}|{tasa_diaria_linea:.6f}|{tasa_desde_linea.date().isoformat() if not pd.isna(tasa_desde_linea) else ''}"
+            if st.session_state.get("lc_pay_interest_ctx") != interest_ctx:
+                st.session_state["lc_pay_interest_ctx"] = interest_ctx
+                st.session_state["lc_pay_interes"] = float(interest_preview.get("interest_suggested", 0.0))
+            st.caption(
+                f"Tasa diaria vigente: {_format_number_es(tasa_diaria_linea, 6)}% | "
+                f"Base de calculo desde: {interest_preview['interest_start'].date().isoformat() if not pd.isna(interest_preview.get('interest_start')) else 'sin base'} | "
+                f"Dias estimados: {int(interest_preview.get('days', 0) or 0)} | "
+                f"Interes sugerido: {_format_money_es(float(interest_preview.get('interest_suggested', 0.0) or 0.0))}"
+            )
             q1, q2, q3 = st.columns(3)
             with q1:
                 capital_linea = st.number_input("Capital pagado", min_value=0.0, step=100.0, key="lc_pay_capital")
