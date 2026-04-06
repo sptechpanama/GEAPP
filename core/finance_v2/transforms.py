@@ -46,6 +46,7 @@ from .constants import (
     COL_MONTO_REAL_PAGADO,
     COL_EVENTOS_PARCIALES_ING,
     COL_EVENTOS_PARCIALES_GAS,
+    COL_FACTORING_DETALLE,
     COL_INVENTARIO_MOVIMIENTO,
     COL_INVENTARIO_ITEM,
     COL_NATURALEZA_INGRESO,
@@ -150,6 +151,48 @@ def _parse_partial_events(raw_value) -> list[dict[str, object]]:
     return rows
 
 
+def _parse_factoring_detail(raw_value) -> dict[str, object]:
+    try:
+        data = json.loads(str(raw_value or "{}"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    def _num(key: str) -> float:
+        return float(pd.to_numeric(pd.Series([data.get(key, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+
+    detail = {
+        "modo": str(data.get("modo", "") or "").strip(),
+        "contraparte_tipo": str(data.get("contraparte_tipo", "") or "").strip(),
+        "contraparte": str(data.get("contraparte", "") or "").strip(),
+        "fecha_inicio": pd.to_datetime(data.get("fecha_inicio"), errors="coerce"),
+        "fecha_liquidacion_final": pd.to_datetime(data.get("fecha_liquidacion_final"), errors="coerce"),
+        "factored_amount": _num("factored_amount"),
+        "initial_cash_received": _num("initial_cash_received"),
+        "initial_retained": _num("initial_retained"),
+        "initial_fee": _num("initial_fee"),
+        "final_cash_received": _num("final_cash_received"),
+        "final_fee": _num("final_fee"),
+        "nota": str(data.get("nota", "") or "").strip(),
+    }
+    if not detail["modo"]:
+        return {}
+    return detail
+
+
+def _factoring_retained_pending(raw_value) -> float:
+    detail = raw_value if isinstance(raw_value, dict) else _parse_factoring_detail(raw_value)
+    if not detail:
+        return 0.0
+    return max(
+        0.0,
+        float(detail.get("initial_retained", 0.0) or 0.0)
+        - float(detail.get("final_cash_received", 0.0) or 0.0)
+        - float(detail.get("final_fee", 0.0) or 0.0),
+    )
+
+
 def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
     out = _ensure_columns(df_ing, INGRESOS_BASE_COLUMNS)
     out[COL_FECHA] = pd.to_datetime(out[COL_FECHA], errors="coerce")
@@ -222,12 +265,17 @@ def normalize_ingresos(df_ing: pd.DataFrame) -> pd.DataFrame:
         for cat, por_cobrar in zip(out.loc[treat_mask, COL_CATEGORIA], out.loc[treat_mask, COL_POR_COBRAR])
     ]
     total_ing = _coerce_non_negative_numeric(out[COL_MONTO])
+    factoring_details = out[COL_FACTORING_DETALLE].map(_parse_factoring_detail)
+    out["__is_factored"] = factoring_details.map(bool)
+    out["__factoring_retenido_pendiente"] = factoring_details.map(_factoring_retained_pending)
+    out["__factoring_detalle"] = factoring_details
     realized_ing = _coerce_non_negative_numeric(out[COL_MONTO_REAL_COBRADO]).clip(upper=total_ing)
     event_realized = out[COL_EVENTOS_PARCIALES_ING].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
     event_realized = pd.to_numeric(event_realized, errors="coerce").fillna(0.0).clip(lower=0.0)
     realized_ing = event_realized.where(event_realized > 0, realized_ing).clip(upper=total_ing)
     full_realized_mask = out[COL_POR_COBRAR].eq("No")
-    realized_ing = realized_ing.where(~full_realized_mask, total_ing)
+    full_cash_mask = full_realized_mask & ~out["__is_factored"]
+    realized_ing = realized_ing.where(~full_cash_mask, total_ing)
     out[COL_MONTO_REAL_COBRADO] = realized_ing
     out.loc[event_realized > 0, COL_FECHA_REAL_COBRO] = out.loc[event_realized > 0, COL_EVENTOS_PARCIALES_ING].map(
         lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)

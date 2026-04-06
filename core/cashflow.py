@@ -42,13 +42,14 @@ def _extract_income_movements(df_ing: pd.DataFrame) -> pd.DataFrame:
     total = pd.to_numeric(out.get("Monto"), errors="coerce").fillna(0.0)
     real_amount = pd.to_numeric(out.get("Monto real cobrado"), errors="coerce").fillna(0.0)
     estado = out.get("Por_cobrar", pd.Series("No", index=out.index)).map(_yes_no_norm)
+    factoring = out.get("Detalle factoring", pd.Series("", index=out.index)).astype(str).str.strip()
     fecha_real = pd.to_datetime(out.get("Fecha real de cobro"), errors="coerce")
     fecha_base = pd.to_datetime(out.get("Fecha"), errors="coerce")
 
     movement_date = fecha_real.where(fecha_real.notna(), fecha_base)
     movement_amount = real_amount.where(real_amount > 0, 0.0)
 
-    full_realized = estado.eq("No")
+    full_realized = estado.eq("No") & factoring.eq("")
     movement_amount = movement_amount.where(~full_realized, total)
     movement_date = movement_date.where(~full_realized, fecha_real.where(fecha_real.notna(), fecha_base))
 

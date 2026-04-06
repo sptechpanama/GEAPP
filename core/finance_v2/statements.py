@@ -19,6 +19,7 @@ from .constants import (
     COL_FINANCIAMIENTO_CRONOGRAMA,
     COL_FINANCIAMIENTO_MONTO,
     COL_FINANCIAMIENTO_TIPO,
+    COL_FACTORING_DETALLE,
     COL_GASTO_DETALLE,
     COL_MONTO,
     COL_MONTO_REAL_COBRADO,
@@ -222,6 +223,51 @@ def _remaining_prepago_at_cutoff(gas: pd.DataFrame, cutoff: pd.Timestamp) -> flo
     return float(total_restante)
 
 
+def _parse_factoring_detail(raw_value) -> dict[str, object]:
+    try:
+        data = json.loads(str(raw_value or "{}"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    def _num(key: str) -> float:
+        return float(pd.to_numeric(pd.Series([data.get(key, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+
+    detail = {
+        "modo": str(data.get("modo", "") or "").strip(),
+        "fecha_inicio": pd.to_datetime(data.get("fecha_inicio"), errors="coerce"),
+        "fecha_liquidacion_final": pd.to_datetime(data.get("fecha_liquidacion_final"), errors="coerce"),
+        "initial_retained": _num("initial_retained"),
+        "final_cash_received": _num("final_cash_received"),
+        "final_fee": _num("final_fee"),
+    }
+    return detail if detail["modo"] else {}
+
+
+def _factoring_retained_at_cutoff(df_ing: pd.DataFrame, cutoff: pd.Timestamp) -> float:
+    if df_ing is None or df_ing.empty or COL_FACTORING_DETALLE not in df_ing.columns:
+        return 0.0
+    total = 0.0
+    for _, row in df_ing.iterrows():
+        detail = _parse_factoring_detail(row.get(COL_FACTORING_DETALLE, ""))
+        if not detail:
+            continue
+        start = pd.to_datetime(detail.get("fecha_inicio"), errors="coerce")
+        if pd.isna(start) or start > cutoff:
+            continue
+        pendiente = max(
+            0.0,
+            float(detail.get("initial_retained", 0.0) or 0.0)
+            - float(detail.get("final_cash_received", 0.0) or 0.0)
+            - float(detail.get("final_fee", 0.0) or 0.0),
+        )
+        if pendiente <= 0:
+            continue
+        total += pendiente
+    return float(total)
+
+
 def _inventory_signed_amounts(gas: pd.DataFrame) -> pd.Series:
     if gas is None or gas.empty:
         return pd.Series(dtype="float64")
@@ -418,6 +464,7 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
     prestamos_recibidos = 0.0
     activos_fijos_netos = 0.0
     inversiones_participaciones = 0.0
+    factoring_retenido = 0.0
     aportes_capital = 0.0
     gas_dates = _safe_datetime_series(gas, COL_FECHA)
     vigente_mask = gas_dates.notna() & (gas_dates <= cutoff)
@@ -484,6 +531,7 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
             errors="coerce",
         ).fillna(0.0).sum()
     )
+    factoring_retenido = _factoring_retained_at_cutoff(ing, cutoff)
 
     activos_rows = gas[
         vigente_mask & _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").eq("Activo fijo")
@@ -509,6 +557,7 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         "anticipos_prepagos": float(anticipos),
         "activos_fijos_netos": float(activos_fijos_netos),
         "inversiones_participaciones": float(inversiones_participaciones),
+        "factoring_retenido": float(factoring_retenido),
         "aportes_capital": float(aportes_capital),
     }
 
@@ -523,6 +572,7 @@ def build_balance_general_simplificado(
     anticipos_prepagos: float = 0.0,
     activos_fijos_netos: float = 0.0,
     inversiones_participaciones: float = 0.0,
+    factoring_retenido: float = 0.0,
     prestamos_recibidos: float = 0.0,
     aportes_capital: float = 0.0,
     otras_deudas: float = 0.0,
@@ -536,6 +586,7 @@ def build_balance_general_simplificado(
             {"Cuenta": "Anticipos / prepagos", "Monto": float(anticipos_prepagos)},
             {"Cuenta": "Activos fijos netos", "Monto": float(activos_fijos_netos)},
             {"Cuenta": "Inversiones / participaciones", "Monto": float(inversiones_participaciones)},
+            {"Cuenta": "Retenido con factoring", "Monto": float(factoring_retenido)},
         ]
     )
     activos_df = activos_df[activos_df["Monto"] != 0].reset_index(drop=True)
@@ -552,7 +603,7 @@ def build_balance_general_simplificado(
     total_pasivos = float(pasivos_df["Monto"].sum()) if not pasivos_df.empty else 0.0
 
     patrimonio_neto = total_activos - total_pasivos
-    capital_trabajo = (efectivo_actual + cuentas_por_cobrar + inventario + anticipos_prepagos) - (cuentas_por_pagar + prestamos_recibidos + otras_deudas)
+    capital_trabajo = (efectivo_actual + cuentas_por_cobrar + inventario + anticipos_prepagos + factoring_retenido) - (cuentas_por_pagar + prestamos_recibidos + otras_deudas)
 
     patrimonio_df = pd.DataFrame(
         [
@@ -563,7 +614,7 @@ def build_balance_general_simplificado(
     patrimonio_df = patrimonio_df[patrimonio_df["Monto"] != 0].reset_index(drop=True)
 
     notes = [
-        "Balance general gerencial y simplificado: incorpora caja, cuentas abiertas, prestamos, inventario, prepagos, inversiones y activos fijos netos cuando existen.",
+        "Balance general gerencial y simplificado: incorpora caja, cuentas abiertas, prestamos, inventario, prepagos, retenidos con factoring, inversiones y activos fijos netos cuando existen.",
         "Los prepagos se consumen de forma lineal segun el plazo configurado; sin cierre persistente ni conciliacion bancaria, algunos saldos siguen siendo aproximados.",
         "El inventario usa movimientos de entrada/salida por monto; aun falta una valorizacion mas fina por cantidades y costo unitario.",
     ]

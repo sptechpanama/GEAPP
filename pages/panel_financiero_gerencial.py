@@ -40,6 +40,7 @@ COL_CONCEPTO = getattr(f2c, "COL_CONCEPTO", "Concepto")
 COL_CONTRAPARTE = getattr(f2c, "COL_CONTRAPARTE", "Contraparte")
 COL_DESC = getattr(f2c, "COL_DESC", "Descripcion")
 COL_EMPRESA = getattr(f2c, "COL_EMPRESA", "Empresa")
+COL_FACTORING_DET = getattr(f2c, "COL_FACTORING_DETALLE", "Detalle factoring")
 COL_FECHA_COBRO = getattr(f2c, "COL_FECHA_COBRO", "Fecha de cobro")
 COL_FECHA_REAL_COBRO = getattr(f2c, "COL_FECHA_REAL_COBRO", "Fecha real de cobro")
 COL_FECHA_REAL_PAGO = getattr(f2c, "COL_FECHA_REAL_PAGO", "Fecha real de pago")
@@ -401,6 +402,7 @@ def _build_balance_snapshots(
             + float(extras.get("inventario", 0.0))
             + float(extras.get("anticipos_prepagos", 0.0))
             + float(extras.get("inversiones_participaciones", 0.0))
+            + float(extras.get("factoring_retenido", 0.0))
             + float(extras.get("activos_fijos_netos", 0.0))
         )
         pasivos = float(cxp + float(extras.get("prestamos_recibidos", 0.0)))
@@ -410,6 +412,7 @@ def _build_balance_snapshots(
             + cxc
             + float(extras.get("inventario", 0.0))
             + float(extras.get("anticipos_prepagos", 0.0))
+            + float(extras.get("factoring_retenido", 0.0))
             - cxp
             - float(extras.get("prestamos_recibidos", 0.0))
         )
@@ -424,6 +427,7 @@ def _build_balance_snapshots(
                 "inventario": float(extras.get("inventario", 0.0)),
                 "anticipos_prepagos": float(extras.get("anticipos_prepagos", 0.0)),
                 "inversiones_participaciones": float(extras.get("inversiones_participaciones", 0.0)),
+                "factoring_retenido": float(extras.get("factoring_retenido", 0.0)),
                 "activos_fijos_netos": float(extras.get("activos_fijos_netos", 0.0)),
                 "prestamos_recibidos": float(extras.get("prestamos_recibidos", 0.0)),
                 "activos_totales": activos,
@@ -518,6 +522,29 @@ def _build_verificar_por_corregir(
         gas_f.get(COL_INVENTARIO_MOVIMIENTO, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq("")
         | gas_f.get(COL_INVENTARIO_ITEM, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq("")
     )
+    factoring_raw = ing_f.get(COL_FACTORING_DET, pd.Series("", index=ing_f.index))
+    factoring_detail = factoring_raw.map(_safe_factoring_detail)
+    factoring_on = factoring_detail.map(bool)
+    factoring_counterparty_missing = factoring_on & ing_counterparty.eq("")
+    factoring_bad_initial = factoring_detail.map(
+        lambda d: False if not d else abs(
+            float(d.get("initial_cash_received", 0.0) or 0.0)
+            + float(d.get("initial_retained", 0.0) or 0.0)
+            + float(d.get("initial_fee", 0.0) or 0.0)
+            - float(d.get("factored_amount", 0.0) or 0.0)
+        ) > 0.01
+    )
+    factoring_bad_final = factoring_detail.map(
+        lambda d: False if not d else (
+            abs(
+                float(d.get("final_cash_received", 0.0) or 0.0)
+                + float(d.get("final_fee", 0.0) or 0.0)
+                - float(d.get("initial_retained", 0.0) or 0.0)
+            ) > 0.01
+            if pd.notna(pd.to_datetime(d.get("fecha_liquidacion_final"), errors="coerce"))
+            else False
+        )
+    )
     ing_counterparty_missing = ing_balance.isin(["Patrimonio", "Pasivo financiero"]) & ing_counterparty.eq("")
     gas_counterparty_missing = gas_balance.isin(["Inversion / participacion en otra empresa", "Cuenta por cobrar / prestamo otorgado"]) & gas_counterparty.eq("")
 
@@ -548,10 +575,21 @@ def _build_verificar_por_corregir(
     checks.append(
         {
             "check": "Contrapartes en movimientos especiales",
-            "status": "OK" if int(ing_counterparty_missing.sum() + gas_counterparty_missing.sum()) == 0 else "REVISAR",
+            "status": "OK" if int(ing_counterparty_missing.sum() + gas_counterparty_missing.sum() + factoring_counterparty_missing.sum()) == 0 else "REVISAR",
             "detalle": (
                 f"Ingresos especiales sin contraparte: {int(ing_counterparty_missing.sum())} | "
-                f"Gastos especiales sin contraparte: {int(gas_counterparty_missing.sum())}"
+                f"Gastos especiales sin contraparte: {int(gas_counterparty_missing.sum())} | "
+                f"Factoring sin contraparte: {int(factoring_counterparty_missing.sum())}"
+            ),
+        }
+    )
+    checks.append(
+        {
+            "check": "Operaciones con factoring consistentes",
+            "status": "OK" if int(factoring_bad_initial.sum() + factoring_bad_final.sum()) == 0 else "REVISAR",
+            "detalle": (
+                f"Factoring inicial inconsistente: {int(factoring_bad_initial.sum())} | "
+                f"Liquidacion final inconsistente: {int(factoring_bad_final.sum())}"
             ),
         }
     )
@@ -597,6 +635,27 @@ def _build_verificar_por_corregir(
         gas_counterparty_missing,
         "Movimiento especial sin contraparte",
         "Completar la contraparte de la inversion o prestamo.",
+    )
+    _append_issue(
+        ing_f,
+        "Ingresos",
+        factoring_counterparty_missing,
+        "Operacion con factoring sin contraparte",
+        "Completar la empresa de factoring / contraparte.",
+    )
+    _append_issue(
+        ing_f,
+        "Ingresos",
+        factoring_bad_initial,
+        "Factoring inicial inconsistente",
+        "Verificar que recibido inicial + retenido + comision inicial sea igual al monto con factoring.",
+    )
+    _append_issue(
+        ing_f,
+        "Ingresos",
+        factoring_bad_final,
+        "Liquidacion final con factoring inconsistente",
+        "Verificar que valor final recibido + comision final no exceda el retenido inicial.",
     )
 
     # Deteccion de posibles gastos fijos no cargados.
@@ -675,6 +734,26 @@ def _safe_schedule_view(raw_value) -> list[dict]:
     except Exception:
         return []
     return data if isinstance(data, list) else []
+
+
+def _safe_factoring_detail(raw_value) -> dict[str, object]:
+    try:
+        data = json.loads(str(raw_value or "{}"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _factoring_retenido_pendiente(raw_value) -> float:
+    detail = raw_value if isinstance(raw_value, dict) else _safe_factoring_detail(raw_value)
+    if not detail:
+        return 0.0
+    return max(
+        0.0,
+        float(detail.get("initial_retained", 0.0) or 0.0)
+        - float(detail.get("final_cash_received", 0.0) or 0.0)
+        - float(detail.get("final_fee", 0.0) or 0.0),
+    )
 
 
 def _schedule_position(row: pd.Series, as_of: pd.Timestamp) -> dict[str, object]:
@@ -834,6 +913,47 @@ def _build_prepagos_view(gas_scope: pd.DataFrame, cutoff_date: date) -> pd.DataF
     return pd.DataFrame(rows).sort_values(["fecha_inicio_devengo", "empresa"], na_position="last").reset_index(drop=True)
 
 
+def _build_factoring_view(ing_scope: pd.DataFrame) -> pd.DataFrame:
+    if ing_scope is None or ing_scope.empty:
+        return pd.DataFrame()
+    work = ing_scope.copy()
+    if "__factoring_detalle" in work.columns:
+        detail_series = work["__factoring_detalle"]
+    else:
+        detail_series = work.get(COL_FACTORING_DET, pd.Series("", index=work.index)).map(_safe_factoring_detail)
+    work["__factoring_detalle_view"] = detail_series
+    if "__factoring_retenido_pendiente" in work.columns:
+        work["__factoring_retenido_pendiente_view"] = pd.to_numeric(work["__factoring_retenido_pendiente"], errors="coerce").fillna(0.0)
+    else:
+        work["__factoring_retenido_pendiente_view"] = work["__factoring_detalle_view"].map(_factoring_retenido_pendiente)
+    work = work[work["__factoring_detalle_view"].map(bool)].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in work.iterrows():
+        detail = row.get("__factoring_detalle_view", {}) or {}
+        rows.append(
+            {
+                "empresa": str(row.get(COL_EMPRESA, "") or ""),
+                "cliente": str(row.get(COL_CLIENTE_NOMBRE, "") or ""),
+                "proyecto": str(row.get(COL_PROYECTO, "") or ""),
+                "contraparte": str(detail.get("contraparte", row.get(COL_CONTRAPARTE, "")) or ""),
+                "fecha_inicio_factoring": pd.to_datetime(detail.get("fecha_inicio"), errors="coerce"),
+                "monto_con_factoring": float(detail.get("factored_amount", 0.0) or 0.0),
+                "valor_recibido_inicial": float(detail.get("initial_cash_received", 0.0) or 0.0),
+                "comision_inicial": float(detail.get("initial_fee", 0.0) or 0.0),
+                "retenido_inicial": float(detail.get("initial_retained", 0.0) or 0.0),
+                "fecha_liquidacion_final": pd.to_datetime(detail.get("fecha_liquidacion_final"), errors="coerce"),
+                "valor_recibido_final": float(detail.get("final_cash_received", 0.0) or 0.0),
+                "comision_final": float(detail.get("final_fee", 0.0) or 0.0),
+                "retenido_pendiente": float(row.get("__factoring_retenido_pendiente_view", 0.0) or 0.0),
+                "estado_factoring": "Retenido pendiente" if float(row.get("__factoring_retenido_pendiente_view", 0.0) or 0.0) > 0.01 else "Liquidado",
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["fecha_inicio_factoring", "empresa"], na_position="last").reset_index(drop=True)
+
+
 st.title("Panel Financiero Gerencial")
 st.caption(
     "Vista gerencial y analitica construida sobre los mismos datos de Finanzas 1. "
@@ -846,13 +966,14 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Flujo de caja actual`: usa fecha real de cobro y fecha real de pago.\n"
         "- `Flujo de caja proyectado`: usa fechas esperadas, recurrencias y cronogramas futuros.\n"
         "- `Estado de resultados`: usa fecha del hecho economico; capital no va al resultado, solo intereses si entran al resultado.\n"
-        "- `Balance general`: integra caja, cuentas abiertas, prestamos, inventario, prepagos y activos fijos netos cuando existen."
+        "- `Balance general`: integra caja, cuentas abiertas, prestamos, inventario, prepagos, retenidos con factoring y activos fijos netos cuando existen."
     )
     st.markdown("#### Pendiente para robustecer")
     st.markdown(
         "- Control operativo de inventario por cantidades y costo unitario.\n"
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
+        "- Factoring con recurso y proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
 
@@ -1105,6 +1226,7 @@ balance = build_balance_general_simplificado(
     inventario=float(balance_components.get("inventario", 0.0)),
     anticipos_prepagos=float(balance_components.get("anticipos_prepagos", 0.0)),
     inversiones_participaciones=float(balance_components.get("inversiones_participaciones", 0.0)),
+    factoring_retenido=float(balance_components.get("factoring_retenido", 0.0)),
     activos_fijos_netos=float(balance_components.get("activos_fijos_netos", 0.0)),
     prestamos_recibidos=float(balance_components.get("prestamos_recibidos", 0.0)),
     aportes_capital=float(balance_components.get("aportes_capital", 0.0)),
@@ -1112,6 +1234,7 @@ balance = build_balance_general_simplificado(
 debt_views = _build_deuda_inversion_views(ing_scope, gas_scope)
 inventory_view = _build_inventory_operativo_view(gas_scope)
 prepagos_view = _build_prepagos_view(gas_scope, balance_hasta)
+factoring_view = _build_factoring_view(ing_scope)
 
 analisis = build_analisis_gerencial(ing_f, gas_f, cxc_df, include_miscelaneos=include_misc)
 
@@ -1427,6 +1550,7 @@ with tab_e:
                 {"Cuenta": "Inventario", "Monto": float(latest.get("inventario", 0.0))},
                 {"Cuenta": "Anticipos / prepagos", "Monto": float(latest.get("anticipos_prepagos", 0.0))},
                 {"Cuenta": "Inversiones / participaciones", "Monto": float(latest.get("inversiones_participaciones", 0.0))},
+                {"Cuenta": "Retenido con factoring", "Monto": float(latest.get("factoring_retenido", 0.0))},
                 {"Cuenta": "Activos fijos netos", "Monto": float(latest.get("activos_fijos_netos", 0.0))},
             ]
         )
@@ -1694,14 +1818,15 @@ with st.expander("Prepagos activos", expanded=False):
 
 with st.expander("Deudas e inversiones", expanded=False):
     st.caption(
-        "Vista administrativa de apoyo para financiamientos, prestamos otorgados, inversiones y aportes de capital. "
-        "Aqui se muestra principal registrado, saldo estimado y la proxima cuota cuando existe cronograma."
+        "Vista administrativa de apoyo para financiamientos, prestamos otorgados, inversiones, aportes de capital y operaciones con factoring. "
+        "Aqui se muestra principal registrado, saldo estimado, retenidos pendientes y la proxima cuota cuando existe cronograma."
     )
-    d1, d2, d3, d4 = st.columns(4)
+    d1, d2, d3, d4, d5 = st.columns(5)
     d1.metric("Prestamos recibidos", format_money_es(float(balance_components.get("prestamos_recibidos", 0.0))))
     d2.metric("Prestamos otorgados", format_money_es(float(balance_components.get("prestamos_otorgados", 0.0))))
     d3.metric("Inversiones / participaciones", format_money_es(float(balance_components.get("inversiones_participaciones", 0.0))))
     d4.metric("Aportes de capital", format_money_es(float(balance_components.get("aportes_capital", 0.0))))
+    d5.metric("Retenido con factoring", format_money_es(float(balance_components.get("factoring_retenido", 0.0))))
 
     for title, key in [
         ("Financiamientos recibidos", "deuda"),
@@ -1728,6 +1853,27 @@ with st.expander("Deudas e inversiones", expanded=False):
                 "proximo_capital": st.column_config.NumberColumn("Proximo capital", format="$%0.2f"),
                 "proximo_interes": st.column_config.NumberColumn("Proximo interes", format="$%0.2f"),
                 "proxima_cuota": st.column_config.NumberColumn("Proxima cuota", format="$%0.2f"),
+            },
+        )
+
+    st.markdown("#### Operaciones con factoring")
+    if factoring_view.empty:
+        st.info("Sin operaciones con factoring en el alcance filtrado.")
+    else:
+        st.dataframe(
+            factoring_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "fecha_inicio_factoring": st.column_config.DateColumn("Fecha factoring"),
+                "fecha_liquidacion_final": st.column_config.DateColumn("Fecha liquidacion final"),
+                "monto_con_factoring": st.column_config.NumberColumn("Monto con factoring", format="$%0.2f"),
+                "valor_recibido_inicial": st.column_config.NumberColumn("Valor recibido inicial", format="$%0.2f"),
+                "comision_inicial": st.column_config.NumberColumn("Comision inicial", format="$%0.2f"),
+                "retenido_inicial": st.column_config.NumberColumn("Retenido inicial", format="$%0.2f"),
+                "valor_recibido_final": st.column_config.NumberColumn("Valor recibido final", format="$%0.2f"),
+                "comision_final": st.column_config.NumberColumn("Comision final", format="$%0.2f"),
+                "retenido_pendiente": st.column_config.NumberColumn("Retenido pendiente", format="$%0.2f"),
             },
         )
 

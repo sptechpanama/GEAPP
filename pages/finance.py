@@ -156,6 +156,7 @@ COL_FIN_TASA_TIPO = "Tipo tasa financiamiento"
 COL_FIN_MODALIDAD = "Modalidad financiamiento"
 COL_FIN_PERIOD = "Periodicidad financiamiento"
 COL_FIN_CRONO = "Cronograma financiamiento"
+COL_FACT_DET = "Detalle factoring"
 
 
 EMPRESAS_OPCIONES = ["RS-SP", "RIR"]
@@ -366,6 +367,7 @@ def _counterparty_required_for_gas(category: str, treatment: str, fin_on: bool) 
 def _autoderive_ing_df(df: pd.DataFrame) -> pd.DataFrame:
     out = ensure_ingresos_columns(df)
     out[COL_ING_NAT] = out[COL_CAT].map(_derive_ing_nature)
+    factoring_mask = out[COL_FACT_DET].map(_has_factoring) if COL_FACT_DET in out.columns else pd.Series(False, index=out.index)
     special_mask = out[COL_CAT].astype(str).isin(["Aporte de socio / capital", "Financiamiento recibido"])
     estado_series = out[COL_POR_COB].map(lambda x: "Pendiente" if _si_no_norm(x) != "No" else "Realizado")
     out.loc[special_mask, COL_TRAT_BAL_ING] = [
@@ -379,7 +381,8 @@ def _autoderive_ing_df(df: pd.DataFrame) -> pd.DataFrame:
         & _ts(out[COL_FCOBRO_REAL]).notna()
     )
     out.loc[complete_partial_mask, COL_POR_COB] = "No"
-    out.loc[full_real_mask | complete_partial_mask, COL_COBRO_REAL_MONTO] = pd.to_numeric(out.loc[full_real_mask | complete_partial_mask, COL_MONTO], errors="coerce").fillna(0.0)
+    full_cash_mask = (full_real_mask | complete_partial_mask) & ~factoring_mask
+    out.loc[full_cash_mask, COL_COBRO_REAL_MONTO] = pd.to_numeric(out.loc[full_cash_mask, COL_MONTO], errors="coerce").fillna(0.0)
     return ensure_ingresos_columns(out)
 
 
@@ -410,6 +413,9 @@ def _validate_ing_df(df: pd.DataFrame) -> list[str]:
         categoria = str(row.get(COL_CAT, "") or "").strip()
         tratamiento = str(row.get(COL_TRAT_BAL_ING, "") or "").strip()
         contraparte = str(row.get(COL_CTP_NOMBRE, "") or "").strip()
+        factoring_detail = _parse_factoring_detail(row.get(COL_FACT_DET, ""))
+        factoring_on = bool(factoring_detail)
+        factoring_retenido = _factoring_retained_pending(factoring_detail)
         fin_on = _bool_from_toggle(row.get(COL_FIN_TOGGLE, "No")) or categoria == "Financiamiento recibido"
         label = str(row.get(COL_DESC, "") or row.get(COL_ROWID, f"fila {idx+1}")).strip() or f"fila {idx+1}"
         if monto <= 0:
@@ -422,8 +428,10 @@ def _validate_ing_df(df: pd.DataFrame) -> list[str]:
             errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial pero sin Fecha real de cobro.")
         if por_cobrar != "No" and monto_real >= monto and monto > 0:
             errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial igual o mayor al total; marque realizado si ya se cobro todo.")
-        if por_cobrar == "No" and abs(monto_real - monto) > 0.01:
+        if por_cobrar == "No" and not factoring_on and abs(monto_real - monto) > 0.01:
             errors.append(f"Ingresos: `{label}` marcado realizado debe tener monto real cobrado igual al monto total.")
+        if factoring_on and factoring_retenido < 0:
+            errors.append(f"Ingresos: `{label}` tiene factoring inconsistente; revisa el retenido.")
         if _counterparty_required_for_ing(categoria, tratamiento, fin_on) and not contraparte:
             errors.append(f"Ingresos: `{label}` requiere Entidad relacionada / contraparte.")
     return errors
@@ -521,6 +529,75 @@ def _serialize_partial_events(entries: list[dict]) -> str:
         return "[]"
 
 
+def _parse_factoring_detail(raw_value) -> dict:
+    try:
+        data = json.loads(str(raw_value or "{}"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    def _num(key: str) -> float:
+        return float(pd.to_numeric(pd.Series([data.get(key, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+
+    detail = {
+        "modo": str(data.get("modo", "") or "").strip(),
+        "contraparte_tipo": str(data.get("contraparte_tipo", "") or "").strip(),
+        "contraparte": str(data.get("contraparte", "") or "").strip(),
+        "fecha_inicio": _date_or_nat(data.get("fecha_inicio")),
+        "fecha_liquidacion_final": _date_or_nat(data.get("fecha_liquidacion_final")),
+        "factored_amount": _num("factored_amount"),
+        "initial_cash_received": _num("initial_cash_received"),
+        "initial_retained": _num("initial_retained"),
+        "initial_fee": _num("initial_fee"),
+        "final_cash_received": _num("final_cash_received"),
+        "final_fee": _num("final_fee"),
+        "nota": str(data.get("nota", "") or "").strip(),
+    }
+    if not detail["modo"]:
+        return {}
+    return detail
+
+
+def _serialize_factoring_detail(detail: dict) -> str:
+    if not isinstance(detail, dict) or not detail:
+        return ""
+    payload = {
+        "modo": str(detail.get("modo", "") or "").strip(),
+        "contraparte_tipo": str(detail.get("contraparte_tipo", "") or "").strip(),
+        "contraparte": str(detail.get("contraparte", "") or "").strip(),
+        "fecha_inicio": (_ts(detail.get("fecha_inicio")).date().isoformat() if not pd.isna(_ts(detail.get("fecha_inicio"))) else ""),
+        "fecha_liquidacion_final": (_ts(detail.get("fecha_liquidacion_final")).date().isoformat() if not pd.isna(_ts(detail.get("fecha_liquidacion_final"))) else ""),
+        "factored_amount": float(pd.to_numeric(pd.Series([detail.get("factored_amount", 0.0)]), errors="coerce").fillna(0.0).iloc[0]),
+        "initial_cash_received": float(pd.to_numeric(pd.Series([detail.get("initial_cash_received", 0.0)]), errors="coerce").fillna(0.0).iloc[0]),
+        "initial_retained": float(pd.to_numeric(pd.Series([detail.get("initial_retained", 0.0)]), errors="coerce").fillna(0.0).iloc[0]),
+        "initial_fee": float(pd.to_numeric(pd.Series([detail.get("initial_fee", 0.0)]), errors="coerce").fillna(0.0).iloc[0]),
+        "final_cash_received": float(pd.to_numeric(pd.Series([detail.get("final_cash_received", 0.0)]), errors="coerce").fillna(0.0).iloc[0]),
+        "final_fee": float(pd.to_numeric(pd.Series([detail.get("final_fee", 0.0)]), errors="coerce").fillna(0.0).iloc[0]),
+        "nota": str(detail.get("nota", "") or "").strip(),
+    }
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return ""
+
+
+def _factoring_retained_pending(raw_value) -> float:
+    detail = raw_value if isinstance(raw_value, dict) else _parse_factoring_detail(raw_value)
+    if not detail:
+        return 0.0
+    pendiente = (
+        float(detail.get("initial_retained", 0.0) or 0.0)
+        - float(detail.get("final_cash_received", 0.0) or 0.0)
+        - float(detail.get("final_fee", 0.0) or 0.0)
+    )
+    return max(0.0, float(pendiente))
+
+
+def _has_factoring(raw_value) -> bool:
+    return bool(_parse_factoring_detail(raw_value))
+
+
 def _seed_partial_events_from_row(row: pd.Series, amount_col: str, date_col: str) -> list[dict]:
     events = _parse_partial_events(row.get(COL_ING_PARTIALS if amount_col == COL_COBRO_REAL_MONTO else COL_GAS_PARTIALS))
     if events:
@@ -538,6 +615,50 @@ def _partial_events_summary(entries: list[dict]) -> tuple[float, pd.Timestamp | 
     total = float(sum(float(x.get("monto", 0.0) or 0.0) for x in entries))
     last_date = max((_ts(x.get("fecha")) for x in entries), default=pd.NaT)
     return total, last_date
+
+
+def _build_factoring_fee_row(
+    *,
+    base_row: pd.Series,
+    factor_nombre: str,
+    factor_tipo_ctp: str,
+    fecha_evento,
+    monto_fee: float,
+    fee_label: str,
+) -> dict:
+    desc_base = str(base_row.get(COL_DESC, "") or "").strip()
+    concepto = f"{fee_label} - {desc_base}" if desc_base else fee_label
+    return {
+        COL_ROWID: uuid.uuid4().hex,
+        COL_FECHA: _ts(fecha_evento),
+        COL_DESC: concepto,
+        COL_CONC: concepto,
+        COL_MONTO: float(monto_fee),
+        COL_CAT: "Gasto financiero",
+        COL_ESC: "Real",
+        COL_REF_RID: str(base_row.get(COL_ROWID, "") or ""),
+        COL_PROY: str(base_row.get(COL_PROY, "") or ""),
+        COL_CLI_ID: str(base_row.get(COL_CLI_ID, "") or ""),
+        COL_CLI_NOM: str(base_row.get(COL_CLI_NOM, "") or ""),
+        COL_EMP: str(base_row.get(COL_EMP, EMPRESA_DEFAULT) or EMPRESA_DEFAULT),
+        COL_POR_PAG: "No",
+        COL_PROV: str(factor_nombre or "").strip(),
+        COL_REC: "No",
+        COL_FPAGO: pd.NaT,
+        COL_FPAGO_REAL: _ts(fecha_evento),
+        COL_CTP_TIPO: str(factor_tipo_ctp or "").strip(),
+        COL_CTP_NOMBRE: str(factor_nombre or "").strip(),
+        COL_PAGO_REAL_MONTO: float(monto_fee),
+        COL_GAS_PARTIALS: _serialize_partial_events(
+            [{"fecha": _ts(fecha_evento), "monto": float(monto_fee), "nota": fee_label}]
+        ),
+        COL_GAS_SUB: "Financiero",
+        COL_GAS_DET: "Otros",
+        COL_TRAT_BAL_GAS: "Gasto del periodo",
+        COL_INV_MOV: "",
+        COL_INV_ITEM: "",
+        COL_USER: _current_user(),
+    }
 
 
 def _render_table_error_block(title: str, errors: list[str]) -> None:
@@ -783,7 +904,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         COL_FECHA, COL_DESC, COL_CONC, COL_MONTO, COL_CAT, COL_ESC,
         COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_POR_COB,
         COL_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_CTP_TIPO, COL_CTP_NOMBRE, COL_COBRO_REAL_MONTO,
-        COL_ING_PARTIALS,
+        COL_ING_PARTIALS, COL_FACT_DET,
         COL_REC, COL_REC_PER, COL_REC_REG,
         COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT, COL_ING_DET, COL_ING_NAT,
         COL_TRAT_BAL_ING, COL_FIN_TOGGLE, COL_FIN_TIPO, COL_FIN_MONTO,
@@ -870,13 +991,15 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         for cat, estado in zip(out.loc[balance_mask, COL_CAT], estado_series.loc[balance_mask])
     ]
     total_ing = out[COL_MONTO].clip(lower=0.0)
+    factoring_mask = out[COL_FACT_DET].map(_has_factoring)
     partial_events_total = out[COL_ING_PARTIALS].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
     partial_events_total = pd.to_numeric(partial_events_total, errors="coerce").fillna(0.0).clip(lower=0.0)
     out[COL_COBRO_REAL_MONTO] = partial_events_total.where(partial_events_total > 0, out[COL_COBRO_REAL_MONTO])
     out.loc[partial_events_total > 0, COL_FCOBRO_REAL] = out.loc[partial_events_total > 0, COL_ING_PARTIALS].map(
         lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)
     )
-    out.loc[out[COL_POR_COB].map(_si_no_norm) == "No", COL_COBRO_REAL_MONTO] = total_ing.loc[out[COL_POR_COB].map(_si_no_norm) == "No"]
+    full_cash_mask = out[COL_POR_COB].map(_si_no_norm).eq("No") & ~factoring_mask
+    out.loc[full_cash_mask, COL_COBRO_REAL_MONTO] = total_ing.loc[full_cash_mask]
     out[COL_COBRO_REAL_MONTO] = out[COL_COBRO_REAL_MONTO].clip(upper=total_ing)
     fin_mask = out[COL_FIN_TOGGLE].map(_bool_from_toggle) | out[COL_CAT].astype(str).eq("Financiamiento recibido")
     out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", ""]
@@ -1623,6 +1746,7 @@ with st.expander("Informacion de interes", expanded=False):
         "- `Financiamiento recibido`: entra caja y nace pasivo.\n"
         "- `Financiamiento otorgado`: sale caja y nace cuenta por cobrar.\n"
         "- `Entidad relacionada / contraparte`: quien esta del otro lado del movimiento. Ejemplos: banco, socio, empresa relacionada o empresa invertida.\n"
+        "- `Con factoring`: el valor recibido inicial entra a caja; el retenido queda como activo hasta la liquidacion final.\n"
         "- `Gasto del periodo`: consumo del mismo periodo.\n"
         "- `Saldo acumulado`: caja acumulada despues de sumar todos los movimientos reales hasta la fecha.\n"
         "- `Flujo neto`: diferencia entre entradas y salidas del periodo analizado.\n"
@@ -1642,7 +1766,8 @@ with st.expander("Informacion de interes", expanded=False):
         "- Cierre mensual persistente.\n"
         "- Conciliacion bancaria.\n"
         "- Cantidades, costo unitario y valorizacion mas fina de inventario.\n"
-        "- Factoring con recurso o con reserva retenida.\n"
+        "- Factoring con recurso.\n"
+        "- Proyeccion estimada del retenido cuando aun no existe liquidacion final.\n"
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
 
@@ -2437,24 +2562,27 @@ with st.expander("Registrar cobro parcial", expanded=False):
                 st.success("Cobro parcial registrado.")
                 _safe_rerun()
 
-with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
+with st.expander("Registrar con factoring", expanded=False):
     st.caption(
-        "Usa esta seccion para liquidar completamente una cuenta por cobrar pendiente mediante factoring sin recurso. "
-        "Regla actual: dinero neto recibido + comision / descuento = saldo pendiente cedido."
+        "Usa esta seccion cuando una cuenta por cobrar propia entra con factoring. "
+        "El sistema registra el dinero recibido inicial, el retenido y la comision inicial."
     )
     st.caption(
-        "Esta primera fase no soporta reserva retenida ni factoring con recurso. "
-        "Si existe reserva o recurso, no lo registres aqui todavia."
+        "Regla actual: saldo pendiente con factoring = dinero recibido inicial + retenido + comision inicial. "
+        "Luego el retenido se liquida en una segunda seccion."
     )
     ing_base_fact = ensure_ingresos_columns(st.session_state.df_ing.copy())
+    if COL_FACT_DET not in ing_base_fact.columns:
+        ing_base_fact[COL_FACT_DET] = ""
     ing_fact_view = ing_base_fact[
         (
             pd.to_numeric(ing_base_fact.get(COL_MONTO), errors="coerce").fillna(0.0)
             - pd.to_numeric(ing_base_fact.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0)
         ).clip(lower=0.0) > 0
     ].copy()
+    ing_fact_view = ing_fact_view[~ing_fact_view[COL_FACT_DET].map(_has_factoring)].copy()
     if ing_fact_view.empty:
-        st.info("No hay cuentas por cobrar pendientes para liquidar por factoring.")
+        st.info("No hay cuentas por cobrar pendientes disponibles para registrar con factoring.")
     else:
         ing_fact_view["__saldo_pendiente"] = (
             pd.to_numeric(ing_fact_view[COL_MONTO], errors="coerce").fillna(0.0)
@@ -2464,7 +2592,7 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
             f"{str(row.get(COL_DESC, '')).strip() or str(row.get(COL_ROWID, ''))} | saldo {_format_money_es(row['__saldo_pendiente'])}": str(row.get(COL_ROWID, ""))
             for _, row in ing_fact_view.iterrows()
         }
-        fact_sel_label = st.selectbox("Cuenta por cobrar a ceder", list(fact_options.keys()), key="ing_factoring_row_select")
+        fact_sel_label = st.selectbox("Cuenta por cobrar a registrar con factoring", list(fact_options.keys()), key="ing_factoring_row_select")
         fact_sel_id = fact_options.get(fact_sel_label, "")
         fact_row = ing_fact_view[ing_fact_view[COL_ROWID].astype(str) == fact_sel_id].iloc[0]
         saldo_fact = float(fact_row["__saldo_pendiente"])
@@ -2473,9 +2601,9 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
 
         f1, f2 = st.columns([1, 1])
         with f1:
-            factoring_tipo = st.selectbox(
+            st.selectbox(
                 "Tipo de operacion",
-                ["Factoring sin recurso - liquidacion total"],
+                ["Con factoring sin recurso"],
                 index=0,
                 key="ing_factoring_tipo",
             )
@@ -2489,19 +2617,26 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
             factor_nombre = st.text_input(
                 "Empresa de factoring / contraparte",
                 key="ing_factoring_ctp_nombre",
-                help="Nombre de la empresa de factoring o entidad que liquida la cuenta.",
+                help="Nombre de la empresa de factoring que desembolsa el anticipo.",
             )
         with f2:
-            fecha_factoring = st.date_input("Fecha de desembolso / cesion", value=_today(), key="ing_factoring_fecha")
+            fecha_factoring = st.date_input("Fecha de desembolso inicial con factoring", value=_today(), key="ing_factoring_fecha")
             neto_factoring = st.number_input(
-                "Dinero neto recibido",
+                "Valor recibido inicial",
                 min_value=0.0,
                 max_value=max(0.0, saldo_fact),
                 step=1.0,
                 key="ing_factoring_neto",
             )
+            retenido_factoring = st.number_input(
+                "Monto retenido",
+                min_value=0.0,
+                max_value=max(0.0, saldo_fact),
+                step=1.0,
+                key="ing_factoring_retenido",
+            )
             comision_factoring = st.number_input(
-                "Comision / descuento del factor",
+                "Comision inicial",
                 min_value=0.0,
                 max_value=max(0.0, saldo_fact),
                 step=1.0,
@@ -2510,12 +2645,18 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
         nota_factoring = st.text_area(
             "Observacion / nota",
             key="ing_factoring_nota",
-            placeholder="Ej: cesion factura hospital X, descuento 7 dias.",
+            placeholder="Ej: con factoring factura hospital X; retencion temporal hasta pago del deudor.",
         )
         st.caption(
             f"Monto total cuenta: {_format_money_es(fact_row.get(COL_MONTO, 0.0))} | "
             f"Cobrado previo: {_format_money_es(existing_real)} | "
-            f"Saldo a ceder: {_format_money_es(saldo_fact)}"
+            f"Saldo que entra con factoring: {_format_money_es(saldo_fact)}"
+        )
+        st.caption(
+            f"Validacion: recibido inicial {_format_money_es(neto_factoring)} + "
+            f"retenido {_format_money_es(retenido_factoring)} + "
+            f"comision inicial {_format_money_es(comision_factoring)} = "
+            f"{_format_money_es(float(neto_factoring) + float(retenido_factoring) + float(comision_factoring))}"
         )
         if current_events:
             st.dataframe(
@@ -2526,15 +2667,15 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
                 hide_index=True,
                 column_config={"Fecha": st.column_config.DateColumn("Fecha"), "Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
             )
-        if st.button("Guardar factoring / cesion", key="btn_guardar_factoring"):
+        if st.button("Guardar con factoring", key="btn_guardar_factoring"):
             if not str(factor_nombre or "").strip():
                 st.error("Debes indicar la empresa de factoring / contraparte.")
                 st.stop()
-            if abs((float(neto_factoring) + float(comision_factoring)) - float(saldo_fact)) > 0.01:
-                st.error("El neto recibido mas la comision debe ser igual al saldo pendiente cedido.")
+            if abs((float(neto_factoring) + float(retenido_factoring) + float(comision_factoring)) - float(saldo_fact)) > 0.01:
+                st.error("Valor recibido inicial + retenido + comision inicial debe ser igual al saldo que entra con factoring.")
                 st.stop()
             if float(neto_factoring) <= 0:
-                st.error("El dinero neto recibido debe ser mayor que cero.")
+                st.error("El valor recibido inicial debe ser mayor que cero.")
                 st.stop()
 
             old_ing_df = st.session_state.df_ing.copy()
@@ -2549,8 +2690,9 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
             base_row = new_ing_df.loc[mask_ing].iloc[0]
             fact_events = _seed_partial_events_from_row(base_row, COL_COBRO_REAL_MONTO, COL_FCOBRO_REAL)
             note_parts = [
-                f"Factoring sin recurso - neto recibido {_format_money_es(neto_factoring)}",
-                f"comision {_format_money_es(comision_factoring)}",
+                f"Con factoring - valor recibido inicial {_format_money_es(neto_factoring)}",
+                f"retenido {_format_money_es(retenido_factoring)}",
+                f"comision inicial {_format_money_es(comision_factoring)}",
                 f"contraparte {str(factor_nombre).strip()}",
             ]
             if str(nota_factoring or "").strip():
@@ -2558,61 +2700,52 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
             fact_events.append(
                 {
                     "fecha": _ts(fecha_factoring),
-                    "monto": float(saldo_fact),
+                    "monto": float(neto_factoring),
                     "nota": " | ".join(note_parts),
                 }
             )
             total_real, last_real = _partial_events_summary(fact_events)
             total_monto = float(pd.to_numeric(pd.Series([base_row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
             total_real = min(total_real, total_monto)
+            factoring_detail = {
+                "modo": "con_factoring_sin_recurso",
+                "contraparte_tipo": str(factor_tipo_ctp or "").strip(),
+                "contraparte": str(factor_nombre or "").strip(),
+                "fecha_inicio": _ts(fecha_factoring),
+                "fecha_liquidacion_final": pd.NaT,
+                "factored_amount": float(saldo_fact),
+                "initial_cash_received": float(neto_factoring),
+                "initial_retained": float(retenido_factoring),
+                "initial_fee": float(comision_factoring),
+                "final_cash_received": 0.0,
+                "final_fee": 0.0,
+                "nota": str(nota_factoring or "").strip(),
+            }
             new_ing_df.loc[mask_ing, COL_ING_PARTIALS] = _serialize_partial_events(fact_events)
             new_ing_df.loc[mask_ing, COL_COBRO_REAL_MONTO] = float(total_real)
             new_ing_df.loc[mask_ing, COL_FCOBRO_REAL] = last_real
             new_ing_df.loc[mask_ing, COL_POR_COB] = "No"
-            new_ing_df.loc[mask_ing, COL_COB] = "Si"
+            new_ing_df.loc[mask_ing, COL_COB] = "Si" if float(retenido_factoring) <= 0.01 else "No"
             new_ing_df.loc[mask_ing, COL_CTP_TIPO] = str(factor_tipo_ctp or "").strip()
             new_ing_df.loc[mask_ing, COL_CTP_NOMBRE] = str(factor_nombre or "").strip()
+            new_ing_df.loc[mask_ing, COL_FACT_DET] = _serialize_factoring_detail(factoring_detail)
             new_ing_df = ensure_ingresos_columns(new_ing_df)
 
             if float(comision_factoring) > 0:
-                desc_base = str(base_row.get(COL_DESC, "") or "").strip()
-                factoring_fee_row = {
-                    COL_ROWID: uuid.uuid4().hex,
-                    COL_FECHA: _ts(fecha_factoring),
-                    COL_DESC: f"Comision factoring - {desc_base}" if desc_base else "Comision factoring",
-                    COL_CONC: f"Comision factoring - {desc_base}" if desc_base else "Comision factoring",
-                    COL_MONTO: float(comision_factoring),
-                    COL_CAT: "Gasto financiero",
-                    COL_ESC: "Real",
-                    COL_REF_RID: str(base_row.get(COL_ROWID, "") or ""),
-                    COL_PROY: str(base_row.get(COL_PROY, "") or ""),
-                    COL_CLI_ID: str(base_row.get(COL_CLI_ID, "") or ""),
-                    COL_CLI_NOM: str(base_row.get(COL_CLI_NOM, "") or ""),
-                    COL_EMP: str(base_row.get(COL_EMP, EMPRESA_DEFAULT) or EMPRESA_DEFAULT),
-                    COL_POR_PAG: "No",
-                    COL_PROV: str(factor_nombre or "").strip(),
-                    COL_REC: "No",
-                    COL_FPAGO: pd.NaT,
-                    COL_FPAGO_REAL: _ts(fecha_factoring),
-                    COL_CTP_TIPO: str(factor_tipo_ctp or "").strip(),
-                    COL_CTP_NOMBRE: str(factor_nombre or "").strip(),
-                    COL_PAGO_REAL_MONTO: float(comision_factoring),
-                    COL_GAS_PARTIALS: _serialize_partial_events(
-                        [{"fecha": _ts(fecha_factoring), "monto": float(comision_factoring), "nota": "Comision factoring"}]
-                    ),
-                    COL_GAS_SUB: "Financiero",
-                    COL_GAS_DET: "Otros",
-                    COL_TRAT_BAL_GAS: "Gasto del periodo",
-                    COL_INV_MOV: "",
-                    COL_INV_ITEM: "",
-                    COL_USER: _current_user(),
-                }
+                factoring_fee_row = _build_factoring_fee_row(
+                    base_row=base_row,
+                    factor_nombre=str(factor_nombre or "").strip(),
+                    factor_tipo_ctp=str(factor_tipo_ctp or "").strip(),
+                    fecha_evento=fecha_factoring,
+                    monto_fee=float(comision_factoring),
+                    fee_label="Comision factoring inicial",
+                )
                 new_gas_df = pd.concat([new_gas_df, pd.DataFrame([factoring_fee_row])], ignore_index=True)
                 new_gas_df = ensure_gastos_columns(new_gas_df)
 
             wrote_ing = safe_write_worksheet(client, SHEET_ID, WS_ING, new_ing_df, old_df=old_ing_df)
             if not wrote_ing:
-                st.error("No se pudo actualizar la cuenta por cobrar para registrar el factoring.")
+                st.error("No se pudo actualizar la cuenta por cobrar para registrar la operacion con factoring.")
                 st.stop()
 
             wrote_gas = True
@@ -2621,15 +2754,173 @@ with st.expander("Liquidar cuenta por factoring / cesion", expanded=False):
                 if not wrote_gas:
                     rollback_ok = safe_write_worksheet(client, SHEET_ID, WS_ING, old_ing_df, old_df=new_ing_df)
                     if rollback_ok:
-                        st.error("No se pudo guardar la comision del factoring. Se revirtio la liquidacion del ingreso.")
+                        st.error("No se pudo guardar la comision inicial. Se revirtio la operacion con factoring.")
                     else:
-                        st.error("No se pudo guardar la comision del factoring y tampoco se pudo revertir automaticamente el ingreso. Revisa ambas hojas.")
+                        st.error("No se pudo guardar la comision inicial y tampoco se pudo revertir automaticamente el ingreso. Revisa ambas hojas.")
                     st.stop()
 
             st.session_state.df_ing = new_ing_df
             st.session_state.df_gas = new_gas_df
             st.cache_data.clear()
-            st.success("Factoring / cesion registrado.")
+            if float(retenido_factoring) > 0:
+                st.success("Operacion con factoring registrada. El retenido queda pendiente para liquidacion final.")
+            else:
+                st.success("Operacion con factoring registrada y liquidada sin retenido.")
+            _safe_rerun()
+
+with st.expander("Liquidar retenido con factoring", expanded=False):
+    st.caption(
+        "Usa esta seccion cuando la empresa de factoring libera el retenido. "
+        "Aqui registras el valor final recibido y la comision final generada por el tiempo transcurrido."
+    )
+    ing_base_ret = ensure_ingresos_columns(st.session_state.df_ing.copy())
+    if COL_FACT_DET not in ing_base_ret.columns:
+        ing_base_ret[COL_FACT_DET] = ""
+    ing_base_ret["__factoring_det"] = ing_base_ret[COL_FACT_DET].map(_parse_factoring_detail)
+    ing_base_ret["__retenido_pendiente"] = ing_base_ret["__factoring_det"].map(_factoring_retained_pending)
+    ing_ret_view = ing_base_ret[ing_base_ret["__retenido_pendiente"] > 0.01].copy()
+    if ing_ret_view.empty:
+        st.info("No hay retenidos con factoring pendientes de liquidar.")
+    else:
+        ret_options = {
+            f"{str(row.get(COL_DESC, '')).strip() or str(row.get(COL_ROWID, ''))} | retenido pendiente {_format_money_es(row['__retenido_pendiente'])}": str(row.get(COL_ROWID, ""))
+            for _, row in ing_ret_view.iterrows()
+        }
+        ret_sel_label = st.selectbox("Operacion con factoring", list(ret_options.keys()), key="ing_factoring_ret_row_select")
+        ret_sel_id = ret_options.get(ret_sel_label, "")
+        ret_row = ing_ret_view[ing_ret_view[COL_ROWID].astype(str) == ret_sel_id].iloc[0]
+        ret_detail = ret_row["__factoring_det"]
+        retenido_pendiente = float(ret_row["__retenido_pendiente"])
+        factor_nombre = str(ret_detail.get("contraparte", "") or ret_row.get(COL_CTP_NOMBRE, "")).strip()
+        factor_tipo_ctp = str(ret_detail.get("contraparte_tipo", "") or ret_row.get(COL_CTP_TIPO, "")).strip()
+
+        r1, r2 = st.columns([1, 1])
+        with r1:
+            fecha_liq_fact = st.date_input("Fecha de liquidacion final", value=_today(), key="ing_factoring_liq_fecha")
+            neto_liq_fact = st.number_input(
+                "Valor final recibido",
+                min_value=0.0,
+                max_value=max(0.0, retenido_pendiente),
+                step=1.0,
+                key="ing_factoring_liq_neto",
+            )
+        with r2:
+            comision_liq_fact = st.number_input(
+                "Comision final",
+                min_value=0.0,
+                max_value=max(0.0, retenido_pendiente),
+                step=1.0,
+                key="ing_factoring_liq_comision",
+            )
+            nota_liq_fact = st.text_area(
+                "Observacion / nota liquidacion final",
+                key="ing_factoring_liq_nota",
+                placeholder="Ej: retenido liberado luego del pago del deudor.",
+            )
+
+        st.caption(
+            f"Factor: {factor_nombre or 'Sin contraparte'} | "
+            f"Factoring inicial: recibido {_format_money_es(ret_detail.get('initial_cash_received', 0.0))} | "
+            f"retenido inicial {_format_money_es(ret_detail.get('initial_retained', 0.0))} | "
+            f"retenido pendiente {_format_money_es(retenido_pendiente)}"
+        )
+        st.caption(
+            f"Validacion: valor final recibido {_format_money_es(neto_liq_fact)} + "
+            f"comision final {_format_money_es(comision_liq_fact)} = "
+            f"{_format_money_es(float(neto_liq_fact) + float(comision_liq_fact))}"
+        )
+
+        if st.button("Guardar liquidacion final con factoring", key="btn_guardar_factoring_liq"):
+            if abs((float(neto_liq_fact) + float(comision_liq_fact)) - float(retenido_pendiente)) > 0.01:
+                st.error("Valor final recibido + comision final debe ser igual al retenido pendiente.")
+                st.stop()
+            if float(neto_liq_fact) <= 0 and float(comision_liq_fact) <= 0:
+                st.error("Debes registrar al menos valor final recibido o comision final.")
+                st.stop()
+
+            old_ing_df = st.session_state.df_ing.copy()
+            old_gas_df = st.session_state.df_gas.copy()
+            new_ing_df = old_ing_df.copy()
+            new_gas_df = old_gas_df.copy()
+            mask_ing = new_ing_df[COL_ROWID].astype(str) == ret_sel_id
+            if not mask_ing.any():
+                st.error("No se encontro la operacion seleccionada.")
+                st.stop()
+
+            base_row = new_ing_df.loc[mask_ing].iloc[0]
+            current_detail = _parse_factoring_detail(base_row.get(COL_FACT_DET, ""))
+            if not current_detail:
+                st.error("La fila seleccionada no contiene una operacion con factoring valida.")
+                st.stop()
+            fact_events = _seed_partial_events_from_row(base_row, COL_COBRO_REAL_MONTO, COL_FCOBRO_REAL)
+            if float(neto_liq_fact) > 0:
+                note_liq_parts = [
+                    f"Liquidacion final factoring - valor recibido {_format_money_es(neto_liq_fact)}",
+                    f"comision final {_format_money_es(comision_liq_fact)}",
+                    f"contraparte {factor_nombre}",
+                ]
+                if str(nota_liq_fact or "").strip():
+                    note_liq_parts.append(str(nota_liq_fact or "").strip())
+                fact_events.append(
+                    {
+                        "fecha": _ts(fecha_liq_fact),
+                        "monto": float(neto_liq_fact),
+                        "nota": " | ".join(note_liq_parts),
+                    }
+                )
+            total_real, last_real = _partial_events_summary(fact_events)
+            total_monto = float(pd.to_numeric(pd.Series([base_row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+            total_real = min(total_real, total_monto)
+            current_detail["fecha_liquidacion_final"] = _ts(fecha_liq_fact)
+            current_detail["final_cash_received"] = float(neto_liq_fact)
+            current_detail["final_fee"] = float(comision_liq_fact)
+            nota_actual = str(current_detail.get("nota", "") or "").strip()
+            nota_liq_text = str(nota_liq_fact or "").strip()
+            if nota_liq_text:
+                current_detail["nota"] = f"{nota_actual} | Liquidacion final: {nota_liq_text}" if nota_actual else f"Liquidacion final: {nota_liq_text}"
+
+            new_ing_df.loc[mask_ing, COL_ING_PARTIALS] = _serialize_partial_events(fact_events)
+            new_ing_df.loc[mask_ing, COL_COBRO_REAL_MONTO] = float(total_real)
+            new_ing_df.loc[mask_ing, COL_FCOBRO_REAL] = last_real
+            new_ing_df.loc[mask_ing, COL_POR_COB] = "No"
+            new_ing_df.loc[mask_ing, COL_COB] = "Si"
+            new_ing_df.loc[mask_ing, COL_CTP_TIPO] = factor_tipo_ctp
+            new_ing_df.loc[mask_ing, COL_CTP_NOMBRE] = factor_nombre
+            new_ing_df.loc[mask_ing, COL_FACT_DET] = _serialize_factoring_detail(current_detail)
+            new_ing_df = ensure_ingresos_columns(new_ing_df)
+
+            if float(comision_liq_fact) > 0:
+                factoring_fee_row = _build_factoring_fee_row(
+                    base_row=base_row,
+                    factor_nombre=factor_nombre,
+                    factor_tipo_ctp=factor_tipo_ctp,
+                    fecha_evento=fecha_liq_fact,
+                    monto_fee=float(comision_liq_fact),
+                    fee_label="Comision factoring final",
+                )
+                new_gas_df = pd.concat([new_gas_df, pd.DataFrame([factoring_fee_row])], ignore_index=True)
+                new_gas_df = ensure_gastos_columns(new_gas_df)
+
+            wrote_ing = safe_write_worksheet(client, SHEET_ID, WS_ING, new_ing_df, old_df=old_ing_df)
+            if not wrote_ing:
+                st.error("No se pudo actualizar la operacion con factoring.")
+                st.stop()
+
+            wrote_gas = True
+            if float(comision_liq_fact) > 0:
+                wrote_gas = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas_df, old_df=old_gas_df)
+                if not wrote_gas:
+                    rollback_ok = safe_write_worksheet(client, SHEET_ID, WS_ING, old_ing_df, old_df=new_ing_df)
+                    if rollback_ok:
+                        st.error("No se pudo guardar la comision final. Se revirtio la liquidacion final del retenido.")
+                    else:
+                        st.error("No se pudo guardar la comision final y tampoco se pudo revertir automaticamente el ingreso. Revisa ambas hojas.")
+                    st.stop()
+
+            st.session_state.df_ing = new_ing_df
+            st.session_state.df_gas = new_gas_df
+            st.cache_data.clear()
+            st.success("Liquidacion final con factoring registrada.")
             _safe_rerun()
 
 
