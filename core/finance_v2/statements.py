@@ -587,6 +587,7 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
         manual_disbursement_amount.sum()
     )
 
+    gas_trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
     gas_reg_type = _safe_series(gas, COL_FINANCIAMIENTO_REG_TIPO, "").astype(str).str.strip()
     gas_fin_instrument = _safe_series(gas, COL_FINANCIAMIENTO_INSTRUMENTO, "").astype(str).str.strip()
     gas_fin_sched = _safe_series(gas, COL_FINANCIAMIENTO_CRONOGRAMA, "").astype(str).str.strip()
@@ -616,7 +617,6 @@ def compute_balance_components(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, cu
     )
     prestamos_recibidos += max(0.0, manual_disbursements - manual_capital_repayments)
 
-    gas_trat = _safe_series(gas, COL_TRATAMIENTO_BALANCE_GAS, "").astype(str)
     gas_estado = _safe_series(gas, COL_POR_PAGAR, "No").astype(str)
     gas_real_date = _safe_datetime_series(gas, COL_FECHA_REAL_PAGO)
     gas_event_date = gas_real_date.fillna(_safe_datetime_series(gas, COL_FECHA))
