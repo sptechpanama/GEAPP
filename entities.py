@@ -12,6 +12,7 @@ import pandas as pd
 from typing import Tuple, Optional
 
 from sheets import read_worksheet  # type: ignore
+from gspread.exceptions import APIError
 
 # Si tus nombres de hojas son distintos, cámbialos aquí:
 WS_CLIENTES = "Clientes"
@@ -83,7 +84,14 @@ def _load_projects(_client, sheet_id: str) -> pd.DataFrame:
 # -------------------- UI Selectors --------------------
 def client_selector(client, sheet_id: str, *, key: str) -> Tuple[str, str]:
     """Selectbox de cliente (id + nombre). Devuelve (ClienteID, ClienteNombre)."""
-    df_cli = _load_clients(client, sheet_id)
+    try:
+        df_cli = _load_clients(client, sheet_id)
+    except APIError as exc:
+        st.warning(f"No se pudo cargar el catalogo de clientes en este momento. Puedes continuar sin seleccionar cliente. Detalle: {str(exc)[:160]}")
+        df_cli = pd.DataFrame(columns=["ClienteID", "ClienteNombre"])
+    except Exception as exc:
+        st.warning(f"No se pudo cargar el catalogo de clientes. Puedes continuar sin seleccionar cliente. Detalle: {str(exc)[:160]}")
+        df_cli = pd.DataFrame(columns=["ClienteID", "ClienteNombre"])
     opciones = [""] + [f"{row.ClienteNombre} ▸ {row.ClienteID}" for _, row in df_cli.iterrows()]
     sel = st.selectbox("Cliente", opciones, index=0, key=f"{key}_cliente")
     if not sel:
@@ -104,7 +112,14 @@ def project_selector(
     Selectbox de proyecto. Si selected_client_id viene, filtra a solo proyectos de ese cliente.
     Devuelve (ProyectoID, ProyectoNombre, ClienteID_del_proyecto, ClienteNombre_del_proyecto)
     """
-    df_proj = _load_projects(client, sheet_id)
+    try:
+        df_proj = _load_projects(client, sheet_id)
+    except APIError as exc:
+        st.warning(f"No se pudo cargar el catalogo de proyectos en este momento. Puedes continuar sin seleccionar proyecto. Detalle: {str(exc)[:160]}")
+        df_proj = pd.DataFrame(columns=["ProyectoID", "ProyectoNombre", "ClienteID", "ClienteNombre"])
+    except Exception as exc:
+        st.warning(f"No se pudo cargar el catalogo de proyectos. Puedes continuar sin seleccionar proyecto. Detalle: {str(exc)[:160]}")
+        df_proj = pd.DataFrame(columns=["ProyectoID", "ProyectoNombre", "ClienteID", "ClienteNombre"])
 
     if selected_client_id:
         mask = df_proj["ClienteID"].astype(str).str.strip() == str(selected_client_id).strip()

@@ -125,10 +125,10 @@ def _make_unique_headers(raw_headers: list[str]) -> list[str]:
 
 
 def read_worksheet(client: gspread.Client, sheet_id: str, worksheet_name: str) -> pd.DataFrame:
-    sh = client.open_by_key(sheet_id)
-    ws = sh.worksheet(worksheet_name)
+    sh = _retry(lambda: client.open_by_key(sheet_id))
+    ws = _retry(lambda: sh.worksheet(worksheet_name))
 
-    raw_headers = ws.row_values(1)
+    raw_headers = _retry(lambda: ws.row_values(1))
     expected_headers = _make_unique_headers(raw_headers)
 
     def _get_all_values():
@@ -150,8 +150,8 @@ def read_worksheet(client: gspread.Client, sheet_id: str, worksheet_name: str) -
     return df
 
 def write_worksheet(client: gspread.Client, sheet_id: str, worksheet_name: str, df: pd.DataFrame) -> None:
-    sh = client.open_by_key(sheet_id)
-    ws = sh.worksheet(worksheet_name)
+    sh = _retry(lambda: client.open_by_key(sheet_id))
+    ws = _retry(lambda: sh.worksheet(worksheet_name))
 
     out = df.copy()
     if "Fecha" in out.columns:
