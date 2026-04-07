@@ -310,15 +310,26 @@ def _download_drive_file(drive, file_id: str) -> tuple[bytes, str, str, str]:
 
 
 def _list_drive_files(drive, folder_id: str, limit: int) -> list[dict[str, Any]]:
-    resp = drive.files().list(
-        q=f"'{folder_id}' in parents and trashed=false",
-        fields="files(id,name,mimeType,webViewLink,modifiedTime)",
-        orderBy="modifiedTime desc",
-        pageSize=int(limit),
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-    return list(resp.get("files", []) or [])
+    base_kwargs = {
+        "q": f"'{folder_id}' in parents and trashed=false",
+        "fields": "files(id,name,mimeType,webViewLink,modifiedTime,parents)",
+        "orderBy": "modifiedTime desc",
+        "pageSize": int(limit),
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
+        "spaces": "drive",
+    }
+    last_files: list[dict[str, Any]] = []
+    for extra in [{"corpora": "allDrives"}, {"corpora": "user"}, {}]:
+        try:
+            resp = drive.files().list(**{**base_kwargs, **extra}).execute()
+            files = list(resp.get("files", []) or [])
+            if files:
+                return files
+            last_files = files
+        except Exception:
+            continue
+    return last_files
 
 
 def _extract_pdf_text_local(content: bytes, max_chars: int) -> str:

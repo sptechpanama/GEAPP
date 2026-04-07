@@ -2073,22 +2073,58 @@ def _download_drive_file_bytes(creds_obj, file_id: str) -> tuple[bytes, str, str
     return fh.getvalue(), str(meta.get("name", "")), str(meta.get("mimeType", ""))
 
 
+def _list_finance_docs_drive_files(drive, folder_id: str, limit: int) -> list[dict]:
+    base_kwargs = {
+        "q": f"'{folder_id}' in parents and trashed=false",
+        "fields": "files(id,name,mimeType,webViewLink,modifiedTime,parents)",
+        "orderBy": "modifiedTime desc",
+        "pageSize": int(limit),
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
+        "spaces": "drive",
+    }
+    attempts = [
+        {"corpora": "allDrives"},
+        {"corpora": "user"},
+        {},
+    ]
+    last_files: list[dict] = []
+    for extra in attempts:
+        try:
+            resp = drive.files().list(**{**base_kwargs, **extra}).execute()
+            files = list(resp.get("files", []) or [])
+            if files:
+                return files
+            last_files = files
+        except Exception:
+            continue
+    return last_files
+
+
+def _diagnose_drive_folder_access(drive, folder_id: str) -> str:
+    try:
+        folder = drive.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType,trashed,webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+    except Exception as exc:
+        return f"No se pudo leer metadata de la carpeta con la cuenta de servicio: {str(exc)[:180]}"
+    name = str(folder.get("name", "") or folder_id)
+    mime = str(folder.get("mimeType", "") or "")
+    if mime != "application/vnd.google-apps.folder":
+        return f"El ID configurado es visible, pero no parece carpeta Drive: {name} ({mime})."
+    return f"Carpeta visible para la cuenta de servicio: {name}. Si lista 0 archivos, revisa que los archivos hereden permisos o compártelos también con la cuenta de servicio."
+
+
 def _import_finance_docs_from_drive(creds_obj, folder_id: str, docs_df: pd.DataFrame, *, limit: int = 25) -> pd.DataFrame:
     if not folder_id:
         raise RuntimeError("Configura DRIVE_FINANCE_DOCS_FOLDER_ID o DRIVE_BACKUP_FOLDER_ID para importar desde Drive.")
     drive = _drive_client_from_creds(creds_obj)
-    query = f"'{folder_id}' in parents and trashed=false"
-    resp = drive.files().list(
-        q=query,
-        fields="files(id,name,mimeType,webViewLink,modifiedTime)",
-        orderBy="modifiedTime desc",
-        pageSize=int(limit),
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
+    files = _list_finance_docs_drive_files(drive, folder_id, limit)
     existing_hashes = set(ensure_finance_docs_columns(docs_df).get(DOC_COL_HASH, pd.Series(dtype=str)).astype(str).str.strip())
     rows = []
-    for item in resp.get("files", []) or []:
+    for item in files:
         fid = str(item.get("id", "") or "").strip()
         if not fid:
             continue
@@ -2286,21 +2322,14 @@ def _scan_finance_docs_folder_for_empresa(
     if not folder_id:
         raise RuntimeError("Falta carpeta Drive para la empresa.")
     drive = _drive_client_from_creds(creds_obj)
-    resp = drive.files().list(
-        q=f"'{folder_id}' in parents and trashed=false",
-        fields="files(id,name,mimeType,webViewLink,modifiedTime)",
-        orderBy="modifiedTime desc",
-        pageSize=int(limit),
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
+    files = _list_finance_docs_drive_files(drive, folder_id, limit)
     work_docs = ensure_finance_docs_columns(docs_df.copy())
     existing_hashes = set(work_docs.get(DOC_COL_HASH, pd.Series(dtype=str)).astype(str).str.strip())
     existing_drive_ids = set(work_docs.get(DOC_COL_DRIVE_ID, pd.Series(dtype=str)).astype(str).str.strip())
     created = 0
     skipped = 0
     errors: list[str] = []
-    for item in resp.get("files", []) or []:
+    for item in files:
         fid = str(item.get("id", "") or "").strip()
         if not fid:
             continue
@@ -3054,6 +3083,11 @@ def _render_finance_docs_company_inbox(
                             st.info("No hubo cambios para guardar.")
                     else:
                         st.info(f"No se encontraron documentos nuevos. Ya existentes: {skipped}.")
+                        try:
+                            drive_diag = _drive_client_from_creds(creds_obj)
+                            st.caption(_diagnose_drive_folder_access(drive_diag, folder_id))
+                        except Exception:
+                            pass
                     if errors:
                         st.warning("Algunos documentos no se pudieron preparar: " + " | ".join(errors[:5]))
                 except Exception as exc:
