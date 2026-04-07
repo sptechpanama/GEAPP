@@ -2783,6 +2783,49 @@ def _can_auto_register_doc(row: pd.Series) -> tuple[bool, str]:
     return False, f"Destino `{destino}` requiere revision y registro manual en su flujo especializado."
 
 
+def _reprocess_finance_doc_row_with_ai(
+    *,
+    row: pd.Series,
+    creds_obj,
+    api_key: str,
+    model_name: str,
+    replace_existing_text: bool,
+) -> dict:
+    if not api_key:
+        raise RuntimeError("Falta `OPENAI_API_KEY`; no se llamo a la API.")
+    file_bytes = None
+    file_name = str(row.get(DOC_COL_ARCHIVO, "") or "documento")
+    mime_type = str(row.get(DOC_COL_MIME, "") or "")
+    drive_id = str(row.get(DOC_COL_DRIVE_ID, "") or "").strip()
+    if drive_id:
+        file_bytes, file_name_dl, mime_dl = _download_drive_file_bytes(creds_obj, drive_id)
+        file_name = file_name_dl or file_name
+        mime_type = mime_dl or mime_type
+    stored_text = "" if replace_existing_text else str(row.get(DOC_COL_TEXTO_USUARIO, "") or "").strip()
+    extracted_now = _finance_doc_local_text(file_bytes, mime_type, "", creds_obj=creds_obj)
+    local_text = "\n".join([x for x in [stored_text, extracted_now] if x]).strip()[:6000]
+    payload = _call_openai_finance_doc(
+        api_key=api_key,
+        model=model_name,
+        file_name=file_name,
+        mime_type=mime_type,
+        content=None if extracted_now else file_bytes,
+        user_text=local_text,
+        user_note=str(row.get(DOC_COL_NOTA, "") or ""),
+    )
+    updated = _apply_ai_doc_payload(row, payload)
+    updated[DOC_COL_MODELO] = model_name
+    updated[DOC_COL_ESTADO] = "Procesado"
+    updated[DOC_COL_TEXTO_USUARIO] = local_text
+    if extracted_now and str(mime_type or "").lower().startswith("image/"):
+        updated[DOC_COL_OCR_USADO] = "Google Vision"
+    elif file_bytes and str(mime_type or "").lower().startswith("image/"):
+        updated[DOC_COL_OCR_USADO] = "OpenAI vision fallback"
+    elif extracted_now and "pdf" in str(mime_type or "").lower():
+        updated[DOC_COL_OCR_USADO] = "PDF texto local"
+    return updated
+
+
 def _option_index(options: list, value, default: int = 0) -> int:
     try:
         return options.index(value)
@@ -3033,6 +3076,7 @@ def _render_finance_docs_company_inbox(
     docs_company = docs_df[docs_df[DOC_COL_EMPRESA].astype(str).str.upper().str.strip().eq(str(empresa).upper())].copy()
     status_s = docs_company[DOC_COL_ESTADO].astype(str).str.strip()
     pending_docs = docs_company[status_s.isin({"", "Borrador", "Procesado", "Requiere revision"})].copy()
+    discarded_docs = docs_company[status_s.eq("Descartado")].copy()
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Pendientes", int(len(pending_docs)))
@@ -3181,6 +3225,29 @@ def _render_finance_docs_company_inbox(
     st.markdown("#### Borradores listos para revisar")
     if pending_docs.empty:
         st.info(f"No hay borradores pendientes para {empresa}.")
+        if not discarded_docs.empty:
+            with st.expander(f"Descartados {empresa}", expanded=False):
+                discard_labels = [
+                    f"{str(row.get(DOC_COL_ARCHIVO, '')).strip() or 'Documento'} | {str(row.get(DOC_COL_DESTINO, '')).strip() or 'Sin destino'} | {str(row.get(DOC_COL_ROWID, ''))[:8]}"
+                    for _, row in discarded_docs.iterrows()
+                ]
+                restore_label = st.selectbox("Borrador descartado", discard_labels, key=f"doc_restore_empty_{emp_key}")
+                restore_row = discarded_docs.iloc[discard_labels.index(restore_label)].copy()
+                restore_id = str(restore_row.get(DOC_COL_ROWID, "") or "").strip()
+                if st.button("Restaurar a borradores", key=f"btn_doc_restore_empty_{emp_key}_{restore_id}"):
+                    try:
+                        new_docs = docs_df.copy()
+                        idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(restore_id)]
+                        if len(idx) > 0:
+                            new_docs.loc[idx[0], DOC_COL_ESTADO] = "Borrador"
+                            new_docs.loc[idx[0], DOC_COL_MENSAJE] = "Restaurado por usuario."
+                            wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                            if wrote:
+                                st.cache_data.clear()
+                                st.success("Borrador restaurado.")
+                                _safe_rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudo restaurar. Detalle: {str(exc)[:220]}")
         return
 
     editable_cols = [
@@ -3268,6 +3335,10 @@ def _render_finance_docs_company_inbox(
         st.markdown(f"[Abrir documento en Drive]({str(selected_row.get(DOC_COL_DRIVE_URL)).strip()})")
     if str(selected_row.get(DOC_COL_DUPLICADO, "") or "").strip():
         st.warning(str(selected_row.get(DOC_COL_DUPLICADO)))
+    st.caption(
+        "`Procesar seleccionado con IA` conserva texto existente y agrega OCR nuevo si aplica. "
+        "`Releer desde cero con IA` ignora la extraccion anterior y vuelve a leer el archivo con la logica actual."
+    )
     card_doc_context: dict | None = None
     if str(selected_row.get(DOC_COL_DESTINO, "") or "").strip() == "Tarjeta de credito":
         cards_doc_before = load_cards_df(client_obj, sheet_id)
@@ -3281,55 +3352,54 @@ def _render_finance_docs_company_inbox(
         if card_doc_context and not card_doc_context.get("ready", False):
             st.warning("Completa antes de aprobar: " + ", ".join(card_doc_context.get("errors", [])))
     confirm_dup = st.checkbox("Registrar aunque marque duplicado", key=f"doc_confirm_dup_{emp_key}_{selected_id}")
-    a1, a2, a3 = st.columns(3)
+    a1, a2, a3, a4 = st.columns(4)
     with a1:
         if st.button("Procesar seleccionado con IA", key=f"btn_doc_ai_{emp_key}_{selected_id}"):
-            if not api_key:
-                st.error("Falta `OPENAI_API_KEY`; no se llamo a la API.")
-            else:
-                try:
-                    file_bytes = None
-                    file_name = str(selected_row.get(DOC_COL_ARCHIVO, "") or "documento")
-                    mime_type = str(selected_row.get(DOC_COL_MIME, "") or "")
-                    drive_id = str(selected_row.get(DOC_COL_DRIVE_ID, "") or "").strip()
-                    if drive_id:
-                        file_bytes, file_name_dl, mime_dl = _download_drive_file_bytes(creds_obj, drive_id)
-                        file_name = file_name_dl or file_name
-                        mime_type = mime_dl or mime_type
-                    stored_text = str(selected_row.get(DOC_COL_TEXTO_USUARIO, "") or "").strip()
-                    extracted_now = _finance_doc_local_text(file_bytes, mime_type, "", creds_obj=creds_obj)
-                    local_text = "\n".join([x for x in [stored_text, extracted_now] if x]).strip()[:6000]
-                    payload = _call_openai_finance_doc(
-                        api_key=api_key,
-                        model=model_name,
-                        file_name=file_name,
-                        mime_type=mime_type,
-                        content=None if extracted_now else file_bytes,
-                        user_text=local_text,
-                        user_note=str(selected_row.get(DOC_COL_NOTA, "") or ""),
-                    )
-                    updated = _apply_ai_doc_payload(selected_row, payload)
-                    updated[DOC_COL_MODELO] = model_name
-                    updated[DOC_COL_ESTADO] = "Procesado"
-                    updated[DOC_COL_TEXTO_USUARIO] = local_text
-                    if extracted_now and str(mime_type or "").lower().startswith("image/"):
-                        updated[DOC_COL_OCR_USADO] = "Google Vision"
-                    elif file_bytes and str(mime_type or "").lower().startswith("image/"):
-                        updated[DOC_COL_OCR_USADO] = "OpenAI vision fallback"
-                    new_docs = docs_df.copy()
-                    idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
-                    if len(idx) > 0:
-                        updated[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, new_docs)
-                        for col, val in updated.items():
-                            new_docs.loc[idx[0], col] = val
-                        wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
-                        if wrote:
-                            st.cache_data.clear()
-                            st.success("Borrador procesado con IA.")
-                            _safe_rerun()
-                except Exception as exc:
-                    st.error(f"No se pudo procesar con IA. No se registro nada. Detalle: {str(exc)[:220]}")
+            try:
+                updated = _reprocess_finance_doc_row_with_ai(
+                    row=selected_row,
+                    creds_obj=creds_obj,
+                    api_key=api_key,
+                    model_name=model_name,
+                    replace_existing_text=False,
+                )
+                new_docs = docs_df.copy()
+                idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
+                if len(idx) > 0:
+                    updated[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, new_docs)
+                    for col, val in updated.items():
+                        new_docs.loc[idx[0], col] = val
+                    wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                    if wrote:
+                        st.cache_data.clear()
+                        st.success("Borrador procesado con IA.")
+                        _safe_rerun()
+            except Exception as exc:
+                st.error(f"No se pudo procesar con IA. No se registro nada. Detalle: {str(exc)[:220]}")
     with a2:
+        if st.button("Releer desde cero con IA", key=f"btn_doc_ai_clean_{emp_key}_{selected_id}"):
+            try:
+                updated = _reprocess_finance_doc_row_with_ai(
+                    row=selected_row,
+                    creds_obj=creds_obj,
+                    api_key=api_key,
+                    model_name=model_name,
+                    replace_existing_text=True,
+                )
+                new_docs = docs_df.copy()
+                idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
+                if len(idx) > 0:
+                    updated[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, new_docs)
+                    for col, val in updated.items():
+                        new_docs.loc[idx[0], col] = val
+                    wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                    if wrote:
+                        st.cache_data.clear()
+                        st.success("Borrador releido desde cero con IA.")
+                        _safe_rerun()
+            except Exception as exc:
+                st.error(f"No se pudo releer con IA. No se registro nada. Detalle: {str(exc)[:220]}")
+    with a3:
         if st.button("Aceptar y cargar a Finanzas 1", key=f"btn_doc_approve_{emp_key}_{selected_id}"):
             try:
                 updated = selected_row.to_dict()
@@ -3447,7 +3517,7 @@ def _render_finance_docs_company_inbox(
                         _safe_rerun()
             except Exception as exc:
                 st.error(f"No se pudo aprobar. Detalle: {str(exc)[:220]}")
-    with a3:
+    with a4:
         if st.button("Quitar borrador", key=f"btn_doc_discard_{emp_key}_{selected_id}"):
             try:
                 new_docs = docs_df.copy()
@@ -3462,6 +3532,56 @@ def _render_finance_docs_company_inbox(
                         _safe_rerun()
             except Exception as exc:
                 st.error(f"No se pudo quitar. Detalle: {str(exc)[:220]}")
+
+    if not discarded_docs.empty:
+        with st.expander(f"Descartados {empresa}", expanded=False):
+            discard_labels = [
+                f"{str(row.get(DOC_COL_ARCHIVO, '')).strip() or 'Documento'} | {str(row.get(DOC_COL_DESTINO, '')).strip() or 'Sin destino'} | {str(row.get(DOC_COL_ROWID, ''))[:8]}"
+                for _, row in discarded_docs.iterrows()
+            ]
+            restore_label = st.selectbox("Borrador descartado", discard_labels, key=f"doc_restore_{emp_key}")
+            restore_row = discarded_docs.iloc[discard_labels.index(restore_label)].copy()
+            restore_id = str(restore_row.get(DOC_COL_ROWID, "") or "").strip()
+            rb1, rb2 = st.columns(2)
+            with rb1:
+                if st.button("Restaurar a borradores", key=f"btn_doc_restore_{emp_key}_{restore_id}"):
+                    try:
+                        new_docs = docs_df.copy()
+                        idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(restore_id)]
+                        if len(idx) > 0:
+                            new_docs.loc[idx[0], DOC_COL_ESTADO] = "Borrador"
+                            new_docs.loc[idx[0], DOC_COL_MENSAJE] = "Restaurado por usuario."
+                            wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                            if wrote:
+                                st.cache_data.clear()
+                                st.success("Borrador restaurado.")
+                                _safe_rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudo restaurar. Detalle: {str(exc)[:220]}")
+            with rb2:
+                if st.button("Restaurar y releer con IA", key=f"btn_doc_restore_ai_{emp_key}_{restore_id}"):
+                    try:
+                        updated = _reprocess_finance_doc_row_with_ai(
+                            row=restore_row,
+                            creds_obj=creds_obj,
+                            api_key=api_key,
+                            model_name=model_name,
+                            replace_existing_text=True,
+                        )
+                        updated[DOC_COL_ESTADO] = "Procesado"
+                        new_docs = docs_df.copy()
+                        idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(restore_id)]
+                        if len(idx) > 0:
+                            updated[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, new_docs)
+                            for col, val in updated.items():
+                                new_docs.loc[idx[0], col] = val
+                            wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                            if wrote:
+                                st.cache_data.clear()
+                                st.success("Borrador restaurado y reprocesado.")
+                                _safe_rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudo restaurar y reprocesar. Detalle: {str(exc)[:220]}")
 
 
 def _build_credit_line_ingreso_row(*, line_row: pd.Series, fecha_evento, monto: float, nota: str = "") -> dict:
