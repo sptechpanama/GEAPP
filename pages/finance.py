@@ -1138,7 +1138,11 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
     out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
     rec_mask = out[COL_REC].map(_bool_from_toggle)
-    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT]] = ["", "", "", pd.NaT, 0]
+    out.loc[~rec_mask, COL_REC_PER] = ""
+    out.loc[~rec_mask, COL_REC_REG] = ""
+    out.loc[~rec_mask, COL_REC_DUR] = ""
+    out.loc[~rec_mask, COL_REC_HASTA] = pd.NaT
+    out.loc[~rec_mask, COL_REC_CANT] = 0
     out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
     out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
     out.loc[rec_mask & (out[COL_REC_DUR].astype(str).str.strip() == ""), COL_REC_DUR] = "Indefinida"
@@ -1166,7 +1170,17 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         | out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne("")
         | out[COL_FIN_REG_TIPO].astype(str).str.strip().ne("")
     )
-    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", "", "", ""]
+    out.loc[~fin_mask, COL_FIN_TIPO] = ""
+    out.loc[~fin_mask, COL_FIN_MONTO] = 0.0
+    out.loc[~fin_mask, COL_FIN_FEC_INI] = pd.NaT
+    out.loc[~fin_mask, COL_FIN_PLAZO] = 0
+    out.loc[~fin_mask, COL_FIN_TASA] = 0.0
+    out.loc[~fin_mask, COL_FIN_TASA_TIPO] = ""
+    out.loc[~fin_mask, COL_FIN_MODALIDAD] = ""
+    out.loc[~fin_mask, COL_FIN_PERIOD] = ""
+    out.loc[~fin_mask, COL_FIN_CRONO] = ""
+    out.loc[~fin_mask, COL_FIN_INSTRUMENTO] = ""
+    out.loc[~fin_mask, COL_FIN_REG_TIPO] = ""
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -1265,7 +1279,11 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
     out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
     rec_mask = out[COL_REC].map(_bool_from_toggle)
-    out.loc[~rec_mask, [COL_REC_PER, COL_REC_REG, COL_REC_DUR, COL_REC_HASTA, COL_REC_CANT]] = ["", "", "", pd.NaT, 0]
+    out.loc[~rec_mask, COL_REC_PER] = ""
+    out.loc[~rec_mask, COL_REC_REG] = ""
+    out.loc[~rec_mask, COL_REC_DUR] = ""
+    out.loc[~rec_mask, COL_REC_HASTA] = pd.NaT
+    out.loc[~rec_mask, COL_REC_CANT] = 0
     out.loc[rec_mask & (out[COL_REC_PER].astype(str).str.strip() == ""), COL_REC_PER] = "Mensual"
     out.loc[rec_mask & (out[COL_REC_REG].astype(str).str.strip() == ""), COL_REC_REG] = "Inicio de cada mes"
     out.loc[rec_mask & (out[COL_REC_DUR].astype(str).str.strip() == ""), COL_REC_DUR] = "Indefinida"
@@ -1281,22 +1299,41 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_POR_PAG].map(_si_no_norm) == "No", COL_PAGO_REAL_MONTO] = total_gas.loc[out[COL_POR_PAG].map(_si_no_norm) == "No"]
     out[COL_PAGO_REAL_MONTO] = out[COL_PAGO_REAL_MONTO].clip(upper=total_gas)
     prepago_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Anticipo / prepago")
-    out.loc[~prepago_mask, [COL_PREPAGO_MESES, COL_PREPAGO_FEC_INI]] = [0, pd.NaT]
+    out.loc[~prepago_mask, COL_PREPAGO_MESES] = 0
+    out.loc[~prepago_mask, COL_PREPAGO_FEC_INI] = pd.NaT
     out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_PREPAGO_FEC_INI] = out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_FECHA]
     inventory_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Inventario")
-    out.loc[~inventory_mask, [COL_INV_MOV, COL_INV_ITEM, COL_INV_FEC_LLEGADA]] = ["", "", pd.NaT]
+    out.loc[~inventory_mask, COL_INV_MOV] = ""
+    out.loc[~inventory_mask, COL_INV_ITEM] = ""
+    out.loc[~inventory_mask, COL_INV_FEC_LLEGADA] = pd.NaT
     out.loc[inventory_mask & out[COL_INV_MOV].astype(str).str.strip().eq(""), COL_INV_MOV] = "Entrada"
     inv_positive_mask = inventory_mask & out[COL_INV_MOV].astype(str).isin(INVENTORY_POSITIVE_MOVEMENTS)
     out.loc[inv_positive_mask & out[COL_INV_FEC_LLEGADA].isna(), COL_INV_FEC_LLEGADA] = out.loc[inv_positive_mask & out[COL_INV_FEC_LLEGADA].isna(), COL_FECHA]
     out.loc[inventory_mask & ~out[COL_INV_MOV].astype(str).isin(INVENTORY_POSITIVE_MOVEMENTS), COL_INV_FEC_LLEGADA] = pd.NaT
     af_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo")
-    out.loc[~af_mask, [COL_AF_TOGGLE, COL_AF_TIPO, COL_AF_VIDA, COL_AF_FEC_INI, COL_AF_VAL_RES, COL_AF_DEP_TOGGLE, COL_AF_DEP_MENSUAL]] = ["No", "", 0, pd.NaT, 0.0, "No", 0.0]
+    out.loc[~af_mask, COL_AF_TOGGLE] = "No"
+    out.loc[~af_mask, COL_AF_TIPO] = ""
+    out.loc[~af_mask, COL_AF_VIDA] = 0
+    out.loc[~af_mask, COL_AF_FEC_INI] = pd.NaT
+    out.loc[~af_mask, COL_AF_VAL_RES] = 0.0
+    out.loc[~af_mask, COL_AF_DEP_TOGGLE] = "No"
+    out.loc[~af_mask, COL_AF_DEP_MENSUAL] = 0.0
     fin_mask = (
         out[COL_FIN_TOGGLE].map(_bool_from_toggle)
         | out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne("")
         | out[COL_FIN_REG_TIPO].astype(str).str.strip().ne("")
     )
-    out.loc[~fin_mask, [COL_FIN_TIPO, COL_FIN_MONTO, COL_FIN_FEC_INI, COL_FIN_PLAZO, COL_FIN_TASA, COL_FIN_TASA_TIPO, COL_FIN_MODALIDAD, COL_FIN_PERIOD, COL_FIN_CRONO, COL_FIN_INSTRUMENTO, COL_FIN_REG_TIPO]] = ["", 0.0, pd.NaT, 0, 0.0, "", "", "", "", "", ""]
+    out.loc[~fin_mask, COL_FIN_TIPO] = ""
+    out.loc[~fin_mask, COL_FIN_MONTO] = 0.0
+    out.loc[~fin_mask, COL_FIN_FEC_INI] = pd.NaT
+    out.loc[~fin_mask, COL_FIN_PLAZO] = 0
+    out.loc[~fin_mask, COL_FIN_TASA] = 0.0
+    out.loc[~fin_mask, COL_FIN_TASA_TIPO] = ""
+    out.loc[~fin_mask, COL_FIN_MODALIDAD] = ""
+    out.loc[~fin_mask, COL_FIN_PERIOD] = ""
+    out.loc[~fin_mask, COL_FIN_CRONO] = ""
+    out.loc[~fin_mask, COL_FIN_INSTRUMENTO] = ""
+    out.loc[~fin_mask, COL_FIN_REG_TIPO] = ""
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
