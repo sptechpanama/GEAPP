@@ -1899,6 +1899,31 @@ def _finance_docs_folder_id() -> str:
     return ""
 
 
+def _finance_docs_folder_id_for_empresa(empresa: str) -> str:
+    suffix = str(empresa or "").upper().replace("-", "_").replace(" ", "_")
+    candidates: list[str | None] = []
+    try:
+        app_cfg = st.secrets.get("app", {})
+        candidates.extend(
+            [
+                app_cfg.get(f"DRIVE_FINANCE_DOCS_FOLDER_ID_{suffix}"),
+                app_cfg.get(f"DRIVE_DOCUMENTOS_FINANCIEROS_FOLDER_ID_{suffix}"),
+            ]
+        )
+    except Exception:
+        pass
+    candidates.extend(
+        [
+            os.environ.get(f"DRIVE_FINANCE_DOCS_FOLDER_ID_{suffix}"),
+            os.environ.get(f"DRIVE_DOCUMENTOS_FINANCIEROS_FOLDER_ID_{suffix}"),
+        ]
+    )
+    for raw in candidates:
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return ""
+
+
 def _openai_finance_api_key() -> str:
     candidates: list[str | None] = []
     try:
@@ -2025,6 +2050,214 @@ def _import_finance_docs_from_drive(creds_obj, folder_id: str, docs_df: pd.DataF
     return ensure_finance_docs_columns(pd.concat([docs_df, pd.DataFrame(rows)], ignore_index=True))
 
 
+def _extract_pdf_text_local(content: bytes, *, max_chars: int = 6000) -> str:
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return ""
+    try:
+        reader = PdfReader(io.BytesIO(content or b""))
+        chunks: list[str] = []
+        for page in reader.pages[:5]:
+            chunks.append(page.extract_text() or "")
+            if sum(len(x) for x in chunks) >= max_chars:
+                break
+        return "\n".join(chunks).strip()[:max_chars]
+    except Exception:
+        return ""
+
+
+def _finance_doc_local_text(content: bytes | None, mime_type: str, existing_text: str = "") -> str:
+    base = str(existing_text or "").strip()
+    if base:
+        return base[:6000]
+    mime = str(mime_type or "").lower()
+    if content and ("pdf" in mime):
+        return _extract_pdf_text_local(content)
+    return ""
+
+
+def _new_finance_doc_row(
+    *,
+    empresa: str,
+    file_name: str,
+    file_hash: str,
+    mime_type: str,
+    drive_id: str,
+    drive_url: str,
+    origen: str,
+    note: str,
+    local_text: str,
+    proposal: dict,
+    message: str,
+    api_used: str = "No",
+    model_name: str = "",
+) -> dict:
+    return {
+        DOC_COL_ROWID: uuid.uuid4().hex,
+        DOC_COL_FECHA_CARGA: _ts(_today()),
+        DOC_COL_USUARIO: _current_user(),
+        DOC_COL_EMPRESA: empresa,
+        DOC_COL_ARCHIVO: str(file_name or "").strip(),
+        DOC_COL_HASH: str(file_hash or "").strip(),
+        DOC_COL_MIME: str(mime_type or "").strip(),
+        DOC_COL_DRIVE_ID: str(drive_id or "").strip(),
+        DOC_COL_DRIVE_URL: str(drive_url or "").strip(),
+        DOC_COL_ORIGEN: str(origen or "").strip(),
+        DOC_COL_NOTA: str(note or "").strip(),
+        DOC_COL_TEXTO_USUARIO: str(local_text or "").strip()[:6000],
+        DOC_COL_ESTADO: "Procesado" if api_used == "Si" else "Borrador",
+        DOC_COL_MENSAJE: str(message or "").strip()[:500],
+        DOC_COL_API_USADA: api_used,
+        DOC_COL_MODELO: model_name if api_used == "Si" else "",
+        **proposal,
+    }
+
+
+def _analyze_finance_doc_content(
+    *,
+    file_name: str,
+    mime_type: str,
+    content: bytes | None,
+    empresa: str,
+    note: str = "",
+    tipo_hint: str = "Auto",
+    use_api: bool = False,
+    api_key: str = "",
+    model_name: str = "",
+) -> tuple[dict, str, str, str]:
+    extracted_text = _finance_doc_local_text(content, mime_type, "")
+    local_text = "\n".join([x for x in [str(note or "").strip(), extracted_text] if x]).strip()[:6000]
+    proposal = _guess_finance_doc_proposal(
+        file_name=file_name,
+        note=note,
+        text=local_text,
+        tipo_hint=tipo_hint,
+        empresa=empresa,
+        monto_manual=0.0,
+        fecha_doc=_today(),
+        fecha_esperada=_today(),
+    )
+    api_used = "No"
+    message = "Borrador creado con reglas locales, sin usar API."
+    if use_api and api_key:
+        try:
+            payload = _call_openai_finance_doc(
+                api_key=api_key,
+                model=model_name,
+                file_name=file_name,
+                mime_type=mime_type,
+                content=content,
+                user_text=local_text,
+                user_note=note,
+            )
+            ai_row = _apply_ai_doc_payload(pd.Series({**proposal, DOC_COL_TEXTO_USUARIO: local_text}), payload)
+            for col in [
+                DOC_COL_TIPO,
+                DOC_COL_DESTINO,
+                DOC_COL_ACCION,
+                DOC_COL_CATEGORIA,
+                DOC_COL_TRATAMIENTO,
+                DOC_COL_ESTADO_MOV,
+                DOC_COL_FECHA_HECHO,
+                DOC_COL_FECHA_ESPERADA,
+                DOC_COL_FECHA_REAL,
+                DOC_COL_MONTO,
+                DOC_COL_CONTRAPARTE,
+                DOC_COL_DETALLE,
+                DOC_COL_DESCRIPCION,
+                DOC_COL_CONFIANZA,
+                DOC_COL_JSON,
+            ]:
+                proposal[col] = ai_row.get(col, proposal.get(col, ""))
+            api_used = "Si"
+            message = str(ai_row.get(DOC_COL_MENSAJE, "Procesado con IA. Revisa antes de aprobar.") or "").strip()
+        except Exception as exc:
+            message = f"Reglas locales aplicadas. IA fallo: {str(exc)[:220]}"
+    return proposal, local_text, api_used, message
+
+
+def _scan_finance_docs_folder_for_empresa(
+    *,
+    creds_obj,
+    folder_id: str,
+    docs_df: pd.DataFrame,
+    empresa: str,
+    limit: int,
+    use_api: bool,
+    api_key: str,
+    model_name: str,
+) -> tuple[pd.DataFrame, int, int, list[str]]:
+    if not folder_id:
+        raise RuntimeError("Falta carpeta Drive para la empresa.")
+    drive = _drive_client_from_creds(creds_obj)
+    resp = drive.files().list(
+        q=f"'{folder_id}' in parents and trashed=false",
+        fields="files(id,name,mimeType,webViewLink,modifiedTime)",
+        orderBy="modifiedTime desc",
+        pageSize=int(limit),
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    work_docs = ensure_finance_docs_columns(docs_df.copy())
+    existing_hashes = set(work_docs.get(DOC_COL_HASH, pd.Series(dtype=str)).astype(str).str.strip())
+    existing_drive_ids = set(work_docs.get(DOC_COL_DRIVE_ID, pd.Series(dtype=str)).astype(str).str.strip())
+    created = 0
+    skipped = 0
+    errors: list[str] = []
+    for item in resp.get("files", []) or []:
+        fid = str(item.get("id", "") or "").strip()
+        if not fid:
+            continue
+        if fid in existing_drive_ids:
+            skipped += 1
+            continue
+        try:
+            try:
+                content, file_name, mime_type = _download_drive_file_bytes(creds_obj, fid)
+            except Exception:
+                content = None
+                file_name = str(item.get("name", "") or "")
+                mime_type = str(item.get("mimeType", "") or "")
+            file_hash = _hash_bytes(content) if content else f"drive:{fid}"
+            if file_hash in existing_hashes:
+                skipped += 1
+                continue
+            proposal, local_text, api_used, message = _analyze_finance_doc_content(
+                file_name=file_name or str(item.get("name", "") or ""),
+                mime_type=mime_type or str(item.get("mimeType", "") or ""),
+                content=content,
+                empresa=empresa,
+                note=f"Documento importado desde Drive para {empresa}",
+                use_api=use_api,
+                api_key=api_key,
+                model_name=model_name,
+            )
+            new_row = _new_finance_doc_row(
+                empresa=empresa,
+                file_name=file_name or str(item.get("name", "") or ""),
+                file_hash=file_hash,
+                mime_type=mime_type or str(item.get("mimeType", "") or ""),
+                drive_id=fid,
+                drive_url=str(item.get("webViewLink", "") or ""),
+                origen="Drive",
+                note=f"Documento importado desde Drive para {empresa}",
+                local_text=local_text,
+                proposal=proposal,
+                message=message,
+                api_used=api_used,
+                model_name=model_name,
+            )
+            new_row[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(pd.Series(new_row), st.session_state.df_ing, st.session_state.df_gas, work_docs)
+            work_docs = ensure_finance_docs_columns(pd.concat([work_docs, pd.DataFrame([new_row])], ignore_index=True))
+            existing_hashes.add(file_hash)
+            existing_drive_ids.add(fid)
+            created += 1
+        except Exception as exc:
+            errors.append(f"{str(item.get('name', '') or fid)}: {str(exc)[:180]}")
+    return work_docs, created, skipped, errors
+
+
 def _guess_doc_type_from_text(text: str, hint: str = "") -> str:
     if hint and hint != "Auto":
         return hint
@@ -2148,11 +2381,19 @@ def _extract_json_object(raw: str) -> dict:
 
 
 def _call_openai_finance_doc(*, api_key: str, model: str, file_name: str, mime_type: str, content: bytes | None, user_text: str, user_note: str) -> dict:
+    allowed_income_categories = ", ".join(ING_CATEGORY_OPTIONS)
+    allowed_expense_categories = ", ".join(GAS_CATEGORY_OPTIONS)
+    allowed_expense_treatments = ", ".join(GAS_BALANCE_OPTIONS)
     prompt = (
         "Extrae datos de un documento financiero para crear un BORRADOR, no un registro final.\n"
         "Devuelve SOLO JSON valido con estas claves: tipo_documento, destino_sugerido, accion_sugerida, categoria_operativa, "
         "tratamiento_balance, estado_movimiento, fecha_hecho, fecha_esperada, fecha_real, monto, contraparte, detalle, descripcion, confianza, explicacion.\n"
         "Destinos permitidos: Ingreso, Gasto, Tarjeta de credito, Linea de credito, Factoring, Gestion de cobro, Revisar manualmente.\n"
+        f"Categorias de ingreso permitidas: {allowed_income_categories}.\n"
+        f"Categorias de gasto permitidas: {allowed_expense_categories}.\n"
+        f"Tratamientos de gasto permitidos: {allowed_expense_treatments}.\n"
+        "Tratamientos de ingreso permitidos: Cuenta por cobrar, Caja / banco, Patrimonio, Pasivo financiero.\n"
+        "Fechas en formato YYYY-MM-DD. Monto como numero decimal.\n"
         "Reglas: financiamiento recibido no es ingreso operativo; pagos de tarjeta no son gasto nuevo de consumos; capital de deuda no va al resultado; inventario/activo fijo/prepago requieren revision humana.\n"
         "Si no estas seguro usa destino_sugerido='Revisar manualmente' y confianza baja.\n\n"
         f"Archivo: {file_name}\nTipo MIME: {mime_type}\nNota usuario: {user_note or '-'}\nTexto usuario/OCR local: {user_text or '-'}"
@@ -2394,6 +2635,361 @@ def _can_auto_register_doc(row: pd.Series) -> tuple[bool, str]:
             return False, f"Tratamiento `{tratamiento}` requiere el flujo especializado de Finanzas 1."
         return True, ""
     return False, f"Destino `{destino}` requiere revision y registro manual en su flujo especializado."
+
+
+def _render_finance_docs_company_inbox(
+    *,
+    empresa: str,
+    client_obj,
+    sheet_id: str,
+    creds_obj,
+    docs_before: pd.DataFrame,
+    docs_df: pd.DataFrame,
+    folder_id: str,
+    api_key: str,
+    model_name: str,
+) -> None:
+    emp_key = str(empresa or "").replace("-", "_")
+    docs_company = docs_df[docs_df[DOC_COL_EMPRESA].astype(str).str.upper().str.strip().eq(str(empresa).upper())].copy()
+    status_s = docs_company[DOC_COL_ESTADO].astype(str).str.strip()
+    pending_docs = docs_company[status_s.isin({"", "Borrador", "Procesado", "Requiere revision"})].copy()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Pendientes", int(len(pending_docs)))
+    m2.metric("Aprobados", int(status_s.eq("Aprobado").sum()))
+    m3.metric("Descartados", int(status_s.eq("Descartado").sum()))
+    m4.metric("API", "Si" if api_key else "No")
+    st.caption(f"Carpeta Drive {empresa}: `{folder_id or 'no configurada'}`")
+    if not folder_id:
+        st.caption(f"Secret esperado: `DRIVE_FINANCE_DOCS_FOLDER_ID_{emp_key}`")
+
+    use_api = st.checkbox(
+        "Procesar nuevos con IA si hay API configurada",
+        value=bool(api_key),
+        key=f"doc_auto_ai_{emp_key}",
+        help="Solo se usa para documentos nuevos al subir/verificar. No registra nada automaticamente.",
+    )
+    limit = st.number_input(
+        "Cantidad maxima a verificar",
+        min_value=1,
+        max_value=100,
+        value=25,
+        step=1,
+        key=f"doc_scan_limit_{emp_key}",
+    )
+
+    scan_col, upload_col = st.columns(2)
+    with scan_col:
+        if st.button(f"Verificar ahora {empresa}", key=f"btn_doc_scan_{emp_key}"):
+            if not folder_id:
+                st.error(f"Falta configurar carpeta Drive para {empresa}.")
+            else:
+                try:
+                    new_docs, created, skipped, errors = _scan_finance_docs_folder_for_empresa(
+                        creds_obj=creds_obj,
+                        folder_id=folder_id,
+                        docs_df=docs_df,
+                        empresa=empresa,
+                        limit=int(limit),
+                        use_api=bool(use_api and api_key),
+                        api_key=api_key,
+                        model_name=model_name,
+                    )
+                    if created:
+                        wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                        if wrote:
+                            st.cache_data.clear()
+                            st.success(f"{created} documento(s) nuevo(s) preparados. {skipped} ya existian.")
+                            _safe_rerun()
+                        else:
+                            st.info("No hubo cambios para guardar.")
+                    else:
+                        st.info(f"No se encontraron documentos nuevos. Ya existentes: {skipped}.")
+                    if errors:
+                        st.warning("Algunos documentos no se pudieron preparar: " + " | ".join(errors[:5]))
+                except Exception as exc:
+                    st.error(f"No se pudo verificar Drive. Finanzas manual no fue afectado. Detalle: {str(exc)[:220]}")
+
+    with upload_col:
+        uploaded_docs = st.file_uploader(
+            f"Subir archivos a Drive {empresa}",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key=f"doc_upload_files_{emp_key}",
+        )
+        quick_note = st.text_input("Nota opcional", key=f"doc_upload_note_{emp_key}")
+        if st.button(f"Subir y preparar {empresa}", key=f"btn_doc_upload_{emp_key}"):
+            if not folder_id:
+                st.error(f"Falta configurar carpeta Drive para {empresa}.")
+            elif not uploaded_docs:
+                st.error("Sube al menos un archivo.")
+            else:
+                work_docs = docs_df.copy()
+                existing_hashes = set(work_docs.get(DOC_COL_HASH, pd.Series(dtype=str)).astype(str).str.strip())
+                created = 0
+                skipped = 0
+                errors: list[str] = []
+                for uploaded in uploaded_docs:
+                    try:
+                        raw = uploaded.getvalue()
+                        file_hash = _hash_bytes(raw)
+                        if file_hash in existing_hashes:
+                            skipped += 1
+                            continue
+                        mime_type = uploaded.type or mimetypes.guess_type(uploaded.name)[0] or "application/octet-stream"
+                        drive_meta = _upload_finance_doc_to_drive(
+                            creds_obj,
+                            filename=uploaded.name,
+                            content=raw,
+                            mime_type=mime_type,
+                            folder_id=folder_id,
+                        )
+                        proposal, local_text, api_used, message = _analyze_finance_doc_content(
+                            file_name=str(drive_meta.get("name") or uploaded.name),
+                            mime_type=str(drive_meta.get("mime") or mime_type),
+                            content=raw,
+                            empresa=empresa,
+                            note=quick_note,
+                            use_api=bool(use_api and api_key),
+                            api_key=api_key,
+                            model_name=model_name,
+                        )
+                        new_row = _new_finance_doc_row(
+                            empresa=empresa,
+                            file_name=str(drive_meta.get("name") or uploaded.name),
+                            file_hash=file_hash,
+                            mime_type=str(drive_meta.get("mime") or mime_type),
+                            drive_id=str(drive_meta.get("id", "")),
+                            drive_url=str(drive_meta.get("url", "")),
+                            origen="Upload app",
+                            note=quick_note,
+                            local_text=local_text,
+                            proposal=proposal,
+                            message=message,
+                            api_used=api_used,
+                            model_name=model_name,
+                        )
+                        new_row[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(pd.Series(new_row), st.session_state.df_ing, st.session_state.df_gas, work_docs)
+                        work_docs = ensure_finance_docs_columns(pd.concat([work_docs, pd.DataFrame([new_row])], ignore_index=True))
+                        existing_hashes.add(file_hash)
+                        created += 1
+                    except Exception as exc:
+                        errors.append(f"{uploaded.name}: {str(exc)[:160]}")
+                if created:
+                    try:
+                        wrote = safe_write_finance_docs(client_obj, sheet_id, work_docs, old_df=docs_before)
+                        if wrote:
+                            st.cache_data.clear()
+                            st.success(f"{created} borrador(es) preparado(s). Duplicados omitidos: {skipped}.")
+                            _safe_rerun()
+                        else:
+                            st.info("No hubo cambios para guardar.")
+                    except Exception as exc:
+                        st.error(f"No se pudo guardar la bandeja. Ingresos/Gastos no fueron modificados. Detalle: {str(exc)[:220]}")
+                elif skipped:
+                    st.info(f"No se crearon borradores nuevos. Duplicados omitidos: {skipped}.")
+                if errors:
+                    st.warning("Archivos no procesados: " + " | ".join(errors[:5]))
+
+    st.divider()
+    st.markdown("#### Borradores listos para revisar")
+    if pending_docs.empty:
+        st.info(f"No hay borradores pendientes para {empresa}.")
+        return
+
+    editable_cols = [
+        DOC_COL_ROWID,
+        DOC_COL_ARCHIVO,
+        DOC_COL_TIPO,
+        DOC_COL_DESTINO,
+        DOC_COL_CATEGORIA,
+        DOC_COL_TRATAMIENTO,
+        DOC_COL_ESTADO_MOV,
+        DOC_COL_FECHA_HECHO,
+        DOC_COL_FECHA_ESPERADA,
+        DOC_COL_FECHA_REAL,
+        DOC_COL_MONTO,
+        DOC_COL_CONTRAPARTE,
+        DOC_COL_DETALLE,
+        DOC_COL_DESCRIPCION,
+        DOC_COL_CONFIANZA,
+        DOC_COL_DUPLICADO,
+        DOC_COL_MENSAJE,
+    ]
+    edited_pending = st.data_editor(
+        pending_docs[editable_cols],
+        use_container_width=True,
+        hide_index=True,
+        disabled=[DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_MENSAJE],
+        column_config={
+            DOC_COL_DESTINO: st.column_config.SelectboxColumn(
+                DOC_COL_DESTINO,
+                options=["Ingreso", "Gasto", "Tarjeta de credito", "Linea de credito", "Factoring", "Gestion de cobro", "Revisar manualmente"],
+            ),
+            DOC_COL_CATEGORIA: st.column_config.SelectboxColumn(
+                DOC_COL_CATEGORIA,
+                options=[""] + sorted(set(ING_CATEGORY_OPTIONS + GAS_CATEGORY_OPTIONS + ["Financiamiento recibido"])),
+            ),
+            DOC_COL_TRATAMIENTO: st.column_config.SelectboxColumn(
+                DOC_COL_TRATAMIENTO,
+                options=[""] + sorted(set(ING_BALANCE_OPTIONS + GAS_BALANCE_OPTIONS + ["Pasivo financiero"])),
+            ),
+            DOC_COL_ESTADO_MOV: st.column_config.SelectboxColumn(DOC_COL_ESTADO_MOV, options=STATE_OPTIONS),
+        },
+        key=f"doc_pending_editor_{emp_key}",
+    )
+    if st.button(f"Guardar correcciones {empresa}", key=f"btn_doc_save_editor_{emp_key}"):
+        try:
+            new_docs = docs_df.copy()
+            for _, edited_row in edited_pending.iterrows():
+                rid = str(edited_row.get(DOC_COL_ROWID, "") or "").strip()
+                idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(rid)]
+                if len(idx) == 0:
+                    continue
+                for col in editable_cols:
+                    if col in {DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_MENSAJE}:
+                        continue
+                    new_docs.loc[idx[0], col] = edited_row.get(col, "")
+                new_docs.loc[idx[0], DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(
+                    new_docs.loc[idx[0]],
+                    st.session_state.df_ing,
+                    st.session_state.df_gas,
+                    new_docs,
+                )
+            wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+            if wrote:
+                st.cache_data.clear()
+                st.success("Correcciones guardadas.")
+                _safe_rerun()
+            else:
+                st.info("No hubo cambios para guardar.")
+        except Exception as exc:
+            st.error(f"No se pudo guardar la correccion. Ingresos/Gastos no fueron modificados. Detalle: {str(exc)[:220]}")
+
+    labels = [
+        f"{str(row.get(DOC_COL_ARCHIVO, '')).strip() or 'Documento'} | {str(row.get(DOC_COL_DESTINO, '')).strip() or 'Sin destino'} | {_format_money_es(float(row.get(DOC_COL_MONTO, 0.0) or 0.0))} | {str(row.get(DOC_COL_ROWID, ''))[:8]}"
+        for _, row in pending_docs.iterrows()
+    ]
+    selected_label = st.selectbox("Borrador para aprobar/quitar", labels, key=f"doc_action_select_{emp_key}")
+    selected_row = pending_docs.iloc[labels.index(selected_label)].copy()
+    selected_id = str(selected_row.get(DOC_COL_ROWID, "") or "").strip()
+    if str(selected_row.get(DOC_COL_DRIVE_URL, "") or "").strip():
+        st.markdown(f"[Abrir documento en Drive]({str(selected_row.get(DOC_COL_DRIVE_URL)).strip()})")
+    if str(selected_row.get(DOC_COL_DUPLICADO, "") or "").strip():
+        st.warning(str(selected_row.get(DOC_COL_DUPLICADO)))
+    confirm_dup = st.checkbox("Registrar aunque marque duplicado", key=f"doc_confirm_dup_{emp_key}_{selected_id}")
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        if st.button("Procesar seleccionado con IA", key=f"btn_doc_ai_{emp_key}_{selected_id}"):
+            if not api_key:
+                st.error("Falta `OPENAI_API_KEY`; no se llamo a la API.")
+            else:
+                try:
+                    file_bytes = None
+                    file_name = str(selected_row.get(DOC_COL_ARCHIVO, "") or "documento")
+                    mime_type = str(selected_row.get(DOC_COL_MIME, "") or "")
+                    drive_id = str(selected_row.get(DOC_COL_DRIVE_ID, "") or "").strip()
+                    if drive_id:
+                        file_bytes, file_name_dl, mime_dl = _download_drive_file_bytes(creds_obj, drive_id)
+                        file_name = file_name_dl or file_name
+                        mime_type = mime_dl or mime_type
+                    local_text = _finance_doc_local_text(file_bytes, mime_type, str(selected_row.get(DOC_COL_TEXTO_USUARIO, "") or ""))
+                    payload = _call_openai_finance_doc(
+                        api_key=api_key,
+                        model=model_name,
+                        file_name=file_name,
+                        mime_type=mime_type,
+                        content=file_bytes,
+                        user_text=local_text,
+                        user_note=str(selected_row.get(DOC_COL_NOTA, "") or ""),
+                    )
+                    updated = _apply_ai_doc_payload(selected_row, payload)
+                    updated[DOC_COL_MODELO] = model_name
+                    updated[DOC_COL_ESTADO] = "Procesado"
+                    updated[DOC_COL_TEXTO_USUARIO] = local_text
+                    new_docs = docs_df.copy()
+                    idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
+                    if len(idx) > 0:
+                        updated[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, new_docs)
+                        for col, val in updated.items():
+                            new_docs.loc[idx[0], col] = val
+                        wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                        if wrote:
+                            st.cache_data.clear()
+                            st.success("Borrador procesado con IA.")
+                            _safe_rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo procesar con IA. No se registro nada. Detalle: {str(exc)[:220]}")
+    with a2:
+        if st.button("Aceptar y cargar a Finanzas 1", key=f"btn_doc_approve_{emp_key}_{selected_id}"):
+            try:
+                updated = selected_row.to_dict()
+                updated[DOC_COL_EMPRESA] = empresa
+                dup_msg = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, docs_df)
+                updated[DOC_COL_DUPLICADO] = dup_msg
+                can_register, reason = _can_auto_register_doc(pd.Series(updated))
+                if dup_msg and not confirm_dup:
+                    st.error("Hay posible duplicado. Marca la confirmacion si aun deseas registrar.")
+                elif not can_register:
+                    st.error(reason)
+                else:
+                    old_ing_df = st.session_state.df_ing.copy()
+                    old_gas_df = st.session_state.df_gas.copy()
+                    ws_reg = ""
+                    rid_reg = ""
+                    wrote_main = False
+                    if str(updated.get(DOC_COL_DESTINO, "")).strip() == "Ingreso":
+                        new_row = _build_ingreso_row_from_doc(pd.Series(updated))
+                        rid_reg = str(new_row.get(COL_ROWID, ""))
+                        new_ing = ensure_ingresos_columns(pd.concat([old_ing_df, pd.DataFrame([new_row])], ignore_index=True))
+                        wrote_main = safe_write_worksheet(client_obj, sheet_id, WS_ING, new_ing, old_df=old_ing_df)
+                        if wrote_main:
+                            st.session_state.df_ing = new_ing
+                            ws_reg = WS_ING
+                    elif str(updated.get(DOC_COL_DESTINO, "")).strip() == "Gasto":
+                        new_row = _build_gasto_row_from_doc(pd.Series(updated))
+                        rid_reg = str(new_row.get(COL_ROWID, ""))
+                        new_gas = ensure_gastos_columns(pd.concat([old_gas_df, pd.DataFrame([new_row])], ignore_index=True))
+                        wrote_main = safe_write_worksheet(client_obj, sheet_id, WS_GAS, new_gas, old_df=old_gas_df)
+                        if wrote_main:
+                            st.session_state.df_gas = new_gas
+                            ws_reg = WS_GAS
+                    if not wrote_main:
+                        st.error("No se pudo registrar en Finanzas 1.")
+                    else:
+                        updated[DOC_COL_ESTADO] = "Aprobado"
+                        updated[DOC_COL_WS_REG] = ws_reg
+                        updated[DOC_COL_ROWID_REG] = rid_reg
+                        updated[DOC_COL_APROBADO_POR] = _current_user()
+                        updated[DOC_COL_FECHA_APROBADO] = _ts(_today())
+                        new_docs = docs_df.copy()
+                        idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
+                        if len(idx) > 0:
+                            for col, val in updated.items():
+                                new_docs.loc[idx[0], col] = val
+                            wrote_doc = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                            if not wrote_doc:
+                                st.warning("El movimiento fue registrado, pero el borrador no pudo marcarse como aprobado.")
+                        st.cache_data.clear()
+                        st.success(f"Borrador registrado en `{ws_reg}`.")
+                        _safe_rerun()
+            except Exception as exc:
+                st.error(f"No se pudo aprobar. Detalle: {str(exc)[:220]}")
+    with a3:
+        if st.button("Quitar borrador", key=f"btn_doc_discard_{emp_key}_{selected_id}"):
+            try:
+                new_docs = docs_df.copy()
+                idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
+                if len(idx) > 0:
+                    new_docs.loc[idx[0], DOC_COL_ESTADO] = "Descartado"
+                    new_docs.loc[idx[0], DOC_COL_MENSAJE] = "Descartado por usuario."
+                    wrote = safe_write_finance_docs(client_obj, sheet_id, new_docs, old_df=docs_before)
+                    if wrote:
+                        st.cache_data.clear()
+                        st.success("Borrador descartado.")
+                        _safe_rerun()
+            except Exception as exc:
+                st.error(f"No se pudo quitar. Detalle: {str(exc)[:220]}")
 
 
 def _build_credit_line_ingreso_row(*, line_row: pd.Series, fecha_evento, monto: float, nota: str = "") -> dict:
@@ -2883,403 +3479,37 @@ with st.expander("Informacion de interes", expanded=False):
         "- Ajustes avanzados de valuacion para inversiones / participaciones."
     )
 
-with st.expander("Bandeja de documentos financieros", expanded=False):
-    st.caption(
-        "Bandeja aislada: crea borradores en la hoja `FinanzasDocs` y guarda archivos en Drive. "
-        "No modifica Ingresos ni Gastos hasta que apruebes un borrador. La IA es opcional y solo se usa al pulsar `Procesar con IA`."
-    )
-    try:
-        docs_before = load_finance_docs_df(client, SHEET_ID)
-        docs_df = ensure_finance_docs_columns(docs_before.copy())
-        docs_ready = True
-    except Exception as exc:
-        docs_before = ensure_finance_docs_columns(pd.DataFrame(columns=DOC_BASE_COLUMNS))
-        docs_df = docs_before.copy()
-        docs_ready = False
-        st.warning(f"La bandeja no pudo cargar su hoja aislada. Finanzas manual sigue operando. Detalle: {str(exc)[:220]}")
+st.markdown("### Bandeja de documentos financieros")
+st.caption(
+    "Sube documentos o verifica carpetas Drive por empresa. La app prepara borradores listos para revisar; "
+    "solo se cargan a Finanzas 1 cuando aceptas."
+)
+try:
+    docs_before = load_finance_docs_df(client, SHEET_ID)
+    docs_df = ensure_finance_docs_columns(docs_before.copy())
+    docs_ready = True
+except Exception as exc:
+    docs_before = ensure_finance_docs_columns(pd.DataFrame(columns=DOC_BASE_COLUMNS))
+    docs_df = docs_before.copy()
+    docs_ready = False
+    st.warning(f"La bandeja no pudo cargar su hoja aislada. Finanzas manual sigue operando. Detalle: {str(exc)[:220]}")
 
-    if docs_ready:
-        folder_id = _finance_docs_folder_id()
-        api_key_available = bool(_openai_finance_api_key())
-        model_name = _openai_finance_model()
-        status_s = docs_df[DOC_COL_ESTADO].astype(str).str.strip()
-        pending_mask = status_s.isin({"", "Borrador", "Procesado", "Requiere revision"})
-        pending_docs = docs_df[pending_mask].copy()
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pendientes", int(len(pending_docs)))
-        c2.metric("Aprobados", int(status_s.eq("Aprobado").sum()))
-        c3.metric("Descartados", int(status_s.eq("Descartado").sum()))
-        c4.metric("API", "Si" if api_key_available else "No")
-        st.caption(
-            f"Drive folder: `{folder_id or 'no configurado'}` | Modelo IA: `{model_name}`. "
-            "Para ahorrar: reglas locales primero; API solo bajo demanda."
-        )
-
-        tab_upload, tab_review, tab_drive, tab_history = st.tabs(
-            ["Subir documento", "Borradores", "Importar Drive", "Historial"]
-        )
-
-        with tab_upload:
-            if not folder_id:
-                st.warning("Configura `DRIVE_FINANCE_DOCS_FOLDER_ID` en secrets para guardar documentos financieros en Drive.")
-            u1, u2, u3 = st.columns(3)
-            with u1:
-                doc_empresa = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT), key="doc_upload_empresa")
-                doc_tipo_hint = st.selectbox(
-                    "Tipo esperado",
-                    [
-                        "Auto",
-                        "Factura proveedor",
-                        "Factura cliente",
-                        "Comprobante transferencia",
-                        "Comprobante cobro",
-                        "Estado de cuenta bancario",
-                        "Estado de tarjeta",
-                        "Linea de credito",
-                        "Factoring",
-                        "Gestion de cobro",
-                        "Otro",
-                    ],
-                    key="doc_upload_tipo",
-                )
-            with u2:
-                doc_fecha = st.date_input("Fecha documento / hecho", value=_today(), key="doc_upload_fecha")
-                doc_fecha_esp = st.date_input("Fecha esperada", value=_today(), key="doc_upload_fecha_esp")
-            with u3:
-                doc_monto_manual = st.number_input("Monto manual opcional", min_value=0.0, step=1.0, key="doc_upload_monto")
-                uploaded_docs = st.file_uploader(
-                    "Archivo(s)",
-                    type=["pdf", "png", "jpg", "jpeg", "webp"],
-                    accept_multiple_files=True,
-                    key="doc_upload_files",
-                )
-            doc_user_note = st.text_area("Descripcion / nota para guiar clasificacion", key="doc_upload_note")
-            doc_user_text = st.text_area("Texto visible opcional para ahorrar API", key="doc_upload_text")
-
-            if st.button("Crear borrador desde documento", key="btn_doc_create_draft"):
-                if not folder_id:
-                    st.error("No se creo borrador porque falta configurar la carpeta de Drive.")
-                elif not uploaded_docs:
-                    st.error("Sube al menos un archivo.")
-                else:
-                    work_docs = docs_df.copy()
-                    existing_hashes = set(work_docs.get(DOC_COL_HASH, pd.Series(dtype=str)).astype(str).str.strip())
-                    created_count = 0
-                    skipped_count = 0
-                    errors_upload = []
-                    for uploaded in uploaded_docs:
-                        try:
-                            raw = uploaded.getvalue()
-                            file_hash = _hash_bytes(raw)
-                            if file_hash in existing_hashes:
-                                skipped_count += 1
-                                continue
-                            mime_type = uploaded.type or mimetypes.guess_type(uploaded.name)[0] or "application/octet-stream"
-                            drive_meta = _upload_finance_doc_to_drive(
-                                creds,
-                                filename=uploaded.name,
-                                content=raw,
-                                mime_type=mime_type,
-                                folder_id=folder_id,
-                            )
-                            proposal = _guess_finance_doc_proposal(
-                                file_name=uploaded.name,
-                                note=doc_user_note,
-                                text=doc_user_text,
-                                tipo_hint=doc_tipo_hint,
-                                empresa=doc_empresa,
-                                monto_manual=float(doc_monto_manual or 0.0),
-                                fecha_doc=doc_fecha,
-                                fecha_esperada=doc_fecha_esp,
-                            )
-                            new_row = {
-                                DOC_COL_ROWID: uuid.uuid4().hex,
-                                DOC_COL_FECHA_CARGA: _ts(_today()),
-                                DOC_COL_USUARIO: _current_user(),
-                                DOC_COL_EMPRESA: doc_empresa,
-                                DOC_COL_ARCHIVO: str(drive_meta.get("name") or uploaded.name),
-                                DOC_COL_HASH: file_hash,
-                                DOC_COL_MIME: str(drive_meta.get("mime") or mime_type),
-                                DOC_COL_DRIVE_ID: str(drive_meta.get("id", "")),
-                                DOC_COL_DRIVE_URL: str(drive_meta.get("url", "")),
-                                DOC_COL_ORIGEN: "Upload app",
-                                DOC_COL_NOTA: str(doc_user_note or "").strip(),
-                                DOC_COL_TEXTO_USUARIO: str(doc_user_text or "").strip(),
-                                DOC_COL_ESTADO: "Borrador",
-                                DOC_COL_MENSAJE: "Borrador creado con reglas locales, sin usar API.",
-                                DOC_COL_API_USADA: "No",
-                                DOC_COL_MODELO: "",
-                                **proposal,
-                            }
-                            new_row[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(
-                                pd.Series(new_row),
-                                st.session_state.df_ing,
-                                st.session_state.df_gas,
-                                work_docs,
-                            )
-                            work_docs = ensure_finance_docs_columns(pd.concat([work_docs, pd.DataFrame([new_row])], ignore_index=True))
-                            existing_hashes.add(file_hash)
-                            created_count += 1
-                        except Exception as exc:
-                            errors_upload.append(f"{uploaded.name}: {str(exc)[:160]}")
-                    if created_count:
-                        try:
-                            wrote = safe_write_finance_docs(client, SHEET_ID, work_docs, old_df=docs_before)
-                            if wrote:
-                                st.cache_data.clear()
-                                st.success(f"Borradores creados: {created_count}. Duplicados omitidos: {skipped_count}.")
-                                _safe_rerun()
-                            else:
-                                st.info("No hubo cambios para guardar en la bandeja.")
-                        except Exception as exc:
-                            st.error(f"No se pudo guardar la bandeja. Ingresos/Gastos no fueron modificados. Detalle: {str(exc)[:220]}")
-                    elif skipped_count:
-                        st.info(f"No se crearon borradores nuevos. Duplicados omitidos: {skipped_count}.")
-                    if errors_upload:
-                        st.warning("Archivos no procesados: " + " | ".join(errors_upload[:5]))
-
-        with tab_review:
-            if pending_docs.empty:
-                st.info("No hay borradores pendientes.")
-            else:
-                st.caption("Edita la tabla y pulsa `Guardar cambios editados` antes de aprobar. Aprobar usa el ultimo borrador guardado.")
-                editable_cols = [
-                    DOC_COL_ROWID,
-                    DOC_COL_EMPRESA,
-                    DOC_COL_ARCHIVO,
-                    DOC_COL_TIPO,
-                    DOC_COL_DESTINO,
-                    DOC_COL_CATEGORIA,
-                    DOC_COL_TRATAMIENTO,
-                    DOC_COL_ESTADO_MOV,
-                    DOC_COL_FECHA_HECHO,
-                    DOC_COL_FECHA_ESPERADA,
-                    DOC_COL_FECHA_REAL,
-                    DOC_COL_MONTO,
-                    DOC_COL_CONTRAPARTE,
-                    DOC_COL_DETALLE,
-                    DOC_COL_DESCRIPCION,
-                    DOC_COL_CONFIANZA,
-                    DOC_COL_DUPLICADO,
-                    DOC_COL_MENSAJE,
-                ]
-                edited_pending = st.data_editor(
-                    pending_docs[editable_cols],
-                    use_container_width=True,
-                    hide_index=True,
-                    disabled=[DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_MENSAJE],
-                    column_config={
-                        DOC_COL_EMPRESA: st.column_config.SelectboxColumn(DOC_COL_EMPRESA, options=EMPRESAS_OPCIONES),
-                        DOC_COL_DESTINO: st.column_config.SelectboxColumn(
-                            DOC_COL_DESTINO,
-                            options=["Ingreso", "Gasto", "Tarjeta de credito", "Linea de credito", "Factoring", "Gestion de cobro", "Revisar manualmente"],
-                        ),
-                        DOC_COL_CATEGORIA: st.column_config.SelectboxColumn(
-                            DOC_COL_CATEGORIA,
-                            options=[""] + sorted(set(ING_CATEGORY_OPTIONS + GAS_CATEGORY_OPTIONS + ["Financiamiento recibido"])),
-                        ),
-                        DOC_COL_TRATAMIENTO: st.column_config.SelectboxColumn(
-                            DOC_COL_TRATAMIENTO,
-                            options=[""] + sorted(set(ING_BALANCE_OPTIONS + GAS_BALANCE_OPTIONS + ["Pasivo financiero"])),
-                        ),
-                        DOC_COL_ESTADO_MOV: st.column_config.SelectboxColumn(DOC_COL_ESTADO_MOV, options=STATE_OPTIONS),
-                    },
-                    key="doc_pending_editor",
-                )
-                if st.button("Guardar cambios editados", key="btn_doc_save_editor"):
-                    try:
-                        new_docs = docs_df.copy()
-                        for _, edited_row in edited_pending.iterrows():
-                            rid = str(edited_row.get(DOC_COL_ROWID, "") or "").strip()
-                            idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(rid)]
-                            if len(idx) == 0:
-                                continue
-                            for col in editable_cols:
-                                if col in {DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_MENSAJE}:
-                                    continue
-                                new_docs.loc[idx[0], col] = edited_row.get(col, "")
-                            new_docs.loc[idx[0], DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(
-                                new_docs.loc[idx[0]],
-                                st.session_state.df_ing,
-                                st.session_state.df_gas,
-                                new_docs,
-                            )
-                        wrote = safe_write_finance_docs(client, SHEET_ID, new_docs, old_df=docs_before)
-                        if wrote:
-                            st.cache_data.clear()
-                            st.success("Borradores actualizados.")
-                            _safe_rerun()
-                        else:
-                            st.info("No hubo cambios para guardar.")
-                    except Exception as exc:
-                        st.error(f"No se pudo guardar la edicion. Ingresos/Gastos no fueron modificados. Detalle: {str(exc)[:220]}")
-
-                labels = [
-                    f"{str(row.get(DOC_COL_ARCHIVO, '')).strip() or 'Documento'} | {str(row.get(DOC_COL_DESTINO, '')).strip() or 'Sin destino'} | {_format_money_es(float(row.get(DOC_COL_MONTO, 0.0) or 0.0))} | {str(row.get(DOC_COL_ROWID, ''))[:8]}"
-                    for _, row in pending_docs.iterrows()
-                ]
-                selected_label = st.selectbox("Borrador para acciones", labels, key="doc_action_select")
-                selected_pos = labels.index(selected_label)
-                selected_row = pending_docs.iloc[selected_pos].copy()
-                selected_id = str(selected_row.get(DOC_COL_ROWID, "") or "").strip()
-                if str(selected_row.get(DOC_COL_DRIVE_URL, "") or "").strip():
-                    st.markdown(f"[Abrir documento en Drive]({str(selected_row.get(DOC_COL_DRIVE_URL)).strip()})")
-                if str(selected_row.get(DOC_COL_DUPLICADO, "") or "").strip():
-                    st.warning(str(selected_row.get(DOC_COL_DUPLICADO)))
-                confirm_dup = st.checkbox("Registrar aunque marque duplicado", key=f"doc_confirm_dup_{selected_id}")
-                a1, a2, a3 = st.columns(3)
-                with a1:
-                    if st.button("Procesar con IA", key=f"btn_doc_ai_{selected_id}"):
-                        api_key = _openai_finance_api_key()
-                        if not api_key:
-                            st.error("Falta `OPENAI_API_KEY`; no se llamo a la API.")
-                        else:
-                            try:
-                                file_bytes = None
-                                file_name = str(selected_row.get(DOC_COL_ARCHIVO, "") or "documento")
-                                mime_type = str(selected_row.get(DOC_COL_MIME, "") or "")
-                                drive_id = str(selected_row.get(DOC_COL_DRIVE_ID, "") or "").strip()
-                                if drive_id:
-                                    file_bytes, file_name_dl, mime_dl = _download_drive_file_bytes(creds, drive_id)
-                                    file_name = file_name_dl or file_name
-                                    mime_type = mime_dl or mime_type
-                                payload = _call_openai_finance_doc(
-                                    api_key=api_key,
-                                    model=model_name,
-                                    file_name=file_name,
-                                    mime_type=mime_type,
-                                    content=file_bytes,
-                                    user_text=str(selected_row.get(DOC_COL_TEXTO_USUARIO, "") or ""),
-                                    user_note=str(selected_row.get(DOC_COL_NOTA, "") or ""),
-                                )
-                                updated = _apply_ai_doc_payload(selected_row, payload)
-                                updated[DOC_COL_MODELO] = model_name
-                                updated[DOC_COL_ESTADO] = "Procesado"
-                                new_docs = docs_df.copy()
-                                idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
-                                if len(idx) > 0:
-                                    updated[DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(
-                                        pd.Series(updated),
-                                        st.session_state.df_ing,
-                                        st.session_state.df_gas,
-                                        new_docs,
-                                    )
-                                    for col, val in updated.items():
-                                        new_docs.loc[idx[0], col] = val
-                                    wrote = safe_write_finance_docs(client, SHEET_ID, new_docs, old_df=docs_before)
-                                    if wrote:
-                                        st.cache_data.clear()
-                                        st.success("Borrador procesado con IA. Revisa antes de aprobar.")
-                                        _safe_rerun()
-                            except Exception as exc:
-                                st.error(f"No se pudo procesar con IA. No se registro nada. Detalle: {str(exc)[:220]}")
-                with a2:
-                    if st.button("Aprobar y registrar", key=f"btn_doc_approve_{selected_id}"):
-                        try:
-                            updated = selected_row.to_dict()
-                            dup_msg = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, docs_df)
-                            updated[DOC_COL_DUPLICADO] = dup_msg
-                            can_register, reason = _can_auto_register_doc(pd.Series(updated))
-                            if dup_msg and not confirm_dup:
-                                st.error("Hay posible duplicado. Marca la confirmacion si aun deseas registrar.")
-                            elif not can_register:
-                                st.error(reason)
-                            else:
-                                old_ing_df = st.session_state.df_ing.copy()
-                                old_gas_df = st.session_state.df_gas.copy()
-                                ws_reg = ""
-                                rid_reg = ""
-                                wrote_main = False
-                                if str(updated.get(DOC_COL_DESTINO, "")).strip() == "Ingreso":
-                                    new_row = _build_ingreso_row_from_doc(pd.Series(updated))
-                                    rid_reg = str(new_row.get(COL_ROWID, ""))
-                                    new_ing = ensure_ingresos_columns(pd.concat([old_ing_df, pd.DataFrame([new_row])], ignore_index=True))
-                                    wrote_main = safe_write_worksheet(client, SHEET_ID, WS_ING, new_ing, old_df=old_ing_df)
-                                    if wrote_main:
-                                        st.session_state.df_ing = new_ing
-                                        ws_reg = WS_ING
-                                elif str(updated.get(DOC_COL_DESTINO, "")).strip() == "Gasto":
-                                    new_row = _build_gasto_row_from_doc(pd.Series(updated))
-                                    rid_reg = str(new_row.get(COL_ROWID, ""))
-                                    new_gas = ensure_gastos_columns(pd.concat([old_gas_df, pd.DataFrame([new_row])], ignore_index=True))
-                                    wrote_main = safe_write_worksheet(client, SHEET_ID, WS_GAS, new_gas, old_df=old_gas_df)
-                                    if wrote_main:
-                                        st.session_state.df_gas = new_gas
-                                        ws_reg = WS_GAS
-                                if not wrote_main:
-                                    st.error("No se pudo registrar en Finanzas 1.")
-                                else:
-                                    updated[DOC_COL_ESTADO] = "Aprobado"
-                                    updated[DOC_COL_WS_REG] = ws_reg
-                                    updated[DOC_COL_ROWID_REG] = rid_reg
-                                    updated[DOC_COL_APROBADO_POR] = _current_user()
-                                    updated[DOC_COL_FECHA_APROBADO] = _ts(_today())
-                                    new_docs = docs_df.copy()
-                                    idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
-                                    if len(idx) > 0:
-                                        for col, val in updated.items():
-                                            new_docs.loc[idx[0], col] = val
-                                        wrote_doc = safe_write_finance_docs(client, SHEET_ID, new_docs, old_df=docs_before)
-                                        if not wrote_doc:
-                                            st.warning("El movimiento fue registrado, pero el borrador no pudo marcarse como aprobado.")
-                                    st.cache_data.clear()
-                                    st.success(f"Borrador registrado en `{ws_reg}`.")
-                                    _safe_rerun()
-                        except Exception as exc:
-                            st.error(f"No se pudo aprobar. Detalle: {str(exc)[:220]}")
-                with a3:
-                    if st.button("Descartar borrador", key=f"btn_doc_discard_{selected_id}"):
-                        try:
-                            new_docs = docs_df.copy()
-                            idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
-                            if len(idx) > 0:
-                                new_docs.loc[idx[0], DOC_COL_ESTADO] = "Descartado"
-                                new_docs.loc[idx[0], DOC_COL_MENSAJE] = "Descartado por usuario."
-                                wrote = safe_write_finance_docs(client, SHEET_ID, new_docs, old_df=docs_before)
-                                if wrote:
-                                    st.cache_data.clear()
-                                    st.success("Borrador descartado.")
-                                    _safe_rerun()
-                        except Exception as exc:
-                            st.error(f"No se pudo descartar. Detalle: {str(exc)[:220]}")
-
-        with tab_drive:
-            st.caption("Importa referencias a archivos ya existentes en Drive. No usa API ni registra ingresos/gastos.")
-            if not folder_id:
-                st.warning("Configura `DRIVE_FINANCE_DOCS_FOLDER_ID` para importar desde Drive.")
-            import_limit = st.number_input("Maximo archivos recientes a revisar", min_value=1, max_value=100, value=25, step=1, key="doc_drive_limit")
-            if st.button("Importar nuevos desde Drive", key="btn_doc_import_drive"):
-                if not folder_id:
-                    st.error("No hay carpeta de Drive configurada.")
-                else:
-                    try:
-                        imported_docs = _import_finance_docs_from_drive(creds, folder_id, docs_df, limit=int(import_limit))
-                        if len(imported_docs) == len(docs_df):
-                            st.info("No se encontraron archivos nuevos en Drive.")
-                        else:
-                            wrote = safe_write_finance_docs(client, SHEET_ID, imported_docs, old_df=docs_before)
-                            if wrote:
-                                st.cache_data.clear()
-                                st.success(f"Archivos importados como borrador: {len(imported_docs) - len(docs_df)}.")
-                                _safe_rerun()
-                    except Exception as exc:
-                        st.error(f"No se pudo importar desde Drive. Finanzas manual no fue afectado. Detalle: {str(exc)[:220]}")
-
-        with tab_history:
-            hist_cols = [
-                DOC_COL_FECHA_CARGA,
-                DOC_COL_ESTADO,
-                DOC_COL_EMPRESA,
-                DOC_COL_ARCHIVO,
-                DOC_COL_TIPO,
-                DOC_COL_DESTINO,
-                DOC_COL_MONTO,
-                DOC_COL_WS_REG,
-                DOC_COL_APROBADO_POR,
-                DOC_COL_FECHA_APROBADO,
-            ]
-            st.dataframe(docs_df[hist_cols].sort_values(DOC_COL_FECHA_CARGA, ascending=False), use_container_width=True, hide_index=True)
+if docs_ready:
+    api_key_fin_docs = _openai_finance_api_key()
+    model_fin_docs = _openai_finance_model()
+    for _empresa_docs in ["RIR", "RS-SP"]:
+        with st.expander(f"Bandeja documentos {_empresa_docs}", expanded=False):
+            _render_finance_docs_company_inbox(
+                empresa=_empresa_docs,
+                client_obj=client,
+                sheet_id=SHEET_ID,
+                creds_obj=creds,
+                docs_before=docs_before,
+                docs_df=docs_df,
+                folder_id=_finance_docs_folder_id_for_empresa(_empresa_docs),
+                api_key=api_key_fin_docs,
+                model_name=model_fin_docs,
+            )
 
 # La visualización analítica fue trasladada al "Panel Financiero Gerencial".
 
