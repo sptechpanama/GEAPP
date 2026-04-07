@@ -128,17 +128,15 @@ def read_worksheet(client: gspread.Client, sheet_id: str, worksheet_name: str) -
     sh = _retry(lambda: client.open_by_key(sheet_id))
     ws = _retry(lambda: sh.worksheet(worksheet_name))
 
-    raw_headers = _retry(lambda: ws.row_values(1))
-    expected_headers = _make_unique_headers(raw_headers)
-
     def _get_all_values():
         return ws.get_all_values()
 
     values = _retry(_get_all_values)
 
     if not values:
-        df = pd.DataFrame(columns=expected_headers)
+        df = pd.DataFrame()
     else:
+        expected_headers = _make_unique_headers(values[0])
         data_rows = values[1:] if len(values) > 1 else []
         width = len(expected_headers)
         padded_rows = [row[:width] + [""] * (width - len(row)) for row in data_rows]

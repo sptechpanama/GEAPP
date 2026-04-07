@@ -45,7 +45,7 @@ from services.backups import (
     create_backup_now,  
 )
 
-from gspread.exceptions import APIError
+from gspread.exceptions import APIError, WorksheetNotFound
 
 from entities import (
     client_selector,
@@ -1757,6 +1757,42 @@ def load_norm_cached(sid: str, ws: str, is_ingresos: bool, cache_token: str):
     return ensure_ingresos_columns(df) if is_ingresos else ensure_gastos_columns(df)
 
 
+@st.cache_data(ttl=300)
+def load_credit_lines_cached(sid: str, cache_token: str):
+    client_obj = st.session_state.get("google_client")
+    if client_obj is None:
+        client_obj, client_creds = get_client()
+        st.session_state.google_client = client_obj
+        st.session_state.google_creds = client_creds
+        st.session_state.google_cache_token = uuid.uuid4().hex
+    _ = cache_token
+    return load_credit_lines_df(client_obj, sid)
+
+
+@st.cache_data(ttl=300)
+def load_cards_cached(sid: str, cache_token: str):
+    client_obj = st.session_state.get("google_client")
+    if client_obj is None:
+        client_obj, client_creds = get_client()
+        st.session_state.google_client = client_obj
+        st.session_state.google_creds = client_creds
+        st.session_state.google_cache_token = uuid.uuid4().hex
+    _ = cache_token
+    return load_cards_df(client_obj, sid)
+
+
+@st.cache_data(ttl=300)
+def load_finance_docs_cached(sid: str, cache_token: str):
+    client_obj = st.session_state.get("google_client")
+    if client_obj is None:
+        client_obj, client_creds = get_client()
+        st.session_state.google_client = client_obj
+        st.session_state.google_creds = client_creds
+        st.session_state.google_cache_token = uuid.uuid4().hex
+    _ = cache_token
+    return load_finance_docs_df(client_obj, sid)
+
+
 def _norm_for_compare(df: pd.DataFrame, id_col: str | None = None) -> pd.DataFrame:
     out = df.copy()
 
@@ -1841,12 +1877,31 @@ def _ensure_worksheet_exists(client, sheet_id: str, worksheet_name: str, headers
         ws.update("A1", [headers])
 
 
+def _fallback_aux_df(cache_key: str, columns: list[str], normalizer) -> pd.DataFrame:
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, pd.DataFrame):
+        return normalizer(cached.copy())
+    return normalizer(pd.DataFrame(columns=columns))
+
+
+def _remember_aux_df(cache_key: str, df: pd.DataFrame) -> pd.DataFrame:
+    st.session_state[cache_key] = df.copy()
+    return df
+
+
 def load_credit_lines_df(client, sheet_id: str) -> pd.DataFrame:
-    _ensure_worksheet_exists(client, sheet_id, WS_LINEAS_CREDITO, LC_BASE_COLUMNS)
     try:
-        return ensure_lineas_credito_columns(read_worksheet(client, sheet_id, WS_LINEAS_CREDITO))
+        df = ensure_lineas_credito_columns(read_worksheet(client, sheet_id, WS_LINEAS_CREDITO))
+        return _remember_aux_df("_last_lineas_credito_df", df)
+    except WorksheetNotFound:
+        try:
+            _ensure_worksheet_exists(client, sheet_id, WS_LINEAS_CREDITO, LC_BASE_COLUMNS)
+            df = ensure_lineas_credito_columns(read_worksheet(client, sheet_id, WS_LINEAS_CREDITO))
+            return _remember_aux_df("_last_lineas_credito_df", df)
+        except Exception:
+            return _fallback_aux_df("_last_lineas_credito_df", LC_BASE_COLUMNS, ensure_lineas_credito_columns)
     except Exception:
-        return ensure_lineas_credito_columns(pd.DataFrame(columns=LC_BASE_COLUMNS))
+        return _fallback_aux_df("_last_lineas_credito_df", LC_BASE_COLUMNS, ensure_lineas_credito_columns)
 
 
 def safe_write_credit_lines(client, sheet_id: str, new_df: pd.DataFrame, old_df: pd.DataFrame | None = None) -> bool:
@@ -1885,11 +1940,18 @@ def ensure_tarjetas_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_cards_df(client, sheet_id: str) -> pd.DataFrame:
-    _ensure_worksheet_exists(client, sheet_id, WS_TARJETAS_CREDITO, TC_BASE_COLUMNS)
     try:
-        return ensure_tarjetas_columns(read_worksheet(client, sheet_id, WS_TARJETAS_CREDITO))
+        df = ensure_tarjetas_columns(read_worksheet(client, sheet_id, WS_TARJETAS_CREDITO))
+        return _remember_aux_df("_last_tarjetas_credito_df", df)
+    except WorksheetNotFound:
+        try:
+            _ensure_worksheet_exists(client, sheet_id, WS_TARJETAS_CREDITO, TC_BASE_COLUMNS)
+            df = ensure_tarjetas_columns(read_worksheet(client, sheet_id, WS_TARJETAS_CREDITO))
+            return _remember_aux_df("_last_tarjetas_credito_df", df)
+        except Exception:
+            return _fallback_aux_df("_last_tarjetas_credito_df", TC_BASE_COLUMNS, ensure_tarjetas_columns)
     except Exception:
-        return ensure_tarjetas_columns(pd.DataFrame(columns=TC_BASE_COLUMNS))
+        return _fallback_aux_df("_last_tarjetas_credito_df", TC_BASE_COLUMNS, ensure_tarjetas_columns)
 
 
 def safe_write_cards(client, sheet_id: str, new_df: pd.DataFrame, old_df: pd.DataFrame | None = None) -> bool:
@@ -1940,11 +2002,18 @@ def ensure_finance_docs_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_finance_docs_df(client, sheet_id: str) -> pd.DataFrame:
-    _ensure_worksheet_exists(client, sheet_id, WS_DOCS_FINANCIEROS, DOC_BASE_COLUMNS)
     try:
-        return ensure_finance_docs_columns(read_worksheet(client, sheet_id, WS_DOCS_FINANCIEROS))
+        df = ensure_finance_docs_columns(read_worksheet(client, sheet_id, WS_DOCS_FINANCIEROS))
+        return _remember_aux_df("_last_finance_docs_df", df)
+    except WorksheetNotFound:
+        try:
+            _ensure_worksheet_exists(client, sheet_id, WS_DOCS_FINANCIEROS, DOC_BASE_COLUMNS)
+            df = ensure_finance_docs_columns(read_worksheet(client, sheet_id, WS_DOCS_FINANCIEROS))
+            return _remember_aux_df("_last_finance_docs_df", df)
+        except Exception:
+            return _fallback_aux_df("_last_finance_docs_df", DOC_BASE_COLUMNS, ensure_finance_docs_columns)
     except Exception:
-        return ensure_finance_docs_columns(pd.DataFrame(columns=DOC_BASE_COLUMNS))
+        return _fallback_aux_df("_last_finance_docs_df", DOC_BASE_COLUMNS, ensure_finance_docs_columns)
 
 
 def safe_write_finance_docs(client, sheet_id: str, new_df: pd.DataFrame, old_df: pd.DataFrame | None = None) -> bool:
@@ -3348,7 +3417,7 @@ def _render_finance_docs_company_inbox(
     )
     card_doc_context: dict | None = None
     if str(selected_row.get(DOC_COL_DESTINO, "") or "").strip() == "Tarjeta de credito":
-        cards_doc_before = load_cards_df(client_obj, sheet_id)
+        cards_doc_before = load_cards_cached(sheet_id, st.session_state.google_cache_token)
         card_doc_context = _render_finance_doc_card_context(
             row=selected_row,
             cards_df=cards_doc_before,
@@ -4084,7 +4153,7 @@ st.caption(
     "solo se cargan a Finanzas 1 cuando aceptas."
 )
 try:
-    docs_before = load_finance_docs_df(client, SHEET_ID)
+    docs_before = load_finance_docs_cached(SHEET_ID, st.session_state.google_cache_token)
     docs_df = ensure_finance_docs_columns(docs_before.copy())
     docs_ready = True
 except Exception as exc:
@@ -5406,7 +5475,7 @@ with st.expander("Gestionar linea de credito", expanded=False):
         "Esta seccion gestiona lineas revolventes sin forzar un cronograma mensual falso. "
         "La tasa diaria, limite y cargos se guardan como referencia; el interes diario se sugiere automaticamente con la tasa vigente y se registra al momento del pago."
     )
-    lineas_before = load_credit_lines_df(client, SHEET_ID)
+    lineas_before = load_credit_lines_cached(SHEET_ID, st.session_state.google_cache_token)
     lineas_df = ensure_lineas_credito_columns(lineas_before.copy())
     lineas_activas = lineas_df[lineas_df[LC_COL_ACTIVA].map(_si_no_norm).eq("Sí")].copy()
     tab_lc2, tab_lc3, tab_lc4, tab_lc1 = st.tabs(
@@ -5758,7 +5827,7 @@ with st.expander("Gestionar tarjeta de credito", expanded=False):
         "Los consumos con tarjeta crean gastos pendientes y el pago de tarjeta liquida esos consumos sin duplicar el gasto. "
         "Los intereses y cargos se registran aparte como gasto financiero."
     )
-    cards_before = load_cards_df(client, SHEET_ID)
+    cards_before = load_cards_cached(SHEET_ID, st.session_state.google_cache_token)
     cards_df = ensure_tarjetas_columns(cards_before.copy())
     cards_activas = cards_df[cards_df[TC_COL_ACTIVA].map(_si_no_norm).eq("Sí")].copy()
     tab_tc2, tab_tc3, tab_tc1 = st.tabs(
