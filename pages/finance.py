@@ -1254,6 +1254,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_FIN_TASA] = pd.to_numeric(out[COL_FIN_TASA], errors="coerce").fillna(0.0).astype(float)
     out[COL_FIN_PLAZO] = pd.to_numeric(out[COL_FIN_PLAZO], errors="coerce").fillna(0).astype(int)
     out[COL_REC_CANT] = pd.to_numeric(out[COL_REC_CANT], errors="coerce").fillna(0).astype(int)
+    out[COL_PREPAGO_MESES] = pd.to_numeric(out[COL_PREPAGO_MESES], errors="coerce").fillna(0).astype(int)
     out[COL_AF_VIDA] = pd.to_numeric(out[COL_AF_VIDA], errors="coerce").fillna(5).astype(int)
     out[COL_EMP] = out[COL_EMP].astype("string").str.upper().str.strip().where(
         out[COL_EMP].astype("string").str.upper().str.strip().isin(EMPRESAS_OPCIONES),
