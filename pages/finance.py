@@ -260,6 +260,11 @@ DOC_COL_DETALLE = "Detalle sugerido"
 DOC_COL_DESCRIPCION = "Descripcion sugerida"
 DOC_COL_CONFIANZA = "Confianza"
 DOC_COL_DUPLICADO = "Posible duplicado"
+DOC_COL_INSTRUMENTO = "Instrumento sugerido"
+DOC_COL_PAGO_CONSUMOS = "Pago consumos sugerido"
+DOC_COL_INTERES = "Interes sugerido"
+DOC_COL_OTROS_CARGOS = "Otros cargos sugeridos"
+DOC_COL_OCR_USADO = "OCR usado"
 DOC_COL_WS_REG = "Worksheet registrado"
 DOC_COL_ROWID_REG = "RowID registrado"
 DOC_COL_APROBADO_POR = "Aprobado por"
@@ -297,6 +302,11 @@ DOC_BASE_COLUMNS = [
     DOC_COL_DESCRIPCION,
     DOC_COL_CONFIANZA,
     DOC_COL_DUPLICADO,
+    DOC_COL_INSTRUMENTO,
+    DOC_COL_PAGO_CONSUMOS,
+    DOC_COL_INTERES,
+    DOC_COL_OTROS_CARGOS,
+    DOC_COL_OCR_USADO,
     DOC_COL_WS_REG,
     DOC_COL_ROWID_REG,
     DOC_COL_APROBADO_POR,
@@ -1886,7 +1896,7 @@ def ensure_finance_docs_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             if col in {DOC_COL_FECHA_CARGA, DOC_COL_FECHA_HECHO, DOC_COL_FECHA_ESPERADA, DOC_COL_FECHA_REAL, DOC_COL_FECHA_APROBADO}:
                 out[col] = pd.NaT
-            elif col in {DOC_COL_MONTO, DOC_COL_CONFIANZA}:
+            elif col in {DOC_COL_MONTO, DOC_COL_CONFIANZA, DOC_COL_PAGO_CONSUMOS, DOC_COL_INTERES, DOC_COL_OTROS_CARGOS}:
                 out[col] = 0.0
             else:
                 out[col] = ""
@@ -1894,11 +1904,29 @@ def ensure_finance_docs_columns(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = _ts(out[col])
     out[DOC_COL_MONTO] = pd.to_numeric(out[DOC_COL_MONTO], errors="coerce").fillna(0.0).astype(float)
     out[DOC_COL_CONFIANZA] = pd.to_numeric(out[DOC_COL_CONFIANZA], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0).astype(float)
+    for col in [DOC_COL_PAGO_CONSUMOS, DOC_COL_INTERES, DOC_COL_OTROS_CARGOS]:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0).astype(float)
     out[DOC_COL_EMPRESA] = out[DOC_COL_EMPRESA].astype("string").str.upper().str.strip().where(
         out[DOC_COL_EMPRESA].astype("string").str.upper().str.strip().isin(EMPRESAS_OPCIONES),
         other=EMPRESA_DEFAULT,
     )
-    text_cols = [c for c in DOC_BASE_COLUMNS if c not in {DOC_COL_MONTO, DOC_COL_CONFIANZA, DOC_COL_FECHA_CARGA, DOC_COL_FECHA_HECHO, DOC_COL_FECHA_ESPERADA, DOC_COL_FECHA_REAL, DOC_COL_FECHA_APROBADO}]
+    text_cols = [
+        c
+        for c in DOC_BASE_COLUMNS
+        if c
+        not in {
+            DOC_COL_MONTO,
+            DOC_COL_CONFIANZA,
+            DOC_COL_PAGO_CONSUMOS,
+            DOC_COL_INTERES,
+            DOC_COL_OTROS_CARGOS,
+            DOC_COL_FECHA_CARGA,
+            DOC_COL_FECHA_HECHO,
+            DOC_COL_FECHA_ESPERADA,
+            DOC_COL_FECHA_REAL,
+            DOC_COL_FECHA_APROBADO,
+        }
+    ]
     out = _ensure_text(out, text_cols)
     out[DOC_COL_ROWID] = out.apply(lambda row: str(row.get(DOC_COL_ROWID, "")).strip() or uuid.uuid4().hex, axis=1)
     return out[DOC_BASE_COLUMNS + [c for c in out.columns if c not in DOC_BASE_COLUMNS]]
@@ -2105,14 +2133,36 @@ def _extract_pdf_text_local(content: bytes, *, max_chars: int = 6000) -> str:
         return ""
 
 
-def _finance_doc_local_text(content: bytes | None, mime_type: str, existing_text: str = "") -> str:
+def _extract_image_text_google_vision(content: bytes | None, creds_obj=None, *, max_chars: int = 6000) -> str:
+    if not content:
+        return ""
+    try:
+        from google.cloud import vision
+    except Exception:
+        return ""
+    try:
+        vision_client = vision.ImageAnnotatorClient(credentials=creds_obj) if creds_obj is not None else vision.ImageAnnotatorClient()
+        image = vision.Image(content=content)
+        response = vision_client.document_text_detection(image=image)
+        err_msg = getattr(getattr(response, "error", None), "message", "")
+        if err_msg:
+            return ""
+        return str(getattr(response.full_text_annotation, "text", "") or "").strip()[:max_chars]
+    except Exception:
+        return ""
+
+
+def _finance_doc_local_text(content: bytes | None, mime_type: str, existing_text: str = "", creds_obj=None) -> str:
     base = str(existing_text or "").strip()
-    if base:
-        return base[:6000]
     mime = str(mime_type or "").lower()
+    extracted = ""
     if content and ("pdf" in mime):
-        return _extract_pdf_text_local(content)
-    return ""
+        extracted = _extract_pdf_text_local(content)
+    elif content and mime.startswith("image/"):
+        extracted = _extract_image_text_google_vision(content, creds_obj)
+    if extracted:
+        return "\n".join([x for x in [base, extracted] if x]).strip()[:6000]
+    return base[:6000]
 
 
 def _new_finance_doc_row(
@@ -2163,8 +2213,9 @@ def _analyze_finance_doc_content(
     use_api: bool = False,
     api_key: str = "",
     model_name: str = "",
+    creds_obj=None,
 ) -> tuple[dict, str, str, str]:
-    extracted_text = _finance_doc_local_text(content, mime_type, "")
+    extracted_text = _finance_doc_local_text(content, mime_type, "", creds_obj=creds_obj)
     local_text = "\n".join([x for x in [str(note or "").strip(), extracted_text] if x]).strip()[:6000]
     proposal = _guess_finance_doc_proposal(
         file_name=file_name,
@@ -2185,7 +2236,7 @@ def _analyze_finance_doc_content(
                 model=model_name,
                 file_name=file_name,
                 mime_type=mime_type,
-                content=content,
+                content=None if local_text else content,
                 user_text=local_text,
                 user_note=note,
             )
@@ -2206,12 +2257,18 @@ def _analyze_finance_doc_content(
                 DOC_COL_DESCRIPCION,
                 DOC_COL_CONFIANZA,
                 DOC_COL_JSON,
+                DOC_COL_INSTRUMENTO,
+                DOC_COL_PAGO_CONSUMOS,
+                DOC_COL_INTERES,
+                DOC_COL_OTROS_CARGOS,
             ]:
                 proposal[col] = ai_row.get(col, proposal.get(col, ""))
             api_used = "Si"
             message = str(ai_row.get(DOC_COL_MENSAJE, "Procesado con IA. Revisa antes de aprobar.") or "").strip()
         except Exception as exc:
             message = f"Reglas locales aplicadas. IA fallo: {str(exc)[:220]}"
+    if extracted_text:
+        proposal[DOC_COL_OCR_USADO] = "Google Vision" if str(mime_type or "").lower().startswith("image/") else "PDF texto local"
     return proposal, local_text, api_used, message
 
 
@@ -2270,6 +2327,7 @@ def _scan_finance_docs_folder_for_empresa(
                 use_api=use_api,
                 api_key=api_key,
                 model_name=model_name,
+                creds_obj=creds_obj,
             )
             new_row = _new_finance_doc_row(
                 empresa=empresa,
@@ -2330,6 +2388,7 @@ def _guess_finance_doc_proposal(*, file_name: str, note: str, text: str, tipo_hi
     monto = float(monto_manual or 0.0) or _guess_amount_from_text(corpus)
     desc = str(note or "").strip() or f"Documento financiero - {str(file_name or '').strip()}"
     lower = corpus.lower()
+    accion = "Registrar"
     if tipo in {"Factura cliente", "Comprobante cobro"}:
         destino = "Ingreso"
         categoria = "Proyectos"
@@ -2348,24 +2407,28 @@ def _guess_finance_doc_proposal(*, file_name: str, note: str, text: str, tipo_hi
         tratamiento = "Gasto del periodo"
         detalle = "Otros"
         estado = "Pendiente"
+        accion = "Registrar pago / cargo" if any(k in lower for k in ["pago", "ach", "abono", "interes", "interÃ©s", "cargo"]) else "Registrar consumo"
     elif tipo in {"Factoring"}:
         destino = "Factoring"
         categoria = "Gasto financiero"
         tratamiento = "Gasto del periodo"
         detalle = "Otros"
         estado = "Realizado"
+        accion = "Registrar"
     elif tipo in {"Gestion de cobro"}:
         destino = "Gestion de cobro"
         categoria = ""
         tratamiento = ""
         detalle = ""
         estado = "Pendiente"
+        accion = "Registrar"
     else:
         destino = "Gasto"
         categoria = "Gastos operativos"
         tratamiento = "Gasto del periodo"
         detalle = "Otros"
         estado = "Pendiente"
+        accion = "Registrar"
         if any(k in lower for k in ["kit", "anestesia", "stock", "inventario", "mercancia", "mercancía"]):
             categoria = "Proyectos"
             tratamiento = "Inventario"
@@ -2383,7 +2446,7 @@ def _guess_finance_doc_proposal(*, file_name: str, note: str, text: str, tipo_hi
     return {
         DOC_COL_TIPO: tipo,
         DOC_COL_DESTINO: destino,
-        DOC_COL_ACCION: "Registrar",
+        DOC_COL_ACCION: accion,
         DOC_COL_CATEGORIA: categoria,
         DOC_COL_TRATAMIENTO: tratamiento,
         DOC_COL_ESTADO_MOV: estado,
@@ -2395,6 +2458,10 @@ def _guess_finance_doc_proposal(*, file_name: str, note: str, text: str, tipo_hi
         DOC_COL_DETALLE: detalle,
         DOC_COL_DESCRIPCION: desc[:240],
         DOC_COL_CONFIANZA: 0.45 if monto > 0 else 0.25,
+        DOC_COL_INSTRUMENTO: "",
+        DOC_COL_PAGO_CONSUMOS: 0.0,
+        DOC_COL_INTERES: monto if destino == "Tarjeta de credito" and any(k in lower for k in ["interes", "interÃ©s"]) else 0.0,
+        DOC_COL_OTROS_CARGOS: monto if destino == "Tarjeta de credito" and any(k in lower for k in ["cargo", "membresia", "membresÃ­a"]) else 0.0,
     }
 
 
@@ -2425,8 +2492,11 @@ def _call_openai_finance_doc(*, api_key: str, model: str, file_name: str, mime_t
     prompt = (
         "Extrae datos de un documento financiero para crear un BORRADOR, no un registro final.\n"
         "Devuelve SOLO JSON valido con estas claves: tipo_documento, destino_sugerido, accion_sugerida, categoria_operativa, "
-        "tratamiento_balance, estado_movimiento, fecha_hecho, fecha_esperada, fecha_real, monto, contraparte, detalle, descripcion, confianza, explicacion.\n"
+        "tratamiento_balance, estado_movimiento, fecha_hecho, fecha_esperada, fecha_real, monto, contraparte, detalle, descripcion, "
+        "instrumento_financiero, pago_consumos, interes_pagado, otros_cargos, confianza, explicacion.\n"
         "Destinos permitidos: Ingreso, Gasto, Tarjeta de credito, Linea de credito, Factoring, Gestion de cobro, Revisar manualmente.\n"
+        "Para Tarjeta de credito usa accion_sugerida='Registrar consumo' si es una compra/consumo, o 'Registrar pago / cargo' si es pago, interes o cargo de tarjeta.\n"
+        "Para pagos de tarjeta, separa pago_consumos, interes_pagado y otros_cargos; si no sabes, deja 0 y baja confianza.\n"
         f"Categorias de ingreso permitidas: {allowed_income_categories}.\n"
         f"Categorias de gasto permitidas: {allowed_expense_categories}.\n"
         f"Tratamientos de gasto permitidos: {allowed_expense_treatments}.\n"
@@ -2475,6 +2545,9 @@ def _apply_ai_doc_payload(row: pd.Series, payload: dict) -> dict:
     detalle = str(payload.get("detalle", "") or "").strip() or out.get(DOC_COL_DETALLE, "")
     monto = float(pd.to_numeric(pd.Series([payload.get("monto", out.get(DOC_COL_MONTO, 0.0))]), errors="coerce").fillna(0.0).iloc[0])
     confianza = float(pd.to_numeric(pd.Series([payload.get("confianza", out.get(DOC_COL_CONFIANZA, 0.0))]), errors="coerce").fillna(0.0).iloc[0])
+    pago_consumos = float(pd.to_numeric(pd.Series([payload.get("pago_consumos", out.get(DOC_COL_PAGO_CONSUMOS, 0.0))]), errors="coerce").fillna(0.0).iloc[0])
+    interes_pagado = float(pd.to_numeric(pd.Series([payload.get("interes_pagado", out.get(DOC_COL_INTERES, 0.0))]), errors="coerce").fillna(0.0).iloc[0])
+    otros_cargos = float(pd.to_numeric(pd.Series([payload.get("otros_cargos", out.get(DOC_COL_OTROS_CARGOS, 0.0))]), errors="coerce").fillna(0.0).iloc[0])
     out.update(
         {
             DOC_COL_TIPO: tipo,
@@ -2490,6 +2563,10 @@ def _apply_ai_doc_payload(row: pd.Series, payload: dict) -> dict:
             DOC_COL_CONTRAPARTE: str(payload.get("contraparte", out.get(DOC_COL_CONTRAPARTE, "")) or "").strip(),
             DOC_COL_DETALLE: detalle,
             DOC_COL_DESCRIPCION: str(payload.get("descripcion", out.get(DOC_COL_DESCRIPCION, "")) or "").strip()[:240],
+            DOC_COL_INSTRUMENTO: str(payload.get("instrumento_financiero", out.get(DOC_COL_INSTRUMENTO, "")) or "").strip()[:120],
+            DOC_COL_PAGO_CONSUMOS: max(0.0, pago_consumos),
+            DOC_COL_INTERES: max(0.0, interes_pagado),
+            DOC_COL_OTROS_CARGOS: max(0.0, otros_cargos),
             DOC_COL_CONFIANZA: max(0.0, min(1.0, confianza)),
             DOC_COL_JSON: json.dumps(payload, ensure_ascii=False),
             DOC_COL_MENSAJE: str(payload.get("explicacion", "Procesado con IA.") or "Procesado con IA.").strip()[:500],
@@ -2675,6 +2752,240 @@ def _can_auto_register_doc(row: pd.Series) -> tuple[bool, str]:
     return False, f"Destino `{destino}` requiere revision y registro manual en su flujo especializado."
 
 
+def _option_index(options: list, value, default: int = 0) -> int:
+    try:
+        return options.index(value)
+    except Exception:
+        return default
+
+
+def _render_finance_doc_card_context(
+    *,
+    row: pd.Series,
+    cards_df: pd.DataFrame,
+    empresa: str,
+    emp_key: str,
+    selected_id: str,
+) -> dict:
+    cards_norm = ensure_tarjetas_columns(cards_df.copy())
+    active_cards = cards_norm[
+        cards_norm[TC_COL_ACTIVA].map(_si_no_norm).eq("SÃ­")
+        & cards_norm[TC_COL_EMPRESA].astype(str).str.upper().str.strip().eq(str(empresa).upper())
+    ].copy()
+    if active_cards.empty:
+        st.error("No hay tarjetas activas para esta empresa. Configura la tarjeta antes de aprobar este borrador.")
+        return {"ready": False, "errors": ["No hay tarjetas activas para esta empresa."]}
+
+    suggested_card = " ".join(
+        [
+            str(row.get(DOC_COL_INSTRUMENTO, "") or ""),
+            str(row.get(DOC_COL_CONTRAPARTE, "") or ""),
+            str(row.get(DOC_COL_DESCRIPCION, "") or ""),
+            str(row.get(DOC_COL_TEXTO_USUARIO, "") or ""),
+        ]
+    ).lower()
+    labels = [
+        f"{str(card.get(TC_COL_EMPRESA, '')).strip()} | {str(card.get(TC_COL_NOMBRE, '')).strip()} | {str(card.get(TC_COL_BANCO, '')).strip()}"
+        for _, card in active_cards.iterrows()
+    ]
+    default_card_idx = 0
+    for idx, (_, card) in enumerate(active_cards.iterrows()):
+        card_name = str(card.get(TC_COL_NOMBRE, "") or "").strip().lower()
+        bank_name = str(card.get(TC_COL_BANCO, "") or "").strip().lower()
+        if (card_name and card_name in suggested_card) or (bank_name and bank_name in suggested_card):
+            default_card_idx = idx
+            break
+
+    raw_action = str(row.get(DOC_COL_ACCION, "") or "").strip()
+    raw_tipo = str(row.get(DOC_COL_TIPO, "") or "").strip().lower()
+    action_default = "Registrar pago / cargo" if (
+        "pago" in raw_action.lower()
+        or "cargo" in raw_action.lower()
+        or "interes" in raw_action.lower()
+        or "interÃ©s" in raw_action.lower()
+        or "pago" in raw_tipo
+    ) else "Registrar consumo"
+
+    st.markdown("##### Campos requeridos para tarjeta")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        card_label = st.selectbox(
+            "Tarjeta",
+            labels,
+            index=default_card_idx,
+            key=f"doc_tc_card_{emp_key}_{selected_id}",
+        )
+        action = st.selectbox(
+            "Accion tarjeta",
+            ["Registrar consumo", "Registrar pago / cargo"],
+            index=0 if action_default == "Registrar consumo" else 1,
+            key=f"doc_tc_action_{emp_key}_{selected_id}",
+        )
+    selected_card = active_cards.iloc[labels.index(card_label)]
+    fecha_hecho = _as_date_or_default(row.get(DOC_COL_FECHA_HECHO), _today())
+    with c2:
+        fecha_evento = st.date_input(
+            "Fecha",
+            value=fecha_hecho,
+            key=f"doc_tc_fecha_{emp_key}_{selected_id}",
+        )
+    with c3:
+        st.caption(
+            f"Corte {int(selected_card.get(TC_COL_DIA_CORTE, 10) or 10)} | "
+            f"Vencimiento {int(selected_card.get(TC_COL_DIA_VENC, 5) or 5)}"
+        )
+
+    base_monto = float(pd.to_numeric(pd.Series([row.get(DOC_COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+    desc_default = str(row.get(DOC_COL_DESCRIPCION, "") or row.get(DOC_COL_ARCHIVO, "") or "").strip()
+    provider_default = str(row.get(DOC_COL_CONTRAPARTE, "") or "").strip()
+    detail_default = str(row.get(DOC_COL_DETALLE, "") or "Otros").strip()
+    if detail_default not in GAS_DETAIL_OPTIONS:
+        detail_default = "Otros"
+
+    if action == "Registrar consumo":
+        due_default = row.get(DOC_COL_FECHA_ESPERADA)
+        if pd.isna(_ts(due_default)):
+            due_default = _estimate_card_due_date(
+                fecha_evento,
+                int(selected_card.get(TC_COL_DIA_CORTE, 10) or 10),
+                int(selected_card.get(TC_COL_DIA_VENC, 5) or 5),
+            )
+        categoria_default = str(row.get(DOC_COL_CATEGORIA, "") or "Gastos operativos").strip()
+        if categoria_default not in GAS_CATEGORY_OPTIONS:
+            categoria_default = "Gastos operativos"
+        tratamiento_default = str(row.get(DOC_COL_TRATAMIENTO, "") or "Gasto del periodo").strip()
+        if tratamiento_default not in GAS_BALANCE_OPTIONS:
+            tratamiento_default = "Gasto del periodo"
+
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            monto = st.number_input("Monto consumo", min_value=0.0, step=1.0, value=float(base_monto), key=f"doc_tc_monto_{emp_key}_{selected_id}")
+            categoria = st.selectbox("Categoria operativa", GAS_CATEGORY_OPTIONS, index=_option_index(GAS_CATEGORY_OPTIONS, categoria_default), key=f"doc_tc_cat_{emp_key}_{selected_id}")
+        with g2:
+            proveedor = st.text_input("Proveedor / comercio", value=provider_default, key=f"doc_tc_prov_{emp_key}_{selected_id}")
+            detalle = st.selectbox("Detalle gasto", GAS_DETAIL_OPTIONS, index=_option_index(GAS_DETAIL_OPTIONS, detail_default, GAS_DETAIL_OPTIONS.index("Otros") if "Otros" in GAS_DETAIL_OPTIONS else 0), key=f"doc_tc_det_{emp_key}_{selected_id}")
+        with g3:
+            tratamiento = st.selectbox("Tratamiento balance gasto", GAS_BALANCE_OPTIONS, index=_option_index(GAS_BALANCE_OPTIONS, tratamiento_default), key=f"doc_tc_trat_{emp_key}_{selected_id}")
+            fecha_pago = st.date_input("Fecha esperada de pago tarjeta", value=_as_date_or_default(due_default, _today()), key=f"doc_tc_due_{emp_key}_{selected_id}")
+        descripcion = st.text_area("Descripcion", value=desc_default, key=f"doc_tc_desc_{emp_key}_{selected_id}")
+
+        prepago_meses = 0
+        prepago_inicio = pd.NaT
+        inv_mov = ""
+        inv_item = ""
+        inv_fecha_llegada = pd.NaT
+        af_tipo = ""
+        af_vida = 0
+        af_inicio = pd.NaT
+        af_residual = 0.0
+        af_dep_toggle = "No"
+        af_dep_mensual = 0.0
+
+        if tratamiento == "Anticipo / prepago":
+            pg1, pg2 = st.columns(2)
+            with pg1:
+                prepago_meses = st.number_input("Plazo prepago meses", min_value=1, step=1, value=12, key=f"doc_tc_prep_meses_{emp_key}_{selected_id}")
+            with pg2:
+                prepago_inicio = st.date_input("Fecha inicio prepago", value=fecha_evento, key=f"doc_tc_prep_ini_{emp_key}_{selected_id}")
+        elif tratamiento == "Inventario":
+            iv1, iv2, iv3 = st.columns([1, 2, 1])
+            with iv1:
+                inv_mov = st.selectbox("Movimiento inventario", INV_MOV_OPTIONS, index=0, key=f"doc_tc_inv_mov_{emp_key}_{selected_id}")
+            with iv2:
+                inv_item_default = desc_default or provider_default or str(row.get(DOC_COL_ARCHIVO, "") or "")
+                inv_item = st.text_input("Item inventario / referencia", value=inv_item_default[:120], key=f"doc_tc_inv_item_{emp_key}_{selected_id}")
+            with iv3:
+                inv_fecha_llegada = st.date_input("Fecha llegada / disponibilidad", value=fecha_evento, key=f"doc_tc_inv_llegada_{emp_key}_{selected_id}", disabled=inv_mov not in INVENTORY_POSITIVE_MOVEMENTS)
+        elif tratamiento == "Activo fijo":
+            af1, af2, af3 = st.columns(3)
+            with af1:
+                af_dep_toggle = st.selectbox("Depreciar / amortizar", YES_NO_OPTIONS, index=1, key=f"doc_tc_af_dep_{emp_key}_{selected_id}")
+                af_tipo = st.selectbox("Tipo activo fijo", AF_TYPE_OPTIONS, index=0, key=f"doc_tc_af_tipo_{emp_key}_{selected_id}")
+            with af2:
+                af_vida = st.selectbox("Vida util (anios)", AF_LIFE_OPTIONS, index=_option_index(AF_LIFE_OPTIONS, 5, 2), key=f"doc_tc_af_vida_{emp_key}_{selected_id}")
+                af_inicio = st.date_input("Fecha inicio activo", value=fecha_evento, key=f"doc_tc_af_inicio_{emp_key}_{selected_id}")
+            with af3:
+                af_residual = st.number_input("Valor residual", min_value=0.0, step=1.0, value=0.0, key=f"doc_tc_af_res_{emp_key}_{selected_id}")
+            if _bool_from_toggle(af_dep_toggle):
+                af_dep_mensual = max(0.0, float(monto) - float(af_residual)) / max(1, int(af_vida) * 12)
+                st.caption(f"Depreciacion/amortizacion mensual estimada: {_format_money_es(af_dep_mensual)}")
+
+        errors = []
+        if float(monto) <= 0:
+            errors.append("monto consumo")
+        if not str(descripcion or "").strip():
+            errors.append("descripcion")
+        if tratamiento == "Inventario" and not str(inv_item or "").strip():
+            errors.append("item inventario / referencia")
+        return {
+            "ready": not errors,
+            "errors": errors,
+            "action": action,
+            "card_row": selected_card,
+            "fecha_evento": fecha_evento,
+            "monto": float(monto),
+            "categoria": categoria,
+            "proveedor": proveedor,
+            "tratamiento": tratamiento,
+            "detalle_gasto": detalle,
+            "fecha_pago_esperada": fecha_pago,
+            "descripcion": descripcion,
+            "prepago_meses": int(prepago_meses or 0),
+            "prepago_inicio": prepago_inicio,
+            "inventario_mov": inv_mov,
+            "inventario_item": inv_item,
+            "inventario_fecha_llegada": inv_fecha_llegada,
+            "activo_fijo_tipo": af_tipo,
+            "activo_fijo_vida": int(af_vida or 0),
+            "activo_fijo_inicio": af_inicio,
+            "activo_fijo_residual": float(af_residual or 0.0),
+            "activo_fijo_dep_toggle": af_dep_toggle,
+            "activo_fijo_dep_mensual": float(af_dep_mensual or 0.0),
+        }
+
+    total_consumos, pagado, saldo = _tarjeta_position(str(selected_card.get(TC_COL_NOMBRE, "") or "").strip())
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Consumos acumulados", _format_money_es(total_consumos))
+    p2.metric("Pagado a consumos", _format_money_es(pagado))
+    p3.metric("Saldo pendiente tarjeta", _format_money_es(saldo))
+
+    pago_default = float(pd.to_numeric(pd.Series([row.get(DOC_COL_PAGO_CONSUMOS, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+    interes_default = float(pd.to_numeric(pd.Series([row.get(DOC_COL_INTERES, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+    cargos_default = float(pd.to_numeric(pd.Series([row.get(DOC_COL_OTROS_CARGOS, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+    action_text = " ".join([raw_action.lower(), raw_tipo, desc_default.lower(), str(row.get(DOC_COL_TEXTO_USUARIO, "") or "").lower()])
+    if pago_default <= 0 and interes_default <= 0 and cargos_default <= 0 and base_monto > 0:
+        if "interes" in action_text or "interÃ©s" in action_text:
+            interes_default = base_monto
+        elif "cargo" in action_text or "membres" in action_text:
+            cargos_default = base_monto
+        else:
+            pago_default = base_monto
+    q1, q2, q3 = st.columns(3)
+    with q1:
+        pago_consumos = st.number_input("Pago a consumos", min_value=0.0, step=1.0, value=float(pago_default), key=f"doc_tc_pay_consumos_{emp_key}_{selected_id}")
+    with q2:
+        interes = st.number_input("Interes pagado", min_value=0.0, step=1.0, value=float(interes_default), key=f"doc_tc_pay_interes_{emp_key}_{selected_id}")
+    with q3:
+        otros = st.number_input("Otros cargos", min_value=0.0, step=1.0, value=float(cargos_default), key=f"doc_tc_pay_otros_{emp_key}_{selected_id}")
+    nota = st.text_input("Nota pago / cargo", value=desc_default, key=f"doc_tc_pay_nota_{emp_key}_{selected_id}")
+    errors = []
+    if float(pago_consumos) <= 0 and float(interes) <= 0 and float(otros) <= 0:
+        errors.append("pago a consumos, interes u otros cargos")
+    if float(pago_consumos) > saldo + 0.01:
+        errors.append("pago a consumos no puede exceder el saldo pendiente")
+    return {
+        "ready": not errors,
+        "errors": errors,
+        "action": action,
+        "card_row": selected_card,
+        "fecha_evento": fecha_evento,
+        "pago_consumos": float(pago_consumos),
+        "interes": float(interes),
+        "otros": float(otros),
+        "nota": nota,
+    }
+
+
 def _render_finance_docs_company_inbox(
     *,
     empresa: str,
@@ -2791,6 +3102,7 @@ def _render_finance_docs_company_inbox(
                             use_api=bool(use_api and api_key),
                             api_key=api_key,
                             model_name=model_name,
+                            creds_obj=creds_obj,
                         )
                         new_row = _new_finance_doc_row(
                             empresa=empresa,
@@ -2850,15 +3162,20 @@ def _render_finance_docs_company_inbox(
         DOC_COL_CONTRAPARTE,
         DOC_COL_DETALLE,
         DOC_COL_DESCRIPCION,
+        DOC_COL_INSTRUMENTO,
+        DOC_COL_PAGO_CONSUMOS,
+        DOC_COL_INTERES,
+        DOC_COL_OTROS_CARGOS,
         DOC_COL_CONFIANZA,
         DOC_COL_DUPLICADO,
+        DOC_COL_OCR_USADO,
         DOC_COL_MENSAJE,
     ]
     edited_pending = st.data_editor(
         pending_docs[editable_cols],
         use_container_width=True,
         hide_index=True,
-        disabled=[DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_MENSAJE],
+        disabled=[DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_OCR_USADO, DOC_COL_MENSAJE],
         column_config={
             DOC_COL_DESTINO: st.column_config.SelectboxColumn(
                 DOC_COL_DESTINO,
@@ -2885,7 +3202,7 @@ def _render_finance_docs_company_inbox(
                 if len(idx) == 0:
                     continue
                 for col in editable_cols:
-                    if col in {DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_MENSAJE}:
+                    if col in {DOC_COL_ROWID, DOC_COL_ARCHIVO, DOC_COL_CONFIANZA, DOC_COL_DUPLICADO, DOC_COL_OCR_USADO, DOC_COL_MENSAJE}:
                         continue
                     new_docs.loc[idx[0], col] = edited_row.get(col, "")
                 new_docs.loc[idx[0], DOC_COL_DUPLICADO] = _finance_doc_possible_duplicate(
@@ -2915,6 +3232,18 @@ def _render_finance_docs_company_inbox(
         st.markdown(f"[Abrir documento en Drive]({str(selected_row.get(DOC_COL_DRIVE_URL)).strip()})")
     if str(selected_row.get(DOC_COL_DUPLICADO, "") or "").strip():
         st.warning(str(selected_row.get(DOC_COL_DUPLICADO)))
+    card_doc_context: dict | None = None
+    if str(selected_row.get(DOC_COL_DESTINO, "") or "").strip() == "Tarjeta de credito":
+        cards_doc_before = load_cards_df(client_obj, sheet_id)
+        card_doc_context = _render_finance_doc_card_context(
+            row=selected_row,
+            cards_df=cards_doc_before,
+            empresa=empresa,
+            emp_key=emp_key,
+            selected_id=selected_id,
+        )
+        if card_doc_context and not card_doc_context.get("ready", False):
+            st.warning("Completa antes de aprobar: " + ", ".join(card_doc_context.get("errors", [])))
     confirm_dup = st.checkbox("Registrar aunque marque duplicado", key=f"doc_confirm_dup_{emp_key}_{selected_id}")
     a1, a2, a3 = st.columns(3)
     with a1:
@@ -2931,13 +3260,13 @@ def _render_finance_docs_company_inbox(
                         file_bytes, file_name_dl, mime_dl = _download_drive_file_bytes(creds_obj, drive_id)
                         file_name = file_name_dl or file_name
                         mime_type = mime_dl or mime_type
-                    local_text = _finance_doc_local_text(file_bytes, mime_type, str(selected_row.get(DOC_COL_TEXTO_USUARIO, "") or ""))
+                    local_text = _finance_doc_local_text(file_bytes, mime_type, str(selected_row.get(DOC_COL_TEXTO_USUARIO, "") or ""), creds_obj=creds_obj)
                     payload = _call_openai_finance_doc(
                         api_key=api_key,
                         model=model_name,
                         file_name=file_name,
                         mime_type=mime_type,
-                        content=file_bytes,
+                        content=None if local_text else file_bytes,
                         user_text=local_text,
                         user_note=str(selected_row.get(DOC_COL_NOTA, "") or ""),
                     )
@@ -2945,6 +3274,8 @@ def _render_finance_docs_company_inbox(
                     updated[DOC_COL_MODELO] = model_name
                     updated[DOC_COL_ESTADO] = "Procesado"
                     updated[DOC_COL_TEXTO_USUARIO] = local_text
+                    if local_text and str(mime_type or "").lower().startswith("image/"):
+                        updated[DOC_COL_OCR_USADO] = "Google Vision"
                     new_docs = docs_df.copy()
                     idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
                     if len(idx) > 0:
@@ -2965,9 +3296,12 @@ def _render_finance_docs_company_inbox(
                 updated[DOC_COL_EMPRESA] = empresa
                 dup_msg = _finance_doc_possible_duplicate(pd.Series(updated), st.session_state.df_ing, st.session_state.df_gas, docs_df)
                 updated[DOC_COL_DUPLICADO] = dup_msg
-                can_register, reason = _can_auto_register_doc(pd.Series(updated))
+                destino_updated = str(updated.get(DOC_COL_DESTINO, "") or "").strip()
+                can_register, reason = (True, "") if destino_updated == "Tarjeta de credito" else _can_auto_register_doc(pd.Series(updated))
                 if dup_msg and not confirm_dup:
                     st.error("Hay posible duplicado. Marca la confirmacion si aun deseas registrar.")
+                elif destino_updated == "Tarjeta de credito" and (not card_doc_context or not card_doc_context.get("ready", False)):
+                    st.error("Completa los campos requeridos de tarjeta antes de aprobar: " + ", ".join((card_doc_context or {}).get("errors", [])))
                 elif not can_register:
                     st.error(reason)
                 else:
@@ -2976,7 +3310,7 @@ def _render_finance_docs_company_inbox(
                     ws_reg = ""
                     rid_reg = ""
                     wrote_main = False
-                    if str(updated.get(DOC_COL_DESTINO, "")).strip() == "Ingreso":
+                    if destino_updated == "Ingreso":
                         new_row = _build_ingreso_row_from_doc(pd.Series(updated))
                         rid_reg = str(new_row.get(COL_ROWID, ""))
                         new_ing = ensure_ingresos_columns(pd.concat([old_ing_df, pd.DataFrame([new_row])], ignore_index=True))
@@ -2984,7 +3318,7 @@ def _render_finance_docs_company_inbox(
                         if wrote_main:
                             st.session_state.df_ing = new_ing
                             ws_reg = WS_ING
-                    elif str(updated.get(DOC_COL_DESTINO, "")).strip() == "Gasto":
+                    elif destino_updated == "Gasto":
                         new_row = _build_gasto_row_from_doc(pd.Series(updated))
                         rid_reg = str(new_row.get(COL_ROWID, ""))
                         new_gas = ensure_gastos_columns(pd.concat([old_gas_df, pd.DataFrame([new_row])], ignore_index=True))
@@ -2992,6 +3326,66 @@ def _render_finance_docs_company_inbox(
                         if wrote_main:
                             st.session_state.df_gas = new_gas
                             ws_reg = WS_GAS
+                    elif destino_updated == "Tarjeta de credito" and card_doc_context:
+                        card_row = card_doc_context["card_row"]
+                        card_name = str(card_row.get(TC_COL_NOMBRE, "") or "").strip()
+                        updated[DOC_COL_INSTRUMENTO] = card_name
+                        ws_reg = WS_GAS
+                        if card_doc_context.get("action") == "Registrar consumo":
+                            new_row = _build_card_consumo_row(
+                                card_row=card_row,
+                                fecha_evento=card_doc_context["fecha_evento"],
+                                monto=float(card_doc_context["monto"]),
+                                descripcion=str(card_doc_context["descripcion"] or "").strip(),
+                                categoria=str(card_doc_context["categoria"] or "").strip(),
+                                proveedor=str(card_doc_context["proveedor"] or "").strip(),
+                                tratamiento=str(card_doc_context["tratamiento"] or "").strip(),
+                                detalle_gasto=str(card_doc_context["detalle_gasto"] or "Otros").strip(),
+                                fecha_pago_esperada=card_doc_context["fecha_pago_esperada"],
+                                prepago_meses=int(card_doc_context.get("prepago_meses", 0) or 0),
+                                prepago_inicio=card_doc_context.get("prepago_inicio"),
+                                inventario_mov=str(card_doc_context.get("inventario_mov", "") or ""),
+                                inventario_item=str(card_doc_context.get("inventario_item", "") or ""),
+                                inventario_fecha_llegada=card_doc_context.get("inventario_fecha_llegada"),
+                                activo_fijo_tipo=str(card_doc_context.get("activo_fijo_tipo", "") or ""),
+                                activo_fijo_vida=int(card_doc_context.get("activo_fijo_vida", 0) or 0),
+                                activo_fijo_inicio=card_doc_context.get("activo_fijo_inicio"),
+                                activo_fijo_residual=float(card_doc_context.get("activo_fijo_residual", 0.0) or 0.0),
+                                activo_fijo_dep_toggle=str(card_doc_context.get("activo_fijo_dep_toggle", "No") or "No"),
+                                activo_fijo_dep_mensual=float(card_doc_context.get("activo_fijo_dep_mensual", 0.0) or 0.0),
+                            )
+                            rid_reg = str(new_row.get(COL_ROWID, ""))
+                            new_gas = ensure_gastos_columns(pd.concat([old_gas_df, pd.DataFrame([new_row])], ignore_index=True))
+                        else:
+                            pago_consumos = float(card_doc_context.get("pago_consumos", 0.0) or 0.0)
+                            interes = float(card_doc_context.get("interes", 0.0) or 0.0)
+                            otros = float(card_doc_context.get("otros", 0.0) or 0.0)
+                            fecha_evento = card_doc_context["fecha_evento"]
+                            nota = str(card_doc_context.get("nota", "") or "").strip()
+                            new_gas = _apply_card_payment(old_gas_df, card_name, fecha_evento, pago_consumos, nota)
+                            updated[DOC_COL_PAGO_CONSUMOS] = pago_consumos
+                            updated[DOC_COL_INTERES] = interes
+                            updated[DOC_COL_OTROS_CARGOS] = otros
+                            if interes > 0:
+                                desc = f"Interes tarjeta de credito - {card_name}"
+                                if nota:
+                                    desc = f"{desc} | {nota}"
+                                charge_row = _build_card_charge_row(card_row=card_row, fecha_evento=fecha_evento, monto=interes, descripcion=desc, detalle_gasto="Intereses")
+                                rid_reg = str(charge_row.get(COL_ROWID, "")) or rid_reg
+                                new_gas = pd.concat([new_gas, pd.DataFrame([charge_row])], ignore_index=True)
+                            if otros > 0:
+                                desc = f"Cargos tarjeta de credito - {card_name}"
+                                if nota:
+                                    desc = f"{desc} | {nota}"
+                                charge_row = _build_card_charge_row(card_row=card_row, fecha_evento=fecha_evento, monto=otros, descripcion=desc, detalle_gasto="Otros")
+                                rid_reg = str(charge_row.get(COL_ROWID, "")) or rid_reg
+                                new_gas = pd.concat([new_gas, pd.DataFrame([charge_row])], ignore_index=True)
+                            if pago_consumos > 0 and not rid_reg:
+                                rid_reg = f"pago_tarjeta_{card_name}_{pd.Timestamp(_today()).strftime('%Y%m%d')}"
+                            new_gas = ensure_gastos_columns(new_gas)
+                        wrote_main = safe_write_worksheet(client_obj, sheet_id, WS_GAS, new_gas, old_df=old_gas_df)
+                        if wrote_main:
+                            st.session_state.df_gas = new_gas
                     if not wrote_main:
                         st.error("No se pudo registrar en Finanzas 1.")
                     else:
