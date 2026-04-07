@@ -17,6 +17,9 @@ openpyxl>=3.1.5
 python-docx>=1.1.2
 pypdf>=4.3.1
 google-cloud-vision>=3.7.4
+PyMuPDF>=1.24.10
+Flask>=3.0.3
+gunicorn>=23.0.0
 SQLAlchemy>=2.0.0
 psycopg2-binary>=2.9.9
 
