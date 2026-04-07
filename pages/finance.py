@@ -2272,7 +2272,7 @@ def _analyze_finance_doc_content(
                 model=model_name,
                 file_name=file_name,
                 mime_type=mime_type,
-                content=None if local_text else content,
+                content=None if extracted_text else content,
                 user_text=local_text,
                 user_note=note,
             )
@@ -2301,6 +2301,8 @@ def _analyze_finance_doc_content(
                 proposal[col] = ai_row.get(col, proposal.get(col, ""))
             api_used = "Si"
             message = str(ai_row.get(DOC_COL_MENSAJE, "Procesado con IA. Revisa antes de aprobar.") or "").strip()
+            if content and str(mime_type or "").lower().startswith("image/") and not extracted_text:
+                proposal[DOC_COL_OCR_USADO] = "OpenAI vision fallback"
         except Exception as exc:
             message = f"Reglas locales aplicadas. IA fallo: {str(exc)[:220]}"
     if extracted_text:
@@ -3294,13 +3296,15 @@ def _render_finance_docs_company_inbox(
                         file_bytes, file_name_dl, mime_dl = _download_drive_file_bytes(creds_obj, drive_id)
                         file_name = file_name_dl or file_name
                         mime_type = mime_dl or mime_type
-                    local_text = _finance_doc_local_text(file_bytes, mime_type, str(selected_row.get(DOC_COL_TEXTO_USUARIO, "") or ""), creds_obj=creds_obj)
+                    stored_text = str(selected_row.get(DOC_COL_TEXTO_USUARIO, "") or "").strip()
+                    extracted_now = _finance_doc_local_text(file_bytes, mime_type, "", creds_obj=creds_obj)
+                    local_text = "\n".join([x for x in [stored_text, extracted_now] if x]).strip()[:6000]
                     payload = _call_openai_finance_doc(
                         api_key=api_key,
                         model=model_name,
                         file_name=file_name,
                         mime_type=mime_type,
-                        content=None if local_text else file_bytes,
+                        content=None if extracted_now else file_bytes,
                         user_text=local_text,
                         user_note=str(selected_row.get(DOC_COL_NOTA, "") or ""),
                     )
@@ -3308,8 +3312,10 @@ def _render_finance_docs_company_inbox(
                     updated[DOC_COL_MODELO] = model_name
                     updated[DOC_COL_ESTADO] = "Procesado"
                     updated[DOC_COL_TEXTO_USUARIO] = local_text
-                    if local_text and str(mime_type or "").lower().startswith("image/"):
+                    if extracted_now and str(mime_type or "").lower().startswith("image/"):
                         updated[DOC_COL_OCR_USADO] = "Google Vision"
+                    elif file_bytes and str(mime_type or "").lower().startswith("image/"):
+                        updated[DOC_COL_OCR_USADO] = "OpenAI vision fallback"
                     new_docs = docs_df.copy()
                     idx = new_docs.index[new_docs[DOC_COL_ROWID].astype(str).eq(selected_id)]
                     if len(idx) > 0:
