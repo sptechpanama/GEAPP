@@ -966,16 +966,25 @@ def _editor_state_to_dataframe(
     *,
     numeric_cols: set[str] | None = None,
 ) -> pd.DataFrame:
-    work = original_df.copy().reset_index(drop=True)
+    # Streamlit Cloud may load Sheets columns as string[pyarrow]. Convert to
+    # object before applying editor deltas so numeric/date edits don't fail.
+    work = original_df.copy().reset_index(drop=True).astype(object)
+    numeric_cols = numeric_cols or set()
+
+    def _normalize_numeric_columns() -> None:
+        for col in numeric_cols:
+            if col in work.columns:
+                work[col] = (
+                    pd.to_numeric(work[col].map(_parse_number_maybe_es), errors="coerce")
+                    .fillna(0.0)
+                    .astype("float64")
+                )
+
+    _normalize_numeric_columns()
+
     editor_state = st.session_state.get(editor_key)
     if not isinstance(editor_state, dict):
-        if numeric_cols:
-            for col in numeric_cols:
-                if col in work.columns:
-                    work[col] = work[col].map(_parse_number_maybe_es)
         return work
-
-    numeric_cols = numeric_cols or set()
 
     edited_rows = editor_state.get("edited_rows") or {}
     for row_idx, changes in edited_rows.items():
@@ -1022,9 +1031,7 @@ def _editor_state_to_dataframe(
             work = pd.concat([work, pd.DataFrame(new_records)], ignore_index=True)
 
     work = work.reset_index(drop=True)
-    for col in numeric_cols:
-        if col in work.columns:
-            work[col] = work[col].map(_parse_number_maybe_es)
+    _normalize_numeric_columns()
     return work
 
 
