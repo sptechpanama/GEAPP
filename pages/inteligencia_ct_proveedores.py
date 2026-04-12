@@ -6482,6 +6482,275 @@ def _load_ap_contact_df() -> pd.DataFrame:
     return _load_ap_contact_df_cached(_get_study_data_rev())
 
 
+def _tracking_record_from_ranked_row(row: pd.Series) -> dict[str, object]:
+    now_iso = _utc_now_iso()
+    return _normalize_tracking_record(
+        {
+            "ficha": row.get("ficha", ""),
+            "nombre_ficha": row.get("nombre_ficha", ""),
+            "clase_riesgo": row.get("clase_riesgo", ""),
+            "enlace_minsa": row.get("enlace_minsa", ""),
+            "score_inicial": row.get("score_total", row.get("score_inicial", 0.0)),
+            "clasificacion": row.get("clasificacion", ""),
+            "actos": row.get("actos", 0),
+            "actos_solo_ficha": row.get("actos_solo_ficha", 0),
+            "actos_con_otras_fichas": row.get("actos_con_otras_fichas", 0),
+            "monto_historico": row.get("monto_historico", 0.0),
+            "proponentes_promedio": row.get("proponentes_promedio", 0.0),
+            "revision_proponentes": row.get("revision_proponentes", False),
+            "top1_ganador": row.get("top1_ganador", ""),
+            "top1_pct_ganadas": row.get("top1_pct_ganadas", 0.0),
+            "top2_ganador": row.get("top2_ganador", ""),
+            "top2_pct_ganadas": row.get("top2_pct_ganadas", 0.0),
+            "top3_ganador": row.get("top3_ganador", ""),
+            "top3_pct_ganadas": row.get("top3_pct_ganadas", 0.0),
+            "estado": "pendiente de estudio profundo",
+            "fecha_ingreso": date.today().isoformat(),
+            "notas": "",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+    )
+
+
+def _first_nonempty_text(*values: object) -> str:
+    for value in values:
+        text = _clean_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _latest_nonempty_text(*values: object) -> str:
+    texts = [str(v).strip() for v in values if str(v or "").strip()]
+    return max(texts) if texts else ""
+
+
+def _earliest_nonempty_text(*values: object) -> str:
+    texts = [str(v).strip() for v in values if str(v or "").strip()]
+    return min(texts) if texts else ""
+
+
+def _derive_rebuilt_tracking_state(
+    existing_rec: dict[str, object] | None,
+    run_row: dict[str, object] | None,
+    ap_row: dict[str, object] | None,
+    contact_rows: pd.DataFrame,
+) -> str:
+    existing_state = _clean_text((existing_rec or {}).get("estado", ""))
+    if existing_state:
+        return existing_state
+
+    if not contact_rows.empty:
+        return "listo para busqueda de proveedores"
+
+    ap_state = _clean_text((ap_row or {}).get("estado_analisis", "")).lower()
+    if ap_state in {AP_COMPLETED, AP_UPDATED, AP_PENDING_JSON, AP_STATE_STUDIED_NO_ANALYSIS}:
+        return "listo para busqueda de proveedores"
+
+    run_state = _clean_text((run_row or {}).get("estado_run", "")).lower()
+    if run_state in {RUN_STATUS_PENDING, RUN_STATUS_COMPLETED, RUN_STATUS_COMPLETED_OBS, RUN_STATUS_UPDATED}:
+        return "en estudio"
+
+    return "pendiente de estudio profundo"
+
+
+def _tracking_recovery_diagnostics() -> dict[str, int]:
+    _ensure_study_db()
+    diag = {
+        "seguimiento_local": 0,
+        "estudio_runs": 0,
+        "estudio_resumen": 0,
+        "analisis_contexto": 0,
+        "contactos": 0,
+    }
+    try:
+        with sqlite3.connect(INTEL_STUDY_DB_PATH) as conn:
+            diag["seguimiento_local"] = int(conn.execute("SELECT COUNT(*) FROM seguimiento_fichas").fetchone()[0])
+            diag["estudio_runs"] = int(conn.execute("SELECT COUNT(*) FROM estudio_runs WHERE COALESCE(is_current,1)=1").fetchone()[0])
+            diag["estudio_resumen"] = int(conn.execute("SELECT COUNT(*) FROM estudio_resumen_ficha").fetchone()[0])
+            diag["analisis_contexto"] = int(conn.execute("SELECT COUNT(*) FROM analisis_proveedores_contexto").fetchone()[0])
+            diag["contactos"] = int(conn.execute("SELECT COUNT(*) FROM analisis_proveedores_contacto").fetchone()[0])
+    except Exception:
+        pass
+    return diag
+
+
+def _rebuild_tracking_from_study_sources(use_ranked_lookup: bool = True) -> tuple[list[dict[str, object]], dict[str, int]]:
+    _ensure_study_db()
+    current_records = _normalize_tracking_records(st.session_state.get("intel_fichas_estudio", []))
+    current_map = {str(rec.get("ficha", "")).strip(): rec for rec in current_records}
+
+    ranked_lookup: dict[str, dict[str, object]] = {}
+    if use_ranked_lookup:
+        ranked_df = st.session_state.get("intel_ranked_df_cache", pd.DataFrame())
+        if not isinstance(ranked_df, pd.DataFrame) or ranked_df.empty:
+            ficha_metrics_df, _, _ = _get_universe_session_cached()
+            ranked_df = _get_ranked_session_cached(ficha_metrics_df, st.session_state["intel_weights"])
+        if isinstance(ranked_df, pd.DataFrame) and not ranked_df.empty and "ficha" in ranked_df.columns:
+            for _, row in ranked_df.iterrows():
+                ficha = _clean_text(row.get("ficha", ""))
+                if ficha:
+                    ranked_lookup[ficha] = _tracking_record_from_ranked_row(row)
+
+    resumen_df = _load_resumen_estudiadas_df()
+    runs_df = _load_runs_df()
+    ap_ctx_df = _load_ap_context_df()
+    contact_df = _load_ap_contact_df()
+
+    resumen_map = {
+        _clean_text(row.get("ficha", "")): row.to_dict()
+        for _, row in resumen_df.iterrows()
+        if _clean_text(row.get("ficha", ""))
+    } if not resumen_df.empty else {}
+    runs_map = {
+        _clean_text(row.get("ficha", "")): row.to_dict()
+        for _, row in runs_df.iterrows()
+        if _clean_text(row.get("ficha", ""))
+    } if not runs_df.empty else {}
+    ap_map = {
+        _clean_text(row.get("ficha", "")): row.to_dict()
+        for _, row in ap_ctx_df.iterrows()
+        if _clean_text(row.get("ficha", ""))
+    } if not ap_ctx_df.empty else {}
+
+    contact_counts: dict[str, int] = {}
+    contact_groups: dict[str, pd.DataFrame] = {}
+    if not contact_df.empty and "ficha" in contact_df.columns:
+        for ficha, part in contact_df.groupby(contact_df["ficha"].astype(str).map(_clean_text), dropna=False):
+            ficha_txt = _clean_text(ficha)
+            if not ficha_txt:
+                continue
+            contact_groups[ficha_txt] = part.copy()
+            contact_counts[ficha_txt] = int(len(part))
+
+    fichas = sorted(
+        {
+            *current_map.keys(),
+            *ranked_lookup.keys(),
+            *resumen_map.keys(),
+            *runs_map.keys(),
+            *ap_map.keys(),
+            *contact_groups.keys(),
+        }
+    )
+
+    rebuilt: list[dict[str, object]] = []
+    for ficha in fichas:
+        existing = current_map.get(ficha, {})
+        base = dict(existing) if existing else {}
+        ranked = ranked_lookup.get(ficha, {})
+        resumen_row = resumen_map.get(ficha, {})
+        run_row = runs_map.get(ficha, {})
+        ap_row = ap_map.get(ficha, {})
+        ficha_contacts = contact_groups.get(ficha, pd.DataFrame())
+
+        rec = _normalize_tracking_record({**ranked, **base})
+        rec["ficha"] = ficha
+        rec["nombre_ficha"] = _first_nonempty_text(
+            rec.get("nombre_ficha", ""),
+            ap_row.get("nombre_ficha", ""),
+            run_row.get("nombre_ficha", ""),
+            resumen_row.get("nombre_ficha", ""),
+        )
+        rec["enlace_minsa"] = _first_nonempty_text(
+            rec.get("enlace_minsa", ""),
+            ap_row.get("enlace_ficha_tecnica", ""),
+        )
+        rec["estado"] = _derive_rebuilt_tracking_state(existing, run_row, ap_row, ficha_contacts)
+
+        fecha_ingreso = _earliest_nonempty_text(
+            base.get("fecha_ingreso", ""),
+            run_row.get("fecha_inicio", ""),
+            ap_row.get("created_at", ""),
+            resumen_row.get("ultima_actualizacion", ""),
+        )
+        if fecha_ingreso:
+            rec["fecha_ingreso"] = fecha_ingreso[:10]
+
+        created_at = _earliest_nonempty_text(
+            base.get("created_at", ""),
+            run_row.get("fecha_inicio", ""),
+            ap_row.get("created_at", ""),
+            resumen_row.get("ultima_actualizacion", ""),
+        )
+        if created_at:
+            rec["created_at"] = created_at
+
+        updated_at = _latest_nonempty_text(
+            base.get("updated_at", ""),
+            run_row.get("updated_at", ""),
+            run_row.get("fecha_fin", ""),
+            resumen_row.get("ultima_actualizacion", ""),
+            ap_row.get("updated_at", ""),
+            ficha_contacts.get("updated_at", pd.Series(dtype=str)).astype(str).max() if not ficha_contacts.empty and "updated_at" in ficha_contacts.columns else "",
+        )
+        if updated_at:
+            rec["updated_at"] = updated_at
+
+        notas_parts = [part for part in [_clean_text(base.get("notas", ""))] if part]
+        if ap_row:
+            ap_state = _clean_text(ap_row.get("estado_analisis", ""))
+            if ap_state:
+                notas_parts.append(f"Analisis proveedores: {ap_state}")
+        if ficha_contacts is not None and not ficha_contacts.empty:
+            notas_parts.append(f"Contactos guardados: {int(contact_counts.get(ficha, 0))}")
+        if not notas_parts:
+            notas_parts.append("Reconstruido desde estudios persistidos")
+        rec["notas"] = " | ".join(dict.fromkeys([p for p in notas_parts if p]))
+        rebuilt.append(rec)
+
+    meta = {
+        "rebuilt": int(len(rebuilt)),
+        "from_ranked": int(len(ranked_lookup)),
+        "from_runs": int(len(runs_map)),
+        "from_resumen": int(len(resumen_map)),
+        "from_ap": int(len(ap_map)),
+        "from_contacts": int(len(contact_groups)),
+    }
+    return _normalize_tracking_records(rebuilt), meta
+
+
+def _render_intel_recovery_panel() -> None:
+    with st.expander("Recuperacion seguimiento", expanded=False):
+        st.caption("Reconstruye `ct_fichas_seguimiento` desde estudios persistidos, analisis de proveedores y contactos, sin depender del fallback local vacio.")
+        diag = _tracking_recovery_diagnostics()
+        st.caption(
+            "Fuentes detectadas: "
+            f"seguimiento local={diag['seguimiento_local']}, "
+            f"runs={diag['estudio_runs']}, "
+            f"resumen={diag['estudio_resumen']}, "
+            f"analisis={diag['analisis_contexto']}, "
+            f"contactos={diag['contactos']}."
+        )
+        use_ranked = st.checkbox(
+            "Completar score, clasificacion y riesgo usando el ranking actual",
+            value=True,
+            key="intel_recovery_use_ranked",
+        )
+        if st.button("Reconstruir seguimiento desde persistencia", key="intel_rebuild_tracking_btn", width="stretch"):
+            try:
+                _bootstrap_study_storage_once()
+                with st.spinner("Reconstruyendo seguimiento desde tablas persistidas..."):
+                    rebuilt, meta = _rebuild_tracking_from_study_sources(use_ranked_lookup=use_ranked)
+                if not rebuilt:
+                    st.warning("No se encontraron fuentes persistidas suficientes para reconstruir seguimiento.")
+                else:
+                    st.session_state["intel_fichas_estudio"] = rebuilt
+                    ok, msg = _persist_tracking_records(rebuilt)
+                    st.session_state["intel_tracking_status"] = msg
+                    st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
+                    st.success(
+                        "Seguimiento reconstruido. "
+                        f"Fichas: {meta['rebuilt']} | runs: {meta['from_runs']} | "
+                        f"resumen: {meta['from_resumen']} | analisis: {meta['from_ap']} | "
+                        f"contactos: {meta['from_contacts']}."
+                    )
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"No se pudo reconstruir seguimiento: {exc}")
+
+
 def _build_ficha_name_lookup() -> dict[str, str]:
     lookup: dict[str, str] = {}
     for source_df in (_load_ap_context_df(), _load_resumen_estudiadas_df()):
@@ -8931,6 +9200,7 @@ st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 _start_intel_backup_once()
 _render_intel_backup_panel()
+_render_intel_recovery_panel()
 
 def _tab_requires_universe(tab_name: str) -> bool:
     return tab_name in {"Dashboard", "Detecc. fichas", "Estudio de fichas", "Analisis proveedores"}
