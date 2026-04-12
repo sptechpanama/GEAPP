@@ -85,6 +85,7 @@ CTNI_LOAD_FICHAS_URL = "https://ctni.minsa.gob.pa/Home/LoadFichas"
 PANAMACOMPRA_BASE_URL = "https://www.panamacompra.gob.pa/Inicio/"
 INTEL_WEIGHTS_PROFILE_VERSION = "defaults_38_32_12_10_8_v1"
 INTEL_STUDY_DB_PATH = APP_ROOT / "data" / "inteligencia_ct_estudios.db"
+INTEL_TRACKING_SNAPSHOT_PATH = APP_ROOT / "data" / "inteligencia_ct_tracking_snapshot.json"
 INTEL_TRACKING_WORKSHEET = "ct_fichas_seguimiento"
 INTEL_REMOTE_RUNS_WORKSHEET = "intel_study_runs_remote"
 INTEL_REMOTE_DETAIL_WORKSHEET = "intel_study_detail_remote"
@@ -2816,6 +2817,44 @@ def _tracking_records_to_df(records: list[dict[str, object]]) -> pd.DataFrame:
     return df[INTEL_TRACKING_COLUMNS]
 
 
+def _remember_tracking_last_good(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    normalized = _normalize_tracking_records(records)
+    if normalized:
+        st.session_state["intel_tracking_last_good_records"] = normalized
+    return normalized
+
+
+def _read_tracking_records_from_snapshot() -> list[dict[str, object]]:
+    try:
+        if not INTEL_TRACKING_SNAPSHOT_PATH.exists():
+            return []
+        payload = json.loads(INTEL_TRACKING_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            return []
+        return _normalize_tracking_records(payload)
+    except Exception:
+        return []
+
+
+def _write_tracking_records_to_snapshot(records: list[dict[str, object]]) -> None:
+    normalized = _normalize_tracking_records(records)
+    if not normalized:
+        return
+    INTEL_TRACKING_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INTEL_TRACKING_SNAPSHOT_PATH.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _tracking_fallback_records() -> list[dict[str, object]]:
+    cached = st.session_state.get("intel_tracking_last_good_records", [])
+    normalized_cached = _normalize_tracking_records(cached if isinstance(cached, list) else [])
+    if normalized_cached:
+        return normalized_cached
+    return _read_tracking_records_from_snapshot()
+
+
 def _read_tracking_records_from_sqlite() -> list[dict[str, object]]:
     try:
         _ensure_study_db()
@@ -2920,6 +2959,9 @@ def _load_tracking_records_persistent() -> tuple[list[dict[str, object]], str, s
 
     if merged and merged != sqlite_records:
         _write_tracking_records_to_sqlite(merged)
+    if merged:
+        _write_tracking_records_to_snapshot(merged)
+        _remember_tracking_last_good(merged)
 
     backend = "sqlite"
     status = "Seguimiento cargado desde SQLite local."
@@ -2931,17 +2973,36 @@ def _load_tracking_records_persistent() -> tuple[list[dict[str, object]], str, s
             if sync_err:
                 status = f"Seguimiento cargado (local) pero Sheets no sincronizo: {sync_err}"
     elif sheet_error:
-        status = f"Seguimiento cargado localmente (Sheets no disponible: {sheet_error})"
+        fallback = _tracking_fallback_records()
+        if fallback:
+            merged = fallback
+            backend = "snapshot"
+            status = (
+                f"Seguimiento cargado desde ultimo snapshot valido "
+                f"(Sheets no disponible: {sheet_error})"
+            )
+            try:
+                _write_tracking_records_to_sqlite(merged)
+            except Exception:
+                pass
+            _remember_tracking_last_good(merged)
+        else:
+            status = f"Seguimiento cargado localmente (Sheets no disponible: {sheet_error})"
 
     return merged, backend, status
 
 
 def _persist_tracking_records(records: list[dict[str, object]]) -> tuple[bool, str]:
     normalized = _normalize_tracking_records(records)
+    _remember_tracking_last_good(normalized)
     try:
         _write_tracking_records_to_sqlite(normalized)
     except Exception as exc:
         return False, f"No se pudo guardar seguimiento en SQLite: {exc}"
+    try:
+        _write_tracking_records_to_snapshot(normalized)
+    except Exception:
+        pass
 
     sheet_error = _write_tracking_records_to_sheets(normalized)
     if sheet_error:
