@@ -2081,6 +2081,20 @@ def _intel_backup_settings() -> dict[str, object]:
     }
 
 
+def _refresh_intel_backup_meta(creds) -> None:
+    cfg = _intel_backup_settings()
+    try:
+        name, ts_local = get_last_backup_info(
+            creds,
+            prefix=str(cfg["prefix"]),
+            folder_id=str(cfg["folder_id"]),
+        )
+    except Exception:
+        name, ts_local = None, None
+    st.session_state["intel_backup_last_name"] = name or ""
+    st.session_state["intel_backup_last_ts"] = ts_local.isoformat() if ts_local is not None else ""
+
+
 def _start_intel_backup_once() -> None:
     if st.session_state.get("intel_backup_started", False):
         return
@@ -2103,6 +2117,7 @@ def _start_intel_backup_once() -> None:
             every_days=cfg["every_days"],
             frequency=str(cfg["frequency"]),
         )
+        _refresh_intel_backup_meta(creds)
         st.session_state["intel_backup_started"] = True
         st.session_state["intel_backup_status"] = "Respaldo automático de Inteligencia verificado."
     except Exception as exc:
@@ -2132,6 +2147,7 @@ def _render_intel_backup_panel() -> None:
                         folder_id=str(cfg["folder_id"]),
                     )
                     if bk:
+                        _refresh_intel_backup_meta(creds)
                         st.session_state["intel_backup_status"] = f"Respaldo creado: {bk.name}"
                         st.success(f"Respaldo creado: {bk.name}")
                     else:
@@ -2139,17 +2155,14 @@ def _render_intel_backup_panel() -> None:
                 except Exception as exc:
                     st.error(f"No se pudo crear el respaldo: {exc}")
         with col_bk2:
-            try:
-                from sheets import get_client
-
-                _, creds = get_client()
-                name, ts_local = get_last_backup_info(
-                    creds,
-                    prefix=str(cfg["prefix"]),
-                    folder_id=str(cfg["folder_id"]),
-                )
-            except Exception:
-                name, ts_local = None, None
+            name = _clean_text(st.session_state.get("intel_backup_last_name", ""))
+            ts_raw = _clean_text(st.session_state.get("intel_backup_last_ts", ""))
+            ts_local = None
+            if ts_raw:
+                try:
+                    ts_local = datetime.fromisoformat(ts_raw)
+                except Exception:
+                    ts_local = None
             if name and ts_local is not None:
                 st.caption(f"Ultimo respaldo: **{ts_local.strftime('%Y-%m-%d %H:%M')}** - *{name}*")
             else:
@@ -6734,12 +6747,21 @@ def _render_intel_recovery_panel() -> None:
                 with st.spinner("Reconstruyendo seguimiento desde tablas persistidas..."):
                     rebuilt, meta = _rebuild_tracking_from_study_sources(use_ranked_lookup=use_ranked)
                 if not rebuilt:
+                    st.session_state["intel_recovery_status"] = "No se encontraron fuentes suficientes para reconstruir seguimiento."
                     st.warning("No se encontraron fuentes persistidas suficientes para reconstruir seguimiento.")
                 else:
                     st.session_state["intel_fichas_estudio"] = rebuilt
                     ok, msg = _persist_tracking_records(rebuilt)
                     st.session_state["intel_tracking_status"] = msg
                     st.session_state["intel_tracking_backend"] = "sheets+sqlite" if ok else "sqlite"
+                    st.session_state["intel_recovery_status"] = (
+                        "Seguimiento reconstruido. "
+                        f"Fichas: {meta['rebuilt']} | runs: {meta['from_runs']} | "
+                        f"resumen: {meta['from_resumen']} | analisis: {meta['from_ap']} | "
+                        f"contactos: {meta['from_contacts']}."
+                    )
+                    st.session_state["intel_recovery_meta"] = meta
+                    st.session_state["intel_recovery_ts"] = datetime.now().isoformat(timespec="seconds")
                     st.success(
                         "Seguimiento reconstruido. "
                         f"Fichas: {meta['rebuilt']} | runs: {meta['from_runs']} | "
@@ -6748,7 +6770,50 @@ def _render_intel_recovery_panel() -> None:
                     )
                     st.rerun()
             except Exception as exc:
+                st.session_state["intel_recovery_status"] = f"No se pudo reconstruir seguimiento: {exc}"
                 st.error(f"No se pudo reconstruir seguimiento: {exc}")
+
+
+def _render_intel_status_panel() -> None:
+    tracking_status = str(st.session_state.get("intel_tracking_status", "") or "").strip()
+    study_status = str(st.session_state.get("intel_study_persist_status", "") or "").strip()
+    backup_status = str(st.session_state.get("intel_backup_status", "") or "").strip()
+    recovery_status = str(st.session_state.get("intel_recovery_status", "") or "").strip()
+    backup_name = _clean_text(st.session_state.get("intel_backup_last_name", ""))
+    backup_ts_raw = _clean_text(st.session_state.get("intel_backup_last_ts", ""))
+    recovery_ts_raw = _clean_text(st.session_state.get("intel_recovery_ts", ""))
+    diag = _tracking_recovery_diagnostics()
+    current_tracking = _normalize_tracking_records(st.session_state.get("intel_fichas_estudio", []))
+
+    backup_caption = "Sin respaldo registrado en esta sesion."
+    if backup_name and backup_ts_raw:
+        try:
+            backup_dt = datetime.fromisoformat(backup_ts_raw)
+            backup_caption = f"{backup_dt.strftime('%Y-%m-%d %H:%M')} - {backup_name}"
+        except Exception:
+            backup_caption = backup_name
+
+    recovery_caption = "Sin reconstruccion ejecutada en esta sesion."
+    if recovery_ts_raw:
+        try:
+            recovery_dt = datetime.fromisoformat(recovery_ts_raw)
+            recovery_caption = recovery_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            recovery_caption = recovery_ts_raw
+
+    st.markdown("### Ultimo estado del modulo")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Seguimiento visible", f"{len(current_tracking):,}")
+    c2.metric("Runs persistidos", f"{diag['estudio_runs']:,}")
+    c3.metric("Analisis persistidos", f"{diag['analisis_contexto']:,}")
+    c4.metric("Contactos persistidos", f"{diag['contactos']:,}")
+
+    st.caption(f"Seguimiento: {tracking_status or 'Sin estado cargado.'}")
+    st.caption(f"Persistencia estudios: {study_status or 'Sin estado de persistencia.'}")
+    st.caption(f"Respaldos: {backup_status or 'Sin estado de respaldo.'}")
+    st.caption(f"Ultimo respaldo detectado: {backup_caption}")
+    st.caption(f"Recuperacion: {recovery_status or 'Sin recuperacion ejecutada.'}")
+    st.caption(f"Ultima recuperacion: {recovery_caption}")
 
 
 def _build_ficha_name_lookup() -> dict[str, str]:
@@ -9199,6 +9264,7 @@ def _render_tab_resultado_final() -> None:
 st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
 _start_intel_backup_once()
+_render_intel_status_panel()
 _render_intel_backup_panel()
 _render_intel_recovery_panel()
 
