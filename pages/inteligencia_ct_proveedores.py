@@ -28,6 +28,11 @@ from sqlalchemy import create_engine
 
 from core.config import APP_ROOT, DB_PATH
 from services.auth_drive import get_drive_delegated
+from services.backups import (
+    create_backup_now,
+    get_last_backup_info,
+    start_backup_scheduler_once,
+)
 from ui.theme import apply_global_theme
 
 
@@ -2031,6 +2036,124 @@ def _intel_sheet_id() -> str:
         except Exception:
             pass
     return ""
+
+
+def _intel_backup_settings() -> dict[str, object]:
+    app_cfg = {}
+    try:
+        raw = st.secrets.get("app", {})
+        if isinstance(raw, Mapping):
+            app_cfg = dict(raw)
+    except Exception:
+        app_cfg = {}
+
+    def _cfg(key: str, fallback: str = "") -> str:
+        env_val = _clean_text(os.getenv(key, ""))
+        if env_val:
+            return env_val
+        app_val = _clean_text(app_cfg.get(key, ""))
+        if app_val:
+            return app_val
+        try:
+            root_val = _clean_text(st.secrets.get(key, ""))
+            if root_val:
+                return root_val
+        except Exception:
+            pass
+        return _clean_text(fallback)
+
+    folder_id = _cfg("INTEL_DRIVE_BACKUP_FOLDER_ID", _cfg("DRIVE_BACKUP_FOLDER_ID", ""))
+    prefix = _cfg("INTEL_BACKUP_PREFIX", "Inteligencia Backup")
+    keep_last_raw = _cfg("INTEL_BACKUP_KEEP_LAST", _cfg("BACKUP_KEEP_LAST", "15"))
+    every_days_raw = _cfg("INTEL_BACKUP_EVERY_DAYS", _cfg("BACKUP_EVERY_DAYS", "1"))
+    frequency = _cfg("INTEL_BACKUP_FREQUENCY", _cfg("BACKUP_FREQUENCY", ""))
+    try:
+        keep_last = max(1, int(keep_last_raw or 15))
+    except Exception:
+        keep_last = 15
+    every_days = every_days_raw or None
+    return {
+        "folder_id": folder_id,
+        "prefix": prefix or "Inteligencia Backup",
+        "keep_last": keep_last,
+        "every_days": every_days,
+        "frequency": frequency,
+    }
+
+
+def _start_intel_backup_once() -> None:
+    if st.session_state.get("intel_backup_started", False):
+        return
+    sheet_id = _intel_sheet_id()
+    if not sheet_id:
+        st.session_state["intel_backup_status"] = "Sin SHEET_ID para respaldo."
+        return
+    try:
+        from sheets import get_client
+
+        _, creds = get_client()
+        cfg = _intel_backup_settings()
+        start_backup_scheduler_once(
+            creds,
+            sheet_id,
+            scheduler_key="inteligencia",
+            prefix=str(cfg["prefix"]),
+            folder_id=str(cfg["folder_id"]),
+            keep_last=int(cfg["keep_last"]),
+            every_days=cfg["every_days"],
+            frequency=str(cfg["frequency"]),
+        )
+        st.session_state["intel_backup_started"] = True
+        st.session_state["intel_backup_status"] = "Respaldo automático de Inteligencia verificado."
+    except Exception as exc:
+        st.session_state["intel_backup_status"] = f"No se pudo iniciar respaldo automático: {exc}"
+
+
+def _render_intel_backup_panel() -> None:
+    cfg = _intel_backup_settings()
+    with st.expander("Respaldos Inteligencia", expanded=False):
+        if not str(cfg["folder_id"]).strip():
+            st.caption("Configura `INTEL_DRIVE_BACKUP_FOLDER_ID` o `DRIVE_BACKUP_FOLDER_ID` para habilitar respaldos en Drive.")
+        status_txt = str(st.session_state.get("intel_backup_status", "") or "").strip()
+        if status_txt:
+            st.caption(status_txt)
+
+        col_bk1, col_bk2 = st.columns([1, 3])
+        with col_bk1:
+            if st.button("Respaldar ahora", key="intel_backup_now", width="stretch"):
+                try:
+                    from sheets import get_client
+
+                    _, creds = get_client()
+                    bk = create_backup_now(
+                        creds,
+                        _intel_sheet_id(),
+                        prefix=str(cfg["prefix"]),
+                        folder_id=str(cfg["folder_id"]),
+                    )
+                    if bk:
+                        st.session_state["intel_backup_status"] = f"Respaldo creado: {bk.name}"
+                        st.success(f"Respaldo creado: {bk.name}")
+                    else:
+                        st.warning("No se pudo crear respaldo. Revisa la carpeta Drive configurada.")
+                except Exception as exc:
+                    st.error(f"No se pudo crear el respaldo: {exc}")
+        with col_bk2:
+            try:
+                from sheets import get_client
+
+                _, creds = get_client()
+                name, ts_local = get_last_backup_info(
+                    creds,
+                    prefix=str(cfg["prefix"]),
+                    folder_id=str(cfg["folder_id"]),
+                )
+            except Exception:
+                name, ts_local = None, None
+            if name and ts_local is not None:
+                st.caption(f"Ultimo respaldo: **{ts_local.strftime('%Y-%m-%d %H:%M')}** - *{name}*")
+            else:
+                st.caption("Aun no hay respaldos en la carpeta configurada.")
 
 
 def _pc_manual_sheet_id() -> str:
@@ -8806,6 +8929,8 @@ def _render_tab_resultado_final() -> None:
 
 st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
 st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
+_start_intel_backup_once()
+_render_intel_backup_panel()
 
 def _tab_requires_universe(tab_name: str) -> bool:
     return tab_name in {"Dashboard", "Detecc. fichas", "Estudio de fichas", "Analisis proveedores"}

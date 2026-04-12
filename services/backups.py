@@ -22,8 +22,8 @@ _KEEP_LAST     = int(_APP.get("BACKUP_KEEP_LAST", 15))
 _EVERY_DAYS = _APP.get("BACKUP_EVERY_DAYS", None)
 _FREQ       = (_APP.get("BACKUP_FREQUENCY") or "").lower()
 
-_STARTED = False  # evita doble ejecución por proceso
-_WARNED_FOLDER = False
+_STARTED_KEYS: set[str] = set()  # evita doble ejecución por proceso y por módulo
+_WARNED_FOLDER_KEYS: set[str] = set()
 
 
 def _notify(kind: str, message: str) -> None:
@@ -61,22 +61,23 @@ def _as_int_days(value) -> Optional[int]:
     except Exception:
         return None
 
-def _freq_delta() -> timedelta:
-    n = _as_int_days(_EVERY_DAYS)
+def _freq_delta(every_days=None, frequency: str | None = None) -> timedelta:
+    n = _as_int_days(_EVERY_DAYS if every_days is None else every_days)
     if n:
         return timedelta(days=n)
-    if _FREQ == "weekly":
+    freq = (_FREQ if frequency is None else str(frequency or "")).lower()
+    if freq == "weekly":
         return timedelta(days=7)
-    if _FREQ == "monthly":
+    if freq == "monthly":
         return timedelta(days=30)
     return timedelta(days=1)
 
-def _list_backups(drive, folder_id: str) -> List[BackupInfo]:
+def _list_backups(drive, folder_id: str, prefix: str) -> List[BackupInfo]:
     if not folder_id:
         return []
     q = (
         f"'{folder_id}' in parents and trashed=false "
-        f"and name contains '{_BACKUP_PREFIX}'"
+        f"and name contains '{prefix}'"
     )
     out: List[BackupInfo] = []
     token = None
@@ -131,13 +132,13 @@ def _delete_excess(drive, backups: List[BackupInfo], keep_last: int) -> int:
             _notify("warning", f"No se pudo eliminar el respaldo '{b.name}': {exc}")
     return removed
 
-def _copy_sheet(drive, source_sheet_id: str, folder_id: str) -> BackupInfo:
+def _copy_sheet(drive, source_sheet_id: str, folder_id: str, prefix: str) -> BackupInfo:
     """
     Crea una copia del Google Sheet dentro de la UNIDAD COMPARTIDA.
     En Shared Drives NO se transfiere propiedad: la "propiedad" la tiene la unidad.
     """
     now_local = datetime.now(tz=_TZ)
-    name = f"{_BACKUP_PREFIX} — {now_local.strftime('%Y-%m-%d %H%M')}"
+    name = f"{prefix} — {now_local.strftime('%Y-%m-%d %H%M')}"
 
     body = {"name": name, "parents": [folder_id]}
     resp = drive.files().copy(
@@ -150,29 +151,69 @@ def _copy_sheet(drive, source_sheet_id: str, folder_id: str) -> BackupInfo:
     ct = datetime.fromisoformat(resp["createdTime"].replace("Z", "+00:00"))
     return BackupInfo(id=resp["id"], name=resp["name"], created_utc=ct)
 
-def auto_backup_if_due(creds, sheet_id: str) -> Optional[BackupInfo]:
+def _resolve_backup_config(
+    *,
+    prefix: str | None = None,
+    folder_id: str | None = None,
+    keep_last: int | None = None,
+    every_days=None,
+    frequency: str | None = None,
+):
+    resolved_prefix = str(prefix or _BACKUP_PREFIX).strip() or "Respaldo"
+    resolved_folder_id = str(folder_id or _FOLDER_ID).strip()
+    try:
+        resolved_keep_last = int(keep_last if keep_last is not None else _KEEP_LAST)
+    except Exception:
+        resolved_keep_last = _KEEP_LAST
+    if resolved_keep_last <= 0:
+        resolved_keep_last = _KEEP_LAST
+    return {
+        "prefix": resolved_prefix,
+        "folder_id": resolved_folder_id,
+        "keep_last": resolved_keep_last,
+        "delta": _freq_delta(every_days=every_days, frequency=frequency),
+    }
+
+
+def auto_backup_if_due(
+    creds,
+    sheet_id: str,
+    *,
+    prefix: str | None = None,
+    folder_id: str | None = None,
+    keep_last: int | None = None,
+    every_days=None,
+    frequency: str | None = None,
+) -> Optional[BackupInfo]:
     """Crea respaldo solo si NO existe uno dentro de la ventana (N días)."""
-    global _WARNED_FOLDER
-    if not _FOLDER_ID:
-        if not _WARNED_FOLDER:
+    cfg = _resolve_backup_config(
+        prefix=prefix,
+        folder_id=folder_id,
+        keep_last=keep_last,
+        every_days=every_days,
+        frequency=frequency,
+    )
+    warn_key = f"{cfg['prefix']}|{cfg['folder_id'] or '(sin_folder)'}"
+    if not cfg["folder_id"]:
+        if warn_key not in _WARNED_FOLDER_KEYS:
             _notify("warning", "Falta DRIVE_BACKUP_FOLDER_ID en secrets.app; no se ejecutarán respaldos automáticos.")
-            _WARNED_FOLDER = True
+            _WARNED_FOLDER_KEYS.add(warn_key)
         return None
     try:
         drive = _drive(creds)
-        backups = _list_backups(drive, _FOLDER_ID)
-        delta = _freq_delta()
+        backups = _list_backups(drive, cfg["folder_id"], cfg["prefix"])
+        delta = cfg["delta"]
 
         now_utc = datetime.now(timezone.utc)
         if backups:
             last = backups[0]
             if (now_utc - last.created_utc) < delta:
-                _delete_excess(drive, backups, _KEEP_LAST)
+                _delete_excess(drive, backups, cfg["keep_last"])
                 return None
 
-        new_bk = _copy_sheet(drive, sheet_id, _FOLDER_ID)
-        backups = _list_backups(drive, _FOLDER_ID)
-        _delete_excess(drive, backups, _KEEP_LAST)
+        new_bk = _copy_sheet(drive, sheet_id, cfg["folder_id"], cfg["prefix"])
+        backups = _list_backups(drive, cfg["folder_id"], cfg["prefix"])
+        _delete_excess(drive, backups, cfg["keep_last"])
         return new_bk
     except HttpError as exc:
         _notify("error", f"Fallo en la copia automática del respaldo: {exc}")
@@ -180,27 +221,46 @@ def auto_backup_if_due(creds, sheet_id: str) -> Optional[BackupInfo]:
         _notify("error", f"Error inesperado al crear el respaldo: {exc}")
     return None
 
-def start_backup_scheduler_once(creds, sheet_id: str):
+def start_backup_scheduler_once(
+    creds,
+    sheet_id: str,
+    *,
+    scheduler_key: str | None = None,
+    prefix: str | None = None,
+    folder_id: str | None = None,
+    keep_last: int | None = None,
+    every_days=None,
+    frequency: str | None = None,
+):
     """
     Idempotente: chequea y respalda si 'toca', una sola vez por proceso.
     """
-    global _STARTED
-    if _STARTED:
+    key = str(scheduler_key or f"{prefix or _BACKUP_PREFIX}|{folder_id or _FOLDER_ID}|{sheet_id}").strip()
+    if key in _STARTED_KEYS:
         return
-    _STARTED = True
+    _STARTED_KEYS.add(key)
     try:
-        created = auto_backup_if_due(creds, sheet_id)
+        created = auto_backup_if_due(
+            creds,
+            sheet_id,
+            prefix=prefix,
+            folder_id=folder_id,
+            keep_last=keep_last,
+            every_days=every_days,
+            frequency=frequency,
+        )
         if created:
             _notify("info", f"Respaldo automático creado: {created.name}")
     except Exception as e:  # pragma: no cover - fallback
         _notify("error", f"Error en respaldo automático: {e}")
 
-def get_last_backup_info(creds) -> Tuple[Optional[str], Optional[datetime]]:
-    if not _FOLDER_ID:
+def get_last_backup_info(creds, *, prefix: str | None = None, folder_id: str | None = None) -> Tuple[Optional[str], Optional[datetime]]:
+    cfg = _resolve_backup_config(prefix=prefix, folder_id=folder_id)
+    if not cfg["folder_id"]:
         return None, None
     try:
         drive = _drive(creds)
-        backups = _list_backups(drive, _FOLDER_ID)
+        backups = _list_backups(drive, cfg["folder_id"], cfg["prefix"])
         if not backups:
             return None, None
         last = backups[0]
@@ -208,17 +268,24 @@ def get_last_backup_info(creds) -> Tuple[Optional[str], Optional[datetime]]:
     except Exception:
         return None, None
 
-def create_backup_now(creds, sheet_id: str) -> Optional[BackupInfo]:
+def create_backup_now(
+    creds,
+    sheet_id: str,
+    *,
+    prefix: str | None = None,
+    folder_id: str | None = None,
+) -> Optional[BackupInfo]:
     """Botón manual."""
-    global _WARNED_FOLDER
-    if not _FOLDER_ID:
-        if not _WARNED_FOLDER:
+    cfg = _resolve_backup_config(prefix=prefix, folder_id=folder_id)
+    warn_key = f"{cfg['prefix']}|{cfg['folder_id'] or '(sin_folder)'}"
+    if not cfg["folder_id"]:
+        if warn_key not in _WARNED_FOLDER_KEYS:
             _notify("warning", "Configura DRIVE_BACKUP_FOLDER_ID en secrets.app para habilitar los respaldos.")
-            _WARNED_FOLDER = True
+            _WARNED_FOLDER_KEYS.add(warn_key)
         return None
     try:
         drive = _drive(creds)
-        return _copy_sheet(drive, sheet_id, _FOLDER_ID)
+        return _copy_sheet(drive, sheet_id, cfg["folder_id"], cfg["prefix"])
     except HttpError as exc:
         _notify("error", f"La API de Drive rechazó el respaldo manual: {exc}")
     except Exception as exc:  # pragma: no cover - fallback
