@@ -925,6 +925,47 @@ def _format_money_es(value) -> str:
     return f"${_format_number_es(value, 2)}"
 
 
+def _prepare_editor_df(
+    df: pd.DataFrame,
+    *,
+    text_cols: list[str] | None = None,
+    select_cols: list[str] | None = None,
+    date_cols: list[str] | None = None,
+    number_cols: list[str] | None = None,
+    formatted_number_text_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Fuerza tipos compatibles con st.data_editor.
+
+    Esto evita errores de compatibilidad en filtros que dejan la vista vacia:
+    Streamlit valida el dtype real de cada columna visible, incluso sin filas.
+    """
+    out = df.copy()
+
+    for col in date_cols or []:
+        if col in out.columns:
+            out[col] = _ts(out[col])
+
+    for col in number_cols or []:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0).astype(float)
+
+    text_like_cols = [*(text_cols or []), *(select_cols or [])]
+    if text_like_cols:
+        out = _ensure_text(out, [c for c in text_like_cols if c in out.columns])
+
+    for col in formatted_number_text_cols or []:
+        if col in out.columns:
+            out[col] = (
+                pd.to_numeric(out[col], errors="coerce")
+                .fillna(0.0)
+                .map(_format_number_es)
+                .astype("string")
+            )
+
+    return out
+
+
 def _parse_number_maybe_es(value) -> float:
     """Acepta 1500.00, 1,500.00, 1500,00, 1.500,00 y devuelve float."""
     if value is None:
@@ -4793,9 +4834,36 @@ ing_colcfg = {
     COL_ROWID:   st.column_config.TextColumn(COL_ROWID, disabled=True),
     COL_USER:    st.column_config.TextColumn(COL_USER, disabled=True),
 }
-df_ing_editor = df_ing_f[ing_cols_view].copy()
-if COL_MONTO in df_ing_editor.columns:
-    df_ing_editor[COL_MONTO] = df_ing_editor[COL_MONTO].map(_format_number_es)
+df_ing_editor = _prepare_editor_df(
+    df_ing_f[ing_cols_view].copy(),
+    text_cols=[
+        COL_DESC,
+        COL_EMP,
+        COL_ROWID,
+        COL_USER,
+        COL_ING_NAT,
+        COL_CTP_NOMBRE,
+        COL_PROY,
+        COL_CLI_ID,
+        COL_CLI_NOM,
+    ],
+    select_cols=[
+        COL_POR_COB,
+        COL_REC,
+        COL_REC_PER,
+        COL_REC_REG,
+        COL_REC_DUR,
+        COL_CAT,
+        COL_ING_DET,
+        COL_TRAT_BAL_ING,
+        COL_CTP_TIPO,
+        COL_FIN_TOGGLE,
+        COL_FIN_TIPO,
+    ],
+    date_cols=[COL_FECHA, COL_FCOBRO, COL_FCOBRO_REAL],
+    number_cols=[COL_COBRO_REAL_MONTO],
+    formatted_number_text_cols=[COL_MONTO],
+)
 ing_order = [x for x in [
     COL_FECHA, COL_MONTO, COL_CAT, COL_ING_DET, COL_ING_NAT, COL_TRAT_BAL_ING, COL_EMP,
     COL_POR_COB, COL_FCOBRO, COL_FCOBRO_REAL, COL_COBRO_REAL_MONTO, COL_CTP_TIPO, COL_CTP_NOMBRE,
@@ -6616,25 +6684,83 @@ gas_order = [x for x in [
 ] if x in gas_cols_view]
 
 edited_gas = st.data_editor(
-    (
-        lambda _df: (
-            _df.assign(**{COL_MONTO: _df[COL_MONTO].map(_format_number_es)})
-            if COL_MONTO in _df.columns
-            else _df
-        )
-    )(df_gas_f[gas_cols_view].copy()),
+    _prepare_editor_df(
+        df_gas_f[gas_cols_view].copy(),
+        text_cols=[
+            COL_GAS_SUB,
+            COL_INV_ITEM,
+            COL_CTP_NOMBRE,
+            COL_CONC,
+            COL_PROV,
+            COL_EMP,
+            COL_REF_RID,
+            COL_ROWID,
+            COL_USER,
+            COL_PROY,
+            COL_CLI_ID,
+            COL_CLI_NOM,
+        ],
+        select_cols=[
+            COL_POR_PAG,
+            COL_REC,
+            COL_REC_PER,
+            COL_REC_REG,
+            COL_REC_DUR,
+            COL_CAT,
+            COL_GAS_DET,
+            COL_TRAT_BAL_GAS,
+            COL_INV_MOV,
+            COL_CTP_TIPO,
+            COL_AF_TOGGLE,
+            COL_AF_DEP_TOGGLE,
+            COL_FIN_TOGGLE,
+            COL_FIN_TIPO,
+        ],
+        date_cols=[COL_FECHA, COL_FPAGO, COL_FPAGO_REAL, COL_INV_FEC_LLEGADA, COL_PREPAGO_FEC_INI],
+        number_cols=[COL_PAGO_REAL_MONTO, COL_PREPAGO_MESES],
+        formatted_number_text_cols=[COL_MONTO],
+    ),
     num_rows="dynamic", hide_index=True, width="stretch",
     column_config=gas_colcfg, key="tabla_gastos",
     column_order=gas_order
 )
 edited_gas = _editor_state_to_dataframe(
-    (
-        lambda _df: (
-            _df.assign(**{COL_MONTO: _df[COL_MONTO].map(_format_number_es)})
-            if COL_MONTO in _df.columns
-            else _df
-        )
-    )(df_gas_f[gas_cols_view].copy()),
+    _prepare_editor_df(
+        df_gas_f[gas_cols_view].copy(),
+        text_cols=[
+            COL_GAS_SUB,
+            COL_INV_ITEM,
+            COL_CTP_NOMBRE,
+            COL_CONC,
+            COL_PROV,
+            COL_EMP,
+            COL_REF_RID,
+            COL_ROWID,
+            COL_USER,
+            COL_PROY,
+            COL_CLI_ID,
+            COL_CLI_NOM,
+        ],
+        select_cols=[
+            COL_POR_PAG,
+            COL_REC,
+            COL_REC_PER,
+            COL_REC_REG,
+            COL_REC_DUR,
+            COL_CAT,
+            COL_GAS_DET,
+            COL_TRAT_BAL_GAS,
+            COL_INV_MOV,
+            COL_CTP_TIPO,
+            COL_AF_TOGGLE,
+            COL_AF_DEP_TOGGLE,
+            COL_FIN_TOGGLE,
+            COL_FIN_TIPO,
+        ],
+        date_cols=[COL_FECHA, COL_FPAGO, COL_FPAGO_REAL, COL_INV_FEC_LLEGADA, COL_PREPAGO_FEC_INI],
+        number_cols=[COL_PAGO_REAL_MONTO, COL_PREPAGO_MESES],
+        formatted_number_text_cols=[COL_MONTO],
+    ),
     "tabla_gastos",
     numeric_cols={COL_MONTO, COL_PAGO_REAL_MONTO, COL_PREPAGO_MESES},
 )
