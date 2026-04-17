@@ -538,11 +538,15 @@ def _autoderive_ing_df(df: pd.DataFrame) -> pd.DataFrame:
         _derive_ing_balance(cat, estado)
         for cat, estado in zip(out.loc[special_mask, COL_CAT], estado_series.loc[special_mask])
     ]
-    full_real_mask = out[COL_POR_COB].map(_si_no_norm).eq("No")
+    full_real_mask = _ensure_bool_mask(out[COL_POR_COB].map(_si_no_norm).eq("No"), index=out.index)
+    complete_partial_mask = _ensure_bool_mask(out[COL_POR_COB].map(_si_no_norm).ne("No"), index=out.index)
     complete_partial_mask = (
-        out[COL_POR_COB].map(_si_no_norm).ne("No")
-        & pd.to_numeric(out[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).ge(pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0))
-        & _ts(out[COL_FCOBRO_REAL]).notna()
+        complete_partial_mask
+        & _ensure_bool_mask(
+            pd.to_numeric(out[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).ge(pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0)),
+            index=out.index,
+        )
+        & _ensure_bool_mask(_ts(out[COL_FCOBRO_REAL]).notna(), index=out.index)
     )
     out.loc[complete_partial_mask, COL_POR_COB] = "No"
     full_cash_mask = (full_real_mask | complete_partial_mask) & ~factoring_mask
@@ -555,13 +559,17 @@ def _autoderive_gas_df(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_GAS_SUB] = out[COL_CAT].map(_derive_gas_sub)
     inv_mask = out[COL_CAT].astype(str).eq("Inversiones")
     out.loc[inv_mask, COL_TRAT_BAL_GAS] = "Inversion / participacion en otra empresa"
+    complete_partial_mask = _ensure_bool_mask(out[COL_POR_PAG].map(_si_no_norm).ne("No"), index=out.index)
     complete_partial_mask = (
-        out[COL_POR_PAG].map(_si_no_norm).ne("No")
-        & pd.to_numeric(out[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).ge(pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0))
-        & _ts(out[COL_FPAGO_REAL]).notna()
+        complete_partial_mask
+        & _ensure_bool_mask(
+            pd.to_numeric(out[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).ge(pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0)),
+            index=out.index,
+        )
+        & _ensure_bool_mask(_ts(out[COL_FPAGO_REAL]).notna(), index=out.index)
     )
     out.loc[complete_partial_mask, COL_POR_PAG] = "No"
-    full_paid_mask = out[COL_POR_PAG].map(_si_no_norm).eq("No")
+    full_paid_mask = _ensure_bool_mask(out[COL_POR_PAG].map(_si_no_norm).eq("No"), index=out.index)
     out.loc[full_paid_mask | complete_partial_mask, COL_PAGO_REAL_MONTO] = pd.to_numeric(out.loc[full_paid_mask | complete_partial_mask, COL_MONTO], errors="coerce").fillna(0.0)
     return ensure_gastos_columns(out)
 
@@ -1083,6 +1091,25 @@ def _ensure_text(df: pd.DataFrame, cols: list) -> pd.DataFrame:
             out[c] = out[c].astype("string").fillna("")
     return out
 
+
+def _ensure_bool_mask(values, *, index=None) -> pd.Series:
+    """Devuelve una mascara booleana pandas estable, sin depender de Arrow."""
+    if isinstance(values, pd.Series):
+        out = values.copy()
+        if index is not None and not out.index.equals(index):
+            out = pd.Series(out.to_numpy(), index=index)
+    else:
+        out = pd.Series(values, index=index)
+    try:
+        out = out.astype("boolean")
+    except Exception:
+        out = pd.Series(
+            [False if pd.isna(v) else bool(v) for v in out],
+            index=out.index,
+            dtype="boolean",
+        )
+    return out.fillna(False).astype(bool)
+
 def _canon_cols(df: pd.DataFrame) -> pd.DataFrame:
     """Normaliza nombres alternos hacia las columnas que usa tu app."""
     df = df.copy()
@@ -1195,7 +1222,7 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
     out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
     out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
-    rec_mask = out[COL_REC].map(_bool_from_toggle)
+    rec_mask = _ensure_bool_mask(out[COL_REC].map(_bool_from_toggle), index=out.index)
     out.loc[~rec_mask, COL_REC_PER] = ""
     out.loc[~rec_mask, COL_REC_REG] = ""
     out.loc[~rec_mask, COL_REC_DUR] = ""
@@ -1212,21 +1239,23 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
         for cat, estado in zip(out.loc[balance_mask, COL_CAT], estado_series.loc[balance_mask])
     ]
     total_ing = out[COL_MONTO].clip(lower=0.0)
-    factoring_mask = out[COL_FACT_DET].map(_has_factoring)
+    factoring_mask = _ensure_bool_mask(out[COL_FACT_DET].map(_has_factoring), index=out.index)
     partial_events_total = out[COL_ING_PARTIALS].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
     partial_events_total = pd.to_numeric(partial_events_total, errors="coerce").fillna(0.0).clip(lower=0.0)
-    out[COL_COBRO_REAL_MONTO] = partial_events_total.where(partial_events_total > 0, out[COL_COBRO_REAL_MONTO])
-    out.loc[partial_events_total > 0, COL_FCOBRO_REAL] = out.loc[partial_events_total > 0, COL_ING_PARTIALS].map(
+    partial_real_mask = _ensure_bool_mask(partial_events_total > 0, index=out.index)
+    out[COL_COBRO_REAL_MONTO] = partial_events_total.where(partial_real_mask, out[COL_COBRO_REAL_MONTO])
+    out.loc[partial_real_mask, COL_FCOBRO_REAL] = out.loc[partial_real_mask, COL_ING_PARTIALS].map(
         lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)
     )
-    full_cash_mask = out[COL_POR_COB].map(_si_no_norm).eq("No") & ~factoring_mask
+    full_cash_mask = _ensure_bool_mask(out[COL_POR_COB].map(_si_no_norm).eq("No"), index=out.index) & ~factoring_mask
     out.loc[full_cash_mask, COL_COBRO_REAL_MONTO] = total_ing.loc[full_cash_mask]
     out[COL_COBRO_REAL_MONTO] = out[COL_COBRO_REAL_MONTO].clip(upper=total_ing)
+    fin_mask = _ensure_bool_mask(out[COL_FIN_TOGGLE].map(_bool_from_toggle), index=out.index)
     fin_mask = (
-        out[COL_FIN_TOGGLE].map(_bool_from_toggle)
-        | out[COL_CAT].astype(str).eq("Financiamiento recibido")
-        | out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne("")
-        | out[COL_FIN_REG_TIPO].astype(str).str.strip().ne("")
+        fin_mask
+        | _ensure_bool_mask(out[COL_CAT].astype(str).eq("Financiamiento recibido"), index=out.index)
+        | _ensure_bool_mask(out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne(""), index=out.index)
+        | _ensure_bool_mask(out[COL_FIN_REG_TIPO].astype(str).str.strip().ne(""), index=out.index)
     )
     out.loc[~fin_mask, COL_FIN_TIPO] = ""
     out.loc[~fin_mask, COL_FIN_MONTO] = 0.0
@@ -1337,7 +1366,7 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[out[COL_REC_PER] == "Quincenal", COL_REC_PER] = "15nal"
     out.loc[out[COL_REC_PER].isin(["Bimestral", "Trimestral"]), COL_REC_PER] = "Mensual"
     out.loc[out[COL_REC_REG] == "Fin de mes", COL_REC_REG] = "Inicio de cada mes"
-    rec_mask = out[COL_REC].map(_bool_from_toggle)
+    rec_mask = _ensure_bool_mask(out[COL_REC].map(_bool_from_toggle), index=out.index)
     out.loc[~rec_mask, COL_REC_PER] = ""
     out.loc[~rec_mask, COL_REC_REG] = ""
     out.loc[~rec_mask, COL_REC_DUR] = ""
@@ -1351,25 +1380,27 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     total_gas = out[COL_MONTO].clip(lower=0.0)
     partial_events_total = out[COL_GAS_PARTIALS].map(lambda raw: sum(evt["monto"] for evt in _parse_partial_events(raw)))
     partial_events_total = pd.to_numeric(partial_events_total, errors="coerce").fillna(0.0).clip(lower=0.0)
-    out[COL_PAGO_REAL_MONTO] = partial_events_total.where(partial_events_total > 0, out[COL_PAGO_REAL_MONTO])
-    out.loc[partial_events_total > 0, COL_FPAGO_REAL] = out.loc[partial_events_total > 0, COL_GAS_PARTIALS].map(
+    partial_paid_mask = _ensure_bool_mask(partial_events_total > 0, index=out.index)
+    out[COL_PAGO_REAL_MONTO] = partial_events_total.where(partial_paid_mask, out[COL_PAGO_REAL_MONTO])
+    out.loc[partial_paid_mask, COL_FPAGO_REAL] = out.loc[partial_paid_mask, COL_GAS_PARTIALS].map(
         lambda raw: max((evt["fecha"] for evt in _parse_partial_events(raw)), default=pd.NaT)
     )
-    out.loc[out[COL_POR_PAG].map(_si_no_norm) == "No", COL_PAGO_REAL_MONTO] = total_gas.loc[out[COL_POR_PAG].map(_si_no_norm) == "No"]
+    full_paid_mask = _ensure_bool_mask(out[COL_POR_PAG].map(_si_no_norm).eq("No"), index=out.index)
+    out.loc[full_paid_mask, COL_PAGO_REAL_MONTO] = total_gas.loc[full_paid_mask]
     out[COL_PAGO_REAL_MONTO] = out[COL_PAGO_REAL_MONTO].clip(upper=total_gas)
-    prepago_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Anticipo / prepago")
+    prepago_mask = _ensure_bool_mask(out[COL_TRAT_BAL_GAS].astype(str).eq("Anticipo / prepago"), index=out.index)
     out.loc[~prepago_mask, COL_PREPAGO_MESES] = 0
     out.loc[~prepago_mask, COL_PREPAGO_FEC_INI] = pd.NaT
     out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_PREPAGO_FEC_INI] = out.loc[prepago_mask & out[COL_PREPAGO_FEC_INI].isna(), COL_FECHA]
-    inventory_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Inventario")
+    inventory_mask = _ensure_bool_mask(out[COL_TRAT_BAL_GAS].astype(str).eq("Inventario"), index=out.index)
     out.loc[~inventory_mask, COL_INV_MOV] = ""
     out.loc[~inventory_mask, COL_INV_ITEM] = ""
     out.loc[~inventory_mask, COL_INV_FEC_LLEGADA] = pd.NaT
     out.loc[inventory_mask & out[COL_INV_MOV].astype(str).str.strip().eq(""), COL_INV_MOV] = "Entrada"
-    inv_positive_mask = inventory_mask & out[COL_INV_MOV].astype(str).isin(INVENTORY_POSITIVE_MOVEMENTS)
+    inv_positive_mask = inventory_mask & _ensure_bool_mask(out[COL_INV_MOV].astype(str).isin(INVENTORY_POSITIVE_MOVEMENTS), index=out.index)
     out.loc[inv_positive_mask & out[COL_INV_FEC_LLEGADA].isna(), COL_INV_FEC_LLEGADA] = out.loc[inv_positive_mask & out[COL_INV_FEC_LLEGADA].isna(), COL_FECHA]
     out.loc[inventory_mask & ~out[COL_INV_MOV].astype(str).isin(INVENTORY_POSITIVE_MOVEMENTS), COL_INV_FEC_LLEGADA] = pd.NaT
-    af_mask = out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo")
+    af_mask = _ensure_bool_mask(out[COL_TRAT_BAL_GAS].astype(str).eq("Activo fijo"), index=out.index)
     out.loc[~af_mask, COL_AF_TOGGLE] = "No"
     out.loc[~af_mask, COL_AF_TIPO] = ""
     out.loc[~af_mask, COL_AF_VIDA] = 0
@@ -1377,10 +1408,11 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[~af_mask, COL_AF_VAL_RES] = 0.0
     out.loc[~af_mask, COL_AF_DEP_TOGGLE] = "No"
     out.loc[~af_mask, COL_AF_DEP_MENSUAL] = 0.0
+    fin_mask = _ensure_bool_mask(out[COL_FIN_TOGGLE].map(_bool_from_toggle), index=out.index)
     fin_mask = (
-        out[COL_FIN_TOGGLE].map(_bool_from_toggle)
-        | out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne("")
-        | out[COL_FIN_REG_TIPO].astype(str).str.strip().ne("")
+        fin_mask
+        | _ensure_bool_mask(out[COL_FIN_INSTRUMENTO].astype(str).str.strip().ne(""), index=out.index)
+        | _ensure_bool_mask(out[COL_FIN_REG_TIPO].astype(str).str.strip().ne(""), index=out.index)
     )
     out.loc[~fin_mask, COL_FIN_TIPO] = ""
     out.loc[~fin_mask, COL_FIN_MONTO] = 0.0
