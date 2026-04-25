@@ -618,8 +618,8 @@ def _autoderive_gas_df(df: pd.DataFrame) -> pd.DataFrame:
 def _validate_ing_df(df: pd.DataFrame) -> list[str]:
     errors: list[str] = []
     for idx, row in df.iterrows():
-        monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
-        monto_real = float(pd.to_numeric(pd.Series([row.get(COL_COBRO_REAL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
+        monto_real = float(_parse_number_maybe_es(row.get(COL_COBRO_REAL_MONTO, 0.0)))
         por_cobrar = _si_no_norm(row.get(COL_POR_COB, "No"))
         fecha_esp = _ts(row.get(COL_FCOBRO))
         fecha_real = _ts(row.get(COL_FCOBRO_REAL))
@@ -653,8 +653,8 @@ def _validate_ing_df(df: pd.DataFrame) -> list[str]:
 def _validate_gas_df(df: pd.DataFrame) -> list[str]:
     errors: list[str] = []
     for idx, row in df.iterrows():
-        monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
-        monto_real = float(pd.to_numeric(pd.Series([row.get(COL_PAGO_REAL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
+        monto_real = float(_parse_number_maybe_es(row.get(COL_PAGO_REAL_MONTO, 0.0)))
         por_pagar = _si_no_norm(row.get(COL_POR_PAG, "No"))
         fecha_esp = _ts(row.get(COL_FPAGO))
         fecha_real = _ts(row.get(COL_FPAGO_REAL))
@@ -997,7 +997,7 @@ def _prepare_editor_df(
 
     for col in number_cols or []:
         if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0).astype(float)
+            out[col] = out[col].map(_parse_number_maybe_es).astype(float)
 
     text_like_cols = [*(text_cols or []), *(select_cols or [])]
     if text_like_cols:
@@ -1006,8 +1006,8 @@ def _prepare_editor_df(
     for col in formatted_number_text_cols or []:
         if col in out.columns:
             out[col] = (
-                pd.to_numeric(out[col], errors="coerce")
-                .fillna(0.0)
+                out[col]
+                .map(_parse_number_maybe_es)
                 .map(_format_number_es)
                 .astype("string")
             )
@@ -1235,10 +1235,10 @@ def ensure_ingresos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_FCOBRO_REAL] = _ts(out[COL_FCOBRO_REAL])
     out[COL_REC_HASTA] = _ts(out[COL_REC_HASTA])
     out[COL_FIN_FEC_INI] = _ts(out[COL_FIN_FEC_INI])
-    out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
-    out[COL_COBRO_REAL_MONTO] = pd.to_numeric(out[COL_COBRO_REAL_MONTO], errors="coerce").fillna(0.0).clip(lower=0.0).astype(float)
-    out[COL_FIN_MONTO] = pd.to_numeric(out[COL_FIN_MONTO], errors="coerce").fillna(0.0).astype(float)
-    out[COL_FIN_TASA] = pd.to_numeric(out[COL_FIN_TASA], errors="coerce").fillna(0.0).astype(float)
+    out[COL_MONTO] = out[COL_MONTO].map(_parse_number_maybe_es).astype(float)
+    out[COL_COBRO_REAL_MONTO] = out[COL_COBRO_REAL_MONTO].map(_parse_number_maybe_es).clip(lower=0.0).astype(float)
+    out[COL_FIN_MONTO] = out[COL_FIN_MONTO].map(_parse_number_maybe_es).astype(float)
+    out[COL_FIN_TASA] = out[COL_FIN_TASA].map(_parse_number_maybe_es).astype(float)
     out[COL_FIN_PLAZO] = pd.to_numeric(out[COL_FIN_PLAZO], errors="coerce").fillna(0).astype(int)
     out[COL_REC_CANT] = pd.to_numeric(out[COL_REC_CANT], errors="coerce").fillna(0).astype(int)
     out[COL_EMP] = out[COL_EMP].astype("string").str.upper().str.strip().where(
@@ -1374,12 +1374,12 @@ def ensure_gastos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out[COL_INV_FEC_LLEGADA] = _ts(out[COL_INV_FEC_LLEGADA])
     out[COL_AF_FEC_INI] = _ts(out[COL_AF_FEC_INI])
     out[COL_FIN_FEC_INI] = _ts(out[COL_FIN_FEC_INI])
-    out[COL_MONTO] = pd.to_numeric(out[COL_MONTO], errors="coerce").fillna(0.0).astype(float)
-    out[COL_PAGO_REAL_MONTO] = pd.to_numeric(out[COL_PAGO_REAL_MONTO], errors="coerce").fillna(0.0).clip(lower=0.0).astype(float)
-    out[COL_AF_VAL_RES] = pd.to_numeric(out[COL_AF_VAL_RES], errors="coerce").fillna(0.0).astype(float)
-    out[COL_AF_DEP_MENSUAL] = pd.to_numeric(out[COL_AF_DEP_MENSUAL], errors="coerce").fillna(0.0).astype(float)
-    out[COL_FIN_MONTO] = pd.to_numeric(out[COL_FIN_MONTO], errors="coerce").fillna(0.0).astype(float)
-    out[COL_FIN_TASA] = pd.to_numeric(out[COL_FIN_TASA], errors="coerce").fillna(0.0).astype(float)
+    out[COL_MONTO] = out[COL_MONTO].map(_parse_number_maybe_es).astype(float)
+    out[COL_PAGO_REAL_MONTO] = out[COL_PAGO_REAL_MONTO].map(_parse_number_maybe_es).clip(lower=0.0).astype(float)
+    out[COL_AF_VAL_RES] = out[COL_AF_VAL_RES].map(_parse_number_maybe_es).astype(float)
+    out[COL_AF_DEP_MENSUAL] = out[COL_AF_DEP_MENSUAL].map(_parse_number_maybe_es).astype(float)
+    out[COL_FIN_MONTO] = out[COL_FIN_MONTO].map(_parse_number_maybe_es).astype(float)
+    out[COL_FIN_TASA] = out[COL_FIN_TASA].map(_parse_number_maybe_es).astype(float)
     out[COL_FIN_PLAZO] = pd.to_numeric(out[COL_FIN_PLAZO], errors="coerce").fillna(0).astype(int)
     out[COL_REC_CANT] = pd.to_numeric(out[COL_REC_CANT], errors="coerce").fillna(0).astype(int)
     out[COL_PREPAGO_MESES] = pd.to_numeric(out[COL_PREPAGO_MESES], errors="coerce").fillna(0).astype(int)
@@ -5102,7 +5102,7 @@ with st.expander("Registrar cobro parcial", expanded=False):
                 events = _seed_partial_events_from_row(row, COL_COBRO_REAL_MONTO, COL_FCOBRO_REAL)
                 events.append({"fecha": _ts(fecha_parcial), "monto": float(monto_parcial), "nota": str(nota_parcial or "").strip()})
                 total_real, last_real = _partial_events_summary(events)
-                total_monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+                total_monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
                 total_real = min(total_real, total_monto)
                 updated.loc[mask, COL_ING_PARTIALS] = _serialize_partial_events(events)
                 updated.loc[mask, COL_COBRO_REAL_MONTO] = total_real
@@ -5639,7 +5639,7 @@ def _apply_card_payment(updated_df: pd.DataFrame, card_name: str, fecha_pago, mo
             }
         )
         total_real, last_real = _partial_events_summary(events)
-        total_monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        total_monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
         total_real = min(total_real, total_monto)
         work.loc[idx, COL_GAS_PARTIALS] = _serialize_partial_events(events)
         work.loc[idx, COL_PAGO_REAL_MONTO] = total_real
@@ -6987,7 +6987,7 @@ with st.expander("Registrar pago parcial", expanded=False):
                 events = _seed_partial_events_from_row(row, COL_PAGO_REAL_MONTO, COL_FPAGO_REAL)
                 events.append({"fecha": _ts(fecha_parcial), "monto": float(monto_parcial), "nota": str(nota_parcial or "").strip()})
                 total_real, last_real = _partial_events_summary(events)
-                total_monto = float(pd.to_numeric(pd.Series([row.get(COL_MONTO, 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+                total_monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
                 total_real = min(total_real, total_monto)
                 updated.loc[mask, COL_GAS_PARTIALS] = _serialize_partial_events(events)
                 updated.loc[mask, COL_PAGO_REAL_MONTO] = total_real
