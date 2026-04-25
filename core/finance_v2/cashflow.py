@@ -120,7 +120,12 @@ def _build_cash_movements(df_ing_real: pd.DataFrame, df_gas_real: pd.DataFrame) 
     return out
 
 
-def build_cashflow_actual(df_ing_real: pd.DataFrame, df_gas_real: pd.DataFrame) -> dict:
+def build_cashflow_actual(
+    df_ing_real: pd.DataFrame,
+    df_gas_real: pd.DataFrame,
+    *,
+    saldo_inicial: float = 0.0,
+) -> dict:
     mov = _build_cash_movements(df_ing_real, df_gas_real)
     if mov.empty:
         empty = pd.DataFrame(columns=[COL_FECHA, "flujo", "saldo"])
@@ -131,12 +136,12 @@ def build_cashflow_actual(df_ing_real: pd.DataFrame, df_gas_real: pd.DataFrame) 
                 "entradas_reales": 0.0,
                 "salidas_reales": 0.0,
                 "flujo_neto": 0.0,
-                "efectivo_actual": 0.0,
+                "efectivo_actual": float(saldo_inicial),
             },
         }
 
     diario = mov.groupby(pd.Grouper(key=COL_FECHA, freq="D"))["flujo"].sum().reset_index()
-    diario["saldo"] = diario["flujo"].cumsum()
+    diario["saldo"] = diario["flujo"].cumsum() + float(saldo_inicial)
 
     entradas = float(mov.loc[mov["flujo"] > 0, "flujo"].sum())
     salidas = float(abs(mov.loc[mov["flujo"] < 0, "flujo"].sum()))

@@ -44,6 +44,7 @@ from services.backups import (
     get_last_backup_info,
     create_backup_now,  
 )
+from services.finance_opening import get_finance_opening_config, opening_amount_for_filter
 
 from gspread.exceptions import APIError, WorksheetNotFound
 
@@ -398,6 +399,33 @@ FIN_RATE_TYPE_OPTIONS = ["Mensual", "Anual"]
 FIN_MODALITY_OPTIONS = ["Cuotas periodicas", "Pago unico al vencimiento"]
 AF_TYPE_OPTIONS = ["Tangible", "Intangible"]
 AF_LIFE_OPTIONS = [1, 3, 5, 7, 10]
+
+
+def _apply_empresa_filter(df: pd.DataFrame, empresa: str) -> pd.DataFrame:
+    if df is None or df.empty or empresa == "Todas" or COL_EMP not in df.columns:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    out = df.copy()
+    return out[out[COL_EMP].astype(str).str.upper().str.strip() == empresa.upper()].copy()
+
+
+def _filter_position_scope(
+    df: pd.DataFrame,
+    *,
+    empresa: str,
+    fecha_hasta: date,
+    fecha_desde: date | None = None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=(df.columns if isinstance(df, pd.DataFrame) else []))
+    out = _apply_empresa_filter(df, empresa)
+    if COL_FECHA not in out.columns:
+        return out
+    out = out.copy()
+    out[COL_FECHA] = _ts(out[COL_FECHA])
+    if fecha_desde is not None:
+        out = out[out[COL_FECHA] >= pd.Timestamp(fecha_desde)]
+    out = out[out[COL_FECHA] <= pd.Timestamp(fecha_hasta)]
+    return out.copy()
 
 ING_CATEGORY_HELP = {
     "Proyectos": "Que entra: cobros principales del negocio. Ejemplos: suministro hospitalario; mantenimiento de equipos.",
@@ -4051,7 +4079,8 @@ df_gas_before = st.session_state.df_gas.copy()
 
 
 # -------------------- Filtros + Buscador + Empresa --------------------
-default_desde = date(date.today().year, 1, 1)
+opening_cfg = get_finance_opening_config()
+default_desde = min(opening_cfg.effective_date, _today())
 default_hasta = _today()
 
 with st.sidebar:
@@ -4141,35 +4170,73 @@ with k2:
     )
 
 # ---- Flujo y saldo actual ----
-cash = preparar_cashflow(df_ing_f, df_gas_f)
-saldo_actual = float(cash["Saldo"].iloc[-1]) if not cash.empty else 0.0
+opening_cash = opening_amount_for_filter(opening_cfg.cash_by_company, filtro_empresa)
+opening_cxc = opening_amount_for_filter(opening_cfg.cxc_by_company, filtro_empresa)
+opening_active = pd.Timestamp(f_hasta) >= pd.Timestamp(opening_cfg.effective_date)
+opening_cash_position = opening_cash if opening_active else 0.0
+opening_cxc_position = opening_cxc if opening_active else 0.0
 
-# KPI: Capital actual + CxC futuras + CxP activas
+df_ing_cash = _filter_position_scope(
+    st.session_state.df_ing,
+    empresa=filtro_empresa,
+    fecha_hasta=f_hasta,
+    fecha_desde=opening_cfg.effective_date if opening_active else None,
+)
+df_gas_cash = _filter_position_scope(
+    st.session_state.df_gas,
+    empresa=filtro_empresa,
+    fecha_hasta=f_hasta,
+    fecha_desde=opening_cfg.effective_date if opening_active else None,
+)
+cash = preparar_cashflow(df_ing_cash, df_gas_cash, saldo_inicial=opening_cash_position)
+saldo_actual = float(cash["Saldo"].iloc[-1]) if not cash.empty else float(opening_cash_position)
+
+df_ing_pos = _filter_position_scope(
+    st.session_state.df_ing,
+    empresa=filtro_empresa,
+    fecha_hasta=f_hasta,
+    fecha_desde=opening_cfg.effective_date if opening_active else None,
+)
+df_gas_pos = _filter_position_scope(
+    st.session_state.df_gas,
+    empresa=filtro_empresa,
+    fecha_hasta=f_hasta,
+    fecha_desde=None if opening_cfg.preserve_existing_cxp else opening_cfg.effective_date,
+)
+
+# KPI: Capital actual + CxC abiertas + CxP activas
 cxp_activas = (
     float(
         (
-            pd.to_numeric(df_gas_f.get(COL_MONTO), errors="coerce").fillna(0.0)
-            - pd.to_numeric(df_gas_f.get(COL_PAGO_REAL_MONTO), errors="coerce").fillna(0.0)
+            pd.to_numeric(df_gas_pos.get(COL_MONTO), errors="coerce").fillna(0.0)
+            - pd.to_numeric(df_gas_pos.get(COL_PAGO_REAL_MONTO), errors="coerce").fillna(0.0)
         ).clip(lower=0.0).sum()
     )
-    if not df_gas_f.empty
+    if not df_gas_pos.empty
     else 0.0
 )
 cxc_futuras = (
-    float(
-        (
-            pd.to_numeric(df_ing_f.get(COL_MONTO), errors="coerce").fillna(0.0)
-            - pd.to_numeric(df_ing_f.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0)
-        ).clip(lower=0.0).sum()
+    opening_cxc_position
+    + (
+        float(
+            (
+                pd.to_numeric(df_ing_pos.get(COL_MONTO), errors="coerce").fillna(0.0)
+                - pd.to_numeric(df_ing_pos.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0)
+            ).clip(lower=0.0).sum()
+        )
+        if not df_ing_pos.empty
+        else 0.0
     )
-    if not df_ing_f.empty
-    else 0.0
 )
 
 k1, k2, k3 = st.columns(3)
 with k1: st.metric("Capital actual", _format_money_es(saldo_actual))
 with k2: st.metric("Cuentas por cobrar", _format_money_es(cxc_futuras))
 with k3: st.metric("Cuentas por pagar", _format_money_es(cxp_activas))
+st.caption(
+    f"Apertura financiera vigente desde {opening_cfg.effective_date.isoformat()}. "
+    "`Capital actual` usa saldo inicial por empresa; `CxC` parte en 0; `CxP` conserva pendientes registrados."
+)
 
 with st.expander("Informacion de interes", expanded=False):
     st.markdown("#### Reportes")

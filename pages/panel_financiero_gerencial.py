@@ -8,6 +8,7 @@ from datetime import date, timedelta
 import altair as alt
 import pandas as pd
 import streamlit as st
+from services.finance_opening import get_finance_opening_config, opening_amount_for_filter
 
 from core.finance_v2 import constants as f2c
 from core.finance_v2.analysis import (
@@ -362,6 +363,7 @@ def _build_balance_snapshots(
     period_label: str,
     fecha_desde: date,
     fecha_hasta: date,
+    efectivo_inicial: float = 0.0,
 ) -> pd.DataFrame:
     freq = _freq_from_period_label(period_label)
     start = pd.Timestamp(fecha_desde)
@@ -383,7 +385,7 @@ def _build_balance_snapshots(
 
     rows: list[dict[str, object]] = []
     for cutoff in cutoffs:
-        efectivo = float(mov.loc[mov[COL_FECHA] <= cutoff, "flujo"].sum()) if not mov.empty else 0.0
+        efectivo = float(efectivo_inicial + (mov.loc[mov[COL_FECHA] <= cutoff, "flujo"].sum() if not mov.empty else 0.0))
 
         # Supuesto gerencial: una cuenta pendiente existe desde fecha origen
         # hasta su fecha esperada; si no tiene fecha esperada, se mantiene abierta.
@@ -1260,6 +1262,8 @@ if fecha_desde > fecha_hasta:
     st.warning("El rango de fechas es invalido.")
     st.stop()
 
+opening_cfg = get_finance_opening_config()
+
 # Base de trabajo: mismos filtros de negocio (empresa/escenario/busqueda), con historico completo.
 scope_filters = GlobalFilters(
     fecha_desde=min_date,
@@ -1293,29 +1297,72 @@ else:
     }.get(balance_window_label, "Mensual")
 
 # Flujos/KPIs del periodo operativo visible (default: mes actual).
-ing_f = _filter_df_window(ing_scope, cash_desde, cash_hasta)
-gas_f = _filter_df_window(gas_scope, cash_desde, cash_hasta)
+opening_active_cash = pd.Timestamp(cash_hasta) >= pd.Timestamp(opening_cfg.effective_date)
+opening_active_balance = pd.Timestamp(balance_hasta) >= pd.Timestamp(opening_cfg.effective_date)
+opening_cash = opening_amount_for_filter(opening_cfg.cash_by_company, empresa)
+opening_cash_balance = opening_cash if opening_active_balance else 0.0
+opening_cash_period = opening_cash if opening_active_cash else 0.0
+opening_cxc = opening_amount_for_filter(opening_cfg.cxc_by_company, empresa)
+
+cash_scope_desde = max(cash_desde, opening_cfg.effective_date) if opening_active_cash else cash_desde
+ing_f = _filter_df_window(ing_scope, cash_scope_desde, cash_hasta)
+gas_f = _filter_df_window(gas_scope, cash_scope_desde, cash_hasta)
 split = split_real_vs_pending(ing_f, gas_f)
 
-# Proyeccion: usa historico completo pendiente.
-split_proj = split_real_vs_pending(ing_scope, gas_scope)
+# Saldos actuales: usa apertura + movimientos reales posteriores a la fecha de arranque.
+if opening_active_cash and cash_scope_desde > opening_cfg.effective_date:
+    cash_prev_end = cash_scope_desde - timedelta(days=1)
+    ing_cash_prev = _filter_df_window(ing_scope, opening_cfg.effective_date, cash_prev_end)
+    gas_cash_prev = _filter_df_window(gas_scope, opening_cfg.effective_date, cash_prev_end)
+    split_cash_prev = split_real_vs_pending(ing_cash_prev, gas_cash_prev)
+    cash_prev = build_cashflow_actual(
+        split_cash_prev["ing_real"],
+        split_cash_prev["gas_real"],
+        saldo_inicial=opening_cash_period,
+    )
+    saldo_inicial_periodo = float(cash_prev["metricas"]["efectivo_actual"])
+else:
+    saldo_inicial_periodo = float(opening_cash_period)
+
+# Proyeccion y CxC: parte desde apertura para no arrastrar cartera historica anterior.
+ing_scope_proj = (
+    _filter_df_window(ing_scope, opening_cfg.effective_date, max_date)
+    if opening_active_cash
+    else ing_scope.copy()
+)
+split_proj = split_real_vs_pending(ing_scope_proj, gas_scope)
 
 # Estado de resultados: periodo cerrado por defecto, editable por rango personalizado.
 ing_res = _filter_df_window(ing_scope, resultados_desde, resultados_hasta)
 gas_res = _filter_df_window(gas_scope, resultados_desde, resultados_hasta)
 
-# Balance: usa el historico completo para calcular correctamente el corte seleccionado.
-split_balance = split_real_vs_pending(ing_scope, gas_scope)
+# Balance: caja con apertura; CxC desde apertura; CxP conserva pendientes registrados.
+ing_balance = (
+    _filter_df_window(ing_scope, opening_cfg.effective_date, balance_hasta)
+    if opening_active_balance
+    else ing_scope.copy()
+)
+gas_balance_cash = (
+    _filter_df_window(gas_scope, opening_cfg.effective_date, balance_hasta)
+    if opening_active_balance
+    else gas_scope.copy()
+)
+split_balance = split_real_vs_pending(ing_balance, gas_scope)
+split_balance_cash = split_real_vs_pending(ing_balance, gas_balance_cash)
 
-cash_actual = build_cashflow_actual(split["ing_real"], split["gas_real"])
-cash_balance = build_cashflow_actual(split_balance["ing_real"], split_balance["gas_real"])
+cash_actual = build_cashflow_actual(split["ing_real"], split["gas_real"], saldo_inicial=saldo_inicial_periodo)
+cash_balance = build_cashflow_actual(
+    split_balance_cash["ing_real"],
+    split_balance_cash["gas_real"],
+    saldo_inicial=opening_cash_balance,
+)
 cxc_df = build_cuentas_por_cobrar(split_proj["ing_pend"])
 cxp_df, cxp_quality = build_cuentas_por_pagar(split_proj["gas_pend"])
-cxc_total = float(cxc_df["monto"].sum()) if not cxc_df.empty else 0.0
+cxc_total = (float(cxc_df["monto"].sum()) if not cxc_df.empty else 0.0) + float(opening_cxc if opening_active_cash else 0.0)
 cxp_total = float(cxp_df["monto"].sum()) if not cxp_df.empty else 0.0
 
 proyectado = build_cashflow_proyectado(
-    ing_scope,
+    ing_scope_proj,
     gas_scope,
     saldo_inicial=cash_actual["metricas"]["efectivo_actual"],
     granularidad="D",
@@ -1337,6 +1384,7 @@ balance_snapshots_summary = _build_balance_snapshots(
     period_label=balance_period_default,
     fecha_desde=balance_desde,
     fecha_hasta=balance_hasta,
+    efectivo_inicial=opening_cash_balance,
 )
 latest_balance_summary = (
     balance_snapshots_summary.sort_values("corte").iloc[-1].to_dict()
@@ -1401,6 +1449,10 @@ with st.sidebar:
 st.caption(
     "Reglas base: flujo de caja en base a cobrado/pagado; estado de resultados gerencial (no contable completo); "
     "balance general simplificado con informacion disponible."
+)
+st.caption(
+    f"Apertura financiera vigente desde {opening_cfg.effective_date.isoformat()}. "
+    "Caja parte de saldo inicial por empresa; CxC arranca en 0; CxP conserva pendientes registrados."
 )
 
 tab_a, tab_b, tab_c, tab_d, tab_e, tab_f, tab_g, tab_h, tab_i = st.tabs(

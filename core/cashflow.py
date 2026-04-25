@@ -109,7 +109,7 @@ def _extract_expense_movements(df_gas: pd.DataFrame) -> pd.DataFrame:
     return mov[mov["Monto"] != 0].reset_index(drop=True)
 
 
-def preparar_cashflow(df_ing: pd.DataFrame, df_gas: pd.DataFrame) -> pd.DataFrame:
+def preparar_cashflow(df_ing: pd.DataFrame, df_gas: pd.DataFrame, *, saldo_inicial: float = 0.0) -> pd.DataFrame:
     """
     Une ingresos (+) y gastos (-), agrupa por día y calcula saldo acumulado.
 
@@ -133,7 +133,7 @@ def preparar_cashflow(df_ing: pd.DataFrame, df_gas: pd.DataFrame) -> pd.DataFram
         return pd.DataFrame(columns=["Fecha", "Flujo", "Saldo"])
 
     diario = mov.groupby(mov["Fecha"].dt.date)["Monto"].sum().sort_index()
-    saldo = diario.cumsum()
+    saldo = diario.cumsum() + float(saldo_inicial)
 
     return pd.DataFrame(
         {
