@@ -167,6 +167,37 @@ def _series_to_csv_download(df: pd.DataFrame, filename: str, label: str):
     st.download_button(label, data=csv_data, file_name=filename, mime="text/csv")
 
 
+def _build_cashflow_actual_with_opening(
+    df_ing_real: pd.DataFrame,
+    df_gas_real: pd.DataFrame,
+    saldo_inicial: float,
+) -> dict:
+    try:
+        return build_cashflow_actual(df_ing_real, df_gas_real, saldo_inicial=saldo_inicial)
+    except TypeError:
+        out = build_cashflow_actual(df_ing_real, df_gas_real)
+        if not isinstance(out, dict):
+            return {
+                "movimientos": pd.DataFrame(columns=[COL_FECHA, COL_EMPRESA, "tipo", "flujo"]),
+                "serie": pd.DataFrame(columns=[COL_FECHA, "flujo", "saldo"]),
+                "metricas": {
+                    "entradas_reales": 0.0,
+                    "salidas_reales": 0.0,
+                    "flujo_neto": 0.0,
+                    "efectivo_actual": float(saldo_inicial),
+                },
+            }
+        serie = out.get("serie")
+        if isinstance(serie, pd.DataFrame) and not serie.empty and "saldo" in serie.columns:
+            serie = serie.copy()
+            serie["saldo"] = pd.to_numeric(serie["saldo"], errors="coerce").fillna(0.0) + float(saldo_inicial)
+            out["serie"] = serie
+        metricas = dict(out.get("metricas", {}) or {})
+        metricas["efectivo_actual"] = float(metricas.get("efectivo_actual", 0.0)) + float(saldo_inicial)
+        out["metricas"] = metricas
+        return out
+
+
 PERIOD_OPTIONS_CASH = ["Mensual", "Semanal", "Diario"]
 PERIOD_OPTIONS_RESULTS = ["Semestral", "Cuatrimestral", "Mensual", "Trimestral", "Anual"]
 PERIOD_OPTIONS_BALANCE = ["Mensual", "Cuatrimestral", "Anual"]
@@ -1315,10 +1346,10 @@ if opening_active_cash and cash_scope_desde > opening_cfg.effective_date:
     ing_cash_prev = _filter_df_window(ing_scope, opening_cfg.effective_date, cash_prev_end)
     gas_cash_prev = _filter_df_window(gas_scope, opening_cfg.effective_date, cash_prev_end)
     split_cash_prev = split_real_vs_pending(ing_cash_prev, gas_cash_prev)
-    cash_prev = build_cashflow_actual(
+    cash_prev = _build_cashflow_actual_with_opening(
         split_cash_prev["ing_real"],
         split_cash_prev["gas_real"],
-        saldo_inicial=opening_cash_period,
+        opening_cash_period,
     )
     saldo_inicial_periodo = float(cash_prev["metricas"]["efectivo_actual"])
 else:
@@ -1350,11 +1381,11 @@ gas_balance_cash = (
 split_balance = split_real_vs_pending(ing_balance, gas_scope)
 split_balance_cash = split_real_vs_pending(ing_balance, gas_balance_cash)
 
-cash_actual = build_cashflow_actual(split["ing_real"], split["gas_real"], saldo_inicial=saldo_inicial_periodo)
-cash_balance = build_cashflow_actual(
+cash_actual = _build_cashflow_actual_with_opening(split["ing_real"], split["gas_real"], saldo_inicial_periodo)
+cash_balance = _build_cashflow_actual_with_opening(
     split_balance_cash["ing_real"],
     split_balance_cash["gas_real"],
-    saldo_inicial=opening_cash_balance,
+    opening_cash_balance,
 )
 cxc_df = build_cuentas_por_cobrar(split_proj["ing_pend"])
 cxp_df, cxp_quality = build_cuentas_por_pagar(split_proj["gas_pend"])

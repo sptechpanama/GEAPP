@@ -427,6 +427,19 @@ def _filter_position_scope(
     out = out[out[COL_FECHA] <= pd.Timestamp(fecha_hasta)]
     return out.copy()
 
+
+def _prepare_cashflow_with_opening(df_ing: pd.DataFrame, df_gas: pd.DataFrame, saldo_inicial: float) -> pd.DataFrame:
+    try:
+        return preparar_cashflow(df_ing, df_gas, saldo_inicial=saldo_inicial)
+    except TypeError:
+        out = preparar_cashflow(df_ing, df_gas)
+        if out is None or out.empty:
+            return pd.DataFrame(columns=["Fecha", "Flujo", "Saldo"])
+        out = out.copy()
+        if "Saldo" in out.columns:
+            out["Saldo"] = pd.to_numeric(out["Saldo"], errors="coerce").fillna(0.0) + float(saldo_inicial)
+        return out
+
 ING_CATEGORY_HELP = {
     "Proyectos": "Que entra: cobros principales del negocio. Ejemplos: suministro hospitalario; mantenimiento de equipos.",
     "Oficina": "Que entra: reintegros o ingresos administrativos menores. Ejemplos: reintegro de caja chica; reembolso administrativo.",
@@ -4188,7 +4201,7 @@ df_gas_cash = _filter_position_scope(
     fecha_hasta=f_hasta,
     fecha_desde=opening_cfg.effective_date if opening_active else None,
 )
-cash = preparar_cashflow(df_ing_cash, df_gas_cash, saldo_inicial=opening_cash_position)
+cash = _prepare_cashflow_with_opening(df_ing_cash, df_gas_cash, opening_cash_position)
 saldo_actual = float(cash["Saldo"].iloc[-1]) if not cash.empty else float(opening_cash_position)
 
 df_ing_pos = _filter_position_scope(
