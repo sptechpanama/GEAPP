@@ -4248,7 +4248,7 @@ with k2: st.metric("Cuentas por cobrar", _format_money_es(cxc_futuras))
 with k3: st.metric("Cuentas por pagar", _format_money_es(cxp_activas))
 st.caption(
     f"Apertura financiera vigente desde {opening_cfg.effective_date.isoformat()}. "
-    "`Capital actual` usa saldo inicial por empresa; `CxC` parte en 0; `CxP` conserva pendientes registrados."
+    "`Capital actual` usa saldo inicial por empresa; `CxC` parte en 0; `CxP` solo cuenta pendientes desde la apertura."
 )
 
 with st.expander("Informacion de interes", expanded=False):

@@ -1304,6 +1304,11 @@ scope_filters = GlobalFilters(
     escenarios=escenarios_sel,
 )
 ing_scope, gas_scope = apply_global_filters(df_ing, df_gas, scope_filters)
+gas_scope_payables = (
+    _filter_df_window(gas_scope, opening_cfg.effective_date, max_date)
+    if (not opening_cfg.preserve_existing_cxp and pd.Timestamp(max_date) >= pd.Timestamp(opening_cfg.effective_date))
+    else gas_scope.copy()
+)
 
 if modo_tiempo == "Rango personalizado":
     cash_desde, cash_hasta = fecha_desde, fecha_hasta
@@ -1361,7 +1366,7 @@ ing_scope_proj = (
     if opening_active_cash
     else ing_scope.copy()
 )
-split_proj = split_real_vs_pending(ing_scope_proj, gas_scope)
+split_proj = split_real_vs_pending(ing_scope_proj, gas_scope_payables)
 
 # Estado de resultados: periodo cerrado por defecto, editable por rango personalizado.
 ing_res = _filter_df_window(ing_scope, resultados_desde, resultados_hasta)
@@ -1378,7 +1383,12 @@ gas_balance_cash = (
     if opening_active_balance
     else gas_scope.copy()
 )
-split_balance = split_real_vs_pending(ing_balance, gas_scope)
+gas_balance_payables = (
+    _filter_df_window(gas_scope, opening_cfg.effective_date, balance_hasta)
+    if (not opening_cfg.preserve_existing_cxp and opening_active_balance)
+    else gas_scope.copy()
+)
+split_balance = split_real_vs_pending(ing_balance, gas_balance_payables)
 split_balance_cash = split_real_vs_pending(ing_balance, gas_balance_cash)
 
 cash_actual = _build_cashflow_actual_with_opening(split["ing_real"], split["gas_real"], saldo_inicial_periodo)
@@ -1483,7 +1493,7 @@ st.caption(
 )
 st.caption(
     f"Apertura financiera vigente desde {opening_cfg.effective_date.isoformat()}. "
-    "Caja parte de saldo inicial por empresa; CxC arranca en 0; CxP conserva pendientes registrados."
+    "Caja parte de saldo inicial por empresa; CxC arranca en 0; CxP solo cuenta pendientes desde la apertura."
 )
 
 tab_a, tab_b, tab_c, tab_d, tab_e, tab_f, tab_g, tab_h, tab_i = st.tabs(

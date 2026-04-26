@@ -23,7 +23,7 @@ class FinanceOpeningConfig:
     effective_date: date
     cash_by_company: dict[str, float]
     cxc_by_company: dict[str, float]
-    preserve_existing_cxp: bool = True
+    preserve_existing_cxp: bool = False
 
 
 def _normalize_company_key(raw_value: str) -> str:
@@ -61,7 +61,7 @@ def get_finance_opening_config() -> FinanceOpeningConfig:
             app_cfg.get(f"FINANCE_OPENING_CXC_{key_suffix}", DEFAULT_FINANCE_OPENING_CXC.get(company, 0.0)),
             DEFAULT_FINANCE_OPENING_CXC.get(company, 0.0),
         )
-    preserve_existing_cxp = str(app_cfg.get("FINANCE_OPENING_PRESERVE_CXP", "true")).strip().lower() not in {
+    preserve_existing_cxp = str(app_cfg.get("FINANCE_OPENING_PRESERVE_CXP", "false")).strip().lower() not in {
         "0",
         "false",
         "no",
@@ -79,4 +79,3 @@ def opening_amount_for_filter(amounts_by_company: dict[str, float], empresa_filt
     if empresa in {"", "TODAS"}:
         return float(sum(float(v) for v in amounts_by_company.values()))
     return float(amounts_by_company.get(empresa, 0.0))
-
