@@ -415,6 +415,8 @@ def build_estado_resultados(
 
     ing_month = ingresos_resultado.copy()
     gas_month = gas_resultado.copy()
+    ing_month[COL_MONTO] = pd.to_numeric(_safe_series(ing_month, COL_MONTO, 0.0), errors="coerce").fillna(0.0)
+    gas_month[COL_MONTO] = pd.to_numeric(_safe_series(gas_month, COL_MONTO, 0.0), errors="coerce").fillna(0.0)
     ing_month["Mes"] = _safe_datetime_series(ing_month, COL_FECHA).dt.to_period("M")
     gas_month["Mes"] = _safe_datetime_series(gas_month, COL_FECHA).dt.to_period("M")
 
