@@ -393,17 +393,27 @@ def _projection_window(horizon_months: int, today_ref: date | None = None) -> tu
 
 
 def _opening_balance_components_for_filter(opening_cfg, empresa_filter: str) -> dict[str, float]:
+    loans_granted = getattr(opening_cfg, "loans_granted_by_company", {}) or {}
+    loans_received = getattr(opening_cfg, "loans_received_by_company", {}) or {}
+    inventory = getattr(opening_cfg, "inventory_by_company", {}) or {}
+    inventory_transit = getattr(opening_cfg, "inventory_transit_by_company", {}) or {}
+    prepayments = getattr(opening_cfg, "prepayments_by_company", {}) or {}
+    fixed_assets = getattr(opening_cfg, "fixed_assets_by_company", {}) or {}
+    investments = getattr(opening_cfg, "investments_by_company", {}) or {}
+    factoring_retained = getattr(opening_cfg, "factoring_retained_by_company", {}) or {}
+    capital = getattr(opening_cfg, "capital_by_company", {}) or {}
+    other_debts = getattr(opening_cfg, "other_debts_by_company", {}) or {}
     return {
-        "prestamos_otorgados": opening_amount_for_filter(opening_cfg.loans_granted_by_company, empresa_filter),
-        "prestamos_recibidos": opening_amount_for_filter(opening_cfg.loans_received_by_company, empresa_filter),
-        "inventario": opening_amount_for_filter(opening_cfg.inventory_by_company, empresa_filter),
-        "inventario_en_transito": opening_amount_for_filter(opening_cfg.inventory_transit_by_company, empresa_filter),
-        "anticipos_prepagos": opening_amount_for_filter(opening_cfg.prepayments_by_company, empresa_filter),
-        "activos_fijos_netos": opening_amount_for_filter(opening_cfg.fixed_assets_by_company, empresa_filter),
-        "inversiones_participaciones": opening_amount_for_filter(opening_cfg.investments_by_company, empresa_filter),
-        "factoring_retenido": opening_amount_for_filter(opening_cfg.factoring_retained_by_company, empresa_filter),
-        "aportes_capital": opening_amount_for_filter(opening_cfg.capital_by_company, empresa_filter),
-        "otras_deudas": opening_amount_for_filter(opening_cfg.other_debts_by_company, empresa_filter),
+        "prestamos_otorgados": opening_amount_for_filter(loans_granted, empresa_filter),
+        "prestamos_recibidos": opening_amount_for_filter(loans_received, empresa_filter),
+        "inventario": opening_amount_for_filter(inventory, empresa_filter),
+        "inventario_en_transito": opening_amount_for_filter(inventory_transit, empresa_filter),
+        "anticipos_prepagos": opening_amount_for_filter(prepayments, empresa_filter),
+        "activos_fijos_netos": opening_amount_for_filter(fixed_assets, empresa_filter),
+        "inversiones_participaciones": opening_amount_for_filter(investments, empresa_filter),
+        "factoring_retenido": opening_amount_for_filter(factoring_retained, empresa_filter),
+        "aportes_capital": opening_amount_for_filter(capital, empresa_filter),
+        "otras_deudas": opening_amount_for_filter(other_debts, empresa_filter),
     }
 
 
