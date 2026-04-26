@@ -16,6 +16,46 @@ DEFAULT_FINANCE_OPENING_CXC = {
     "RIR": 0.0,
     "RS-SP": 0.0,
 }
+DEFAULT_FINANCE_OPENING_INVENTORY = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_INVENTORY_TRANSIT = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_PREPAYMENTS = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_FIXED_ASSETS = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_LOANS_RECEIVED = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_LOANS_GRANTED = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_INVESTMENTS = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_CAPITAL = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_OTHER_DEBTS = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
+DEFAULT_FINANCE_OPENING_FACTORING_RETAINED = {
+    "RIR": 0.0,
+    "RS-SP": 0.0,
+}
 
 
 @dataclass(frozen=True)
@@ -23,6 +63,16 @@ class FinanceOpeningConfig:
     effective_date: date
     cash_by_company: dict[str, float]
     cxc_by_company: dict[str, float]
+    inventory_by_company: dict[str, float]
+    inventory_transit_by_company: dict[str, float]
+    prepayments_by_company: dict[str, float]
+    fixed_assets_by_company: dict[str, float]
+    loans_received_by_company: dict[str, float]
+    loans_granted_by_company: dict[str, float]
+    investments_by_company: dict[str, float]
+    capital_by_company: dict[str, float]
+    other_debts_by_company: dict[str, float]
+    factoring_retained_by_company: dict[str, float]
     preserve_existing_cxp: bool = False
 
 
@@ -51,6 +101,16 @@ def get_finance_opening_config() -> FinanceOpeningConfig:
     )
     cash_by_company: dict[str, float] = {}
     cxc_by_company: dict[str, float] = {}
+    inventory_by_company: dict[str, float] = {}
+    inventory_transit_by_company: dict[str, float] = {}
+    prepayments_by_company: dict[str, float] = {}
+    fixed_assets_by_company: dict[str, float] = {}
+    loans_received_by_company: dict[str, float] = {}
+    loans_granted_by_company: dict[str, float] = {}
+    investments_by_company: dict[str, float] = {}
+    capital_by_company: dict[str, float] = {}
+    other_debts_by_company: dict[str, float] = {}
+    factoring_retained_by_company: dict[str, float] = {}
     for company, fallback_cash in DEFAULT_FINANCE_OPENING_CASH.items():
         key_suffix = company.replace("-", "_")
         cash_by_company[company] = _parse_float(
@@ -61,6 +121,52 @@ def get_finance_opening_config() -> FinanceOpeningConfig:
             app_cfg.get(f"FINANCE_OPENING_CXC_{key_suffix}", DEFAULT_FINANCE_OPENING_CXC.get(company, 0.0)),
             DEFAULT_FINANCE_OPENING_CXC.get(company, 0.0),
         )
+        inventory_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_INVENTORY_{key_suffix}", DEFAULT_FINANCE_OPENING_INVENTORY.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_INVENTORY.get(company, 0.0),
+        )
+        inventory_transit_by_company[company] = _parse_float(
+            app_cfg.get(
+                f"FINANCE_OPENING_INVENTORY_TRANSIT_{key_suffix}",
+                DEFAULT_FINANCE_OPENING_INVENTORY_TRANSIT.get(company, 0.0),
+            ),
+            DEFAULT_FINANCE_OPENING_INVENTORY_TRANSIT.get(company, 0.0),
+        )
+        prepayments_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_PREPAYMENTS_{key_suffix}", DEFAULT_FINANCE_OPENING_PREPAYMENTS.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_PREPAYMENTS.get(company, 0.0),
+        )
+        fixed_assets_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_FIXED_ASSETS_{key_suffix}", DEFAULT_FINANCE_OPENING_FIXED_ASSETS.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_FIXED_ASSETS.get(company, 0.0),
+        )
+        loans_received_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_LOANS_RECEIVED_{key_suffix}", DEFAULT_FINANCE_OPENING_LOANS_RECEIVED.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_LOANS_RECEIVED.get(company, 0.0),
+        )
+        loans_granted_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_LOANS_GRANTED_{key_suffix}", DEFAULT_FINANCE_OPENING_LOANS_GRANTED.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_LOANS_GRANTED.get(company, 0.0),
+        )
+        investments_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_INVESTMENTS_{key_suffix}", DEFAULT_FINANCE_OPENING_INVESTMENTS.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_INVESTMENTS.get(company, 0.0),
+        )
+        capital_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_CAPITAL_{key_suffix}", DEFAULT_FINANCE_OPENING_CAPITAL.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_CAPITAL.get(company, 0.0),
+        )
+        other_debts_by_company[company] = _parse_float(
+            app_cfg.get(f"FINANCE_OPENING_OTHER_DEBTS_{key_suffix}", DEFAULT_FINANCE_OPENING_OTHER_DEBTS.get(company, 0.0)),
+            DEFAULT_FINANCE_OPENING_OTHER_DEBTS.get(company, 0.0),
+        )
+        factoring_retained_by_company[company] = _parse_float(
+            app_cfg.get(
+                f"FINANCE_OPENING_FACTORING_RETAINED_{key_suffix}",
+                DEFAULT_FINANCE_OPENING_FACTORING_RETAINED.get(company, 0.0),
+            ),
+            DEFAULT_FINANCE_OPENING_FACTORING_RETAINED.get(company, 0.0),
+        )
     preserve_existing_cxp = str(app_cfg.get("FINANCE_OPENING_PRESERVE_CXP", "false")).strip().lower() not in {
         "0",
         "false",
@@ -70,6 +176,16 @@ def get_finance_opening_config() -> FinanceOpeningConfig:
         effective_date=effective_date,
         cash_by_company=cash_by_company,
         cxc_by_company=cxc_by_company,
+        inventory_by_company=inventory_by_company,
+        inventory_transit_by_company=inventory_transit_by_company,
+        prepayments_by_company=prepayments_by_company,
+        fixed_assets_by_company=fixed_assets_by_company,
+        loans_received_by_company=loans_received_by_company,
+        loans_granted_by_company=loans_granted_by_company,
+        investments_by_company=investments_by_company,
+        capital_by_company=capital_by_company,
+        other_debts_by_company=other_debts_by_company,
+        factoring_retained_by_company=factoring_retained_by_company,
         preserve_existing_cxp=preserve_existing_cxp,
     )
 

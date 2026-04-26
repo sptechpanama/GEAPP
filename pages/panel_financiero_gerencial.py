@@ -76,7 +76,7 @@ if st.session_state.get("authentication_status") is not True:
     st.switch_page("Inicio.py")
 
 
-F2_DEFAULTS_VERSION = "2026-04-02-defaults-v5"
+F2_DEFAULTS_VERSION = "2026-04-26-defaults-v6"
 
 
 def _ensure_v2_default_state() -> None:
@@ -93,9 +93,9 @@ def _ensure_v2_default_state() -> None:
     st.session_state["f2_period_balance"] = "Mensual"
     st.session_state["f2_horizonte_proyeccion"] = 4
     st.session_state["f2_use_recommended_periods"] = True
-    st.session_state["f2_window_cash_actual"] = "Mes corriente"
-    st.session_state["f2_window_results"] = "Ultimo semestre cerrado"
-    st.session_state["f2_window_balance"] = "Ultimo cierre mensual"
+    st.session_state["f2_window_cash_actual"] = "Desde apertura"
+    st.session_state["f2_window_results"] = "Desde apertura"
+    st.session_state["f2_window_balance"] = "Desde apertura hasta hoy"
     st.session_state["f2_defaults_version"] = F2_DEFAULTS_VERSION
 
 
@@ -332,7 +332,15 @@ def _last_closed_year_window(ref: date) -> tuple[date, date]:
     return date(ref.year - 1, 1, 1), date(ref.year - 1, 12, 31)
 
 
-def _resolve_cash_window(label: str, today_ref: date, min_date: date, max_date: date) -> tuple[date, date]:
+def _resolve_cash_window(
+    label: str,
+    today_ref: date,
+    min_date: date,
+    max_date: date,
+    opening_date: date | None = None,
+) -> tuple[date, date]:
+    if label == "Desde apertura" and opening_date is not None:
+        return _clip_window(opening_date, today_ref, min_date, max_date)
     if label == "Ultimos 30 dias":
         return _clip_window(today_ref - timedelta(days=29), today_ref, min_date, max_date)
     if label == "Mes anterior":
@@ -345,7 +353,15 @@ def _resolve_cash_window(label: str, today_ref: date, min_date: date, max_date: 
     return _clip_window(_month_start(today_ref), today_ref, min_date, max_date)
 
 
-def _resolve_results_window(label: str, today_ref: date, min_date: date, max_date: date) -> tuple[date, date]:
+def _resolve_results_window(
+    label: str,
+    today_ref: date,
+    min_date: date,
+    max_date: date,
+    opening_date: date | None = None,
+) -> tuple[date, date]:
+    if label == "Desde apertura" and opening_date is not None:
+        return _clip_window(opening_date, today_ref, min_date, max_date)
     if label == "Ultimo cuatrimestre cerrado":
         return _clip_window(*_last_closed_cuatrimester_window(today_ref), min_date, max_date)
     if label == "Ultimo año cerrado":
@@ -353,7 +369,15 @@ def _resolve_results_window(label: str, today_ref: date, min_date: date, max_dat
     return _clip_window(*_last_closed_semester_window(today_ref), min_date, max_date)
 
 
-def _resolve_balance_window(label: str, today_ref: date, min_date: date, max_date: date) -> tuple[date, date]:
+def _resolve_balance_window(
+    label: str,
+    today_ref: date,
+    min_date: date,
+    max_date: date,
+    opening_date: date | None = None,
+) -> tuple[date, date]:
+    if label == "Desde apertura hasta hoy" and opening_date is not None:
+        return _clip_window(opening_date, today_ref, min_date, max_date)
     if label == "Ultimo cierre cuatrimestral":
         return _clip_window(*_last_closed_cuatrimester_window(today_ref), min_date, max_date)
     if label == "Ultimo cierre anual":
@@ -366,6 +390,21 @@ def _projection_window(horizon_months: int, today_ref: date | None = None) -> tu
     end_period = today_norm.to_period("M") + (int(horizon_months) - 1)
     horizon_end = end_period.to_timestamp(how="end").normalize().date()
     return today_norm.date(), horizon_end
+
+
+def _opening_balance_components_for_filter(opening_cfg, empresa_filter: str) -> dict[str, float]:
+    return {
+        "prestamos_otorgados": opening_amount_for_filter(opening_cfg.loans_granted_by_company, empresa_filter),
+        "prestamos_recibidos": opening_amount_for_filter(opening_cfg.loans_received_by_company, empresa_filter),
+        "inventario": opening_amount_for_filter(opening_cfg.inventory_by_company, empresa_filter),
+        "inventario_en_transito": opening_amount_for_filter(opening_cfg.inventory_transit_by_company, empresa_filter),
+        "anticipos_prepagos": opening_amount_for_filter(opening_cfg.prepayments_by_company, empresa_filter),
+        "activos_fijos_netos": opening_amount_for_filter(opening_cfg.fixed_assets_by_company, empresa_filter),
+        "inversiones_participaciones": opening_amount_for_filter(opening_cfg.investments_by_company, empresa_filter),
+        "factoring_retenido": opening_amount_for_filter(opening_cfg.factoring_retained_by_company, empresa_filter),
+        "aportes_capital": opening_amount_for_filter(opening_cfg.capital_by_company, empresa_filter),
+        "otras_deudas": opening_amount_for_filter(opening_cfg.other_debts_by_company, empresa_filter),
+    }
 
 
 def _prepare_expected_dates_for_balance(split: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -400,6 +439,7 @@ def _build_balance_snapshots(
     fecha_desde: date,
     fecha_hasta: date,
     efectivo_inicial: float = 0.0,
+    opening_balance_extras: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     freq = _freq_from_period_label(period_label)
     start = pd.Timestamp(fecha_desde)
@@ -422,6 +462,7 @@ def _build_balance_snapshots(
 
     ing_p, gas_p = _prepare_expected_dates_for_balance(split)
 
+    opening_balance_extras = dict(opening_balance_extras or {})
     rows: list[dict[str, object]] = []
     for cutoff in cutoffs:
         efectivo = float(efectivo_inicial + (mov.loc[mov[COL_FECHA] <= cutoff, "flujo"].sum() if not mov.empty else 0.0))
@@ -440,6 +481,8 @@ def _build_balance_snapshots(
         cxc = float(ing_p.loc[cxc_mask, "monto"].sum()) if not ing_p.empty else 0.0
         cxp = float(gas_p.loc[cxp_mask, "monto"].sum()) if not gas_p.empty else 0.0
         extras = compute_balance_components(df_ing_scope, df_gas_scope, cutoff_date=cutoff)
+        for key, amount in opening_balance_extras.items():
+            extras[key] = float(extras.get(key, 0.0)) + float(amount or 0.0)
         activos = float(
             efectivo
             + cxc
@@ -451,7 +494,7 @@ def _build_balance_snapshots(
             + float(extras.get("factoring_retenido", 0.0))
             + float(extras.get("activos_fijos_netos", 0.0))
         )
-        pasivos = float(cxp + float(extras.get("prestamos_recibidos", 0.0)))
+        pasivos = float(cxp + float(extras.get("prestamos_recibidos", 0.0)) + float(extras.get("otras_deudas", 0.0)))
         patrimonio = float(activos - pasivos)
         capital_trabajo = float(
             efectivo
@@ -461,6 +504,7 @@ def _build_balance_snapshots(
             + float(extras.get("factoring_retenido", 0.0))
             - cxp
             - float(extras.get("prestamos_recibidos", 0.0))
+            - float(extras.get("otras_deudas", 0.0))
         )
 
         rows.append(
@@ -477,6 +521,8 @@ def _build_balance_snapshots(
                 "factoring_retenido": float(extras.get("factoring_retenido", 0.0)),
                 "activos_fijos_netos": float(extras.get("activos_fijos_netos", 0.0)),
                 "prestamos_recibidos": float(extras.get("prestamos_recibidos", 0.0)),
+                "aportes_capital": float(extras.get("aportes_capital", 0.0)),
+                "otras_deudas": float(extras.get("otras_deudas", 0.0)),
                 "activos_totales": activos,
                 "pasivos_totales": pasivos,
                 "patrimonio_neto": patrimonio,
@@ -1198,12 +1244,13 @@ else:
     max_date = combined_dates.max().date()
 
 opts = get_filter_options(df_ing, df_gas)
+opening_cfg = get_finance_opening_config()
 
 with st.sidebar:
     st.markdown("### Filtros globales")
     today = date.today()
     mes_inicio = date(today.year, today.month, 1)
-    default_desde = max(min_date, mes_inicio)
+    default_desde = max(min_date, opening_cfg.effective_date)
     default_hasta = min(max_date, today)
     if default_desde > default_hasta:
         default_desde = min_date
@@ -1255,8 +1302,8 @@ with st.sidebar:
         "Usar periodos recomendados",
         value=True,
         help=(
-            "Activa los periodos recomendados por defecto: Flujo actual/proyectado Mensual, "
-            "Estado de resultados Semestral y Balance con ultimo cierre mensual."
+            "Activa los periodos recomendados por defecto: Flujo actual desde apertura, "
+            "Estado de resultados desde apertura y Balance desde apertura hasta hoy."
         ),
         key="f2_use_recommended_periods",
     )
@@ -1267,24 +1314,27 @@ with st.sidebar:
         st.session_state["f2_period_cash_proj"] = "Mensual"
         st.session_state["f2_period_results"] = "Semestral"
         st.session_state["f2_period_balance"] = "Mensual"
+        st.session_state["f2_window_cash_actual"] = "Desde apertura"
+        st.session_state["f2_window_results"] = "Desde apertura"
+        st.session_state["f2_window_balance"] = "Desde apertura hasta hoy"
 
     if modo_tiempo != "Rango personalizado":
         st.markdown("#### Ventanas de analisis")
         cash_window_label = st.selectbox(
             "Flujo de caja actual",
-            options=["Mes corriente", "Ultimos 30 dias", "Mes anterior", "Trimestre corriente", "Año corriente"],
+            options=["Desde apertura", "Mes corriente", "Ultimos 30 dias", "Mes anterior", "Trimestre corriente", "Año corriente"],
             index=0,
             key="f2_window_cash_actual",
         )
         results_window_label = st.selectbox(
             "Estado de resultados",
-            options=["Ultimo semestre cerrado", "Ultimo cuatrimestre cerrado", "Ultimo año cerrado"],
+            options=["Desde apertura", "Ultimo semestre cerrado", "Ultimo cuatrimestre cerrado", "Ultimo año cerrado"],
             index=0,
             key="f2_window_results",
         )
         balance_window_label = st.selectbox(
             "Balance general",
-            options=["Ultimo cierre mensual", "Ultimo cierre cuatrimestral", "Ultimo cierre anual"],
+            options=["Desde apertura hasta hoy", "Ultimo cierre mensual", "Ultimo cierre cuatrimestral", "Ultimo cierre anual"],
             index=0,
             key="f2_window_balance",
         )
@@ -1326,8 +1376,6 @@ if fecha_desde > fecha_hasta:
     st.warning("El rango de fechas es invalido.")
     st.stop()
 
-opening_cfg = get_finance_opening_config()
-
 # Base de trabajo: mismos filtros de negocio (empresa/escenario/busqueda), con historico completo.
 scope_filters = GlobalFilters(
     fecha_desde=min_date,
@@ -1351,27 +1399,31 @@ if modo_tiempo == "Rango personalizado":
     balance_period_default = st.session_state.get("f2_period_balance", "Mensual")
 else:
     today_ref = date.today()
-    cash_desde, cash_hasta = _resolve_cash_window(cash_window_label, today_ref, min_date, max_date)
-    resultados_desde, resultados_hasta = _resolve_results_window(results_window_label, today_ref, min_date, max_date)
-    balance_desde, balance_hasta = _resolve_balance_window(balance_window_label, today_ref, min_date, max_date)
+    cash_desde, cash_hasta = _resolve_cash_window(cash_window_label, today_ref, min_date, max_date, opening_cfg.effective_date)
+    resultados_desde, resultados_hasta = _resolve_results_window(results_window_label, today_ref, min_date, max_date, opening_cfg.effective_date)
+    balance_desde, balance_hasta = _resolve_balance_window(balance_window_label, today_ref, min_date, max_date, opening_cfg.effective_date)
     results_period_default = {
+        "Desde apertura": "Mensual",
         "Ultimo semestre cerrado": "Semestral",
         "Ultimo cuatrimestre cerrado": "Cuatrimestral",
         "Ultimo año cerrado": "Anual",
-    }.get(results_window_label, "Semestral")
+    }.get(results_window_label, "Mensual")
     balance_period_default = {
+        "Desde apertura hasta hoy": "Mensual",
         "Ultimo cierre mensual": "Mensual",
         "Ultimo cierre cuatrimestral": "Cuatrimestral",
         "Ultimo cierre anual": "Anual",
     }.get(balance_window_label, "Mensual")
 
-# Flujos/KPIs del periodo operativo visible (default: mes actual).
+# Flujos/KPIs del periodo operativo visible bajo la apertura financiera vigente.
 opening_active_cash = pd.Timestamp(cash_hasta) >= pd.Timestamp(opening_cfg.effective_date)
+opening_active_results = pd.Timestamp(resultados_hasta) >= pd.Timestamp(opening_cfg.effective_date)
 opening_active_balance = pd.Timestamp(balance_hasta) >= pd.Timestamp(opening_cfg.effective_date)
 opening_cash = opening_amount_for_filter(opening_cfg.cash_by_company, empresa)
 opening_cash_balance = opening_cash if opening_active_balance else 0.0
 opening_cash_period = opening_cash if opening_active_cash else 0.0
 opening_cxc = opening_amount_for_filter(opening_cfg.cxc_by_company, empresa)
+opening_balance_extras = _opening_balance_components_for_filter(opening_cfg, empresa) if opening_active_balance else {}
 
 cash_scope_desde = max(cash_desde, opening_cfg.effective_date) if opening_active_cash else cash_desde
 ing_f = _filter_df_window(ing_scope, cash_scope_desde, cash_hasta)
@@ -1399,25 +1451,32 @@ ing_scope_proj = (
     if opening_active_cash
     else ing_scope.copy()
 )
-split_proj = split_real_vs_pending(ing_scope_proj, gas_scope_payables)
+gas_scope_proj = (
+    _filter_df_window(gas_scope_payables, opening_cfg.effective_date, max_date)
+    if opening_active_cash
+    else gas_scope_payables.copy()
+)
+split_proj = split_real_vs_pending(ing_scope_proj, gas_scope_proj)
 
-# Estado de resultados: periodo cerrado por defecto, editable por rango personalizado.
-ing_res = _filter_df_window(ing_scope, resultados_desde, resultados_hasta)
-gas_res = _filter_df_window(gas_scope, resultados_desde, resultados_hasta)
+# Estado de resultados: usar periodo posterior a la apertura para que sea util en la transicion.
+result_scope_desde = max(resultados_desde, opening_cfg.effective_date) if opening_active_results else resultados_desde
+ing_res = _filter_df_window(ing_scope, result_scope_desde, resultados_hasta)
+gas_res = _filter_df_window(gas_scope, result_scope_desde, resultados_hasta)
 
-# Balance: caja con apertura; CxC desde apertura; CxP conserva pendientes registrados.
+# Balance: caja y componentes de balance desde la apertura para evitar arrastrar historia previa.
+balance_scope_desde = max(balance_desde, opening_cfg.effective_date) if opening_active_balance else balance_desde
 ing_balance = (
-    _filter_df_window(ing_scope, opening_cfg.effective_date, balance_hasta)
+    _filter_df_window(ing_scope, balance_scope_desde, balance_hasta)
     if opening_active_balance
     else ing_scope.copy()
 )
 gas_balance_cash = (
-    _filter_df_window(gas_scope, opening_cfg.effective_date, balance_hasta)
+    _filter_df_window(gas_scope, balance_scope_desde, balance_hasta)
     if opening_active_balance
     else gas_scope.copy()
 )
 gas_balance_payables = (
-    _filter_df_window(gas_scope, opening_cfg.effective_date, balance_hasta)
+    _filter_df_window(gas_scope, balance_scope_desde, balance_hasta)
     if (not opening_cfg.preserve_existing_cxp and opening_active_balance)
     else gas_scope.copy()
 )
@@ -1437,35 +1496,38 @@ cxp_total = float(cxp_df["monto"].sum()) if not cxp_df.empty else 0.0
 
 proyectado = build_cashflow_proyectado(
     ing_scope_proj,
-    gas_scope,
+    gas_scope_proj,
     saldo_inicial=cash_actual["metricas"]["efectivo_actual"],
     granularidad="D",
     horizon_months=int(horizonte_proy_meses),
 )
 
 estado = build_estado_resultados(
-    ing_scope,
-    gas_scope,
+    ing_res,
+    gas_res,
     include_miscelaneos=include_misc,
-    fecha_desde=resultados_desde,
+    fecha_desde=result_scope_desde,
     fecha_hasta=resultados_hasta,
 )
 balance_snapshots_summary = _build_balance_snapshots(
     cash_movimientos=cash_balance["movimientos"],
     split=split_balance,
-    df_ing_scope=ing_scope,
-    df_gas_scope=gas_scope,
+    df_ing_scope=ing_balance,
+    df_gas_scope=gas_balance_cash,
     period_label=balance_period_default,
-    fecha_desde=balance_desde,
+    fecha_desde=balance_scope_desde,
     fecha_hasta=balance_hasta,
     efectivo_inicial=opening_cash_balance,
+    opening_balance_extras=opening_balance_extras,
 )
 latest_balance_summary = (
     balance_snapshots_summary.sort_values("corte").iloc[-1].to_dict()
     if not balance_snapshots_summary.empty
     else {}
 )
-balance_components = compute_balance_components(ing_scope, gas_scope, cutoff_date=balance_hasta)
+balance_components = compute_balance_components(ing_balance, gas_balance_cash, cutoff_date=balance_hasta)
+for _key, _amount in opening_balance_extras.items():
+    balance_components[_key] = float(balance_components.get(_key, 0.0)) + float(_amount or 0.0)
 balance_kwargs = {
     "efectivo_actual": float(latest_balance_summary.get("efectivo", 0.0)),
     "cuentas_por_cobrar": float(latest_balance_summary.get("cuentas_por_cobrar", 0.0)),
@@ -1479,6 +1541,7 @@ balance_kwargs = {
     "activos_fijos_netos": float(balance_components.get("activos_fijos_netos", 0.0)),
     "prestamos_recibidos": float(balance_components.get("prestamos_recibidos", 0.0)),
     "aportes_capital": float(balance_components.get("aportes_capital", 0.0)),
+    "otras_deudas": float(balance_components.get("otras_deudas", 0.0)),
 }
 supported_balance_params = set(inspect.signature(build_balance_general_simplificado).parameters)
 balance = build_balance_general_simplificado(
@@ -1526,7 +1589,8 @@ st.caption(
 )
 st.caption(
     f"Apertura financiera vigente desde {opening_cfg.effective_date.isoformat()}. "
-    "Caja parte de saldo inicial por empresa; CxC arranca en 0; CxP solo cuenta pendientes desde la apertura."
+    "Caja parte de saldo inicial por empresa; CxC arranca en 0; CxP solo cuenta pendientes desde la apertura; "
+    "resultado y balance recomendados se leen desde la apertura para evitar arrastrar historia desordenada."
 )
 
 tab_a, tab_b, tab_c, tab_d, tab_e, tab_f, tab_g, tab_h, tab_i = st.tabs(
@@ -1690,7 +1754,7 @@ with tab_c:
 
 with tab_d:
     st.markdown("### Estado de resultados (gerencial)")
-    st.caption(f"Periodo analizado: {resultados_desde.isoformat()} -> {resultados_hasta.isoformat()}")
+    st.caption(f"Periodo analizado: {result_scope_desde.isoformat()} -> {resultados_hasta.isoformat()}")
     st.caption(f"Tipo de periodo: {results_period_default}")
     if custom_periods:
         period_results = st.selectbox(
@@ -1762,7 +1826,7 @@ with tab_d:
 
 with tab_e:
     st.markdown("### Balance general (simplificado)")
-    st.caption(f"Periodo analizado: {balance_desde.isoformat()} -> {balance_hasta.isoformat()}")
+    st.caption(f"Periodo analizado: {balance_scope_desde.isoformat()} -> {balance_hasta.isoformat()}")
     st.caption(f"Tipo de corte: {balance_period_default}")
     if custom_periods:
         period_balance = st.selectbox(
@@ -1777,11 +1841,13 @@ with tab_e:
     snapshots = _build_balance_snapshots(
         cash_movimientos=cash_balance["movimientos"],
         split=split_balance,
-        df_ing_scope=ing_scope,
-        df_gas_scope=gas_scope,
+        df_ing_scope=ing_balance,
+        df_gas_scope=gas_balance_cash,
         period_label=period_balance,
-        fecha_desde=balance_desde,
+        fecha_desde=balance_scope_desde,
         fecha_hasta=balance_hasta,
+        efectivo_inicial=opening_cash_balance,
+        opening_balance_extras=opening_balance_extras,
     )
     snapshots = snapshots.sort_values("corte") if not snapshots.empty else snapshots
 
@@ -1817,11 +1883,13 @@ with tab_e:
             [
                 {"Cuenta": "Cuentas por pagar", "Monto": float(latest["cuentas_por_pagar"])},
                 {"Cuenta": "Prestamos recibidos", "Monto": float(latest.get("prestamos_recibidos", 0.0))},
+                {"Cuenta": "Otras deudas", "Monto": float(latest.get("otras_deudas", 0.0))},
             ]
         )
         pasivos_df = pasivos_df[pasivos_df["Monto"] != 0].reset_index(drop=True)
         patrimonio_df = pd.DataFrame(
             [
+                {"Cuenta": "Aportes de socios / capital", "Monto": float(latest.get("aportes_capital", 0.0))},
                 {"Cuenta": "Patrimonio neto estimado", "Monto": float(latest["patrimonio_neto"])},
             ]
         )
