@@ -495,6 +495,20 @@ def _build_verificar_por_corregir(
     checks: list[dict[str, object]] = []
     issues: list[dict[str, object]] = []
 
+    def _ensure_bool_mask(values, *, index) -> pd.Series:
+        if isinstance(values, pd.Series):
+            mask = values.copy()
+        elif values is None:
+            mask = pd.Series(False, index=index)
+        else:
+            mask = pd.Series(values, index=index)
+        mask = mask.reindex(index)
+        try:
+            mask = mask.astype("boolean")
+        except Exception:
+            mask = mask.map(lambda v: bool(v) if pd.notna(v) else False).astype("boolean")
+        return mask.fillna(False).astype(bool)
+
     ing_pending = split["ing_pend"].copy()
     gas_pending = split["gas_pend"].copy()
 
@@ -509,7 +523,10 @@ def _build_verificar_por_corregir(
     )
 
     def _append_issue(df: pd.DataFrame, source: str, mask: pd.Series, problem: str, action: str) -> None:
-        if df is None or df.empty or mask is None or not mask.any():
+        if df is None or df.empty or mask is None:
+            return
+        mask = _ensure_bool_mask(mask, index=df.index)
+        if not mask.any():
             return
         subset = df.loc[mask].copy()
         for _, row in subset.head(300).iterrows():
@@ -559,29 +576,37 @@ def _build_verificar_por_corregir(
     ing_balance = ing_f.get(COL_TRATAMIENTO_BALANCE_ING, pd.Series("", index=ing_f.index)).astype(str).str.strip()
     gas_balance = gas_f.get(COL_TRATAMIENTO_BALANCE_GAS, pd.Series("", index=gas_f.index)).astype(str).str.strip()
 
-    ing_partial_missing_date = ing_f[COL_POR_COBRAR].map(lambda x: str(x).strip().lower()).ne("no") & ing_real_amount.gt(0) & ing_real_date.isna() if COL_POR_COBRAR in ing_f.columns else pd.Series(False, index=ing_f.index)
-    gas_partial_missing_date = gas_f[COL_POR_PAGAR].map(lambda x: str(x).strip().lower()).ne("no") & gas_real_amount.gt(0) & gas_real_date.isna() if COL_POR_PAGAR in gas_f.columns else pd.Series(False, index=gas_f.index)
-    prepago_missing_cfg = gas_balance.eq("Anticipo / prepago") & (
-        pd.to_numeric(gas_f.get(COL_PREPAGO_MESES), errors="coerce").fillna(0).le(0)
-        | pd.to_datetime(gas_f.get(COL_PREPAGO_FECHA_INICIO), errors="coerce").isna()
+    ing_partial_missing_date = (
+        _ensure_bool_mask(ing_f[COL_POR_COBRAR].map(lambda x: str(x).strip().lower()).ne("no"), index=ing_f.index)
+        & _ensure_bool_mask(ing_real_amount.gt(0), index=ing_f.index)
+        & _ensure_bool_mask(ing_real_date.isna(), index=ing_f.index)
+    ) if COL_POR_COBRAR in ing_f.columns else pd.Series(False, index=ing_f.index)
+    gas_partial_missing_date = (
+        _ensure_bool_mask(gas_f[COL_POR_PAGAR].map(lambda x: str(x).strip().lower()).ne("no"), index=gas_f.index)
+        & _ensure_bool_mask(gas_real_amount.gt(0), index=gas_f.index)
+        & _ensure_bool_mask(gas_real_date.isna(), index=gas_f.index)
+    ) if COL_POR_PAGAR in gas_f.columns else pd.Series(False, index=gas_f.index)
+    prepago_missing_cfg = _ensure_bool_mask(gas_balance.eq("Anticipo / prepago"), index=gas_f.index) & (
+        _ensure_bool_mask(pd.to_numeric(gas_f.get(COL_PREPAGO_MESES), errors="coerce").fillna(0).le(0), index=gas_f.index)
+        | _ensure_bool_mask(pd.to_datetime(gas_f.get(COL_PREPAGO_FECHA_INICIO), errors="coerce").isna(), index=gas_f.index)
     )
-    inventory_missing_cfg = gas_balance.eq("Inventario") & (
-        gas_f.get(COL_INVENTARIO_MOVIMIENTO, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq("")
-        | gas_f.get(COL_INVENTARIO_ITEM, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq("")
+    inventory_missing_cfg = _ensure_bool_mask(gas_balance.eq("Inventario"), index=gas_f.index) & (
+        _ensure_bool_mask(gas_f.get(COL_INVENTARIO_MOVIMIENTO, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq(""), index=gas_f.index)
+        | _ensure_bool_mask(gas_f.get(COL_INVENTARIO_ITEM, pd.Series("", index=gas_f.index)).astype(str).str.strip().eq(""), index=gas_f.index)
     )
     factoring_raw = ing_f.get(COL_FACTORING_DET, pd.Series("", index=ing_f.index))
     factoring_detail = factoring_raw.map(_safe_factoring_detail)
-    factoring_on = factoring_detail.map(bool)
-    factoring_counterparty_missing = factoring_on & ing_counterparty.eq("")
-    factoring_bad_initial = factoring_detail.map(
+    factoring_on = _ensure_bool_mask(factoring_detail.map(bool), index=ing_f.index)
+    factoring_counterparty_missing = factoring_on & _ensure_bool_mask(ing_counterparty.eq(""), index=ing_f.index)
+    factoring_bad_initial = _ensure_bool_mask(factoring_detail.map(
         lambda d: False if not d else abs(
             float(d.get("initial_cash_received", 0.0) or 0.0)
             + float(d.get("initial_retained", 0.0) or 0.0)
             + float(d.get("initial_fee", 0.0) or 0.0)
             - float(d.get("factored_amount", 0.0) or 0.0)
         ) > 0.01
-    )
-    factoring_bad_final = factoring_detail.map(
+    ), index=ing_f.index)
+    factoring_bad_final = _ensure_bool_mask(factoring_detail.map(
         lambda d: False if not d else (
             abs(
                 float(d.get("final_cash_received", 0.0) or 0.0)
@@ -591,9 +616,9 @@ def _build_verificar_por_corregir(
             if pd.notna(pd.to_datetime(d.get("fecha_liquidacion_final"), errors="coerce"))
             else False
         )
-    )
-    ing_counterparty_missing = ing_balance.isin(["Patrimonio", "Pasivo financiero"]) & ing_counterparty.eq("")
-    gas_counterparty_missing = gas_balance.isin(["Inversion / participacion en otra empresa", "Cuenta por cobrar / prestamo otorgado"]) & gas_counterparty.eq("")
+    ), index=ing_f.index)
+    ing_counterparty_missing = _ensure_bool_mask(ing_balance.isin(["Patrimonio", "Pasivo financiero"]), index=ing_f.index) & _ensure_bool_mask(ing_counterparty.eq(""), index=ing_f.index)
+    gas_counterparty_missing = _ensure_bool_mask(gas_balance.isin(["Inversion / participacion en otra empresa", "Cuenta por cobrar / prestamo otorgado"]), index=gas_f.index) & _ensure_bool_mask(gas_counterparty.eq(""), index=gas_f.index)
 
     checks.append(
         {
