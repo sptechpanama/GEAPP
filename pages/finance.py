@@ -4729,11 +4729,13 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
         help=_help_for_option(ING_CATEGORY_HELP, st.session_state.get("ing_categoria_quick", ING_CATEGORY_OPTIONS[0])),
         on_change=lambda: _mark_form_force_open("ing"),
     )
+    ing_detail_quick_options = [""] + ING_DETAIL_OPTIONS
     detalle_ing = st.selectbox(
         "Detalle",
-        ING_DETAIL_OPTIONS,
-        index=0,
+        ing_detail_quick_options,
+        index=_option_index(ing_detail_quick_options, st.session_state.get("ing_detalle_ing_quick", ""), 0),
         key="ing_detalle_ing_quick",
+        format_func=lambda v: "Selecciona un detalle" if not str(v or "").strip() else v,
         on_change=lambda: _mark_form_force_open("ing"),
     )
     cp1, cp2 = st.columns([1, 2])
@@ -4848,6 +4850,9 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             }]
         if _counterparty_required_for_ing(categoria_final, tratamiento_balance_final, fin_ing_on) and not str(contraparte_ing or "").strip():
             st.error("Debes indicar la contraparte para este tipo de ingreso.")
+            st.stop()
+        if not str(detalle_ing or "").strip():
+            st.error("Debes seleccionar el detalle del ingreso.")
             st.stop()
         if estado_ing_final == "Parcial" and (monto_cobrado_real_final <= 0 or monto_cobrado_real_final >= float(monto_nuevo)):
             st.error("Para un ingreso parcial, el monto real cobrado debe ser mayor que 0 y menor que el monto total.")
@@ -6503,11 +6508,13 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         disabled=True,
         help=_help_for_option(GAS_SUB_HELP, subclas_gas_default),
     )
+    gas_detail_quick_options = [""] + GAS_DETAIL_OPTIONS
     detalle_gas = st.selectbox(
         "Detalle",
-        GAS_DETAIL_OPTIONS,
-        index=0,
+        gas_detail_quick_options,
+        index=_option_index(gas_detail_quick_options, st.session_state.get("gas_detalle_gas_quick", ""), 0),
         key="gas_detalle_gas_quick",
+        format_func=lambda v: "Selecciona un detalle" if not str(v or "").strip() else v,
         on_change=lambda: _mark_form_force_open("gas"),
     )
 
@@ -6669,6 +6676,9 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             }]
         if _counterparty_required_for_gas(categoria_g, tratamiento_gas, fin_gas_on) and not str(contraparte_g or "").strip():
             st.error("Debes indicar la contraparte para este tipo de gasto.")
+            st.stop()
+        if not str(detalle_gas or "").strip():
+            st.error("Debes seleccionar el detalle del gasto.")
             st.stop()
         if estado_g_final == "Parcial" and (monto_pagado_real_final <= 0 or monto_pagado_real_final >= float(monto_g)):
             st.error("Para un gasto parcial, el monto real pagado debe ser mayor que 0 y menor que el monto total.")

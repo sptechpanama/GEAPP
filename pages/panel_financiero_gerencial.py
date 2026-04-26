@@ -208,13 +208,18 @@ def _freq_from_period_label(label: str) -> str:
     mapping = {
         "diario": "D",
         "semanal": "W",
-        "mensual": "M",
+        "mensual": "ME",
         "semestral": "6MS",
-        "trimestral": "Q",
+        "trimestral": "QE",
         "cuatrimestral": "4MS",
-        "anual": "Y",
+        "anual": "YE",
     }
-    return mapping.get(key, "M")
+    freq = mapping.get(key, "ME")
+    try:
+        pd.tseries.frequencies.to_offset(freq)
+    except Exception:
+        return "ME"
+    return freq
 
 
 def _aggregate_cash_series(serie: pd.DataFrame, period_label: str) -> pd.DataFrame:
@@ -403,7 +408,10 @@ def _build_balance_snapshots(
         return pd.DataFrame()
 
     # Corte por periodo. Ej.: anual / cuatrimestral / mensual.
-    cutoffs = pd.date_range(start=start, end=end, freq=freq)
+    try:
+        cutoffs = pd.date_range(start=start, end=end, freq=freq)
+    except Exception:
+        cutoffs = pd.date_range(start=start, end=end, freq="ME")
     if len(cutoffs) == 0 or cutoffs[-1] != end:
         cutoffs = cutoffs.append(pd.DatetimeIndex([end]))
 
