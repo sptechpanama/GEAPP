@@ -445,6 +445,11 @@ def build_estado_resultados(
     mensual = mensual.sort_values("Mes", na_position="last")
     mensual["Utilidad"] = mensual["Ingresos"] - mensual["Gastos"]
 
+    ingresos_resultado[COL_EMPRESA] = _safe_series(ingresos_resultado, COL_EMPRESA, "").astype(str).fillna("")
+    ingresos_resultado[COL_MONTO] = pd.to_numeric(_safe_series(ingresos_resultado, COL_MONTO, 0.0), errors="coerce").fillna(0.0)
+    gas_resultado[COL_EMPRESA] = _safe_series(gas_resultado, COL_EMPRESA, "").astype(str).fillna("")
+    gas_resultado[COL_CATEGORIA] = _safe_series(gas_resultado, COL_CATEGORIA, "").astype(str).fillna("")
+    gas_resultado[COL_MONTO] = pd.to_numeric(_safe_series(gas_resultado, COL_MONTO, 0.0), errors="coerce").fillna(0.0)
     empresa_ing = ingresos_resultado.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Ingresos"})
     empresa_gas = gas_resultado.groupby(COL_EMPRESA, as_index=False)[COL_MONTO].sum().rename(columns={COL_MONTO: "Gastos"})
     por_empresa = empresa_ing.merge(empresa_gas, on=COL_EMPRESA, how="outer").fillna(0.0)
