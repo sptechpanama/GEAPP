@@ -144,15 +144,23 @@ def _line_chart(df: pd.DataFrame, x: str, y: str, title: str, color: str = "#22c
 
 
 
-def _bar_chart(df: pd.DataFrame, x: str, y: str, title: str, color: str = "#0ea5e9"):
+def _bar_chart(
+    df: pd.DataFrame,
+    x: str,
+    y: str,
+    title: str,
+    color: str = "#0ea5e9",
+    x_sort=None,
+):
     if df.empty:
         st.info("Sin datos para mostrar en este grafico.")
         return
+    sort_spec = x_sort if x_sort is not None else "-y"
     chart = (
         alt.Chart(df)
         .mark_bar(color=color)
         .encode(
-            x=alt.X(f"{x}:N", sort="-y", title=x.replace("_", " ").title()),
+            x=alt.X(f"{x}:N", sort=sort_spec, title=x.replace("_", " ").title()),
             y=alt.Y(f"{y}:Q", title=title),
             tooltip=[alt.Tooltip(f"{x}:N", title=x.title()), alt.Tooltip(f"{y}:Q", title=title, format=",.2f")],
         )
@@ -1682,12 +1690,14 @@ with tab_b:
         with c1:
             _line_chart(serie_actual, COL_FECHA, "saldo", "Saldo acumulado", color="#22c55e")
         with c2:
+            serie_actual_bar = serie_actual.tail(24).assign(periodo=lambda d: d[COL_FECHA].dt.strftime(fmt))
             _bar_chart(
-                serie_actual.tail(24).assign(periodo=lambda d: d[COL_FECHA].dt.strftime(fmt)),
+                serie_actual_bar,
                 "periodo",
                 "flujo",
                 f"Flujo {period_cash_actual.lower()}",
                 color="#0ea5e9",
+                x_sort=serie_actual_bar["periodo"].tolist(),
             )
     else:
         st.info("No hay movimientos reales en el periodo filtrado.")
@@ -1750,12 +1760,14 @@ with tab_c:
         with c1:
             _line_chart(serie_proj, COL_FECHA, "saldo", "Saldo proyectado", color="#f59e0b")
         with c2:
+            serie_proj_bar = serie_proj.tail(24).assign(periodo=lambda d: d[COL_FECHA].dt.strftime(fmt))
             _bar_chart(
-                serie_proj.tail(24).assign(periodo=lambda d: d[COL_FECHA].dt.strftime(fmt)),
+                serie_proj_bar,
                 "periodo",
                 "flujo",
                 f"Flujo proyectado {period_cash_proj.lower()}",
                 color="#f59e0b",
+                x_sort=serie_proj_bar["periodo"].tolist(),
             )
         st.markdown("#### Eventos futuros")
         st.dataframe(proyectado["eventos"], use_container_width=True, hide_index=True)
