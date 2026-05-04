@@ -6002,8 +6002,8 @@ with st.expander("Gestionar linea de credito", expanded=False):
                     st.stop()
                 st.session_state.df_gas = new_gas_df
                 st.cache_data.clear()
-            st.success("Cargo asociado registrado.")
-            _safe_rerun()
+                st.success("Cargo asociado registrado.")
+                _safe_rerun()
 
 
 st.markdown("## Tarjeta de credito")
