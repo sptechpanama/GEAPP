@@ -615,83 +615,159 @@ def _autoderive_gas_df(df: pd.DataFrame) -> pd.DataFrame:
     return ensure_gastos_columns(out)
 
 
+def _validate_ing_row(row: pd.Series, idx: int) -> list[str]:
+    errors: list[str] = []
+    monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
+    monto_real = float(_parse_number_maybe_es(row.get(COL_COBRO_REAL_MONTO, 0.0)))
+    por_cobrar = _si_no_norm(row.get(COL_POR_COB, "No"))
+    fecha_esp = _ts(row.get(COL_FCOBRO))
+    fecha_real = _ts(row.get(COL_FCOBRO_REAL))
+    categoria = str(row.get(COL_CAT, "") or "").strip()
+    tratamiento = str(row.get(COL_TRAT_BAL_ING, "") or "").strip()
+    contraparte = str(row.get(COL_CTP_NOMBRE, "") or "").strip()
+    factoring_detail = _parse_factoring_detail(row.get(COL_FACT_DET, ""))
+    factoring_on = bool(factoring_detail)
+    factoring_retenido = _factoring_retained_pending(factoring_detail)
+    fin_on = _bool_from_toggle(row.get(COL_FIN_TOGGLE, "No")) or categoria == "Financiamiento recibido"
+    label = str(row.get(COL_DESC, "") or row.get(COL_ROWID, f"fila {idx+1}")).strip() or f"fila {idx+1}"
+    if monto <= 0:
+        errors.append(f"Ingresos: `{label}` tiene monto no valido.")
+    if por_cobrar != "No" and pd.isna(fecha_esp):
+        errors.append(f"Ingresos: `{label}` requiere Fecha esperada de cobro.")
+    if por_cobrar == "No" and pd.isna(fecha_real):
+        errors.append(f"Ingresos: `{label}` requiere Fecha real de cobro.")
+    if por_cobrar != "No" and monto_real > 0 and pd.isna(fecha_real):
+        errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial pero sin Fecha real de cobro.")
+    if por_cobrar != "No" and monto_real >= monto and monto > 0:
+        errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial igual o mayor al total; marque realizado si ya se cobro todo.")
+    if por_cobrar == "No" and not factoring_on and abs(monto_real - monto) > 0.01:
+        errors.append(f"Ingresos: `{label}` marcado realizado debe tener monto real cobrado igual al monto total.")
+    if factoring_on and factoring_retenido < 0:
+        errors.append(f"Ingresos: `{label}` tiene factoring inconsistente; revisa el retenido.")
+    if _counterparty_required_for_ing(categoria, tratamiento, fin_on) and not contraparte:
+        errors.append(f"Ingresos: `{label}` requiere Entidad relacionada / contraparte.")
+    return errors
+
+
 def _validate_ing_df(df: pd.DataFrame) -> list[str]:
     errors: list[str] = []
     for idx, row in df.iterrows():
-        monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
-        monto_real = float(_parse_number_maybe_es(row.get(COL_COBRO_REAL_MONTO, 0.0)))
-        por_cobrar = _si_no_norm(row.get(COL_POR_COB, "No"))
-        fecha_esp = _ts(row.get(COL_FCOBRO))
-        fecha_real = _ts(row.get(COL_FCOBRO_REAL))
-        categoria = str(row.get(COL_CAT, "") or "").strip()
-        tratamiento = str(row.get(COL_TRAT_BAL_ING, "") or "").strip()
-        contraparte = str(row.get(COL_CTP_NOMBRE, "") or "").strip()
-        factoring_detail = _parse_factoring_detail(row.get(COL_FACT_DET, ""))
-        factoring_on = bool(factoring_detail)
-        factoring_retenido = _factoring_retained_pending(factoring_detail)
-        fin_on = _bool_from_toggle(row.get(COL_FIN_TOGGLE, "No")) or categoria == "Financiamiento recibido"
-        label = str(row.get(COL_DESC, "") or row.get(COL_ROWID, f"fila {idx+1}")).strip() or f"fila {idx+1}"
-        if monto <= 0:
-            errors.append(f"Ingresos: `{label}` tiene monto no valido.")
-        if por_cobrar != "No" and pd.isna(fecha_esp):
-            errors.append(f"Ingresos: `{label}` requiere Fecha esperada de cobro.")
-        if por_cobrar == "No" and pd.isna(fecha_real):
-            errors.append(f"Ingresos: `{label}` requiere Fecha real de cobro.")
-        if por_cobrar != "No" and monto_real > 0 and pd.isna(fecha_real):
-            errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial pero sin Fecha real de cobro.")
-        if por_cobrar != "No" and monto_real >= monto and monto > 0:
-            errors.append(f"Ingresos: `{label}` tiene monto cobrado parcial igual o mayor al total; marque realizado si ya se cobro todo.")
-        if por_cobrar == "No" and not factoring_on and abs(monto_real - monto) > 0.01:
-            errors.append(f"Ingresos: `{label}` marcado realizado debe tener monto real cobrado igual al monto total.")
-        if factoring_on and factoring_retenido < 0:
-            errors.append(f"Ingresos: `{label}` tiene factoring inconsistente; revisa el retenido.")
-        if _counterparty_required_for_ing(categoria, tratamiento, fin_on) and not contraparte:
-            errors.append(f"Ingresos: `{label}` requiere Entidad relacionada / contraparte.")
+        errors.extend(_validate_ing_row(row, idx))
+    return errors
+
+
+def _validate_gas_row(row: pd.Series, idx: int) -> list[str]:
+    errors: list[str] = []
+    monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
+    monto_real = float(_parse_number_maybe_es(row.get(COL_PAGO_REAL_MONTO, 0.0)))
+    por_pagar = _si_no_norm(row.get(COL_POR_PAG, "No"))
+    fecha_esp = _ts(row.get(COL_FPAGO))
+    fecha_real = _ts(row.get(COL_FPAGO_REAL))
+    categoria = str(row.get(COL_CAT, "") or "").strip()
+    tratamiento = str(row.get(COL_TRAT_BAL_GAS, "") or "").strip()
+    contraparte = str(row.get(COL_CTP_NOMBRE, "") or "").strip()
+    fin_on = _bool_from_toggle(row.get(COL_FIN_TOGGLE, "No"))
+    label = str(row.get(COL_CONC, "") or row.get(COL_ROWID, f"fila {idx+1}")).strip() or f"fila {idx+1}"
+    if monto <= 0:
+        errors.append(f"Gastos: `{label}` tiene monto no valido.")
+    if por_pagar != "No" and pd.isna(fecha_esp):
+        errors.append(f"Gastos: `{label}` requiere Fecha esperada de pago.")
+    if por_pagar == "No" and pd.isna(fecha_real):
+        errors.append(f"Gastos: `{label}` requiere Fecha real de pago.")
+    if por_pagar != "No" and monto_real > 0 and pd.isna(fecha_real):
+        errors.append(f"Gastos: `{label}` tiene monto pagado parcial pero sin Fecha real de pago.")
+    if por_pagar != "No" and monto_real >= monto and monto > 0:
+        errors.append(f"Gastos: `{label}` tiene monto pagado parcial igual o mayor al total; marque realizado si ya se pago todo.")
+    if por_pagar == "No" and abs(monto_real - monto) > 0.01:
+        errors.append(f"Gastos: `{label}` marcado realizado debe tener monto real pagado igual al monto total.")
+    if tratamiento == "Anticipo / prepago":
+        plazo = int(pd.to_numeric(pd.Series([row.get(COL_PREPAGO_MESES, 0)]), errors="coerce").fillna(0).iloc[0])
+        fecha_inicio = _ts(row.get(COL_PREPAGO_FEC_INI))
+        if plazo <= 0:
+            errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Plazo prepago meses.")
+        if pd.isna(fecha_inicio):
+            errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Fecha inicio prepago.")
+    if tratamiento == "Inventario":
+        inv_mov = str(row.get(COL_INV_MOV, "") or "").strip()
+        inv_item = str(row.get(COL_INV_ITEM, "") or "").strip()
+        if not inv_mov:
+            errors.append(f"Gastos: `{label}` con Inventario requiere Movimiento inventario.")
+        if not inv_item:
+            errors.append(f"Gastos: `{label}` con Inventario requiere Item inventario / referencia.")
+    if _counterparty_required_for_gas(categoria, tratamiento, fin_on) and not contraparte:
+        errors.append(f"Gastos: `{label}` requiere Entidad relacionada / contraparte.")
     return errors
 
 
 def _validate_gas_df(df: pd.DataFrame) -> list[str]:
     errors: list[str] = []
     for idx, row in df.iterrows():
-        monto = float(_parse_number_maybe_es(row.get(COL_MONTO, 0.0)))
-        monto_real = float(_parse_number_maybe_es(row.get(COL_PAGO_REAL_MONTO, 0.0)))
-        por_pagar = _si_no_norm(row.get(COL_POR_PAG, "No"))
-        fecha_esp = _ts(row.get(COL_FPAGO))
-        fecha_real = _ts(row.get(COL_FPAGO_REAL))
-        categoria = str(row.get(COL_CAT, "") or "").strip()
-        tratamiento = str(row.get(COL_TRAT_BAL_GAS, "") or "").strip()
-        contraparte = str(row.get(COL_CTP_NOMBRE, "") or "").strip()
-        fin_on = _bool_from_toggle(row.get(COL_FIN_TOGGLE, "No"))
-        label = str(row.get(COL_CONC, "") or row.get(COL_ROWID, f"fila {idx+1}")).strip() or f"fila {idx+1}"
-        if monto <= 0:
-            errors.append(f"Gastos: `{label}` tiene monto no valido.")
-        if por_pagar != "No" and pd.isna(fecha_esp):
-            errors.append(f"Gastos: `{label}` requiere Fecha esperada de pago.")
-        if por_pagar == "No" and pd.isna(fecha_real):
-            errors.append(f"Gastos: `{label}` requiere Fecha real de pago.")
-        if por_pagar != "No" and monto_real > 0 and pd.isna(fecha_real):
-            errors.append(f"Gastos: `{label}` tiene monto pagado parcial pero sin Fecha real de pago.")
-        if por_pagar != "No" and monto_real >= monto and monto > 0:
-            errors.append(f"Gastos: `{label}` tiene monto pagado parcial igual o mayor al total; marque realizado si ya se pago todo.")
-        if por_pagar == "No" and abs(monto_real - monto) > 0.01:
-            errors.append(f"Gastos: `{label}` marcado realizado debe tener monto real pagado igual al monto total.")
-        if tratamiento == "Anticipo / prepago":
-            plazo = int(pd.to_numeric(pd.Series([row.get(COL_PREPAGO_MESES, 0)]), errors="coerce").fillna(0).iloc[0])
-            fecha_inicio = _ts(row.get(COL_PREPAGO_FEC_INI))
-            if plazo <= 0:
-                errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Plazo prepago meses.")
-            if pd.isna(fecha_inicio):
-                errors.append(f"Gastos: `{label}` con Anticipo / prepago requiere Fecha inicio prepago.")
-        if tratamiento == "Inventario":
-            inv_mov = str(row.get(COL_INV_MOV, "") or "").strip()
-            inv_item = str(row.get(COL_INV_ITEM, "") or "").strip()
-            if not inv_mov:
-                errors.append(f"Gastos: `{label}` con Inventario requiere Movimiento inventario.")
-            if not inv_item:
-                errors.append(f"Gastos: `{label}` con Inventario requiere Item inventario / referencia.")
-        if _counterparty_required_for_gas(categoria, tratamiento, fin_on) and not contraparte:
-            errors.append(f"Gastos: `{label}` requiere Entidad relacionada / contraparte.")
+        errors.extend(_validate_gas_row(row, idx))
     return errors
+
+
+def _collect_row_validation_errors(
+    df: pd.DataFrame,
+    row_validator,
+) -> dict[int, list[str]]:
+    errors_by_row: dict[int, list[str]] = {}
+    for idx, row in df.iterrows():
+        row_errors = row_validator(row, idx)
+        if row_errors:
+            errors_by_row[idx] = row_errors
+    return errors_by_row
+
+
+def _sync_table_with_partial_validation(
+    *,
+    title: str,
+    edited_df: pd.DataFrame,
+    filtered_df: pd.DataFrame,
+    row_validator,
+    base_df_key: str,
+    worksheet_name: str,
+    ensure_columns_fn,
+    id_column: str,
+) -> None:
+    row_errors = _collect_row_validation_errors(edited_df, row_validator)
+    if not row_errors:
+        sync_cambios(
+            edited_df=edited_df,
+            filtered_df=filtered_df,
+            base_df_key=base_df_key,
+            worksheet_name=worksheet_name,
+            session_state=st.session_state,
+            write_worksheet=write_worksheet,
+            client=client,
+            sheet_id=SHEET_ID,
+            id_column=id_column,
+            ensure_columns_fn=ensure_columns_fn,
+        )
+        return
+
+    invalid_indexes = set(row_errors.keys())
+    valid_df = edited_df.loc[~edited_df.index.isin(invalid_indexes)].copy()
+    if not valid_df.empty:
+        sync_cambios(
+            edited_df=valid_df,
+            filtered_df=filtered_df,
+            base_df_key=base_df_key,
+            worksheet_name=worksheet_name,
+            session_state=st.session_state,
+            write_worksheet=write_worksheet,
+            client=client,
+            sheet_id=SHEET_ID,
+            id_column=id_column,
+            ensure_columns_fn=ensure_columns_fn,
+        )
+        _render_table_error_block(
+            title,
+            [msg for msgs in row_errors.values() for msg in msgs][:50],
+            intro=f"Se guardaron los cambios válidos en {title}. Quedan filas por corregir antes de que esas filas se sincronicen.",
+        )
+        return
+
+    _render_table_error_block(title, [msg for msgs in row_errors.values() for msg in msgs][:50])
 
 
 def _date_or_nat(value):
@@ -879,10 +955,10 @@ def _build_factoring_fee_row(
     }
 
 
-def _render_table_error_block(title: str, errors: list[str]) -> None:
+def _render_table_error_block(title: str, errors: list[str], intro: str | None = None) -> None:
     if not errors:
         return
-    st.error(f"No se guardaron cambios en {title} hasta corregir la tabla editable.")
+    st.error(intro or f"No se guardaron cambios en {title} hasta corregir la tabla editable.")
     st.dataframe(pd.DataFrame({"detalle": errors}), use_container_width=True, hide_index=True)
 
 
@@ -4997,7 +5073,6 @@ edited_ing = _editor_state_to_dataframe(
     numeric_cols={COL_MONTO, COL_COBRO_REAL_MONTO},
 )
 edited_ing = _autoderive_ing_df(edited_ing)
-ing_table_errors = _validate_ing_df(edited_ing)
 
 if COL_POR_COB in st.session_state.df_ing.columns and COL_FCOBRO in st.session_state.df_ing.columns:
     miss_cobro_mask = (
@@ -5046,17 +5121,17 @@ else:
                 return df[mask]
             df_ing_f = _match_df(df_ing_f)
 
-# === ALTAS/EDICIONES (sync normal) ===
-if ing_table_errors:
-    _render_table_error_block("Ingresos", ing_table_errors[:50])
-else:
-    sync_cambios(
-        edited_df=edited_ing, filtered_df=df_ing_f,
-        base_df_key="df_ing", worksheet_name=WS_ING,
-        session_state=st.session_state, write_worksheet=write_worksheet,
-        client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
-        ensure_columns_fn=_autoderive_ing_df,
-    )
+# === ALTAS/EDICIONES (sync parcial seguro) ===
+_sync_table_with_partial_validation(
+    title="Ingresos",
+    edited_df=edited_ing,
+    filtered_df=df_ing_f,
+    row_validator=_validate_ing_row,
+    base_df_key="df_ing",
+    worksheet_name=WS_ING,
+    ensure_columns_fn=_autoderive_ing_df,
+    id_column=COL_ROWID,
+)
 
 with st.expander("Registrar cobro parcial", expanded=False):
     ing_base_partial = ensure_ingresos_columns(st.session_state.df_ing.copy())
@@ -6887,7 +6962,6 @@ edited_gas = _editor_state_to_dataframe(
     numeric_cols={COL_MONTO, COL_PAGO_REAL_MONTO, COL_PREPAGO_MESES},
 )
 edited_gas = _autoderive_gas_df(edited_gas)
-gas_table_errors = _validate_gas_df(edited_gas)
 
 if COL_POR_PAG in st.session_state.df_gas.columns and COL_FPAGO in st.session_state.df_gas.columns:
     miss_pago_mask = (
@@ -6936,17 +7010,17 @@ else:
                 return df[mask]
             df_gas_f = _match_df(df_gas_f)
 
-# === ALTAS/EDICIONES (sync normal) ===
-if gas_table_errors:
-    _render_table_error_block("Gastos", gas_table_errors[:50])
-else:
-    sync_cambios(
-        edited_df=edited_gas, filtered_df=df_gas_f,
-        base_df_key="df_gas", worksheet_name=WS_GAS,
-        session_state=st.session_state, write_worksheet=write_worksheet,
-        client=client, sheet_id=SHEET_ID, id_column=COL_ROWID,
-        ensure_columns_fn=_autoderive_gas_df,
-    )
+# === ALTAS/EDICIONES (sync parcial seguro) ===
+_sync_table_with_partial_validation(
+    title="Gastos",
+    edited_df=edited_gas,
+    filtered_df=df_gas_f,
+    row_validator=_validate_gas_row,
+    base_df_key="df_gas",
+    worksheet_name=WS_GAS,
+    ensure_columns_fn=_autoderive_gas_df,
+    id_column=COL_ROWID,
+)
 
 with st.expander("Registrar pago parcial", expanded=False):
     gas_base_partial = ensure_gastos_columns(st.session_state.df_gas.copy())
