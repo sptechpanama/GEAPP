@@ -33,6 +33,7 @@ def _safe_rerun() -> None:
 
 from sheets import get_client, read_worksheet, write_worksheet
 from services.backups import debug_sa_quota
+from services.company_labels import display_company_label
 from core.cashflow import preparar_cashflow
 try:
     from core.sync import sync_cambios
@@ -399,6 +400,10 @@ FIN_RATE_TYPE_OPTIONS = ["Mensual", "Anual"]
 FIN_MODALITY_OPTIONS = ["Cuotas periodicas", "Pago unico al vencimiento"]
 AF_TYPE_OPTIONS = ["Tangible", "Intangible"]
 AF_LIFE_OPTIONS = [1, 3, 5, 7, 10]
+
+
+def _empresa_format_option(value: str) -> str:
+    return value if str(value or "") == "Todas" else display_company_label(value)
 
 
 def _apply_empresa_filter(df: pd.DataFrame, empresa: str) -> pd.DataFrame:
@@ -3125,7 +3130,7 @@ def _render_finance_doc_card_context(
         ]
     ).lower()
     labels = [
-        f"{str(card.get(TC_COL_EMPRESA, '')).strip()} | {str(card.get(TC_COL_NOMBRE, '')).strip()} | {str(card.get(TC_COL_BANCO, '')).strip()}"
+        f"{display_company_label(str(card.get(TC_COL_EMPRESA, '')).strip())} | {str(card.get(TC_COL_NOMBRE, '')).strip()} | {str(card.get(TC_COL_BANCO, '')).strip()}"
         for _, card in active_cards.iterrows()
     ]
     default_card_idx = 0
@@ -4177,7 +4182,13 @@ with st.sidebar:
     with st.expander("Rango y criterios", expanded=True):
         f_desde = st.date_input("Desde", value=default_desde, key="filtro_desde")
         f_hasta = st.date_input("Hasta", value=default_hasta, key="filtro_hasta")
-        filtro_empresa = st.selectbox("Empresa", options=["Todas"] + EMPRESAS_OPCIONES, index=0, key="filtro_empresa")
+        filtro_empresa = st.selectbox(
+            "Empresa",
+            options=["Todas"] + EMPRESAS_OPCIONES,
+            index=0,
+            key="filtro_empresa",
+            format_func=_empresa_format_option,
+        )
         search_q = st.text_input(
             "🔎 Buscar (cliente, proyecto, descripción, concepto, categoría, empresa)",
             key="global_search",
@@ -4189,7 +4200,7 @@ with st.sidebar:
     if isinstance(f_hasta, date) and f_hasta != default_hasta:
         active_tags.append(f"Hasta {f_hasta.strftime('%Y-%m-%d')}")
     if filtro_empresa != "Todas":
-        active_tags.append(f"Empresa: {filtro_empresa}")
+        active_tags.append(f"Empresa: {display_company_label(filtro_empresa)}")
     if search_q.strip():
         active_tags.append(f"Busca: {search_q.strip()[:30]}" + ("…" if len(search_q.strip()) > 30 else ""))
 
@@ -4463,7 +4474,8 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
             "Empresa (cliente)",
             EMPRESAS_OPCIONES,
             index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
-            key="cat_emp_cliente"
+            key="cat_emp_cliente",
+            format_func=_empresa_format_option,
         )
     with colc2:
         cli_nom_in = st.text_input("Nombre del cliente", key="cat_cli_nom")
@@ -4540,7 +4552,8 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
             "Empresa (proyecto)",
             EMPRESAS_OPCIONES,
             index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
-            key="cat_emp_proj"
+            key="cat_emp_proj",
+            format_func=_empresa_format_option,
         )
     proy_nom_in = st.text_input("Nombre del proyecto", key="cat_proj_nom")
 
@@ -4635,6 +4648,7 @@ with st.expander("Anadir ingreso (rapido)", expanded=ing_should_expand):
             index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
             key="ing_empresa_quick",
             on_change=lambda: _mark_form_force_open("ing"),
+            format_func=_empresa_format_option,
         )
     with c2:
         fecha_nueva = st.date_input(
@@ -5749,7 +5763,7 @@ with st.expander("Gestionar linea de credito", expanded=False):
 
     with tab_lc1:
         line_options = ["Nueva linea"] + [
-            f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}"
+            f"{display_company_label(str(row.get(LC_COL_EMPRESA, '')).strip())} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}"
             for _, row in lineas_df.iterrows()
         ]
         selected_line_label = st.selectbox("Linea a editar", line_options, key="lc_config_sel")
@@ -5763,7 +5777,7 @@ with st.expander("Gestionar linea de credito", expanded=False):
         lc_emp_index = EMPRESAS_OPCIONES.index(lc_emp_default) if lc_emp_default in EMPRESAS_OPCIONES else EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT)
         c1, c2, c3 = st.columns(3)
         with c1:
-            lc_empresa = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=lc_emp_index, key=f"lc_cfg_emp_{suffix}")
+            lc_empresa = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=lc_emp_index, key=f"lc_cfg_emp_{suffix}", format_func=_empresa_format_option)
             lc_nombre = st.text_input("Nombre linea", value=str(selected_line.get(LC_COL_NOMBRE, "")) if selected_line is not None else "", key=f"lc_cfg_nombre_{suffix}")
             lc_banco = st.text_input("Banco", value=str(selected_line.get(LC_COL_BANCO, "")) if selected_line is not None else "", key=f"lc_cfg_banco_{suffix}")
         with c2:
@@ -5825,7 +5839,7 @@ with st.expander("Gestionar linea de credito", expanded=False):
             st.info("Primero configura y activa al menos una linea de credito.")
         else:
             disb_labels = {
-                f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
+                f"{display_company_label(str(row.get(LC_COL_EMPRESA, '')).strip())} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
                 for _, row in lineas_activas.iterrows()
             }
             disb_sel = st.selectbox("Linea activa", list(disb_labels.keys()), key="lc_disb_sel")
@@ -5909,7 +5923,7 @@ with st.expander("Gestionar linea de credito", expanded=False):
             st.info("Primero configura y activa al menos una linea de credito.")
         else:
             pay_labels = {
-                f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
+                f"{display_company_label(str(row.get(LC_COL_EMPRESA, '')).strip())} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
                 for _, row in lineas_activas.iterrows()
             }
             pay_sel = st.selectbox("Linea activa", list(pay_labels.keys()), key="lc_pay_sel")
@@ -6018,7 +6032,7 @@ with st.expander("Gestionar linea de credito", expanded=False):
             st.info("Primero configura y activa al menos una linea de credito.")
         else:
             cargo_labels = {
-                f"{str(row.get(LC_COL_EMPRESA, '')).strip()} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
+                f"{display_company_label(str(row.get(LC_COL_EMPRESA, '')).strip())} | {str(row.get(LC_COL_NOMBRE, '')).strip()} | {str(row.get(LC_COL_BANCO, '')).strip()}": str(row.get(LC_COL_ROWID, "")).strip()
                 for _, row in lineas_activas.iterrows()
             }
             cargo_sel = st.selectbox("Linea activa", list(cargo_labels.keys()), key="lc_charge_sel")
@@ -6100,7 +6114,7 @@ with st.expander("Gestionar tarjeta de credito", expanded=False):
 
     with tab_tc1:
         card_options = ["Nueva tarjeta"] + [
-            f"{str(row.get(TC_COL_EMPRESA, '')).strip()} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}"
+            f"{display_company_label(str(row.get(TC_COL_EMPRESA, '')).strip())} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}"
             for _, row in cards_df.iterrows()
         ]
         selected_card_label = st.selectbox("Tarjeta a editar", card_options, key="tc_config_sel")
@@ -6114,7 +6128,7 @@ with st.expander("Gestionar tarjeta de credito", expanded=False):
         tc_emp_index = EMPRESAS_OPCIONES.index(tc_emp_default) if tc_emp_default in EMPRESAS_OPCIONES else EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT)
         c1, c2, c3 = st.columns(3)
         with c1:
-            tc_empresa = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=tc_emp_index, key=f"tc_cfg_emp_{suffix}")
+            tc_empresa = st.selectbox("Empresa", EMPRESAS_OPCIONES, index=tc_emp_index, key=f"tc_cfg_emp_{suffix}", format_func=_empresa_format_option)
             tc_nombre = st.text_input("Nombre tarjeta", value=str(selected_card.get(TC_COL_NOMBRE, "")) if selected_card is not None else "", key=f"tc_cfg_nombre_{suffix}")
             tc_banco = st.text_input("Banco", value=str(selected_card.get(TC_COL_BANCO, "")) if selected_card is not None else "", key=f"tc_cfg_banco_{suffix}")
         with c2:
@@ -6164,7 +6178,7 @@ with st.expander("Gestionar tarjeta de credito", expanded=False):
             st.info("Primero configura y activa al menos una tarjeta.")
         else:
             card_labels = {
-                f"{str(row.get(TC_COL_EMPRESA, '')).strip()} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}": str(row.get(TC_COL_ROWID, "")).strip()
+                f"{display_company_label(str(row.get(TC_COL_EMPRESA, '')).strip())} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}": str(row.get(TC_COL_ROWID, "")).strip()
                 for _, row in cards_activas.iterrows()
             }
             tc_sel = st.selectbox("Tarjeta activa", list(card_labels.keys()), key="tc_cons_sel")
@@ -6287,7 +6301,7 @@ with st.expander("Gestionar tarjeta de credito", expanded=False):
             st.info("Primero configura y activa al menos una tarjeta.")
         else:
             pay_labels = {
-                f"{str(row.get(TC_COL_EMPRESA, '')).strip()} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}": str(row.get(TC_COL_ROWID, "")).strip()
+                f"{display_company_label(str(row.get(TC_COL_EMPRESA, '')).strip())} | {str(row.get(TC_COL_NOMBRE, '')).strip()} | {str(row.get(TC_COL_BANCO, '')).strip()}": str(row.get(TC_COL_ROWID, "")).strip()
                 for _, row in cards_activas.iterrows()
             }
             tc_pay_sel = st.selectbox("Tarjeta activa", list(pay_labels.keys()), key="tc_pay_sel")
@@ -6370,6 +6384,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
             index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
             key="gas_empresa_quick",
             on_change=lambda: _mark_form_force_open("gas"),
+            format_func=_empresa_format_option,
         )
     with c2:
         fecha_g = st.date_input(
