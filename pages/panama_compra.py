@@ -26,6 +26,11 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
 from services.auth_drive import get_drive_delegated
+from services.panama_compra_keywords import (
+    DEFAULT_PANAMACOMPRA_KEYWORDS,
+    match_keywords_in_text,
+    normalize_keyword_term,
+)
 
 apply_global_theme()
 
@@ -84,6 +89,7 @@ PC_CONFIG_WORKSHEET = "pc_config"
 PC_MANUAL_SHEET_ID = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
 PC_MANUAL_WORKSHEET = "pc_manual"
 CT_RIR_LIST_WORKSHEET = "ct_rir_fichas"
+PC_KEYWORDS_WORKSHEET = "pc_palabras_clave"
 JOB_NAME_LABELS = {
     "clrir": "Cotizaciones Programadas",
     "clv": "Cotizaciones Abiertas",
@@ -2535,6 +2541,150 @@ def _save_ct_rir_tokens(tokens: list[str]) -> bool:
         return False
 
 
+def _parse_manual_keyword_terms(raw_value: object) -> list[str]:
+    raw = _clean_text(raw_value)
+    if not raw:
+        return []
+    candidates = re.split(r"[,;\n\r]+", raw)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = normalize_keyword_term(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        terms.append(normalized)
+    return terms
+
+
+def _load_panama_keyword_terms() -> list[str]:
+    default_terms = [normalize_keyword_term(term) for term in DEFAULT_PANAMACOMPRA_KEYWORDS]
+    default_rows = [["Palabra clave", "Actualizado por", "Actualizado"]]
+    default_rows.extend([[term, "sistema", "inicial"] for term in default_terms])
+
+    try:
+        sh = get_gc().open_by_key(SHEET_ID)
+    except Exception:
+        return default_terms
+
+    try:
+        ws = sh.worksheet(PC_KEYWORDS_WORKSHEET)
+    except Exception:
+        try:
+            ws = sh.add_worksheet(title=PC_KEYWORDS_WORKSHEET, rows=2000, cols=3)
+            ws.update(f"A1:C{len(default_rows)}", default_rows)
+            return default_terms
+        except Exception:
+            return default_terms
+
+    try:
+        values = ws.get_all_values()
+    except Exception:
+        return default_terms
+
+    if not values:
+        return default_terms
+
+    seen: set[str] = set()
+    terms: list[str] = []
+    for row in values[1:]:
+        if not row:
+            continue
+        term = normalize_keyword_term(row[0])
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+def _save_panama_keyword_terms(terms: list[str]) -> bool:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        clean_term = normalize_keyword_term(term)
+        if not clean_term or clean_term in seen:
+            continue
+        seen.add(clean_term)
+        normalized.append(clean_term)
+
+    try:
+        sh = get_gc().open_by_key(SHEET_ID)
+        try:
+            ws = sh.worksheet(PC_KEYWORDS_WORKSHEET)
+        except Exception:
+            ws = sh.add_worksheet(title=PC_KEYWORDS_WORKSHEET, rows=2000, cols=3)
+    except Exception:
+        return False
+
+    user_name = _current_user()
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = [["Palabra clave", "Actualizado por", "Actualizado"]]
+    rows.extend([[term, user_name, now_text] for term in normalized])
+    try:
+        ws.clear()
+        end_row = max(1, len(rows))
+        ws.update(f"A1:C{end_row}", rows)
+        return True
+    except Exception:
+        return False
+
+
+def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[str]:
+    current_terms = _load_panama_keyword_terms()
+    selected_options = current_terms if current_terms else [""]
+
+    controls = st.columns([2.2, 2.2, 1.1, 1.1])
+    with controls[0]:
+        selected = st.selectbox(
+            "Palabra configurada",
+            options=selected_options,
+            key=f"{key_prefix}_selector",
+            format_func=lambda value: value if value else "Sin palabras configuradas",
+            label_visibility="collapsed",
+            disabled=(selected_options == [""]),
+        )
+    manual_raw = controls[1].text_input(
+        "Palabras clave",
+        key=f"{key_prefix}_manual_input",
+        placeholder="Ej: chiller, york, daikin, aire acondicionado",
+        label_visibility="collapsed",
+    )
+    add_clicked = controls[2].button("Agregar", key=f"{key_prefix}_add")
+    remove_clicked = controls[3].button("Quitar", key=f"{key_prefix}_remove")
+
+    if add_clicked or remove_clicked:
+        manual_terms = _parse_manual_keyword_terms(manual_raw)
+        selected_term = normalize_keyword_term(selected)
+        target_terms = manual_terms if manual_terms else ([selected_term] if selected_term else [])
+        if not target_terms:
+            st.warning("Ingresa una o mas palabras clave separadas por coma, o selecciona una ya configurada.")
+        else:
+            current_set = set(current_terms)
+            if add_clicked:
+                updated = current_terms + [term for term in target_terms if term not in current_set]
+            else:
+                remove_set = set(target_terms)
+                updated = [term for term in current_terms if term not in remove_set]
+
+            if _save_panama_keyword_terms(updated):
+                action = "agregaron" if add_clicked else "quitaron"
+                st.success(f"Lista de palabras clave actualizada: se {action} {len(target_terms)} palabra(s).")
+                st.rerun()
+            else:
+                st.error("No se pudo guardar la lista de palabras clave en Google Sheets.")
+
+    with st.expander("Palabras clave incluidas", expanded=False):
+        if not current_terms:
+            st.caption("Sin palabras clave configuradas.")
+        else:
+            kw_df = pd.DataFrame({"Palabra clave": current_terms})
+            st.dataframe(kw_df, use_container_width=True, height=220, hide_index=True)
+            st.caption(f"Total palabras clave: {len(current_terms)}")
+
+    return current_terms
+
+
 def _render_ct_rir_manager(source_df: pd.DataFrame, *, key_prefix: str = "ct_rir") -> None:
     current_tokens = _load_ct_rir_tokens()
     current_set = set(current_tokens)
@@ -2614,6 +2764,99 @@ def _coerce_ct_label(value: object) -> str:
     if norm in {"si", "s", "true", "1", "x", "con ct", "ct"}:
         return "Si"
     return "No"
+
+
+def _keyword_source_columns(df: pd.DataFrame) -> list[str]:
+    selected: list[str] = []
+    for col in df.columns:
+        if col == ROW_ID_COL:
+            continue
+        normalized = _normalize_column_key(col)
+        if normalized in {"titulo", "descripcion"} or normalized.startswith("item"):
+            selected.append(col)
+    return selected
+
+
+def _keyword_match_columns(df: pd.DataFrame, keyword_terms: list[str]) -> pd.DataFrame:
+    if df.empty or not keyword_terms:
+        return pd.DataFrame()
+
+    text_columns = _keyword_source_columns(df)
+    if not text_columns:
+        return pd.DataFrame()
+
+    matched_rows: list[dict[str, object]] = []
+    for _, row in df.iterrows():
+        row_payload = row.to_dict()
+        matched_terms: list[str] = []
+        matched_cols: list[str] = []
+        for col in text_columns:
+            column_matches = match_keywords_in_text(row_payload.get(col, ""), keyword_terms)
+            if not column_matches:
+                continue
+            for term in column_matches:
+                if term not in matched_terms:
+                    matched_terms.append(term)
+            if col not in matched_cols:
+                matched_cols.append(col)
+        if not matched_terms:
+            continue
+        row_payload["Palabras clave detectadas"] = ", ".join(matched_terms)
+        row_payload["Campos con coincidencia"] = ", ".join(matched_cols)
+        matched_rows.append(row_payload)
+
+    if not matched_rows:
+        return pd.DataFrame()
+    return pd.DataFrame(matched_rows)
+
+
+def _deduplicate_keyword_hits(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    link_col = _resolve_column_by_alias(df.columns.tolist(), ["enlace", "url", "link"])
+    title_col = _resolve_column_by_alias(df.columns.tolist(), ["titulo", "título"])
+    fecha_col = _resolve_column_exact(df.columns.tolist(), ["fecha", "fecha sola"])
+    entidad_col = _resolve_column_by_alias(df.columns.tolist(), ["entidad"])
+
+    work = df.copy()
+    if link_col:
+        key_series = work[link_col].fillna("").astype(str).str.strip()
+    else:
+        empty_series = pd.Series([""] * len(work), index=work.index, dtype="object")
+        title_series = work[title_col].fillna("").astype(str).str.strip() if title_col else empty_series
+        fecha_series = work[fecha_col].fillna("").astype(str).str.strip() if fecha_col else empty_series
+        entidad_series = work[entidad_col].fillna("").astype(str).str.strip() if entidad_col else empty_series
+        key_series = title_series + "||" + fecha_series + "||" + entidad_series
+
+    work["__keyword_match_key__"] = key_series
+
+    deduped_rows: list[pd.Series] = []
+    for _, group in work.groupby("__keyword_match_key__", sort=False, dropna=False):
+        base = group.iloc[0].copy()
+        for agg_col in (
+            "Tipo convocatoria",
+            "Pestana origen",
+            "Palabras clave detectadas",
+            "Campos con coincidencia",
+        ):
+            if agg_col not in group.columns:
+                continue
+            values: list[str] = []
+            seen: set[str] = set()
+            for raw in group[agg_col].fillna("").astype(str):
+                for part in [p.strip() for p in raw.split(",") if p.strip()]:
+                    normalized_part = _normalize_column_key(part)
+                    if normalized_part in seen:
+                        continue
+                    seen.add(normalized_part)
+                    values.append(part)
+            if values:
+                base[agg_col] = ", ".join(values)
+        deduped_rows.append(base)
+
+    out = pd.DataFrame(deduped_rows)
+    return out.drop(columns=["__keyword_match_key__"], errors="ignore").reset_index(drop=True)
 
 
 def _coerce_registro_sanitario_label(value: object) -> str:
@@ -4729,6 +4972,17 @@ SHEET_GROUPS = {
         "cl_prog_ct_rir",
         "ap_ct_rir",
     ],
+    "Palabras Clave": [
+        "cl_abiertas_rir_sin_requisitos",
+        "cl_abiertas",
+        "cl_abiertas_rir_con_ct",
+        "cl_prog_sin_ficha",
+        "cl_prog_sin_requisitos",
+        "cl_prog_con_ct",
+        "ap_con_ct",
+        "ap_sin_ficha",
+        "ap_sin_requisitos",
+    ],
     "Prioritarias": [
         "cl_prioritarios",
     ],
@@ -4739,6 +4993,7 @@ CATEGORY_ORDER = [
     "Cotizaciones Programadas",
     "Licitaciones",
     "Criterios Tecnicos RIR",
+    "Palabras Clave",
     "Prioritarias",
 ]
 
@@ -5557,6 +5812,44 @@ for tab, category_name in zip(category_tabs, ordered_categories):
                 render_df(
                     df_read_only,
                     "ct_rir_unificado",
+                    pc_state_df,
+                    pc_config_df,
+                    suffix=tab_suffix,
+                )
+            continue
+
+        if category_name == "Palabras Clave":
+            keyword_terms = _render_keyword_watch_manager(key_prefix=f"{selector_key}_keywords")
+            parts: list[pd.DataFrame] = []
+            for source_sheet in sheets:
+                source_df = load_df(source_sheet)
+                if source_df.empty:
+                    continue
+                matched_df = _keyword_match_columns(source_df, keyword_terms)
+                if matched_df.empty:
+                    continue
+                matched_df["Tipo convocatoria"] = _sheet_tipo_convocatoria(source_sheet)
+                matched_df["Pestana origen"] = _sheet_label(source_sheet)
+                parts.append(matched_df)
+
+            if parts:
+                df = pd.concat(parts, ignore_index=True, sort=False)
+                df = _deduplicate_keyword_hits(df)
+            else:
+                df = pd.DataFrame()
+
+            if df.empty:
+                st.info("No se encontraron actos con las palabras clave configuradas.")
+            else:
+                read_only_cols = [c for c in df.columns if not _is_checkbox_target(c)]
+                df_read_only = df[read_only_cols].copy() if read_only_cols else df.copy()
+                st.caption(
+                    "Vista unificada de Abiertas, Programadas y Licitaciones "
+                    "filtrada por coincidencias de palabras clave en titulo, descripcion e items."
+                )
+                render_df(
+                    df_read_only,
+                    "palabras_clave_unificado",
                     pc_state_df,
                     pc_config_df,
                     suffix=tab_suffix,
