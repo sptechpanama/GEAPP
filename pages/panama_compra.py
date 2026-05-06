@@ -4972,7 +4972,7 @@ SHEET_GROUPS = {
         "cl_prog_ct_rir",
         "ap_ct_rir",
     ],
-    "Palabras Clave": [
+    "Actos RS/SP": [
         "cl_abiertas_rir_sin_requisitos",
         "cl_abiertas",
         "cl_abiertas_rir_con_ct",
@@ -4993,7 +4993,7 @@ CATEGORY_ORDER = [
     "Cotizaciones Programadas",
     "Licitaciones",
     "Criterios Tecnicos RIR",
-    "Palabras Clave",
+    "Actos RS/SP",
     "Prioritarias",
 ]
 
@@ -5818,7 +5818,7 @@ for tab, category_name in zip(category_tabs, ordered_categories):
                 )
             continue
 
-        if category_name == "Palabras Clave":
+        if category_name == "Actos RS/SP":
             keyword_terms = _render_keyword_watch_manager(key_prefix=f"{selector_key}_keywords")
             parts: list[pd.DataFrame] = []
             for source_sheet in sheets:

@@ -8,7 +8,6 @@ from datetime import date, timedelta
 import altair as alt
 import pandas as pd
 import streamlit as st
-from services.company_labels import apply_company_labels_df, display_company_label
 from services.finance_opening import get_finance_opening_config, opening_amount_for_filter
 
 from core.finance_v2 import constants as f2c
@@ -131,7 +130,6 @@ def _line_chart(df: pd.DataFrame, x: str, y: str, title: str, color: str = "#22c
     if df.empty:
         st.info("Sin datos para mostrar en este grafico.")
         return
-    df = apply_company_labels_df(df, columns=(x,))
     chart = (
         alt.Chart(df)
         .mark_line(point=True, color=color)
@@ -157,7 +155,6 @@ def _bar_chart(
     if df.empty:
         st.info("Sin datos para mostrar en este grafico.")
         return
-    df = apply_company_labels_df(df, columns=(x,))
     sort_spec = x_sort if x_sort is not None else "-y"
     chart = (
         alt.Chart(df)
@@ -176,10 +173,6 @@ def _bar_chart(
 def _series_to_csv_download(df: pd.DataFrame, filename: str, label: str):
     csv_data = df.to_csv(index=False).encode("utf-8")
     st.download_button(label, data=csv_data, file_name=filename, mime="text/csv")
-
-
-def _empresa_format_option(value: str) -> str:
-    return value if str(value or "") == "Todas" else display_company_label(value)
 
 
 def _build_cashflow_actual_with_opening(
@@ -1297,7 +1290,7 @@ with st.sidebar:
         st.caption(f"Periodo activo: {fecha_desde.isoformat()} -> {fecha_hasta.isoformat()}")
 
     empresa_opt = ["Todas"] + opts["empresas"]
-    empresa = st.selectbox("Empresa", options=empresa_opt, index=0, key="f2_empresa", format_func=_empresa_format_option)
+    empresa = st.selectbox("Empresa", options=empresa_opt, index=0, key="f2_empresa")
 
     escenarios_opts = opts["escenarios"]
     escenarios_sel = st.multiselect(
@@ -1636,7 +1629,7 @@ with tab_a:
     st.markdown("### Estado general")
     st.write(
         f"Rango analizado: **{fecha_desde.isoformat()}** a **{fecha_hasta.isoformat()}** | "
-        f"Empresa: **{display_company_label(empresa)}** | Vista: **{vista_modo}**"
+        f"Empresa: **{empresa}** | Vista: **{vista_modo}**"
     )
 
     col1, col2 = st.columns(2)
@@ -1777,7 +1770,7 @@ with tab_c:
                 x_sort=serie_proj_bar["periodo"].tolist(),
             )
         st.markdown("#### Eventos futuros")
-        st.dataframe(apply_company_labels_df(proyectado["eventos"]), use_container_width=True, hide_index=True)
+        st.dataframe(proyectado["eventos"], use_container_width=True, hide_index=True)
     else:
         st.info("No hay eventos de cobro/pago pendientes para proyectar en el rango filtrado.")
 
@@ -1799,7 +1792,7 @@ with tab_d:
         st.caption(f"- {note}")
 
     st.dataframe(
-        apply_company_labels_df(estado["estado"]),
+        estado["estado"],
         use_container_width=True,
         hide_index=True,
         column_config={"Monto": st.column_config.NumberColumn("Monto", format="$%0.2f")},
@@ -1843,7 +1836,7 @@ with tab_d:
     if not estado["por_empresa"].empty:
         st.markdown("#### Desglose por empresa")
         st.dataframe(
-            apply_company_labels_df(estado["por_empresa"]),
+            estado["por_empresa"],
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -1985,7 +1978,7 @@ with tab_f:
         st.markdown("#### Cuentas por cobrar")
         st.metric("Total CxC", format_money_es(cxc_total))
         st.dataframe(
-            apply_company_labels_df(cxc_df),
+            cxc_df,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -1997,7 +1990,7 @@ with tab_f:
         st.markdown("#### Cuentas por pagar")
         st.metric("Total CxP", format_money_es(cxp_total))
         st.dataframe(
-            apply_company_labels_df(cxp_df),
+            cxp_df,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2017,7 +2010,7 @@ with tab_g:
     if not analisis["por_empresa"].empty:
         st.markdown("#### Ingresos, gastos y utilidad por empresa")
         st.dataframe(
-            apply_company_labels_df(analisis["por_empresa"]),
+            analisis["por_empresa"],
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2111,7 +2104,7 @@ with tab_i:
             issues_view = issues_view[issues_view["problema"] == prob_sel]
 
         st.dataframe(
-            apply_company_labels_df(issues_view),
+            issues_view,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2137,7 +2130,7 @@ with st.expander("Inventario operativo", expanded=False):
         st.info("Sin movimientos de inventario en el alcance filtrado.")
     else:
         st.dataframe(
-            apply_company_labels_df(inventory_view),
+            inventory_view,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2161,7 +2154,7 @@ with st.expander("Prepagos activos", expanded=False):
         st.info("Sin prepagos activos en el alcance filtrado.")
     else:
         st.dataframe(
-            apply_company_labels_df(prepagos_view),
+            prepagos_view,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2202,7 +2195,7 @@ with st.expander("Deudas e inversiones", expanded=False):
             st.info("Sin registros en el alcance filtrado.")
             continue
         st.dataframe(
-            apply_company_labels_df(df_view),
+            df_view,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2233,7 +2226,7 @@ with st.expander("Deudas e inversiones", expanded=False):
         st.info("Sin operaciones con factoring en el alcance filtrado.")
     else:
         st.dataframe(
-            apply_company_labels_df(factoring_view),
+            factoring_view,
             use_container_width=True,
             hide_index=True,
             column_config={
