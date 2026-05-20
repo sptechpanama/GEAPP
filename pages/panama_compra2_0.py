@@ -319,6 +319,51 @@ def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFra
 
 
 @st.cache_data(ttl=300)
+def get_sqlite_db_update_summary(db_path: str) -> dict[str, str]:
+    summary = {
+        "last_data_update_at": "",
+        "last_run_completed_at": "",
+        "last_run_status": "",
+        "row_count": "0",
+        "file_mtime_at": "",
+    }
+    db_file = Path(db_path)
+    if db_file.exists():
+        try:
+            summary["file_mtime_at"] = datetime.fromtimestamp(db_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+    with _connect_sqlite(db_path) as conn:
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'"
+        )
+        tables = {str(row[0]) for row in cur.fetchall()}
+
+        if "db_metadata" in tables:
+            cur = conn.execute(
+                "SELECT key, value FROM db_metadata "
+                "WHERE key IN ('last_data_update_at', 'last_run_completed_at', 'last_run_status')"
+            )
+            for key, value in cur.fetchall():
+                if key in summary:
+                    summary[str(key)] = str(value or "")
+
+        if "actos_publicos" in tables:
+            cur = conn.execute("SELECT COUNT(1), MAX(fecha_actualizacion) FROM actos_publicos")
+            row = cur.fetchone()
+            if row:
+                count_value = row[0] if row[0] is not None else 0
+                max_update = row[1] if len(row) > 1 else ""
+                summary["row_count"] = str(count_value)
+                if not summary["last_data_update_at"] and max_update:
+                    summary["last_data_update_at"] = str(max_update)
+
+    return summary
+
+
+@st.cache_data(ttl=300)
 def list_sqlite_columns(db_path: str, table_name: str) -> list[str]:
     identifier = _quote_identifier(table_name)
     with _connect_sqlite(db_path) as conn:
@@ -5719,6 +5764,28 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         except Exception as exc:
             st.error(f"No fue posible listar las tablas: {exc}")
             return
+
+    if backend == "sqlite" and db_path_str:
+        try:
+            db_update_summary = get_sqlite_db_update_summary(db_path_str)
+        except Exception as exc:
+            st.caption(f"Ultima actualizacion: no disponible ({exc})")
+        else:
+            last_data_update_at = db_update_summary.get("last_data_update_at", "")
+            last_run_completed_at = db_update_summary.get("last_run_completed_at", "")
+            last_run_status = db_update_summary.get("last_run_status", "")
+            file_mtime_at = db_update_summary.get("file_mtime_at", "")
+            details = []
+            if last_data_update_at:
+                details.append(f"Datos actualizados: `{last_data_update_at}`")
+            if last_run_completed_at:
+                details.append(f"Ultima corrida: `{last_run_completed_at}`")
+            if last_run_status:
+                details.append(f"Estado: `{last_run_status}`")
+            if file_mtime_at:
+                details.append(f"Archivo: `{file_mtime_at}`")
+            if details:
+                st.caption(" | ".join(details))
 
     if not db_tables:
         st.info("No hay tablas visibles en la base configurada.")
