@@ -119,6 +119,7 @@ HEADER_ALIASES = {
 }
 
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
+SCRAPER_DB_PATH = Path(r"C:\Users\rodri\scrapers_repo\data\db\panamacompra.db")
 CHAT_MAX_RAW_ROWS = 2000
 CHAT_MAX_DISPLAY_ROWS = 300
 CHAT_SUMMARY_SAMPLE_ROWS = 80
@@ -146,7 +147,7 @@ CHAT_FORBIDDEN_SQL_KEYWORDS = (
 
 def _candidate_db_paths() -> list[Path]:
     candidates: list[Path] = []
-    for raw in (DB_PATH, FALLBACK_DB_PATH):
+    for raw in (DB_PATH, SCRAPER_DB_PATH, FALLBACK_DB_PATH):
         if not raw:
             continue
         try:
@@ -159,12 +160,87 @@ def _candidate_db_paths() -> list[Path]:
     return candidates
 
 
+def _parse_update_marker(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        if hasattr(parsed, "to_pydatetime"):
+            return parsed.to_pydatetime()
+    except Exception:
+        return None
+    return None
+
+
+def _read_sqlite_latest_update(path: Path) -> tuple[datetime | None, str]:
+    if not path.exists():
+        return None, ""
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            )
+            tables = {str(row[0]) for row in cur.fetchall()}
+            raw_value = ""
+            if "db_metadata" in tables:
+                cur = conn.execute(
+                    "SELECT value FROM db_metadata WHERE key='last_data_update_at' LIMIT 1"
+                )
+                row = cur.fetchone()
+                raw_value = str(row[0] or "") if row else ""
+            if not raw_value and "actos_publicos" in tables:
+                cur = conn.execute("SELECT MAX(fecha_actualizacion) FROM actos_publicos")
+                row = cur.fetchone()
+                raw_value = str(row[0] or "") if row else ""
+            return _parse_update_marker(raw_value), raw_value
+    except Exception:
+        return None, ""
+
+
 def _preferred_db_path() -> Path | None:
     candidates = _candidate_db_paths()
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0] if candidates else None
+    existing = [candidate for candidate in candidates if candidate.exists()]
+    if not existing:
+        return candidates[0] if candidates else None
+    ranked: list[tuple[datetime | None, Path]] = []
+    for candidate in existing:
+        parsed, _ = _read_sqlite_latest_update(candidate)
+        ranked.append((parsed, candidate))
+    ranked.sort(
+        key=lambda item: (
+            item[0] or datetime.min,
+            item[1].stat().st_mtime if item[1].exists() else 0,
+        ),
+        reverse=True,
+    )
+    return ranked[0][1]
+
+
+def _pick_fresher_sqlite_path(*paths: Path | None) -> Path | None:
+    existing = [path for path in paths if path is not None and path.exists()]
+    if not existing:
+        return None
+    ranked: list[tuple[datetime | None, Path]] = []
+    for path in existing:
+        parsed, _ = _read_sqlite_latest_update(path)
+        ranked.append((parsed, path))
+    ranked.sort(
+        key=lambda item: (
+            item[0] or datetime.min,
+            item[1].stat().st_mtime if item[1].exists() else 0,
+        ),
+        reverse=True,
+    )
+    return ranked[0][1]
 
 
 def _panamacompra_drive_file_id() -> str:
@@ -191,8 +267,6 @@ def _download_panamacompra_db_bytes(file_id: str) -> bytes:
 
 def _runtime_panamacompra_db_path() -> Path | None:
     db_path = _preferred_db_path()
-    if db_path and db_path.exists():
-        return db_path
 
     file_id = _panamacompra_drive_file_id()
     if not file_id:
@@ -212,7 +286,7 @@ def _runtime_panamacompra_db_path() -> Path | None:
             runtime_path.write_bytes(raw)
     except Exception:
         return db_path
-    return runtime_path
+    return _pick_fresher_sqlite_path(db_path, runtime_path) or db_path or runtime_path
 
 
 def _supabase_db_url() -> str:
@@ -235,6 +309,65 @@ def _supabase_db_url() -> str:
 
 def _active_db_backend() -> str:
     return "postgres" if _supabase_db_url() else "sqlite"
+
+
+@st.cache_data(ttl=300)
+def get_postgres_db_update_summary(db_url: str) -> dict[str, str]:
+    summary = {
+        "last_data_update_at": "",
+        "row_count": "0",
+    }
+    tables = list_postgres_tables(db_url)
+    target = next(
+        (name for name in ("actos_publicos", "actos", "panamacompra_actos") if name in tables),
+        "",
+    )
+    if not target:
+        return summary
+    identifier = _quote_identifier(target)
+    query = text(f"SELECT COUNT(1), MAX(fecha_actualizacion) FROM {identifier}")
+    engine = _pg_engine(db_url)
+    with engine.connect() as conn:
+        row = conn.execute(query).first()
+    if row:
+        summary["row_count"] = str(row[0] if row[0] is not None else 0)
+        summary["last_data_update_at"] = str(row[1] or "")
+    return summary
+
+
+def _resolve_panamacompra_source() -> dict[str, object]:
+    sqlite_path = _runtime_panamacompra_db_path()
+    sqlite_summary = None
+    sqlite_marker = None
+    if sqlite_path and sqlite_path.exists():
+        sqlite_summary = get_sqlite_db_update_summary(str(sqlite_path))
+        sqlite_marker = _parse_update_marker(sqlite_summary.get("last_data_update_at", ""))
+
+    db_url = _supabase_db_url()
+    postgres_summary = None
+    postgres_marker = None
+    if db_url:
+        try:
+            postgres_summary = get_postgres_db_update_summary(db_url)
+            postgres_marker = _parse_update_marker(postgres_summary.get("last_data_update_at", ""))
+        except Exception:
+            postgres_summary = None
+            postgres_marker = None
+
+    if postgres_summary and (postgres_marker or not sqlite_summary):
+        if sqlite_marker and postgres_marker and sqlite_marker > postgres_marker:
+            return {"backend": "sqlite", "db_path": sqlite_path, "db_url": "", "summary": sqlite_summary}
+        if sqlite_summary and not postgres_marker and sqlite_marker:
+            return {"backend": "sqlite", "db_path": sqlite_path, "db_url": "", "summary": sqlite_summary}
+        return {"backend": "postgres", "db_path": None, "db_url": db_url, "summary": postgres_summary}
+
+    if sqlite_summary:
+        return {"backend": "sqlite", "db_path": sqlite_path, "db_url": "", "summary": sqlite_summary}
+
+    if db_url:
+        return {"backend": "postgres", "db_path": None, "db_url": db_url, "summary": postgres_summary or {}}
+
+    return {"backend": "sqlite", "db_path": sqlite_path, "db_url": "", "summary": sqlite_summary or {}}
 
 
 @st.cache_resource
@@ -5565,12 +5698,13 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         st.divider()
         st.subheader("Base panamacompra.db")
 
-    backend = _active_db_backend()
-    db_path_str = ""
-    db_url = ""
+    resolved_source = _resolve_panamacompra_source()
+    backend = str(resolved_source.get("backend") or "sqlite")
+    db_path_obj = resolved_source.get("db_path")
+    db_path_str = str(db_path_obj) if isinstance(db_path_obj, Path) else ""
+    db_url = str(resolved_source.get("db_url") or "")
 
     if backend == "postgres":
-        db_url = _supabase_db_url()
         st.caption("Origen configurado: `Supabase (PostgreSQL)`")
         try:
             db_tables = list_postgres_tables(db_url)
@@ -5610,7 +5744,7 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
             )
             st.caption(f"Origen alterno: `{db_path}`")
     else:
-        db_path = _runtime_panamacompra_db_path()
+        db_path = db_path_obj if isinstance(db_path_obj, Path) else _runtime_panamacompra_db_path()
         if db_path is None:
             st.info("No hay rutas configuradas para la base panamacompra.db.")
             return
@@ -5977,23 +6111,13 @@ catalogos_file_id = _first_app_value(
     ],
 )
 
-backend_refs = _active_db_backend()
-db_url_refs = _supabase_db_url() if backend_refs == "postgres" else ""
+resolved_refs = _resolve_panamacompra_source()
+backend_refs = str(resolved_refs.get("backend") or "sqlite")
+db_url_refs = str(resolved_refs.get("db_url") or "") if backend_refs == "postgres" else ""
 db_path_refs = ""
-if backend_refs == "postgres":
-    try:
-        # Si Supabase no responde, evita romper la carga de la página.
-        list_postgres_tables(db_url_refs)
-    except Exception:
-        db_path_obj = _preferred_db_path()
-        if db_path_obj and db_path_obj.exists():
-            backend_refs = "sqlite"
-            db_url_refs = ""
-            db_path_refs = str(db_path_obj)
-else:
-    db_path_obj = _preferred_db_path()
-    if db_path_obj and db_path_obj.exists():
-        db_path_refs = str(db_path_obj)
+db_path_obj = resolved_refs.get("db_path")
+if backend_refs == "sqlite" and isinstance(db_path_obj, Path) and db_path_obj.exists():
+    db_path_refs = str(db_path_obj)
 
 fichas_table = _first_app_value(
     _app_cfg,
