@@ -9,6 +9,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 from services.finance_opening import get_finance_opening_config, opening_amount_for_filter
+from services.finance_recurring import materialize_due_recurring_gastos
+from sheets import get_client, write_worksheet
 
 from core.finance_v2 import constants as f2c
 from core.finance_v2.analysis import (
@@ -1249,6 +1251,26 @@ with st.spinner("Cargando datos financieros..."):
         cfg["ws_gas"],
         st.session_state["finanzas2_cache_token"],
     )
+auto_gas_df, auto_gas_summary = materialize_due_recurring_gastos(
+    data.get("gastos", pd.DataFrame()),
+    today=date.today(),
+    current_user=str(st.session_state.get("auth_username", "") or st.session_state.get("auth_user_name", "") or "").strip(),
+)
+if auto_gas_summary:
+    try:
+        client, _ = get_client()
+        write_worksheet(client, cfg["sheet_id"], cfg["ws_gas"], auto_gas_df)
+        data["gastos"] = auto_gas_df
+        st.session_state["finanzas2_cache_token"] = uuid.uuid4().hex
+        total_auto_rows = sum(int(item.get("materializados", 0) or 0) for item in auto_gas_summary)
+        st.session_state["f2_auto_gas_notice"] = (
+            f"Se materializaron {total_auto_rows} pago(s) automático(s) de gastos recurrentes antes de actualizar el tablero."
+        )
+    except Exception:
+        pass
+auto_panel_notice = st.session_state.pop("f2_auto_gas_notice", "")
+if auto_panel_notice:
+    st.info(auto_panel_notice)
 
 df_ing = normalize_ingresos(data.get("ingresos", pd.DataFrame()))
 df_gas = normalize_gastos(data.get("gastos", pd.DataFrame()))

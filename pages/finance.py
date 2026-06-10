@@ -45,6 +45,7 @@ from services.backups import (
     create_backup_now,  
 )
 from services.finance_opening import get_finance_opening_config, opening_amount_for_filter
+from services.finance_recurring import materialize_due_recurring_gastos
 
 from gspread.exceptions import APIError, WorksheetNotFound
 
@@ -1560,11 +1561,21 @@ def ensure_clientes_columns(df: pd.DataFrame) -> pd.DataFrame:
 def ensure_proyectos_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if COL_PROY not in out.columns:    out[COL_PROY] = ""
+    if "ProyectoID" not in out.columns: out["ProyectoID"] = out[COL_PROY] if COL_PROY in out.columns else ""
+    if "ProyectoNombre" not in out.columns: out["ProyectoNombre"] = out[COL_PROY] if COL_PROY in out.columns else ""
     if COL_CLI_ID not in out.columns:  out[COL_CLI_ID] = ""
     if COL_CLI_NOM not in out.columns: out[COL_CLI_NOM] = ""
     if COL_EMP not in out.columns:     out[COL_EMP] = EMPRESA_DEFAULT
     if COL_ROWID not in out.columns:   out[COL_ROWID] = ""
-    out = _ensure_text(out, [COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_ROWID])
+    out = _ensure_text(out, [COL_PROY, "ProyectoID", "ProyectoNombre", COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_ROWID])
+    out["ProyectoID"] = out["ProyectoID"].astype(str).str.strip().where(
+        out["ProyectoID"].astype(str).str.strip().ne(""),
+        other=out[COL_PROY].astype(str).str.strip(),
+    )
+    out["ProyectoNombre"] = out["ProyectoNombre"].astype(str).str.strip().where(
+        out["ProyectoNombre"].astype(str).str.strip().ne(""),
+        other=out[COL_PROY].astype(str).str.strip(),
+    )
     out[COL_ROWID] = out.apply(_make_rowid, axis=1)
     return out
 
@@ -1649,21 +1660,43 @@ def _ensure_catalog_data(
 
     df_proj = ensure_proyectos_columns(raw_proj)
     df_proj[COL_PROY] = df_proj[COL_PROY].astype(str).str.strip()
+    df_proj["ProyectoID"] = df_proj["ProyectoID"].astype(str).str.strip()
+    df_proj["ProyectoNombre"] = df_proj["ProyectoNombre"].astype(str).str.strip()
     df_proj[COL_CLI_ID] = df_proj[COL_CLI_ID].astype(str).str.strip()
     df_proj[COL_CLI_NOM] = df_proj[COL_CLI_NOM].astype(str).str.strip()
-    df_proj = df_proj[df_proj[COL_PROY] != ""].drop_duplicates(subset=[COL_PROY]).reset_index(drop=True)
+    df_proj = df_proj[df_proj[COL_PROY] != ""].copy()
+    if not df_proj.empty:
+        dedup_key = (
+            df_proj["ProyectoID"].where(df_proj["ProyectoID"].ne(""), df_proj[COL_PROY])
+            + "::"
+            + df_proj[COL_CLI_ID]
+            + "::"
+            + df_proj[COL_EMP].astype(str).str.upper().str.strip()
+        )
+        df_proj["__dedup_key__"] = dedup_key
+        df_proj = df_proj.drop_duplicates(subset=["__dedup_key__"]).reset_index(drop=True)
     proj_labels = []
     proj_label_map = {}
+    used_labels: set[str] = set()
     for _, row in df_proj.iterrows():
         proj_id = str(row.get("ProyectoID", row[COL_PROY])).strip()
         proj_name = str(row.get("ProyectoNombre", row[COL_PROY])).strip()
-        label = _format_catalog_label(proj_name or proj_id, proj_id) or proj_id
+        proj_store_value = str(row.get(COL_PROY, proj_name or proj_id)).strip() or proj_name or proj_id
+        label = _format_catalog_label(proj_name or proj_store_value, proj_id or proj_store_value) or proj_store_value
+        if label in used_labels:
+            emp_label = str(row.get(COL_EMP, "") or "").strip().upper()
+            cli_label = str(row.get(COL_CLI_NOM, "") or row.get(COL_CLI_ID, "") or "").strip()
+            extra = " | ".join([x for x in [cli_label, emp_label] if x])
+            label = f"{label} | {extra}" if extra else f"{label} | {str(row.get(COL_ROWID, '')).strip()[:8]}"
+        used_labels.add(label)
         proj_labels.append(label)
         proj_label_map[label] = {
             "ProyectoID": proj_id,
             "ProyectoNombre": proj_name or proj_id,
+            "ProyectoStoreValue": proj_store_value,
             "ClienteID": row[COL_CLI_ID],
             "ClienteNombre": row[COL_CLI_NOM],
+            "Empresa": str(row.get(COL_EMP, EMPRESA_DEFAULT) or EMPRESA_DEFAULT).strip(),
         }
     df_proj["__label__"] = proj_labels
     st.session_state["catalog_projects_df"] = df_proj
@@ -1710,7 +1743,7 @@ def _on_project_change(prefix: str, *, mark_open: bool = True) -> None:
     label = st.session_state.get(f"{prefix}_proyecto_raw", "")
     info = st.session_state.get("catalog_projects_label_map", {}).get(label)
     if info:
-        st.session_state[f"{prefix}_proyecto_id"] = info["ProyectoID"]
+        st.session_state[f"{prefix}_proyecto_id"] = info.get("ProyectoStoreValue") or info["ProyectoNombre"] or info["ProyectoID"]
         st.session_state[f"{prefix}_proyecto_nombre"] = info["ProyectoNombre"]
         st.session_state[f"{prefix}_proyecto_cliente_id"] = info.get("ClienteID", "")
         st.session_state[f"{prefix}_proyecto_cliente_nombre"] = info.get("ClienteNombre", "")
@@ -1742,6 +1775,29 @@ def _build_project_options(prefix: str, client_id: str | None = None) -> list[st
         df_view = df_proj.copy()
     labels = df_view["__label__"].tolist()
     return [""] + labels if labels else [""]
+
+
+def _select_new_project_in_forms(*, project_row: pd.Series) -> None:
+    cli_id = str(project_row.get(COL_CLI_ID, "") or "").strip()
+    project_name = str(project_row.get("ProyectoNombre", "") or project_row.get(COL_PROY, "") or "").strip()
+    target_label = ""
+    for label, info in st.session_state.get("catalog_projects_label_map", {}).items():
+        if (
+            str(info.get("ProyectoID", "") or "").strip() == str(project_row.get("ProyectoID", "") or "").strip()
+            and str(info.get("ClienteID", "") or "").strip() == cli_id
+        ):
+            target_label = label
+            break
+    if not target_label:
+        return
+    for prefix in ("ing", "gas"):
+        if str(st.session_state.get(f"{prefix}_cliente_id", "") or "").strip() != cli_id:
+            continue
+        st.session_state[f"{prefix}_proyecto_raw"] = target_label
+        st.session_state[f"{prefix}_proyecto_id"] = project_name
+        st.session_state[f"{prefix}_proyecto_nombre"] = project_name
+        st.session_state[f"{prefix}_proyecto_cliente_id"] = cli_id
+        st.session_state[f"{prefix}_proyecto_cliente_nombre"] = str(project_row.get(COL_CLI_NOM, "") or "").strip()
 
 
 def _sync_project_selection(prefix: str, mark_open: bool = True) -> None:
@@ -4160,6 +4216,26 @@ st.session_state.df_ing = load_norm_cached(SHEET_ID, WS_ING, True, cache_token)
 st.session_state.df_gas = load_norm_cached(SHEET_ID, WS_GAS, False, cache_token)
 _ensure_operational_schema_persisted_once(client, SHEET_ID)
 
+auto_gas_df, auto_gas_summary = materialize_due_recurring_gastos(
+    st.session_state.df_gas,
+    today=_today(),
+    current_user=_current_user(),
+)
+if auto_gas_summary:
+    wrote_auto_gas = safe_write_worksheet(client, SHEET_ID, WS_GAS, auto_gas_df, old_df=st.session_state.df_gas, id_col=COL_ROWID)
+    if wrote_auto_gas:
+        st.session_state.df_gas = ensure_gastos_columns(auto_gas_df)
+        st.cache_data.clear()
+        st.session_state.google_cache_token = uuid.uuid4().hex
+        total_auto_rows = sum(int(item.get("materializados", 0) or 0) for item in auto_gas_summary)
+        st.session_state["finance_auto_gas_notice"] = (
+            f"Se materializaron {total_auto_rows} pago(s) automático(s) de gastos recurrentes y se escribieron en Sheets."
+        )
+
+auto_gas_notice = st.session_state.pop("finance_auto_gas_notice", "")
+if auto_gas_notice:
+    st.info(auto_gas_notice)
+
 
 # === Copias "antes" para comparar cambios ===
 df_ing_before = st.session_state.df_ing.copy()
@@ -4577,9 +4653,12 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
                 if dup:
                     st.warning("Ya existe un proyecto con ese nombre para ese cliente y empresa.")
                 else:
+                    new_project_id = f"P-{uuid.uuid4().hex[:8].upper()}"
                     new_row = {
                         COL_ROWID: uuid.uuid4().hex,
                         COL_PROY: proy_nom_in.strip(),
+                        "ProyectoID": new_project_id,
+                        "ProyectoNombre": proy_nom_in.strip(),
                         COL_CLI_ID: cli_sel_id.strip(),
                         COL_CLI_NOM: cli_sel_nom.strip(),
                         COL_EMP: emp_proy,
@@ -4601,6 +4680,7 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
                             clients_df=clients_df_state if isinstance(clients_df_state, pd.DataFrame) else None,
                             projects_df=dfp,
                         )
+                        _select_new_project_in_forms(project_row=pd.Series(new_row))
                         st.session_state["catalog_reset_proyecto_inputs"] = True
                         st.session_state["catalog_force_open"] = True
                         st.session_state["catalog_scroll_to"] = True
