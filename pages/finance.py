@@ -1580,6 +1580,69 @@ def ensure_proyectos_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _align_projects_with_clients(df_proj: pd.DataFrame, df_cli: pd.DataFrame) -> pd.DataFrame:
+    out = ensure_proyectos_columns(df_proj)
+    cli = ensure_clientes_columns(df_cli)
+    cli[COL_CLI_ID] = cli[COL_CLI_ID].astype(str).str.strip()
+    cli[COL_CLI_NOM] = cli[COL_CLI_NOM].astype(str).str.strip()
+    cli[COL_EMP] = cli[COL_EMP].astype(str).str.strip()
+    company_by_id = cli.set_index(COL_CLI_ID)[COL_EMP].to_dict() if not cli.empty else {}
+    name_by_id = cli.set_index(COL_CLI_ID)[COL_CLI_NOM].to_dict() if not cli.empty else {}
+    mapped_company = out[COL_CLI_ID].map(company_by_id).fillna("").astype(str).str.strip()
+    mapped_name = out[COL_CLI_ID].map(name_by_id).fillna("").astype(str).str.strip()
+    out[COL_EMP] = out[COL_EMP].astype(str).str.strip()
+    out[COL_CLI_NOM] = out[COL_CLI_NOM].astype(str).str.strip()
+    out.loc[mapped_company.ne(""), COL_EMP] = mapped_company.loc[mapped_company.ne("")]
+    out.loc[mapped_name.ne(""), COL_CLI_NOM] = mapped_name.loc[mapped_name.ne("")]
+    return out
+
+
+def _validate_catalog_clientes_df(df: pd.DataFrame) -> list[str]:
+    errors: list[str] = []
+    work = ensure_clientes_columns(df)
+    work[COL_CLI_ID] = work[COL_CLI_ID].astype(str).str.strip()
+    work[COL_CLI_NOM] = work[COL_CLI_NOM].astype(str).str.strip()
+    work[COL_EMP] = work[COL_EMP].astype(str).str.strip().str.upper()
+    blank_id = work[COL_CLI_ID].eq("")
+    blank_name = work[COL_CLI_NOM].eq("")
+    invalid_emp = ~work[COL_EMP].isin(EMPRESAS_OPCIONES)
+    if blank_id.any():
+        errors.append("Hay clientes sin ClienteID.")
+    if blank_name.any():
+        errors.append("Hay clientes sin nombre.")
+    if invalid_emp.any():
+        errors.append("Hay clientes con empresa inválida.")
+    if work[COL_CLI_ID].duplicated().any():
+        errors.append("Hay ClienteID duplicados.")
+    dup_name_company = work.duplicated(subset=[COL_CLI_NOM, COL_EMP], keep=False) & work[COL_CLI_NOM].ne("")
+    if dup_name_company.any():
+        errors.append("Hay clientes repetidos con el mismo nombre en la misma empresa.")
+    return errors
+
+
+def _validate_catalog_proyectos_df(df: pd.DataFrame, client_label_col: str) -> list[str]:
+    errors: list[str] = []
+    work = df.copy()
+    work["ProyectoID"] = work.get("ProyectoID", pd.Series("", index=work.index)).astype(str).str.strip()
+    work["ProyectoNombre"] = work.get("ProyectoNombre", pd.Series("", index=work.index)).astype(str).str.strip()
+    work[client_label_col] = work.get(client_label_col, pd.Series("", index=work.index)).astype(str).str.strip()
+    blank_id = work["ProyectoID"].eq("")
+    blank_name = work["ProyectoNombre"].eq("")
+    blank_client = work[client_label_col].eq("")
+    if blank_id.any():
+        errors.append("Hay proyectos sin ProyectoID.")
+    if blank_name.any():
+        errors.append("Hay proyectos sin nombre.")
+    if blank_client.any():
+        errors.append("Hay proyectos sin cliente asignado.")
+    if work["ProyectoID"].duplicated().any():
+        errors.append("Hay ProyectoID duplicados.")
+    dup_name_client = work.duplicated(subset=["ProyectoNombre", client_label_col], keep=False) & work["ProyectoNombre"].ne("")
+    if dup_name_client.any():
+        errors.append("Hay proyectos repetidos para el mismo cliente.")
+    return errors
+
+
 # -------------------- Catálogo en memoria --------------------
 CATALOG_TTL_SECONDS = 180  # recarga cada 3 minutos si no se fuerza
 
@@ -1664,18 +1727,13 @@ def _ensure_catalog_data(
             st.error(f"No se pudo cargar el catálogo de proyectos. {exc}")
             return
 
-    df_proj = ensure_proyectos_columns(raw_proj)
+    df_proj = _align_projects_with_clients(raw_proj, df_cli)
     df_proj[COL_PROY] = df_proj[COL_PROY].astype(str).str.strip()
     df_proj["ProyectoID"] = df_proj["ProyectoID"].astype(str).str.strip()
     df_proj["ProyectoNombre"] = df_proj["ProyectoNombre"].astype(str).str.strip()
     df_proj[COL_CLI_ID] = df_proj[COL_CLI_ID].astype(str).str.strip()
     df_proj[COL_CLI_NOM] = df_proj[COL_CLI_NOM].astype(str).str.strip()
     df_proj[COL_EMP] = df_proj[COL_EMP].astype(str).str.strip()
-    if not df_proj.empty:
-        mapped_proj_company = df_proj[COL_CLI_ID].map(cli_id_to_company).fillna("").astype(str).str.strip()
-        mapped_proj_client_name = df_proj[COL_CLI_ID].map(cli_id_to_name).fillna("").astype(str).str.strip()
-        df_proj.loc[mapped_proj_company.ne(""), COL_EMP] = mapped_proj_company.loc[mapped_proj_company.ne("")]
-        df_proj.loc[mapped_proj_client_name.ne(""), COL_CLI_NOM] = mapped_proj_client_name.loc[mapped_proj_client_name.ne("")]
     df_proj = df_proj[df_proj[COL_PROY] != ""].copy()
     if not df_proj.empty:
         dedup_key = (
@@ -4734,6 +4792,263 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
                         st.session_state["catalog_scroll_to"] = True
                         st.toast(f"Proyecto creado: {proy_nom_in.strip()} (Cliente: {cli_sel_nom})")
                         st.rerun()
+
+    st.divider()
+    with st.expander("🗂️ Ver / editar clientes y proyectos", expanded=False):
+        st.caption(
+            "Aquí puedes revisar la asignación por empresa y editar el catálogo existente. "
+            "Los cambios en clientes actualizan automáticamente el nombre y la empresa de sus proyectos asociados."
+        )
+
+        catalog_clients_full = ensure_clientes_columns(
+            st.session_state.get("catalog_clients_df", pd.DataFrame()).copy()
+        )
+        catalog_projects_full = _align_projects_with_clients(
+            st.session_state.get("catalog_projects_df", pd.DataFrame()).copy(),
+            catalog_clients_full,
+        )
+
+        summary_tab, clients_tab, projects_tab = st.tabs(["Resumen", "Clientes", "Proyectos"])
+
+        with summary_tab:
+            client_summary = (
+                catalog_clients_full.groupby(COL_EMP, dropna=False)[COL_CLI_ID]
+                .nunique()
+                .reset_index(name="Clientes")
+                .sort_values(COL_EMP)
+                if not catalog_clients_full.empty
+                else pd.DataFrame(columns=[COL_EMP, "Clientes"])
+            )
+            project_summary = (
+                catalog_projects_full.groupby(COL_EMP, dropna=False)["ProyectoID"]
+                .nunique()
+                .reset_index(name="Proyectos")
+                .sort_values(COL_EMP)
+                if not catalog_projects_full.empty
+                else pd.DataFrame(columns=[COL_EMP, "Proyectos"])
+            )
+            summary_df = client_summary.merge(project_summary, on=COL_EMP, how="outer").fillna(0)
+            if not summary_df.empty:
+                summary_df["Clientes"] = summary_df["Clientes"].astype(int)
+                summary_df["Proyectos"] = summary_df["Proyectos"].astype(int)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+            if not catalog_clients_full.empty:
+                clients_without_projects = catalog_clients_full[
+                    ~catalog_clients_full[COL_CLI_ID].astype(str).isin(
+                        set(catalog_projects_full[COL_CLI_ID].astype(str)) if not catalog_projects_full.empty else set()
+                    )
+                ][[COL_EMP, COL_CLI_ID, COL_CLI_NOM]].copy()
+                st.caption("Clientes sin proyectos asignados")
+                st.dataframe(
+                    clients_without_projects.sort_values([COL_EMP, COL_CLI_NOM]) if not clients_without_projects.empty else clients_without_projects,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with clients_tab:
+            st.caption("Edita nombre y empresa del cliente. `ClienteID` queda fijo para no romper relaciones.")
+            clients_editor_full = catalog_clients_full.sort_values([COL_EMP, COL_CLI_NOM, COL_CLI_ID]).reset_index(drop=True)
+            client_view_cols = [c for c in [COL_CLI_ID, COL_CLI_NOM, COL_EMP, COL_ROWID] if c in clients_editor_full.columns]
+            clients_editor_base = _prepare_editor_df(
+                clients_editor_full[client_view_cols].copy(),
+                text_cols=[COL_CLI_ID, COL_CLI_NOM, COL_ROWID],
+                select_cols=[COL_EMP],
+            )
+            edited_clients_view = st.data_editor(
+                clients_editor_base,
+                key="catalog_clientes_editor",
+                num_rows="fixed",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    COL_CLI_ID: st.column_config.TextColumn(COL_CLI_ID, disabled=True),
+                    COL_CLI_NOM: st.column_config.TextColumn(COL_CLI_NOM),
+                    COL_EMP: st.column_config.SelectboxColumn(COL_EMP, options=EMPRESAS_OPCIONES),
+                    COL_ROWID: st.column_config.TextColumn(COL_ROWID, disabled=True),
+                },
+                column_order=client_view_cols,
+            )
+            edited_clients_view = _editor_state_to_dataframe(
+                clients_editor_base,
+                "catalog_clientes_editor",
+            )
+            if st.button("Guardar cambios de clientes", key="btn_save_catalog_clientes", type="secondary"):
+                updated_clients_full = clients_editor_full.copy()
+                for col in [COL_CLI_NOM, COL_EMP]:
+                    if col in updated_clients_full.columns and col in edited_clients_view.columns:
+                        updated_clients_full[col] = edited_clients_view[col]
+                updated_clients_full = ensure_clientes_columns(updated_clients_full)
+                validation_errors = _validate_catalog_clientes_df(updated_clients_full)
+                if validation_errors:
+                    _render_table_error_block("Catálogo de clientes", validation_errors)
+                else:
+                    current_projects_full = _align_projects_with_clients(
+                        st.session_state.get("catalog_projects_df", pd.DataFrame()).copy(),
+                        catalog_clients_full,
+                    )
+                    updated_projects_full = _align_projects_with_clients(
+                        current_projects_full.copy(),
+                        updated_clients_full,
+                    )
+                    helper_project_cols = [c for c in updated_projects_full.columns if str(c).startswith("__")]
+                    projects_to_write = updated_projects_full.drop(columns=helper_project_cols, errors="ignore")
+                    old_projects_to_compare = current_projects_full.drop(columns=helper_project_cols, errors="ignore")
+                    clients_changed = not _norm_for_compare(updated_clients_full, COL_ROWID).equals(
+                        _norm_for_compare(catalog_clients_full, COL_ROWID)
+                    )
+                    projects_changed = not _norm_for_compare(projects_to_write, COL_ROWID).equals(
+                        _norm_for_compare(old_projects_to_compare, COL_ROWID)
+                    )
+                    wrote_clients = True
+                    wrote_projects = True
+                    if clients_changed:
+                        wrote_clients = safe_write_worksheet(
+                            client,
+                            SHEET_ID,
+                            WS_CLIENTES,
+                            updated_clients_full,
+                            old_df=catalog_clients_full,
+                            id_col=COL_ROWID,
+                        )
+                    if wrote_clients and projects_changed:
+                        wrote_projects = safe_write_worksheet(
+                            client,
+                            SHEET_ID,
+                            WS_PROYECTOS,
+                            projects_to_write,
+                            old_df=old_projects_to_compare,
+                            id_col=COL_ROWID,
+                        )
+                        if not wrote_projects and clients_changed:
+                            safe_write_worksheet(
+                                client,
+                                SHEET_ID,
+                                WS_CLIENTES,
+                                catalog_clients_full,
+                                old_df=updated_clients_full,
+                                id_col=COL_ROWID,
+                            )
+                    if (clients_changed and not wrote_clients) or (projects_changed and not wrote_projects):
+                        st.error("No se pudieron guardar los cambios del catálogo de clientes.")
+                    elif not clients_changed and not projects_changed:
+                        st.info("No hubo cambios para guardar en clientes.")
+                    else:
+                        _load_clients.clear()
+                        _load_projects.clear()
+                        st.cache_data.clear()
+                        _ensure_catalog_data(
+                            client,
+                            SHEET_ID,
+                            force=True,
+                            clients_df=updated_clients_full,
+                            projects_df=projects_to_write,
+                        )
+                        st.session_state["catalog_force_open"] = True
+                        st.session_state["catalog_scroll_to"] = True
+                        st.toast("Catálogo de clientes actualizado.")
+                        st.rerun()
+
+        with projects_tab:
+            st.caption("Edita el nombre del proyecto o reasígnalo a otro cliente. La empresa se deriva del cliente asignado.")
+            catalog_project_client_col = "Cliente asignado"
+            projects_editor_full = catalog_projects_full.sort_values([COL_EMP, COL_CLI_NOM, "ProyectoNombre"]).reset_index(drop=True)
+            client_label_options = [x for x in st.session_state.get("catalog_clients_opts", [""]) if x]
+            projects_editor_view = projects_editor_full.copy()
+            projects_editor_view[catalog_project_client_col] = projects_editor_view[COL_CLI_ID].map(
+                st.session_state.get("catalog_clients_id_to_label", {})
+            ).fillna("")
+            project_view_cols = [
+                c
+                for c in ["ProyectoID", "ProyectoNombre", catalog_project_client_col, COL_EMP, COL_ROWID]
+                if c in projects_editor_view.columns
+            ]
+            projects_editor_base = _prepare_editor_df(
+                projects_editor_view[project_view_cols].copy(),
+                text_cols=["ProyectoID", "ProyectoNombre", COL_ROWID, COL_EMP],
+                select_cols=[catalog_project_client_col],
+            )
+            edited_projects_view = st.data_editor(
+                projects_editor_base,
+                key="catalog_proyectos_editor",
+                num_rows="fixed",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "ProyectoID": st.column_config.TextColumn("ProyectoID", disabled=True),
+                    "ProyectoNombre": st.column_config.TextColumn("ProyectoNombre"),
+                    catalog_project_client_col: st.column_config.SelectboxColumn(
+                        catalog_project_client_col,
+                        options=client_label_options,
+                    ),
+                    COL_EMP: st.column_config.TextColumn(COL_EMP, disabled=True),
+                    COL_ROWID: st.column_config.TextColumn(COL_ROWID, disabled=True),
+                },
+                column_order=project_view_cols,
+            )
+            edited_projects_view = _editor_state_to_dataframe(
+                projects_editor_base,
+                "catalog_proyectos_editor",
+            )
+            if st.button("Guardar cambios de proyectos", key="btn_save_catalog_proyectos", type="secondary"):
+                validation_errors = _validate_catalog_proyectos_df(edited_projects_view, catalog_project_client_col)
+                client_info_by_label = st.session_state.get("catalog_clients_label_map", {})
+                unmapped_client = False
+                updated_projects_full = projects_editor_full.copy()
+                if not validation_errors:
+                    for idx, row in edited_projects_view.iterrows():
+                        client_label = str(row.get(catalog_project_client_col, "") or "").strip()
+                        info = client_info_by_label.get(client_label)
+                        if not info:
+                            unmapped_client = True
+                            break
+                        updated_projects_full.at[idx, "ProyectoNombre"] = str(row.get("ProyectoNombre", "") or "").strip()
+                        updated_projects_full.at[idx, COL_PROY] = str(row.get("ProyectoNombre", "") or "").strip()
+                        updated_projects_full.at[idx, COL_CLI_ID] = str(info.get("ClienteID", "") or "").strip()
+                        updated_projects_full.at[idx, COL_CLI_NOM] = str(info.get("ClienteNombre", "") or "").strip()
+                        updated_projects_full.at[idx, COL_EMP] = str(
+                            st.session_state.get("catalog_clients_company_by_id", {}).get(info.get("ClienteID", ""), EMPRESA_DEFAULT)
+                            or EMPRESA_DEFAULT
+                        ).strip()
+                if unmapped_client:
+                    validation_errors.append("Hay proyectos con cliente asignado inválido.")
+                if validation_errors:
+                    _render_table_error_block("Catálogo de proyectos", validation_errors)
+                else:
+                    updated_projects_full = _align_projects_with_clients(updated_projects_full, catalog_clients_full)
+                    helper_project_cols = [c for c in updated_projects_full.columns if str(c).startswith("__")]
+                    projects_to_write = updated_projects_full.drop(columns=helper_project_cols, errors="ignore")
+                    old_projects_to_compare = catalog_projects_full.drop(columns=helper_project_cols, errors="ignore")
+                    projects_changed = not _norm_for_compare(projects_to_write, COL_ROWID).equals(
+                        _norm_for_compare(old_projects_to_compare, COL_ROWID)
+                    )
+                    if not projects_changed:
+                        st.info("No hubo cambios para guardar en proyectos.")
+                    else:
+                        wrote_projects = safe_write_worksheet(
+                            client,
+                            SHEET_ID,
+                            WS_PROYECTOS,
+                            projects_to_write,
+                            old_df=old_projects_to_compare,
+                            id_col=COL_ROWID,
+                        )
+                        if not wrote_projects:
+                            st.error("No se pudieron guardar los cambios del catálogo de proyectos.")
+                        else:
+                            _load_projects.clear()
+                            st.cache_data.clear()
+                            _ensure_catalog_data(
+                                client,
+                                SHEET_ID,
+                                force=True,
+                                clients_df=catalog_clients_full,
+                                projects_df=projects_to_write,
+                            )
+                            st.session_state["catalog_force_open"] = True
+                            st.session_state["catalog_scroll_to"] = True
+                            st.toast("Catálogo de proyectos actualizado.")
+                            st.rerun()
 
 
 # ============================================================
