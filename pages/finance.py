@@ -50,8 +50,6 @@ from services.finance_recurring import materialize_due_recurring_gastos
 from gspread.exceptions import APIError, WorksheetNotFound
 
 from entities import (
-    client_selector,
-    project_selector,
     WS_PROYECTOS,
     WS_CLIENTES,
     _load_clients,
@@ -1629,13 +1627,17 @@ def _ensure_catalog_data(
     cli_labels: list[str] = []
     cli_label_map: dict[str, dict[str, str]] = {}
     cli_id_to_label: dict[str, str] = {}
+    cli_id_to_company: dict[str, str] = {}
+    cli_id_to_name: dict[str, str] = {}
     cli_by_emp: dict[str, list[str]] = {}
     for _, row in df_cli.iterrows():
         label = _format_catalog_label(row[COL_CLI_NOM], row[COL_CLI_ID]) or row[COL_CLI_ID]
         cli_labels.append(label)
         cli_label_map[label] = {"ClienteID": row[COL_CLI_ID], "ClienteNombre": row[COL_CLI_NOM]}
         cli_id_to_label[row[COL_CLI_ID]] = label
-        emp_key = (row.get(COL_EMP) or EMPRESA_DEFAULT).strip().upper()
+        cli_id_to_company[row[COL_CLI_ID]] = str(row.get(COL_EMP) or EMPRESA_DEFAULT).strip()
+        cli_id_to_name[row[COL_CLI_ID]] = str(row.get(COL_CLI_NOM) or "").strip()
+        emp_key = cli_id_to_company[row[COL_CLI_ID]].upper()
         bucket = cli_by_emp.setdefault(emp_key, [])
         if label not in bucket:
             bucket.append(label)
@@ -1643,6 +1645,8 @@ def _ensure_catalog_data(
     st.session_state["catalog_clients_opts"] = [""] + cli_labels
     st.session_state["catalog_clients_label_map"] = cli_label_map
     st.session_state["catalog_clients_id_to_label"] = cli_id_to_label
+    st.session_state["catalog_clients_company_by_id"] = cli_id_to_company
+    st.session_state["catalog_clients_name_by_id"] = cli_id_to_name
     st.session_state["catalog_clients_by_emp"] = {
         emp: [""] + labels if labels and labels[0] != "" else labels or [""]
         for emp, labels in cli_by_emp.items()
@@ -1666,6 +1670,12 @@ def _ensure_catalog_data(
     df_proj["ProyectoNombre"] = df_proj["ProyectoNombre"].astype(str).str.strip()
     df_proj[COL_CLI_ID] = df_proj[COL_CLI_ID].astype(str).str.strip()
     df_proj[COL_CLI_NOM] = df_proj[COL_CLI_NOM].astype(str).str.strip()
+    df_proj[COL_EMP] = df_proj[COL_EMP].astype(str).str.strip()
+    if not df_proj.empty:
+        mapped_proj_company = df_proj[COL_CLI_ID].map(cli_id_to_company).fillna("").astype(str).str.strip()
+        mapped_proj_client_name = df_proj[COL_CLI_ID].map(cli_id_to_name).fillna("").astype(str).str.strip()
+        df_proj.loc[mapped_proj_company.ne(""), COL_EMP] = mapped_proj_company.loc[mapped_proj_company.ne("")]
+        df_proj.loc[mapped_proj_client_name.ne(""), COL_CLI_NOM] = mapped_proj_client_name.loc[mapped_proj_client_name.ne("")]
     df_proj = df_proj[df_proj[COL_PROY] != ""].copy()
     if not df_proj.empty:
         dedup_key = (
@@ -1769,19 +1779,26 @@ def _build_project_options(prefix: str, client_id: str | None = None) -> list[st
     df_proj = st.session_state.get("catalog_projects_df")
     if df_proj is None or df_proj.empty:
         return [""]
+    company = str(st.session_state.get(f"{prefix}_empresa_quick", EMPRESA_DEFAULT) or EMPRESA_DEFAULT).strip().upper()
     if client_id is None:
         client_id = st.session_state.get(f"{prefix}_cliente_id", "")
+    df_view = df_proj.copy()
+    if company:
+        df_view = df_view[df_view[COL_EMP].astype(str).str.strip().str.upper().eq(company)].copy()
     if client_id:
-        df_view = df_proj[df_proj[COL_CLI_ID].astype(str) == str(client_id)].copy()
-    else:
-        df_view = df_proj.copy()
+        df_view = df_view[df_view[COL_CLI_ID].astype(str).str.strip().eq(str(client_id).strip())].copy()
     labels = df_view["__label__"].tolist()
     return [""] + labels if labels else [""]
 
 
 def _select_new_project_in_forms(*, project_row: pd.Series) -> None:
     cli_id = str(project_row.get(COL_CLI_ID, "") or "").strip()
-    project_name = str(project_row.get("ProyectoNombre", "") or project_row.get(COL_PROY, "") or "").strip()
+    project_company = str(
+        project_row.get(COL_EMP)
+        or st.session_state.get("catalog_clients_company_by_id", {}).get(cli_id, EMPRESA_DEFAULT)
+        or EMPRESA_DEFAULT
+    ).strip()
+    client_label = st.session_state.get("catalog_clients_id_to_label", {}).get(cli_id, "")
     target_label = ""
     for label, info in st.session_state.get("catalog_projects_label_map", {}).items():
         if (
@@ -1793,13 +1810,13 @@ def _select_new_project_in_forms(*, project_row: pd.Series) -> None:
     if not target_label:
         return
     for prefix in ("ing", "gas"):
-        if str(st.session_state.get(f"{prefix}_cliente_id", "") or "").strip() != cli_id:
-            continue
+        st.session_state[f"{prefix}_empresa_quick"] = project_company or EMPRESA_DEFAULT
+        if client_label:
+            st.session_state[f"{prefix}_skip_project_sync"] = True
+            st.session_state[f"{prefix}_cliente_raw"] = client_label
+            _on_client_change(prefix, mark_open=False)
         st.session_state[f"{prefix}_proyecto_raw"] = target_label
-        st.session_state[f"{prefix}_proyecto_id"] = project_name
-        st.session_state[f"{prefix}_proyecto_nombre"] = project_name
-        st.session_state[f"{prefix}_proyecto_cliente_id"] = cli_id
-        st.session_state[f"{prefix}_proyecto_cliente_nombre"] = str(project_row.get(COL_CLI_NOM, "") or "").strip()
+        _on_project_change(prefix, mark_open=False)
 
 
 def _sync_project_selection(prefix: str, mark_open: bool = True) -> None:
@@ -1975,6 +1992,8 @@ force_catalog_reload = st.session_state.pop("catalog_force_reload", False)
 st.session_state.setdefault("catalog_clients_opts", [""])
 st.session_state.setdefault("catalog_clients_label_map", {})
 st.session_state.setdefault("catalog_clients_id_to_label", {})
+st.session_state.setdefault("catalog_clients_company_by_id", {})
+st.session_state.setdefault("catalog_clients_name_by_id", {})
 st.session_state.setdefault("catalog_projects_df", pd.DataFrame())
 st.session_state.setdefault("catalog_projects_label_map", {})
 try:
@@ -4613,6 +4632,10 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
                             clients_df=dfc,
                             projects_df=projects_df_state if isinstance(projects_df_state, pd.DataFrame) else None,
                         )
+                        new_client_label = st.session_state.get("catalog_clients_id_to_label", {}).get(new_id, "")
+                        if new_client_label:
+                            st.session_state["cat_emp_proj"] = emp_cliente
+                            st.session_state["cat_proj_cliente"] = new_client_label
                         st.session_state["catalog_reset_cliente_inputs"] = True
                         st.session_state["catalog_force_open"] = True
                         st.session_state["catalog_scroll_to"] = True
@@ -4623,16 +4646,23 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
 
     # --- Crear Proyecto (asociado a cliente) ---
     st.subheader("Crear nuevo proyecto")
-    colp1, colp2 = st.columns([2, 1])
-    with colp1:
-        cli_sel_id, cli_sel_nom = client_selector(client, SHEET_ID, key="cat_proj")
-    with colp2:
-        emp_proy = st.selectbox(
-            "Empresa (proyecto)",
-            EMPRESAS_OPCIONES,
-            index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
-            key="cat_emp_proj"
-        )
+    emp_proy = st.selectbox(
+        "Empresa (proyecto)",
+        EMPRESAS_OPCIONES,
+        index=EMPRESAS_OPCIONES.index(EMPRESA_DEFAULT),
+        key="cat_emp_proj"
+    )
+    project_creator_client_options = _client_options_for_company(emp_proy)
+    if st.session_state.get("cat_proj_cliente") not in project_creator_client_options:
+        st.session_state["cat_proj_cliente"] = project_creator_client_options[0] if project_creator_client_options else ""
+    selected_proj_client_label = st.selectbox(
+        "Cliente",
+        project_creator_client_options,
+        key="cat_proj_cliente",
+    )
+    selected_proj_client_info = st.session_state.get("catalog_clients_label_map", {}).get(selected_proj_client_label, {})
+    cli_sel_id = str(selected_proj_client_info.get("ClienteID", "") or "").strip()
+    cli_sel_nom = str(selected_proj_client_info.get("ClienteNombre", "") or "").strip()
     proy_nom_in = st.text_input("Nombre del proyecto", key="cat_proj_nom")
 
     if st.button("Crear proyecto", key="btn_crear_proyecto"):
@@ -4657,6 +4687,9 @@ with st.expander("➕ Clientes y Proyectos", expanded=catalog_should_expand):
                         st.error(f"No se pudo leer la hoja de proyectos. {exc}")
                         st.stop()
                 dfp = ensure_proyectos_columns(dfp)
+                helper_project_cols = [c for c in dfp.columns if str(c).startswith("__")]
+                if helper_project_cols:
+                    dfp = dfp.drop(columns=helper_project_cols)
 
                 dup = False
                 if not dfp.empty:
