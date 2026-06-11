@@ -1832,6 +1832,19 @@ def _clear_form_force_open(prefix: str) -> None:
     st.session_state[f"{prefix}_scroll_to"] = False
 
 
+def _open_programmed_payment_form() -> None:
+    _reset_entry_state("gas")
+    st.session_state["gas_recurrente_quick"] = "Sí"
+    st.session_state["gas_estado_quick"] = "Pendiente"
+    st.session_state["gas_porpag_quick"] = "Sí"
+    st.session_state["gas_rec_period_quick"] = "Mensual"
+    st.session_state["gas_rec_rule_quick"] = "Inicio de cada mes"
+    st.session_state["gas_rec_duracion_quick"] = "Indefinida"
+    st.session_state["gas_fecha_quick"] = _today()
+    st.session_state["gas_fecha_pago_quick"] = _today()
+    _mark_form_force_open("gas")
+
+
 def _render_form_scroll_restore(anchor_id: str, should_scroll: bool) -> None:
     st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
     if not should_scroll:
@@ -6914,8 +6927,7 @@ with st.expander("Anadir gasto (rapido)", expanded=gas_should_expand):
         _clear_form_force_open("gas")
         _reset_entry_state("gas")
         _safe_rerun()
-# Tabla Gastos (etiqueta "Descripcion" para Concepto)
-st.markdown("### Gastos (tabla)")
+# Configuración de tablas de gastos
 gas_cols_view = [c for c in df_gas_f.columns if c not in (COL_ROWID, COL_ESC)] + [COL_ROWID]
 gas_colcfg = {
     COL_POR_PAG: st.column_config.SelectboxColumn(COL_POR_PAG, options=YES_NO_OPTIONS),
@@ -6960,6 +6972,127 @@ gas_order = [x for x in [
     COL_PROY, COL_CLI_ID, COL_CLI_NOM, COL_USER, COL_REF_RID, COL_ROWID
 ] if x in gas_cols_view]
 
+st.markdown("### Pagos programados (recurrentes)")
+st.caption(
+    "Aquí ves las plantillas activas de gastos recurrentes. Puedes editarlas, eliminarlas o crear una nueva. "
+    "Los pagos reales se materializan al abrir Finanzas o el Panel Gerencial cuando la fecha programada ya venció."
+)
+pc1, pc2 = st.columns([1, 3])
+with pc1:
+    if st.button("Crear nuevo pago programado", key="btn_open_programmed_payment_form", type="secondary"):
+        _open_programmed_payment_form()
+        _safe_rerun()
+with pc2:
+    st.caption(
+        "Para máxima confiabilidad automática, usa `Tratamiento balance gasto = Gasto del periodo`. "
+        "Si configuras tratamientos especiales, seguirán viéndose aquí, pero su materialización no es el caso más robusto."
+    )
+
+gas_programmed_mask = st.session_state.df_gas.get(COL_REC, pd.Series("No", index=st.session_state.df_gas.index)).map(_si_no_norm).eq("Si")
+df_gas_programmed = ensure_gastos_columns(st.session_state.df_gas.loc[gas_programmed_mask].copy())
+program_cols_view = [
+    c
+    for c in [
+        COL_FECHA,
+        COL_CONC,
+        COL_PROV,
+        COL_MONTO,
+        COL_CAT,
+        COL_GAS_SUB,
+        COL_GAS_DET,
+        COL_TRAT_BAL_GAS,
+        COL_EMP,
+        COL_POR_PAG,
+        COL_FPAGO,
+        COL_REC,
+        COL_REC_PER,
+        COL_REC_REG,
+        COL_REC_DUR,
+        COL_REC_HASTA,
+        COL_REC_CANT,
+        COL_CTP_TIPO,
+        COL_CTP_NOMBRE,
+        COL_PROY,
+        COL_CLI_ID,
+        COL_CLI_NOM,
+        COL_USER,
+        COL_ROWID,
+    ]
+    if c in df_gas_programmed.columns
+]
+prog_colcfg = dict(gas_colcfg)
+prog_colcfg[COL_REC_HASTA] = st.column_config.DateColumn("Recurrencia hasta fecha")
+prog_colcfg[COL_REC_CANT] = st.column_config.NumberColumn("Recurrencia cantidad periodos", format="%d")
+
+edited_gas_programmed = st.data_editor(
+    _prepare_editor_df(
+        df_gas_programmed[program_cols_view].copy() if not df_gas_programmed.empty else df_gas_programmed.copy(),
+        text_cols=[
+            COL_GAS_SUB,
+            COL_CONC,
+            COL_PROV,
+            COL_EMP,
+            COL_CTP_NOMBRE,
+            COL_PROY,
+            COL_CLI_ID,
+            COL_CLI_NOM,
+            COL_USER,
+            COL_ROWID,
+        ],
+        select_cols=[
+            COL_POR_PAG,
+            COL_REC,
+            COL_REC_PER,
+            COL_REC_REG,
+            COL_REC_DUR,
+            COL_CAT,
+            COL_GAS_DET,
+            COL_TRAT_BAL_GAS,
+            COL_CTP_TIPO,
+        ],
+        date_cols=[COL_FECHA, COL_FPAGO, COL_REC_HASTA],
+        numeric_cols=[COL_MONTO, COL_REC_CANT],
+    ),
+    key="tabla_gastos_programados",
+    num_rows="dynamic",
+    use_container_width=True,
+    hide_index=True,
+    column_config=prog_colcfg,
+    column_order=program_cols_view,
+)
+edited_gas_programmed = _editor_state_to_dataframe(
+    edited_gas_programmed,
+    "tabla_gastos_programados",
+    numeric_cols={COL_MONTO, COL_REC_CANT},
+)
+edited_gas_programmed = _autoderive_gas_df(edited_gas_programmed)
+
+if COL_ROWID in edited_gas_programmed.columns:
+    ids_original_prog = set(df_gas_programmed[COL_ROWID].astype(str)) if not df_gas_programmed.empty else set()
+    ids_editados_prog = set(edited_gas_programmed[COL_ROWID].astype(str)) if not edited_gas_programmed.empty else set()
+    ids_a_borrar_prog = ids_original_prog - ids_editados_prog
+    if ids_a_borrar_prog:
+        base_prog = st.session_state.df_gas.copy()
+        base_prog = base_prog[~base_prog[COL_ROWID].astype(str).isin(ids_a_borrar_prog)].reset_index(drop=True)
+        wrote_prog_delete = safe_write_worksheet(client, SHEET_ID, WS_GAS, ensure_gastos_columns(base_prog), old_df=df_gas_before, id_col=COL_ROWID)
+        if wrote_prog_delete:
+            st.session_state.df_gas = ensure_gastos_columns(base_prog)
+            st.cache_data.clear()
+            st.success("Pagos programados eliminados.")
+            _safe_rerun()
+
+_sync_table_with_partial_validation(
+    title="Pagos programados",
+    edited_df=edited_gas_programmed,
+    filtered_df=df_gas_programmed,
+    row_validator=_validate_gas_row,
+    base_df_key="df_gas",
+    worksheet_name=WS_GAS,
+    ensure_columns_fn=_autoderive_gas_df,
+    id_column=COL_ROWID,
+)
+
+st.markdown("### Gastos (tabla)")
 edited_gas = st.data_editor(
     _prepare_editor_df(
         df_gas_f[gas_cols_view].copy(),
