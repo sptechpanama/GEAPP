@@ -8,7 +8,7 @@
 # ================================================
 
 from __future__ import annotations
-import base64, hashlib, io, json, mimetypes, os, re, uuid, time
+import base64, hashlib, io, json, mimetypes, os, re, unicodedata, uuid, time
 import streamlit as st
 import streamlit.components.v1 as components
 from ui.theme import apply_global_theme
@@ -502,8 +502,10 @@ def _ts(x):
     except Exception: return pd.NaT
 
 def _si_no_norm(x) -> str:
-    s = str(x).strip().lower()
-    return "Sí" if s in {"si","sí","sí","yes","y","true","1"} else "No"
+    raw = str(x or "").strip().lower()
+    normalized = unicodedata.normalize("NFKD", raw)
+    token = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return YES_NO_OPTIONS[1] if token in {"si", "yes", "y", "true", "1"} else YES_NO_OPTIONS[0]
 
 def _estado_to_yes_no(estado: str) -> str:
     return YES_NO_OPTIONS[1] if str(estado or "").strip() in {"Pendiente", "Parcial"} else YES_NO_OPTIONS[0]
@@ -2973,7 +2975,7 @@ def _build_ingreso_row_from_doc(row: pd.Series) -> dict:
     fecha_real = _ts(row.get(DOC_COL_FECHA_REAL))
     if estado == "Realizado" and pd.isna(fecha_real):
         fecha_real = fecha_hecho
-    por_cobrar = "No" if estado == "Realizado" else "Si"
+    por_cobrar = YES_NO_OPTIONS[0] if estado == "Realizado" else YES_NO_OPTIONS[1]
     desc = str(row.get(DOC_COL_DESCRIPCION, "") or row.get(DOC_COL_ARCHIVO, "") or "Ingreso desde documento").strip()
     return {
         COL_ROWID: uuid.uuid4().hex,
@@ -2988,8 +2990,8 @@ def _build_ingreso_row_from_doc(row: pd.Series) -> dict:
         COL_CLI_NOM: "",
         COL_EMP: str(row.get(DOC_COL_EMPRESA, EMPRESA_DEFAULT) or EMPRESA_DEFAULT),
         COL_POR_COB: por_cobrar,
-        COL_COB: "Si" if estado == "Realizado" else "No",
-        COL_FCOBRO: fecha_esp if por_cobrar == "Si" else pd.NaT,
+        COL_COB: YES_NO_OPTIONS[1] if estado == "Realizado" else YES_NO_OPTIONS[0],
+        COL_FCOBRO: fecha_esp if _si_no_norm(por_cobrar) != YES_NO_OPTIONS[0] else pd.NaT,
         COL_FCOBRO_REAL: fecha_real if por_cobrar == "No" else pd.NaT,
         COL_REC: "No",
         COL_REC_PER: "",
@@ -3031,7 +3033,7 @@ def _build_gasto_row_from_doc(row: pd.Series) -> dict:
     fecha_real = _ts(row.get(DOC_COL_FECHA_REAL))
     if estado == "Realizado" and pd.isna(fecha_real):
         fecha_real = fecha_hecho
-    por_pagar = "No" if estado == "Realizado" else "Si"
+    por_pagar = YES_NO_OPTIONS[0] if estado == "Realizado" else YES_NO_OPTIONS[1]
     desc = str(row.get(DOC_COL_DESCRIPCION, "") or row.get(DOC_COL_ARCHIVO, "") or "Gasto desde documento").strip()
     return {
         COL_ROWID: uuid.uuid4().hex,
@@ -3051,7 +3053,7 @@ def _build_gasto_row_from_doc(row: pd.Series) -> dict:
         COL_REC: "No",
         COL_REC_PER: "",
         COL_REC_REG: "",
-        COL_FPAGO: fecha_esp if por_pagar == "Si" else pd.NaT,
+        COL_FPAGO: fecha_esp if _si_no_norm(por_pagar) != YES_NO_OPTIONS[0] else pd.NaT,
         COL_FPAGO_REAL: fecha_real if por_pagar == "No" else pd.NaT,
         COL_REC_DUR: "",
         COL_REC_HASTA: pd.NaT,
@@ -6988,7 +6990,10 @@ with pc2:
         "Si configuras tratamientos especiales, seguirán viéndose aquí, pero su materialización no es el caso más robusto."
     )
 
-gas_programmed_mask = st.session_state.df_gas.get(COL_REC, pd.Series("No", index=st.session_state.df_gas.index)).map(_si_no_norm).eq("Si")
+gas_programmed_mask = _ensure_bool_mask(
+    st.session_state.df_gas.get(COL_REC, pd.Series(YES_NO_OPTIONS[0], index=st.session_state.df_gas.index)).map(_bool_from_toggle),
+    index=st.session_state.df_gas.index,
+)
 df_gas_programmed = ensure_gastos_columns(st.session_state.df_gas.loc[gas_programmed_mask].copy())
 program_cols_view = [
     c
