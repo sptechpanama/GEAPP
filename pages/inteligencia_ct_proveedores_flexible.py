@@ -9,16 +9,15 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-import bcrypt
 import pandas as pd
 import streamlit as st
-import streamlit_authenticator as stauth
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from sqlalchemy import create_engine
 
 from core.config import APP_ROOT, DB_PATH
+from services.access_control import build_authenticator, require_page_access
 from services.auth_drive import get_drive_delegated
 from services.inteligencia_ct_flexible import (
     build_detected_fichas_summary,
@@ -44,26 +43,7 @@ st.set_page_config(
 apply_global_theme()
 
 
-USERS = {
-    "rsanchez": ("Rodrigo Sánchez", "Sptech-71"),
-    "isanchez": ("Irvin Sánchez", "Sptech-71"),
-    "igsanchez": ("Iris Grisel Sánchez", "Sptech-71"),
-}
-
-
-def _hash(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-
-
-@st.cache_data(show_spinner=False, ttl=86400)
-def _hash_for_auth_cached(pw: str) -> str:
-    return _hash(pw)
-
-
-credentials = {
-    "usernames": {u: {"name": n, "password": _hash_for_auth_cached(p)} for u, (n, p) in USERS.items()}
-}
-authenticator = stauth.Authenticate(credentials, "finapp_auth", "finapp_key_123", 30)
+authenticator = build_authenticator()
 
 try:
     authenticator.login(" ", location="sidebar", key="auth_intel_ct_flexible_silent")
@@ -71,8 +51,7 @@ try:
 except Exception:
     pass
 
-if st.session_state.get("authentication_status") is not True:
-    st.switch_page("Inicio.py")
+require_page_access("pages/inteligencia_ct_proveedores_flexible.py")
 
 authenticator.logout("Cerrar sesión", location="sidebar")
 

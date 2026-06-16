@@ -33,14 +33,14 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from sheets import get_client, read_worksheet, write_worksheet
 from entities import client_selector, _load_clients, WS_CLIENTES
+from services.access_control import require_page_access
 from ui.theme import apply_global_theme
 
 st.set_page_config(page_title="Generador de cotizaciones", page_icon="🧾", layout="wide")
 apply_global_theme()
 
 # ---- Guard simple ----
-if st.session_state.get("authentication_status") is not True:
-    st.switch_page("Inicio.py")
+require_page_access("pages/generador_de_cotizaciones.py")
 
 
 # ---- Helpers ----

@@ -9,25 +9,15 @@ import re
 from datetime import datetime
 from gspread.exceptions import WorksheetNotFound, APIError
 from sheets import get_client, read_worksheet, write_worksheet
+from services.access_control import require_page_access
 from ui.theme import apply_global_theme
 
-# --------- Guard: require inicio de sesión -----------
-# Usar la misma clave que `Inicio.py` (streamlit-authenticator pone
-# `authentication_status` en `st.session_state`). Antes se revisaba
-# `auth_ok`, que no existe y causaba redirección a Inicio incluso si
-# el usuario estaba autenticado.
-status = st.session_state.get("authentication_status", None)
-if status is not True:
-    st.warning("Debes iniciar sesión para entrar.")
-    try:
-        # Streamlit >= 1.31
-        st.switch_page("Inicio.py")
-    except Exception:
-        st.write("Ir al Inicio desde el menú lateral.")
-    st.stop()
-# ------
 st.set_page_config(page_title="✅ Tasks", page_icon="✅", layout="wide")
 apply_global_theme()
+
+# --------- Guard: require inicio de sesión -----------
+require_page_access("pages/tasks.py")
+# ------
 WS_TASKS = st.secrets.get("app", {}).get("WS_TASKS", "pendientes")
 ESTADOS_VALIDOS = ["Pendiente", "Completada", "Descartar"]
 DEFAULT_TASK_COLUMNS = [
