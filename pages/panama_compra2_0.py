@@ -25,6 +25,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
+from services.access_control import require_page_access
 from services.auth_drive import get_drive_delegated
 from services.panama_compra_detection_v2 import apply_detection_v2_to_dataframe
 
@@ -75,21 +76,7 @@ def _ensure_scroll_top_on_page_entry() -> None:
 
 
 def _require_authentication() -> None:
-    status = st.session_state.get("authentication_status")
-    if status is True:
-        st.session_state.setdefault("username", st.session_state.get("username"))
-        return
-    if status is False:
-        st.error("Credenciales inválidas. Vuelve a la portada para iniciar sesión.")
-    else:
-        st.warning("Debes iniciar sesión para entrar.")
-
-    # Redirige al home, igual que otras páginas protegidas del multipage.
-    try:
-        st.switch_page("Inicio.py")
-    except Exception:
-        st.stop()
-    st.stop()
+    require_page_access("pages/panama_compra2_0.py")
 
 PC_STATE_WORKSHEET = "pc_state"
 PC_CONFIG_WORKSHEET = "pc_config"
@@ -2844,6 +2831,122 @@ def _coerce_ct_label(value: object) -> str:
     return "No"
 
 
+def _panamacompra_content_columns(df: pd.DataFrame) -> list[str]:
+    selected: list[str] = []
+    for col in df.columns:
+        if col == ROW_ID_COL:
+            continue
+        normalized = _normalize_column_key(col)
+        if normalized in {"fecha de actualizacion", "prioritario", "descartar"}:
+            continue
+        if normalized in {
+            "publicacion",
+            "enlace",
+            "titulo",
+            "precio_referencia",
+            "fecha",
+            "entidad",
+            "unidad solicitante",
+            "termino_entrega",
+            "descripcion",
+        } or normalized.startswith("item"):
+            selected.append(col)
+    return selected
+
+
+def _drop_blank_panamacompra_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    content_cols = _panamacompra_content_columns(df)
+    if not content_cols:
+        return df
+    mask = pd.Series(False, index=df.index)
+    for col in content_cols:
+        series = df[col].fillna("").astype(str).str.strip()
+        mask = mask | series.ne("")
+    if not mask.any():
+        return df.iloc[0:0].copy()
+    return df.loc[mask].copy()
+
+
+def _ct_rir_match_columns(
+    df: pd.DataFrame,
+    ficha_tokens: list[str],
+    *,
+    include_all: bool = False,
+) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    work = _drop_blank_panamacompra_rows(df.copy())
+    if work.empty:
+        return pd.DataFrame()
+    if include_all:
+        return work.reset_index(drop=True)
+
+    ficha_col = _resolve_column_by_alias(work.columns.tolist(), ["ficha_detectada", "ficha #"])
+    if not ficha_col:
+        return pd.DataFrame()
+
+    token_set = {_normalize_ficha_token(token) for token in ficha_tokens if _normalize_ficha_token(token)}
+    if not token_set:
+        return pd.DataFrame()
+
+    mask = work[ficha_col].fillna("").astype(str).map(
+        lambda raw: any(token in token_set for token in _parse_manual_ficha_tokens(raw))
+    )
+    if not mask.any():
+        return pd.DataFrame()
+    return work.loc[mask].copy().reset_index(drop=True)
+
+
+def _deduplicate_ct_rir_hits(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    link_col = _resolve_column_by_alias(df.columns.tolist(), ["enlace", "url", "link"])
+    title_col = _resolve_column_by_alias(df.columns.tolist(), ["titulo", "título"])
+    fecha_col = _resolve_column_exact(df.columns.tolist(), ["fecha", "fecha sola"])
+    entidad_col = _resolve_column_by_alias(df.columns.tolist(), ["entidad"])
+
+    work = df.copy()
+    if link_col:
+        key_series = work[link_col].fillna("").astype(str).str.strip()
+    else:
+        empty_series = pd.Series([""] * len(work), index=work.index, dtype="object")
+        title_series = work[title_col].fillna("").astype(str).str.strip() if title_col else empty_series
+        fecha_series = work[fecha_col].fillna("").astype(str).str.strip() if fecha_col else empty_series
+        entidad_series = work[entidad_col].fillna("").astype(str).str.strip() if entidad_col else empty_series
+        key_series = title_series + "||" + fecha_series + "||" + entidad_series
+
+    work["__ct_rir_match_key__"] = key_series
+    if "__ct_rir_priority__" not in work.columns:
+        work["__ct_rir_priority__"] = 1
+
+    deduped_rows: list[pd.Series] = []
+    for _, group in work.groupby("__ct_rir_match_key__", sort=False, dropna=False):
+        sorted_group = group.sort_values("__ct_rir_priority__", kind="stable")
+        base = sorted_group.iloc[0].copy()
+        for agg_col in ("Tipo convocatoria", "Pestana origen", "ficha_detectada"):
+            if agg_col not in sorted_group.columns:
+                continue
+            values: list[str] = []
+            seen: set[str] = set()
+            for raw in sorted_group[agg_col].fillna("").astype(str):
+                parts = [raw.strip()] if agg_col == "ficha_detectada" else [p.strip() for p in raw.split(",") if p.strip()]
+                for part in parts:
+                    normalized_part = _normalize_column_key(part)
+                    if not normalized_part or normalized_part in seen:
+                        continue
+                    seen.add(normalized_part)
+                    values.append(part)
+            if values:
+                base[agg_col] = ", ".join(values) if agg_col != "ficha_detectada" else " | ".join(values)
+        deduped_rows.append(base)
+
+    out = pd.DataFrame(deduped_rows)
+    return out.drop(columns=["__ct_rir_match_key__", "__ct_rir_priority__"], errors="ignore").reset_index(drop=True)
+
+
 def _coerce_registro_sanitario_label(value: object) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "No"
@@ -5287,6 +5390,22 @@ SHEET_GROUPS = {
     ],
 }
 
+CT_RIR_SCAN_SHEETS = [
+    "cl_abiertas",
+    "cl_abiertas_rir_sin_requisitos",
+    "cl_abiertas_rir_con_ct",
+    "cl_abiertas_ct_rir",
+    "cl_prog_sin_ficha",
+    "cl_prog_sin_requisitos",
+    "cl_prog_con_ct",
+    "cl_prog_ct_rir",
+    "ap_sin_ficha",
+    "ap_sin_requisitos",
+    "ap_con_ct",
+    "ap_ct_rir",
+]
+CT_RIR_DIRECT_SHEETS = {"cl_abiertas_ct_rir", "cl_prog_ct_rir", "ap_ct_rir"}
+
 CATEGORY_ORDER = [
     "Cotizaciones Abiertas",
     "Cotizaciones Programadas",
@@ -5396,6 +5515,7 @@ def load_df(sheet_name: str) -> pd.DataFrame:
     data_cols = [c for c in df.columns if c != ROW_ID_COL]
     if data_cols:
         df = df.dropna(how="all", subset=data_cols)
+    df = _drop_blank_panamacompra_rows(df)
     df = df.reset_index(drop=True)
     return df
 
@@ -6117,18 +6237,27 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         tab_suffix = selector_slug.strip("_") or None
 
         if category_name == "Criterios Tecnicos RIR":
+            ficha_tokens = _load_ct_rir_tokens()
             parts: list[pd.DataFrame] = []
-            for source_sheet in sheets:
+            for source_sheet in CT_RIR_SCAN_SHEETS:
                 source_df = load_df(source_sheet)
                 if source_df.empty:
                     continue
                 work = _pc2_apply_ficha_detection(source_df.copy())
-                work["Tipo convocatoria"] = _sheet_tipo_convocatoria(source_sheet)
-                work["Pestana origen"] = _sheet_label(source_sheet)
-                parts.append(work)
+                matched_df = _ct_rir_match_columns(
+                    work,
+                    ficha_tokens,
+                    include_all=(source_sheet in CT_RIR_DIRECT_SHEETS),
+                )
+                if matched_df.empty:
+                    continue
+                matched_df["Tipo convocatoria"] = _sheet_tipo_convocatoria(source_sheet)
+                matched_df["Pestana origen"] = _sheet_label(source_sheet)
+                matched_df["__ct_rir_priority__"] = 0 if source_sheet in CT_RIR_DIRECT_SHEETS else 1
+                parts.append(matched_df)
 
             if parts:
-                df = pd.concat(parts, ignore_index=True, sort=False)
+                df = _deduplicate_ct_rir_hits(pd.concat(parts, ignore_index=True, sort=False))
             else:
                 df = pd.DataFrame()
 

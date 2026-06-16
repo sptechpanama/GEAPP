@@ -8,6 +8,7 @@ from datetime import date, timedelta
 import altair as alt
 import pandas as pd
 import streamlit as st
+from services.access_control import require_page_access
 from services.finance_opening import get_finance_opening_config, opening_amount_for_filter
 from services.finance_recurring import materialize_due_recurring_gastos
 from sheets import get_client, write_worksheet
@@ -73,9 +74,7 @@ COL_TRATAMIENTO_BALANCE_GAS = getattr(f2c, "COL_TRATAMIENTO_BALANCE_GAS", "Trata
 
 st.set_page_config(page_title="Panel Financiero Gerencial", page_icon="\U0001f4c8", layout="wide")
 apply_global_theme()
-
-if st.session_state.get("authentication_status") is not True:
-    st.switch_page("Inicio.py")
+require_page_access("pages/panel_financiero_gerencial.py")
 
 
 F2_DEFAULTS_VERSION = "2026-04-26-defaults-v6"
