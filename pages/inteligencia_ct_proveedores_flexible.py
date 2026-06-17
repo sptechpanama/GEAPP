@@ -62,6 +62,24 @@ PROFILE_LABELS = get_detection_profile_labels()
 DEFAULT_PROFILE = "moderado"
 DATE_CANDIDATE_COLUMNS = ("fecha", "publicacion", "fecha_actualizacion")
 TEXT_SEARCH_COLUMNS = ("titulo", "descripcion", "entidad", "unidad_solic", "termino_entrega", "estado", "ficha_detectada")
+DB_RELEVANT_COLUMN_KEYS = {
+    "id",
+    "fecha actualizacion",
+    "publicacion",
+    "enlace",
+    "titulo",
+    "precio referencia",
+    "fecha",
+    "entidad",
+    "unidad solic",
+    "unidad solicitante",
+    "termino entrega",
+    "ficha detectada",
+    "estado",
+    "descripcion",
+}
+DEFAULT_MAX_ROWS = 50
+MAX_PROCESS_ROWS = 400
 
 
 def _clean_text(value: object) -> str:
@@ -102,6 +120,35 @@ def _parse_any_date(value: object) -> pd.Timestamp:
 def _detected_mask(series: pd.Series) -> pd.Series:
     clean = series.fillna("").astype(str).str.strip()
     return clean.ne("") & clean.str.lower().ne("no detectada")
+
+
+def _quote_identifier(identifier: str) -> str:
+    return f'"{str(identifier).replace(chr(34), chr(34) * 2)}"'
+
+
+def _quote_sqlite_string(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _select_projection_columns(columns: list[str] | tuple[str, ...]) -> list[str]:
+    selected: list[str] = []
+    for col in columns:
+        normalized = _normalize_column_key(col)
+        if normalized in DB_RELEVANT_COLUMN_KEYS:
+            selected.append(str(col))
+            continue
+        if normalized.startswith("item "):
+            selected.append(str(col))
+            continue
+        if normalized.startswith("item_"):
+            selected.append(str(col))
+            continue
+        if re.fullmatch(r"item \d+", normalized):
+            selected.append(str(col))
+            continue
+    if selected:
+        return selected
+    return [str(col) for col in columns]
 
 
 def _normalize_drive_file_id(raw: str) -> str:
@@ -291,8 +338,18 @@ def _load_actos_postgres_df() -> tuple[pd.DataFrame, str]:
                         break
             if not selected_table:
                 return pd.DataFrame(), "postgres"
-            df = pd.read_sql_query(f'SELECT * FROM "{selected_table}"', conn)
-            return df, f"postgres:{selected_table}"
+            cols_df = pd.read_sql_query(
+                (
+                    "SELECT column_name FROM information_schema.columns "
+                    f"WHERE table_schema='public' AND table_name='{selected_table}' "
+                    "ORDER BY ordinal_position"
+                ),
+                conn,
+            )
+            selected_cols = _select_projection_columns(cols_df["column_name"].astype(str).tolist())
+            select_sql = ", ".join(_quote_identifier(col) for col in selected_cols) if selected_cols else "*"
+            df = pd.read_sql_query(f'SELECT {select_sql} FROM "{selected_table}"', conn)
+            return _prepare_reference_dates(df), f"postgres:{selected_table}"
     except Exception:
         return pd.DataFrame(), "postgres"
 
@@ -315,8 +372,14 @@ def _load_actos_db_df() -> tuple[pd.DataFrame, str]:
                         break
                 if not selected_table:
                     return pd.DataFrame(), str(db_path)
-                df = pd.read_sql_query(f"SELECT * FROM {selected_table}", conn)
-            return df, str(db_path)
+                schema_df = pd.read_sql_query(
+                    f"SELECT name FROM pragma_table_info({_quote_sqlite_string(selected_table)})",
+                    conn,
+                )
+                selected_cols = _select_projection_columns(schema_df["name"].astype(str).tolist())
+                select_sql = ", ".join(_quote_identifier(col) for col in selected_cols) if selected_cols else "*"
+                df = pd.read_sql_query(f"SELECT {select_sql} FROM {_quote_identifier(selected_table)}", conn)
+            return _prepare_reference_dates(df), str(db_path)
         except Exception:
             pass
     return _load_actos_postgres_df()
@@ -379,7 +442,9 @@ def _filter_source_rows(
     search_text: str,
     max_rows: int,
 ) -> pd.DataFrame:
-    work = _prepare_reference_dates(df)
+    work = df.copy()
+    if "__fecha_ref__" not in work.columns:
+        work = _prepare_reference_dates(work)
     if only_without_previous and "ficha_detectada" in work.columns:
         work = work[~_detected_mask(work["ficha_detectada"])].copy()
     if states and "estado" in work.columns:
@@ -414,6 +479,20 @@ def _filter_source_rows(
 
 def _result_signature(payload: dict[str, object]) -> tuple[tuple[str, object], ...]:
     return tuple(sorted(payload.items()))
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _run_flexible_detection_cached(
+    subset_df: pd.DataFrame,
+    profiles: tuple[str, ...],
+    metadata_source_key: str,
+) -> pd.DataFrame:
+    metadata_df, _ = _load_detection_metadata_df()
+    return apply_detection_profiles_to_dataframe(
+        subset_df.copy(),
+        metadata_df=metadata_df if not metadata_df.empty else None,
+        profiles=profiles,
+    )
 
 
 def _render_metrics_row(result_df: pd.DataFrame, selected_profile: str) -> None:
@@ -458,13 +537,11 @@ st.caption(
 )
 
 base_df, db_source = _load_actos_db_df()
-metadata_df, metadata_source = _load_detection_metadata_df()
+metadata_source = str(st.session_state.get("intel_flex_metadata_source", "") or "")
 
 if base_df.empty:
     st.error("No se pudo cargar la base de actos públicos desde SQLite/Drive/Postgres.")
     st.stop()
-
-base_df = _prepare_reference_dates(base_df)
 available_states = []
 if "estado" in base_df.columns:
     available_states = sorted({str(value).strip() for value in base_df["estado"].fillna("").astype(str).tolist() if str(value).strip()})
@@ -484,6 +561,7 @@ with st.expander("Configuración del barrido", expanded=True):
         "Para mantener la página ágil, el barrido se ejecuta sobre un subconjunto filtrado. "
         "El enfoque por defecto prioriza actos sin ficha previa para rescatar oportunidades perdidas."
     )
+    st.caption("Para una respuesta más fluida, empieza con 25-50 actos y sube solo si necesitas más cobertura.")
     c1, c2, c3 = st.columns([1.1, 1.4, 1.1])
     with c1:
         only_without_previous = st.checkbox(
@@ -493,10 +571,10 @@ with st.expander("Configuración del barrido", expanded=True):
         )
         max_rows = st.slider(
             "Máximo de actos a procesar",
-            min_value=50,
-            max_value=1200,
-            value=250,
-            step=50,
+            min_value=25,
+            max_value=MAX_PROCESS_ROWS,
+            value=DEFAULT_MAX_ROWS,
+            step=25,
             help="Sube este valor si quieres más cobertura. También aumentará el tiempo de cálculo.",
         )
     with c2:
@@ -539,7 +617,7 @@ request_payload = {
 
 current_signature = _result_signature(request_payload)
 last_signature = st.session_state.get("intel_flex_last_signature")
-should_run = run_detection or "intel_flex_result_df" not in st.session_state
+should_run = bool(run_detection)
 
 if should_run:
     subset_df = _filter_source_rows(
@@ -559,26 +637,29 @@ if should_run:
     else:
         started_at = time.time()
         with st.spinner("Recalculando fichas con los tres perfiles..."):
-            result_df = apply_detection_profiles_to_dataframe(
+            if not metadata_source:
+                _, metadata_source = _load_detection_metadata_df()
+            result_df = _run_flexible_detection_cached(
                 subset_df,
-                metadata_df=metadata_df if not metadata_df.empty else None,
-                profiles=PROFILE_KEYS,
+                profiles=tuple(PROFILE_KEYS),
+                metadata_source_key=str(metadata_source or ""),
             )
         st.session_state["intel_flex_result_df"] = result_df
         st.session_state["intel_flex_runtime_s"] = round(time.time() - started_at, 2)
+        st.session_state["intel_flex_metadata_source"] = str(metadata_source or "")
 
 result_df = st.session_state.get("intel_flex_result_df", pd.DataFrame())
 subset_count = int(st.session_state.get("intel_flex_subset_count", 0) or 0)
 runtime_s = float(st.session_state.get("intel_flex_runtime_s", 0.0) or 0.0)
 
 st.caption(f"Fuente actos: `{db_source or 'desconocida'}`")
-st.caption(f"Fuente metadata fichas: `{metadata_source}`")
+st.caption(f"Fuente metadata fichas: `{metadata_source or 'pendiente al ejecutar barrido'}`")
 
 if last_signature is not None and current_signature != last_signature and not run_detection:
     st.warning("Hay cambios de filtros pendientes. Pulsa `Procesar barrido flexible` para recalcular los resultados.")
 
 if result_df is None or result_df.empty:
-    st.info("No hay resultados cargados todavía para los filtros actuales.")
+    st.info("Configura los filtros y pulsa `Procesar barrido flexible` para cargar resultados.")
     st.stop()
 
 selected_profile = normalize_detection_profile_key(
