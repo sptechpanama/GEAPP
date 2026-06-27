@@ -54,6 +54,7 @@ authenticator.logout("Cerrar sesion", location="sidebar")
 SHEET_ID = st.secrets["app"]["SHEET_ID"]
 WS_COT = "cotizaciones"
 WS_FACT = "Facturacion"
+WS_FACT_REC = "FacturacionRecibidas"
 DEFAULT_COMPANIES = ["RS Engineering", "RIR Medical", "SP Tech Solutions S.A."]
 FACT_COLUMNS = [
     "FacturaID",
@@ -88,9 +89,40 @@ FACT_COLUMNS = [
     "UpdatedAt",
     "Usuario",
 ]
+RECEIVED_COLUMNS = [
+    "DocumentoID",
+    "EstadoLocal",
+    "ImpactoFinanzas",
+    "Empresa",
+    "ProveedorNombre",
+    "ProveedorRUC",
+    "ProveedorDV",
+    "ProveedorEmail",
+    "ProveedorDireccion",
+    "ProyectoID",
+    "ProyectoNombre",
+    "NumeroFiscal",
+    "TipoDocumento",
+    "FechaRecepcion",
+    "FechaEmision",
+    "FechaVencimiento",
+    "CondicionPago",
+    "Moneda",
+    "Subtotal",
+    "Impuesto",
+    "Total",
+    "LineasJSON",
+    "Notas",
+    "CreatedAt",
+    "UpdatedAt",
+    "Usuario",
+]
 ITEM_COLUMNS = ["sku", "description", "quantity", "unit_price", "tax_rate"]
 PAYMENT_TERMS = ["Contado", "Credito 7 dias", "Credito 15 dias", "Credito 30 dias", "Credito 60 dias", "Otro"]
 LOCAL_STATUS_OPTIONS = ["borrador", "listo_api", "emitida", "error_api", "anulada"]
+RECEIVED_STATUS_OPTIONS = ["pendiente_revision", "lista_finanzas", "contabilizada", "pagada", "anulada"]
+RECEIVED_IMPACT_OPTIONS = ["pendiente", "lista_para_registro", "registrada_en_finanzas", "pagada", "revisar"]
+RECEIVED_DOC_TYPES = ["Factura proveedor", "Recibo fiscal", "Nota de debito", "Nota de credito", "Otro"]
 
 
 def _default_items_df() -> pd.DataFrame:
@@ -110,6 +142,10 @@ def _default_items_df() -> pd.DataFrame:
 
 def _new_invoice_id() -> str:
     return f"FAC-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+
+
+def _new_received_id() -> str:
+    return f"REC-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
 
 
 def _now_text() -> str:
@@ -155,6 +191,15 @@ def _ensure_facturacion_sheet(client, sheet_id: str) -> None:
         ws.update("A1", [FACT_COLUMNS])
 
 
+def _ensure_facturacion_recibidas_sheet(client, sheet_id: str) -> None:
+    sh = client.open_by_key(sheet_id)
+    try:
+        sh.worksheet(WS_FACT_REC)
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title=WS_FACT_REC, rows=1000, cols=max(len(RECEIVED_COLUMNS), 24))
+        ws.update("A1", [RECEIVED_COLUMNS])
+
+
 def _normalize_facturas_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy() if df is not None else pd.DataFrame()
     for col in FACT_COLUMNS:
@@ -168,6 +213,22 @@ def _normalize_facturas_df(df: pd.DataFrame) -> pd.DataFrame:
     out["FacturaID"] = out["FacturaID"].fillna("").astype(str)
     out["EstadoLocal"] = out["EstadoLocal"].replace("", "borrador").fillna("borrador")
     out["EstadoAPI"] = out["EstadoAPI"].fillna("").astype(str)
+    return out
+
+
+def _normalize_recibidas_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy() if df is not None else pd.DataFrame()
+    for col in RECEIVED_COLUMNS:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[RECEIVED_COLUMNS].copy()
+    for col in ["Subtotal", "Impuesto", "Total"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+    for col in ["FechaRecepcion", "FechaEmision", "FechaVencimiento", "CreatedAt", "UpdatedAt"]:
+        out[col] = out[col].fillna("").astype(str)
+    out["DocumentoID"] = out["DocumentoID"].fillna("").astype(str)
+    out["EstadoLocal"] = out["EstadoLocal"].replace("", "pendiente_revision").fillna("pendiente_revision")
+    out["ImpactoFinanzas"] = out["ImpactoFinanzas"].replace("", "pendiente").fillna("pendiente")
     return out
 
 
@@ -203,6 +264,13 @@ def _load_facturas_cached(sheet_id: str, cache_token: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def _load_recibidas_cached(sheet_id: str, cache_token: str) -> pd.DataFrame:
+    client, _ = get_client()
+    _ensure_facturacion_recibidas_sheet(client, sheet_id)
+    return _normalize_recibidas_df(read_worksheet(client, sheet_id, WS_FACT_REC))
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def _load_cotizaciones_cached(sheet_id: str, cache_token: str) -> pd.DataFrame:
     client, _ = get_client()
     try:
@@ -227,6 +295,27 @@ def _safe_load_projects_df(client, sheet_id: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["ProyectoID", "ProyectoNombre", "ClienteID", "ClienteNombre"])
     except Exception:
         return pd.DataFrame(columns=["ProyectoID", "ProyectoNombre", "ClienteID", "ClienteNombre"])
+
+
+def _company_options(*series_values: pd.Series | list[str]) -> list[str]:
+    values: list[str] = list(DEFAULT_COMPANIES)
+    for series in series_values:
+        if isinstance(series, pd.Series):
+            iterable = series.tolist()
+        else:
+            iterable = list(series)
+        for value in iterable:
+            text = _norm_text(value)
+            if text:
+                values.append(text)
+    return list(dict.fromkeys(values))
+
+
+def _date_or_default(value: Any, default: date) -> date:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return default
+    return parsed.date()
 
 
 def _coerce_items_df(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -329,6 +418,29 @@ def _project_options(df_proj: pd.DataFrame, client_id: str) -> list[dict[str, st
     return options
 
 
+def _project_options_by_company(df_proj: pd.DataFrame, company: str) -> list[dict[str, str]]:
+    work = df_proj.copy()
+    for col in ["ProyectoID", "ProyectoNombre"]:
+        if col not in work.columns:
+            work[col] = ""
+    if "Empresa" in work.columns and company:
+        mask = work["Empresa"].astype(str).apply(lambda value: _client_company_matches(value, company))
+        filtered = work[mask].copy()
+        if not filtered.empty:
+            work = filtered
+    work = work.sort_values(["ProyectoNombre", "ProyectoID"], na_position="last")
+    options: list[dict[str, str]] = []
+    for _, row in work.iterrows():
+        options.append(
+            {
+                "label": f"{_norm_text(row.get('ProyectoNombre')) or _norm_text(row.get('ProyectoID'))} · {_norm_text(row.get('ProyectoID'))}",
+                "id": _norm_text(row.get("ProyectoID")),
+                "name": _norm_text(row.get("ProyectoNombre")),
+            }
+        )
+    return options
+
+
 def _quote_options(df_cot: pd.DataFrame, company: str, client_name: str) -> list[dict[str, Any]]:
     work = df_cot.copy()
     if company:
@@ -384,6 +496,29 @@ def _set_current_from_draft(row: dict[str, Any]) -> None:
     st.session_state["fe_items_df"] = _parse_lines_json(row.get("LineasJSON"))
 
 
+def _set_current_from_received(row: dict[str, Any]) -> None:
+    st.session_state["fr_document_id"] = _norm_text(row.get("DocumentoID")) or _new_received_id()
+    st.session_state["fr_status_local"] = _norm_text(row.get("EstadoLocal")) or "pendiente_revision"
+    st.session_state["fr_finance_impact"] = _norm_text(row.get("ImpactoFinanzas")) or "pendiente"
+    st.session_state["fr_company"] = _norm_text(row.get("Empresa"))
+    st.session_state["fr_supplier_name"] = _norm_text(row.get("ProveedorNombre"))
+    st.session_state["fr_supplier_ruc"] = _norm_text(row.get("ProveedorRUC"))
+    st.session_state["fr_supplier_dv"] = _norm_text(row.get("ProveedorDV"))
+    st.session_state["fr_supplier_email"] = _norm_text(row.get("ProveedorEmail"))
+    st.session_state["fr_supplier_address"] = _norm_text(row.get("ProveedorDireccion"))
+    st.session_state["fr_project_id"] = _norm_text(row.get("ProyectoID"))
+    st.session_state["fr_project_name"] = _norm_text(row.get("ProyectoNombre"))
+    st.session_state["fr_fiscal_number"] = _norm_text(row.get("NumeroFiscal"))
+    st.session_state["fr_doc_type"] = _norm_text(row.get("TipoDocumento")) or RECEIVED_DOC_TYPES[0]
+    st.session_state["fr_received_date"] = _date_or_default(row.get("FechaRecepcion"), date.today())
+    st.session_state["fr_issue_date"] = _date_or_default(row.get("FechaEmision"), date.today())
+    st.session_state["fr_due_date"] = _date_or_default(row.get("FechaVencimiento"), date.today())
+    st.session_state["fr_payment_terms"] = _norm_text(row.get("CondicionPago")) or PAYMENT_TERMS[0]
+    st.session_state["fr_currency"] = _norm_text(row.get("Moneda")) or "USD"
+    st.session_state["fr_notes"] = _norm_text(row.get("Notas"))
+    st.session_state["fr_items_df"] = _parse_lines_json(row.get("LineasJSON"))
+
+
 def _reset_current_draft() -> None:
     st.session_state["fe_invoice_id"] = _new_invoice_id()
     st.session_state["fe_status_local"] = "borrador"
@@ -405,6 +540,29 @@ def _reset_current_draft() -> None:
     st.session_state["fe_currency"] = "USD"
     st.session_state["fe_notes"] = ""
     st.session_state["fe_items_df"] = _default_items_df()
+
+
+def _reset_current_received() -> None:
+    st.session_state["fr_document_id"] = _new_received_id()
+    st.session_state["fr_status_local"] = "pendiente_revision"
+    st.session_state["fr_finance_impact"] = "pendiente"
+    st.session_state["fr_company"] = DEFAULT_COMPANIES[0]
+    st.session_state["fr_supplier_name"] = ""
+    st.session_state["fr_supplier_ruc"] = ""
+    st.session_state["fr_supplier_dv"] = ""
+    st.session_state["fr_supplier_email"] = ""
+    st.session_state["fr_supplier_address"] = ""
+    st.session_state["fr_project_id"] = ""
+    st.session_state["fr_project_name"] = ""
+    st.session_state["fr_fiscal_number"] = ""
+    st.session_state["fr_doc_type"] = RECEIVED_DOC_TYPES[0]
+    st.session_state["fr_received_date"] = date.today()
+    st.session_state["fr_issue_date"] = date.today()
+    st.session_state["fr_due_date"] = date.today()
+    st.session_state["fr_payment_terms"] = PAYMENT_TERMS[0]
+    st.session_state["fr_currency"] = "USD"
+    st.session_state["fr_notes"] = ""
+    st.session_state["fr_items_df"] = _default_items_df()
 
 
 def _payment_term_default_due(payment_terms: str, issue_date: date) -> date:
@@ -448,6 +606,62 @@ def _current_draft_payload(items_df: pd.DataFrame) -> dict[str, Any]:
         "lines": _coerce_items_df(items_df).to_dict(orient="records"),
     }
     return build_invoice_payload_from_draft(draft)
+
+
+def _current_received_record(items_df: pd.DataFrame) -> dict[str, Any]:
+    lines_df = _coerce_items_df(items_df)
+    subtotal, tax, total = _totals_from_items(lines_df)
+    return {
+        "DocumentoID": _norm_text(st.session_state.get("fr_document_id")),
+        "EstadoLocal": _norm_text(st.session_state.get("fr_status_local")) or "pendiente_revision",
+        "ImpactoFinanzas": _norm_text(st.session_state.get("fr_finance_impact")) or "pendiente",
+        "Empresa": _norm_text(st.session_state.get("fr_company")),
+        "ProveedorNombre": _norm_text(st.session_state.get("fr_supplier_name")),
+        "ProveedorRUC": _norm_text(st.session_state.get("fr_supplier_ruc")),
+        "ProveedorDV": _norm_text(st.session_state.get("fr_supplier_dv")),
+        "ProveedorEmail": _norm_text(st.session_state.get("fr_supplier_email")),
+        "ProveedorDireccion": _norm_text(st.session_state.get("fr_supplier_address")),
+        "ProyectoID": _norm_text(st.session_state.get("fr_project_id")),
+        "ProyectoNombre": _norm_text(st.session_state.get("fr_project_name")),
+        "NumeroFiscal": _norm_text(st.session_state.get("fr_fiscal_number")),
+        "TipoDocumento": _norm_text(st.session_state.get("fr_doc_type")) or RECEIVED_DOC_TYPES[0],
+        "FechaRecepcion": str(st.session_state.get("fr_received_date", date.today())),
+        "FechaEmision": str(st.session_state.get("fr_issue_date", date.today())),
+        "FechaVencimiento": str(st.session_state.get("fr_due_date", date.today())),
+        "CondicionPago": _norm_text(st.session_state.get("fr_payment_terms")) or PAYMENT_TERMS[0],
+        "Moneda": _norm_text(st.session_state.get("fr_currency")) or "USD",
+        "Subtotal": subtotal,
+        "Impuesto": tax,
+        "Total": total,
+        "LineasJSON": json.dumps(lines_df.to_dict(orient="records"), ensure_ascii=False),
+        "Notas": _norm_text(st.session_state.get("fr_notes")),
+        "CreatedAt": _now_text(),
+        "UpdatedAt": _now_text(),
+        "Usuario": str(st.session_state.get("auth_username", "") or st.session_state.get("auth_user_name", "") or "").strip(),
+    }
+
+
+def _validate_received_record(record: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not _norm_text(record.get("Empresa")):
+        errors.append("Falta la empresa receptora.")
+    if not _norm_text(record.get("ProveedorNombre")):
+        errors.append("Falta el proveedor.")
+    if not _norm_text(record.get("NumeroFiscal")):
+        errors.append("Falta el numero fiscal/documento.")
+    try:
+        total = float(record.get("Total") or 0)
+    except Exception:
+        total = 0
+    if total <= 0:
+        errors.append("El total debe ser mayor que 0.")
+    try:
+        lines = json.loads(record.get("LineasJSON") or "[]")
+    except Exception:
+        lines = []
+    if not isinstance(lines, list) or not lines:
+        errors.append("Debe existir al menos una linea.")
+    return errors
 
 
 def _upsert_factura_row(drafts_df: pd.DataFrame, payload: dict[str, Any], *, response_data: dict[str, Any] | None = None) -> pd.DataFrame:
@@ -503,16 +717,261 @@ def _upsert_factura_row(drafts_df: pd.DataFrame, payload: dict[str, Any], *, res
     return _normalize_facturas_df(updated)
 
 
+def _upsert_recibida_row(received_df: pd.DataFrame, record: dict[str, Any]) -> pd.DataFrame:
+    row = dict(record)
+    row["UpdatedAt"] = _now_text()
+    updated = _normalize_recibidas_df(received_df)
+    mask = updated["DocumentoID"].astype(str).str.strip() == _norm_text(row.get("DocumentoID"))
+    if mask.any():
+        first_idx = updated.index[mask][0]
+        created_at = _norm_text(updated.at[first_idx, "CreatedAt"])
+        if created_at:
+            row["CreatedAt"] = created_at
+        updated.loc[first_idx, RECEIVED_COLUMNS] = [row.get(col, "") for col in RECEIVED_COLUMNS]
+    else:
+        updated = pd.concat([updated, pd.DataFrame([row])], ignore_index=True)
+    return _normalize_recibidas_df(updated)
+
+
+def _render_recibidas_view() -> None:
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Recibidas", len(received_df))
+    metric_2.metric("Pendientes finanzas", int((received_df["ImpactoFinanzas"] == "pendiente").sum()) if not received_df.empty else 0)
+    metric_3.metric("Listas finanzas", int((received_df["EstadoLocal"] == "lista_finanzas").sum()) if not received_df.empty else 0)
+    metric_4.metric("Contabilizadas", int((received_df["EstadoLocal"] == "contabilizada").sum()) if not received_df.empty else 0)
+
+    left, right = st.columns([1.45, 1.0], gap="large")
+
+    with right:
+        with st.expander("Estado contable", expanded=True):
+            st.write("Estas facturas no salen por el API fiscal de ventas.")
+            st.write("Su objetivo es dejar una bandeja limpia de compras/soportes recibidos para luego integrarla con `Gastos` y `CxP`.")
+            pendientes_pago = int((received_df["EstadoLocal"] != "pagada").sum()) if not received_df.empty else 0
+            st.write(f"Documentos no pagados: `{pendientes_pago}`")
+
+        with st.expander("Recibidas guardadas", expanded=True):
+            if received_df.empty:
+                st.info("Aun no hay facturas recibidas guardadas.")
+            else:
+                received_view = received_df[
+                    ["DocumentoID", "Empresa", "ProveedorNombre", "NumeroFiscal", "Total", "EstadoLocal", "ImpactoFinanzas", "UpdatedAt"]
+                ].sort_values("UpdatedAt", ascending=False, na_position="last")
+                st.dataframe(received_view, use_container_width=True, hide_index=True)
+                received_options = [
+                    {
+                        "label": f"{row.DocumentoID} · {row.ProveedorNombre} · {row.EstadoLocal} · ${float(row.Total):,.2f}",
+                        "id": row.DocumentoID,
+                    }
+                    for _, row in received_view.iterrows()
+                ]
+                selected_label = st.selectbox(
+                    "Cargar factura recibida",
+                    options=[""] + [opt["label"] for opt in received_options],
+                    index=0,
+                    key="fr_load_doc_label",
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Cargar recibida", use_container_width=True, type="secondary"):
+                        match = next((opt for opt in received_options if opt["label"] == selected_label), None)
+                        if not match:
+                            st.warning("Selecciona un documento recibido.")
+                        else:
+                            row = received_df[received_df["DocumentoID"].astype(str) == match["id"]].head(1)
+                            if row.empty:
+                                st.error("No se encontro el documento recibido.")
+                            else:
+                                _set_current_from_received(row.iloc[0].to_dict())
+                                _safe_rerun()
+                with c2:
+                    if st.button("Nueva recibida", use_container_width=True):
+                        _reset_current_received()
+                        _safe_rerun()
+
+    with left:
+        with st.expander("Proveedor y cabecera", expanded=True):
+            company_options = _company_options(
+                received_df.get("Empresa", pd.Series(dtype=str)),
+                drafts_df.get("Empresa", pd.Series(dtype=str)),
+                quotes_df.get("empresa", pd.Series(dtype=str)),
+            )
+            current_company = st.session_state.get("fr_company", DEFAULT_COMPANIES[0])
+            if current_company not in company_options:
+                company_options.append(current_company)
+            st.selectbox("Empresa receptora", options=company_options, key="fr_company")
+
+            rec_proj_options = _project_options_by_company(projects_df, st.session_state.get("fr_company", ""))
+            rec_proj_labels = [""] + [opt["label"] for opt in rec_proj_options]
+            current_project_id = st.session_state.get("fr_project_id", "")
+            current_project_label = ""
+            for opt in rec_proj_options:
+                if opt["id"] == current_project_id and current_project_id:
+                    current_project_label = opt["label"]
+                    break
+            rec_proj_index = rec_proj_labels.index(current_project_label) if current_project_label in rec_proj_labels else 0
+            selected_project_label = st.selectbox("Proyecto / centro de costo", options=rec_proj_labels, index=rec_proj_index, key="fr_project_label")
+            selected_project = next((opt for opt in rec_proj_options if opt["label"] == selected_project_label), None)
+            if selected_project:
+                st.session_state["fr_project_id"] = selected_project["id"]
+                st.session_state["fr_project_name"] = selected_project["name"]
+            elif not selected_project_label:
+                st.session_state["fr_project_id"] = ""
+                st.session_state["fr_project_name"] = ""
+
+            top_1, top_2, top_3 = st.columns(3)
+            with top_1:
+                st.text_input("Documento ID interno", key="fr_document_id", disabled=True)
+            with top_2:
+                doc_type = st.session_state.get("fr_doc_type", RECEIVED_DOC_TYPES[0])
+                if doc_type not in RECEIVED_DOC_TYPES:
+                    doc_type = RECEIVED_DOC_TYPES[0]
+                st.selectbox("Tipo documento", options=RECEIVED_DOC_TYPES, index=RECEIVED_DOC_TYPES.index(doc_type), key="fr_doc_type")
+            with top_3:
+                status_current = st.session_state.get("fr_status_local", "pendiente_revision")
+                if status_current not in RECEIVED_STATUS_OPTIONS:
+                    status_current = "pendiente_revision"
+                st.selectbox("Estado local", options=RECEIVED_STATUS_OPTIONS, index=RECEIVED_STATUS_OPTIONS.index(status_current), key="fr_status_local")
+
+            date_1, date_2, date_3 = st.columns(3)
+            with date_1:
+                st.date_input("Fecha recepcion", key="fr_received_date")
+            with date_2:
+                st.date_input("Fecha emision", key="fr_issue_date")
+            with date_3:
+                st.date_input("Fecha vencimiento", key="fr_due_date")
+
+            term_1, term_2, term_3 = st.columns(3)
+            with term_1:
+                st.selectbox("Condicion de pago", options=PAYMENT_TERMS, key="fr_payment_terms")
+            with term_2:
+                impact_current = st.session_state.get("fr_finance_impact", "pendiente")
+                if impact_current not in RECEIVED_IMPACT_OPTIONS:
+                    impact_current = "pendiente"
+                st.selectbox("Impacto Finanzas", options=RECEIVED_IMPACT_OPTIONS, index=RECEIVED_IMPACT_OPTIONS.index(impact_current), key="fr_finance_impact")
+            with term_3:
+                st.text_input("Moneda", key="fr_currency")
+            if st.button("Recalcular vencimiento recibida", type="secondary"):
+                st.session_state["fr_due_date"] = _payment_term_default_due(
+                    st.session_state.get("fr_payment_terms", PAYMENT_TERMS[0]),
+                    st.session_state.get("fr_issue_date", date.today()),
+                )
+                _safe_rerun()
+
+            st.text_input("Proveedor", key="fr_supplier_name", placeholder="Nombre fiscal del proveedor")
+            prov_1, prov_2 = st.columns(2)
+            with prov_1:
+                st.text_input("RUC proveedor", key="fr_supplier_ruc", placeholder="RUC o identificacion fiscal")
+            with prov_2:
+                st.text_input("DV proveedor", key="fr_supplier_dv")
+            st.text_input("Numero fiscal / factura", key="fr_fiscal_number", placeholder="Numero del documento recibido")
+            st.text_input("Correo proveedor", key="fr_supplier_email")
+            st.text_input("Direccion proveedor", key="fr_supplier_address")
+            st.text_input("Nombre proyecto", key="fr_project_name", placeholder="Proyecto asociado")
+            st.text_area("Notas del documento", key="fr_notes", height=90, placeholder="Observaciones de compra, pago o revision")
+
+        with st.expander("Detalle recibido", expanded=True):
+            items_value = _coerce_items_df(st.session_state.get("fr_items_df", _default_items_df()))
+            edited_items = st.data_editor(
+                items_value,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="dynamic",
+                key="fr_items_editor",
+                column_config={
+                    "sku": st.column_config.TextColumn("SKU / referencia", help="Codigo, referencia o espacio en blanco."),
+                    "description": st.column_config.TextColumn("Descripcion", required=True),
+                    "quantity": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, format="%.2f"),
+                    "unit_price": st.column_config.NumberColumn("Precio unitario", min_value=0.0, step=1.0, format="%.2f"),
+                    "tax_rate": st.column_config.NumberColumn("ITBMS %", min_value=0.0, step=1.0, format="%.2f"),
+                },
+            )
+            edited_items = _coerce_items_df(edited_items)
+            st.session_state["fr_items_df"] = edited_items
+            items_totals_df = _items_with_totals(edited_items)
+            subtotal, tax, total = _totals_from_items(edited_items)
+            st.dataframe(
+                items_totals_df[["description", "quantity", "unit_price", "tax_rate", "line_subtotal", "line_tax", "line_total"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            tot_1, tot_2, tot_3 = st.columns(3)
+            tot_1.metric("Subtotal", f"${subtotal:,.2f}")
+            tot_2.metric("ITBMS", f"${tax:,.2f}")
+            tot_3.metric("Total", f"${total:,.2f}")
+
+            action_1, action_2, action_3 = st.columns(3)
+            with action_1:
+                if st.button("Guardar recibida", use_container_width=True):
+                    record = _current_received_record(edited_items)
+                    updated_df = _upsert_recibida_row(received_df, record)
+                    write_worksheet(client, SHEET_ID, WS_FACT_REC, updated_df)
+                    st.session_state["facturacion_cache_token"] = uuid.uuid4().hex
+                    st.success("Factura recibida guardada.")
+                    _safe_rerun()
+            with action_2:
+                if st.button("Marcar lista para Finanzas", use_container_width=True):
+                    st.session_state["fr_status_local"] = "lista_finanzas"
+                    st.session_state["fr_finance_impact"] = "lista_para_registro"
+                    record = _current_received_record(edited_items)
+                    errors = _validate_received_record(record)
+                    if errors:
+                        st.error("Corrige antes de marcarla lista: " + " | ".join(errors))
+                        st.session_state["fr_status_local"] = "pendiente_revision"
+                        st.session_state["fr_finance_impact"] = "pendiente"
+                    else:
+                        updated_df = _upsert_recibida_row(received_df, record)
+                        write_worksheet(client, SHEET_ID, WS_FACT_REC, updated_df)
+                        st.session_state["facturacion_cache_token"] = uuid.uuid4().hex
+                        st.success("Documento marcado como listo para pasar a Finanzas.")
+                        _safe_rerun()
+            with action_3:
+                if st.button("Marcar contabilizada", use_container_width=True, type="primary"):
+                    st.session_state["fr_status_local"] = "contabilizada"
+                    st.session_state["fr_finance_impact"] = "registrada_en_finanzas"
+                    record = _current_received_record(edited_items)
+                    errors = _validate_received_record(record)
+                    if errors:
+                        st.error("Corrige antes de contabilizar: " + " | ".join(errors))
+                        st.session_state["fr_status_local"] = "pendiente_revision"
+                        st.session_state["fr_finance_impact"] = "pendiente"
+                    else:
+                        updated_df = _upsert_recibida_row(received_df, record)
+                        write_worksheet(client, SHEET_ID, WS_FACT_REC, updated_df)
+                        st.session_state["facturacion_cache_token"] = uuid.uuid4().hex
+                        st.success("Documento marcado como contabilizado.")
+                        _safe_rerun()
+
+        live_received_record = _current_received_record(st.session_state.get("fr_items_df", _default_items_df()))
+        live_received_errors = _validate_received_record(live_received_record)
+        with st.expander("Resumen estructurado recibida", expanded=False):
+            if live_received_errors:
+                st.warning("Pendientes: " + " | ".join(live_received_errors))
+            else:
+                st.success("Estructura recibida validada.")
+            st.code(json.dumps(live_received_record, indent=2, ensure_ascii=False), language="json")
+            st.download_button(
+                "Descargar resumen JSON",
+                data=json.dumps(live_received_record, indent=2, ensure_ascii=False),
+                file_name=f"{st.session_state.get('fr_document_id', 'recibida')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+
 if "facturacion_cache_token" not in st.session_state:
     st.session_state["facturacion_cache_token"] = uuid.uuid4().hex
 if "fe_invoice_id" not in st.session_state:
     _reset_current_draft()
+if "fr_document_id" not in st.session_state:
+    _reset_current_received()
 
 client, _ = get_client()
 _ensure_facturacion_sheet(client, SHEET_ID)
+_ensure_facturacion_recibidas_sheet(client, SHEET_ID)
 
 cache_token = st.session_state["facturacion_cache_token"]
 drafts_df = _load_facturas_cached(SHEET_ID, cache_token)
+received_df = _load_recibidas_cached(SHEET_ID, cache_token)
 quotes_df = _load_cotizaciones_cached(SHEET_ID, cache_token)
 clients_df = _safe_load_clients_df(client, SHEET_ID)
 projects_df = _safe_load_projects_df(client, SHEET_ID)
@@ -521,7 +980,13 @@ settings = load_firmatech_settings()
 health = provider_health(settings)
 
 st.title("Facturacion electronica")
-st.caption("Borradores listos para emitir por API, trazables y preparados para integrarse despues con Finanzas.")
+selected_view = st.radio("Vista", ["Emitidas", "Recibidas"], horizontal=True, key="facturacion_view")
+if selected_view == "Recibidas":
+    st.caption("Compras y documentos recibidos, listos para organizarse y luego integrarse con `Gastos` y `CxP`.")
+    _render_recibidas_view()
+    st.stop()
+
+st.caption("Ventas emitidas o por emitir, trazables y preparadas para integrarse despues con Finanzas.")
 
 metric_1, metric_2, metric_3, metric_4 = st.columns(4)
 metric_1.metric("Borradores", int((drafts_df["EstadoLocal"] == "borrador").sum()) if not drafts_df.empty else 0)
