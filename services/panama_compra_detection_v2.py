@@ -800,6 +800,27 @@ FLEXIBLE_DETECTION_PROFILES: dict[str, FlexibleDetectionProfile] = {
         absolute_score_min=82.0,
         absolute_margin_min=10.0,
     ),
+    "flexible": FlexibleDetectionProfile(
+        slug="flexible",
+        label="Flexible",
+        possible_score_min=44.0,
+        numeric_score_min=86.0,
+        numeric_margin_min=3.0,
+        exact_score_min=79.0,
+        exact_margin_min=6.0,
+        sequence_score_min=72.0,
+        sequence_margin_min=6.0,
+        fuzzy_high_score_min=77.0,
+        fuzzy_high_margin_min=4.0,
+        fuzzy_medium_score_min=69.0,
+        fuzzy_medium_margin_min=3.0,
+        coverage_high_score_min=69.0,
+        coverage_high_margin_min=4.0,
+        coverage_medium_score_min=62.0,
+        coverage_medium_margin_min=1.0,
+        absolute_score_min=76.0,
+        absolute_margin_min=8.0,
+    ),
     "muy_flexible": FlexibleDetectionProfile(
         slug="muy_flexible",
         label="Muy Flexible",
@@ -841,7 +862,8 @@ def normalize_detection_profile_key(value: object) -> str:
         "moderado": "moderado",
         "moderate": "moderado",
         "medium": "moderado",
-        "flexible": "muy_flexible",
+        "flexible": "flexible",
+        "flex": "flexible",
         "muy_flexible": "muy_flexible",
         "muy__flexible": "muy_flexible",
         "muyflexible": "muy_flexible",
@@ -1173,7 +1195,7 @@ def apply_detection_profiles_to_dataframe(
     df: pd.DataFrame,
     *,
     metadata_df: pd.DataFrame | None = None,
-    profiles: Sequence[str] = ("estricto", "moderado", "muy_flexible"),
+    profiles: Sequence[str] = ("estricto", "moderado", "flexible", "muy_flexible"),
     title_aliases: Sequence[str] = ("titulo", "título"),
     description_aliases: Sequence[str] = ("descripcion", "descripción"),
 ) -> pd.DataFrame:
@@ -1194,7 +1216,7 @@ def apply_detection_profiles_to_dataframe(
 
     profile_keys = tuple(dict.fromkeys(normalize_detection_profile_key(profile) for profile in profiles if str(profile or "").strip()))
     if not profile_keys:
-        profile_keys = ("estricto", "moderado", "muy_flexible")
+        profile_keys = ("estricto", "moderado", "flexible", "muy_flexible")
 
     metadata_records = _metadata_records_from_df(metadata_df)
     out = df.copy()

@@ -32,11 +32,55 @@ from services.backups import (
     get_last_backup_info,
     start_backup_scheduler_once,
 )
+from services.panama_compra_detection_v2 import (
+    apply_detection_profiles_to_dataframe,
+    flexible_output_col,
+    get_detection_profile_labels,
+    list_detection_profiles,
+    normalize_detection_profile_key,
+)
 from ui.theme import apply_global_theme
 
 
+INTEL_PAGE_VARIANT = str(globals().get("GEAPP_INTEL_PAGE_VARIANT", "") or "").strip().lower()
+INTEL_IS_FLEXIBLE_VARIANT = INTEL_PAGE_VARIANT == "flexible"
+INTEL_PAGE_ACCESS_PATH = (
+    "pages/inteligencia_ct_proveedores_flexible.py"
+    if INTEL_IS_FLEXIBLE_VARIANT
+    else "pages/inteligencia_ct_proveedores.py"
+)
+INTEL_PAGE_CONFIG_TITLE = (
+    "Inteligencia CT Proveedores Flexible"
+    if INTEL_IS_FLEXIBLE_VARIANT
+    else "Inteligencia CT y Proveedores"
+)
+INTEL_SILENT_AUTH_KEY = (
+    "auth_intel_ct_flexible_silent"
+    if INTEL_IS_FLEXIBLE_VARIANT
+    else "auth_intel_ct_silent"
+)
+INTEL_MAIN_HEADING = (
+    "# 🧠 Inteligencia de Prospección CT y Proveedores Flexible"
+    if INTEL_IS_FLEXIBLE_VARIANT
+    else "# 🧠 Inteligencia de Prospección CT y Proveedores"
+)
+INTEL_MAIN_CAPTION = (
+    "Mismas vistas y lógica del módulo normal, pero con la ficha detectada materializada "
+    "según el perfil seleccionado: Muy flexible, Flexible, Moderado o Estricto."
+    if INTEL_IS_FLEXIBLE_VARIANT
+    else "Fase 1.1: captacion operativa desde DB + arquitectura del embudo."
+)
+INTEL_FLEX_PROFILE_KEYS = list(list_detection_profiles())
+INTEL_FLEX_PROFILE_LABELS = get_detection_profile_labels()
+INTEL_FLEX_DEFAULT_PROFILE = (
+    "moderado"
+    if "moderado" in INTEL_FLEX_PROFILE_KEYS
+    else (INTEL_FLEX_PROFILE_KEYS[0] if INTEL_FLEX_PROFILE_KEYS else "estricto")
+)
+
+
 st.set_page_config(
-    page_title="Inteligencia CT y Proveedores",
+    page_title=INTEL_PAGE_CONFIG_TITLE,
     page_icon="🧠",
     layout="wide",
 )
@@ -46,12 +90,12 @@ apply_global_theme()
 authenticator = build_authenticator()
 
 try:
-    authenticator.login(" ", location="sidebar", key="auth_intel_ct_silent")
+    authenticator.login(" ", location="sidebar", key=INTEL_SILENT_AUTH_KEY)
     st.sidebar.empty()
 except Exception:
     pass
 
-require_page_access("pages/inteligencia_ct_proveedores.py")
+require_page_access(INTEL_PAGE_ACCESS_PATH)
 
 authenticator.logout("Cerrar sesión", location="sidebar")
 
@@ -1399,6 +1443,42 @@ def _load_actos_db_df() -> tuple[pd.DataFrame, str]:
         return pd.DataFrame(), str(db_path)
 
 
+def _candidate_detection_metadata_paths() -> list[Path]:
+    raw_candidates = [
+        APP_ROOT / "fichas_ctni_con_enlace.xlsx",
+        APP_ROOT / "fichas_ctni.xlsx",
+        APP_ROOT / "data" / "fichas_ctni_con_enlace.xlsx",
+        APP_ROOT / "data" / "fichas_ctni.xlsx",
+        Path.cwd() / "fichas_ctni_con_enlace.xlsx",
+        Path.cwd() / "fichas_ctni.xlsx",
+        Path.cwd() / "data" / "fichas_ctni_con_enlace.xlsx",
+        Path.cwd() / "data" / "fichas_ctni.xlsx",
+    ]
+    unique: list[Path] = []
+    for path in raw_candidates:
+        try:
+            normalized = path.expanduser().resolve()
+        except Exception:
+            normalized = path.expanduser()
+        if normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _load_detection_metadata_df() -> tuple[pd.DataFrame, str]:
+    for path in _candidate_detection_metadata_paths():
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            continue
+        if not df.empty:
+            return df, str(path)
+    return pd.DataFrame(), "sin_metadata_local"
+
+
 def _extract_ficha_tokens(raw_value: object) -> list[str]:
     tokens = FICHA_TOKEN_RE.findall(str(raw_value or ""))
     unique: list[str] = []
@@ -1493,7 +1573,7 @@ def _build_top_winners_by_ficha(exploded: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
-def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
+def _build_ficha_universe(detection_profile_override: str = "") -> tuple[pd.DataFrame, pd.DataFrame, str]:
     base_df, db_path = _load_actos_db_df()
     if base_df.empty:
         return pd.DataFrame(), pd.DataFrame(), db_path
@@ -1501,6 +1581,30 @@ def _build_ficha_universe() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     work = base_df.copy()
     if "id" not in work.columns:
         work["id"] = range(1, len(work) + 1)
+    override_profile = (
+        normalize_detection_profile_key(detection_profile_override)
+        if str(detection_profile_override or "").strip()
+        else ""
+    )
+    if override_profile:
+        metadata_df, metadata_source = _load_detection_metadata_df()
+        work = apply_detection_profiles_to_dataframe(
+            work,
+            metadata_df=metadata_df if not metadata_df.empty else None,
+            profiles=(override_profile,),
+        )
+        override_col = flexible_output_col("ficha_detectada", override_profile)
+        if override_col in work.columns:
+            work["ficha_detectada"] = work[override_col].fillna("").astype(str)
+            st.session_state["intel_detection_profile_status"] = (
+                "Universo flexible materializado con perfil "
+                f"`{INTEL_FLEX_PROFILE_LABELS.get(override_profile, override_profile)}` "
+                f"(metadata: `{metadata_source}`)."
+            )
+        else:
+            st.session_state["intel_detection_profile_status"] = (
+                f"No se pudo materializar el perfil `{override_profile}`; se mantiene ficha_detectada base."
+            )
     work["ficha_detectada"] = work.get("ficha_detectada", "").fillna("").astype(str)
     work["ficha_tokens"] = work["ficha_detectada"].map(_extract_ficha_tokens)
     # Fallback: if ficha_detectada is missing/empty in source, try extraction from key text fields.
@@ -9236,8 +9340,8 @@ def _render_tab_resultado_final() -> None:
         )
 
 
-st.markdown("# 🧠 Inteligencia de Prospección CT y Proveedores")
-st.caption("Fase 1.1: captacion operativa desde DB + arquitectura del embudo.")
+st.markdown(INTEL_MAIN_HEADING)
+st.caption(INTEL_MAIN_CAPTION)
 _start_intel_backup_once()
 _render_intel_status_panel()
 _render_intel_backup_panel()
@@ -9259,39 +9363,84 @@ def _weights_signature(weights: dict[str, float]) -> str:
     return "|".join(parts)
 
 
-def _get_universe_session_cached() -> tuple[pd.DataFrame, pd.DataFrame, str]:
-    if not st.session_state.get("intel_universe_cache_ready", False):
-        ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe()
-        st.session_state["intel_ficha_metrics_df_cache"] = ficha_metrics_df
-        st.session_state["intel_ficha_acts_df_cache"] = ficha_acts_df
-        st.session_state["intel_db_path_cache"] = db_path
-        st.session_state["intel_universe_cache_ready"] = True
+def _current_detection_profile_override() -> str:
+    if not INTEL_IS_FLEXIBLE_VARIANT:
+        return ""
+    raw_value = st.session_state.get("intel_flexible_detection_profile", INTEL_FLEX_DEFAULT_PROFILE)
+    return normalize_detection_profile_key(raw_value)
+
+
+def _universe_cache_key(detection_profile_override: str = "") -> str:
+    normalized = (
+        normalize_detection_profile_key(detection_profile_override)
+        if str(detection_profile_override or "").strip()
+        else ""
+    )
+    return f"flex:{normalized}" if normalized else "base"
+
+
+def _get_universe_session_cached(detection_profile_override: str = "") -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    cache_key = _universe_cache_key(detection_profile_override)
+    cache_map = st.session_state.setdefault("intel_universe_cache_map", {})
+    entry = cache_map.get(cache_key)
+    if not isinstance(entry, dict):
+        ficha_metrics_df, ficha_acts_df, db_path = _build_ficha_universe(detection_profile_override)
+        entry = {
+            "ficha_metrics_df": ficha_metrics_df,
+            "ficha_acts_df": ficha_acts_df,
+            "db_path": db_path,
+        }
+        cache_map[cache_key] = entry
+    st.session_state["intel_ficha_metrics_df_cache"] = entry.get("ficha_metrics_df", pd.DataFrame())
+    st.session_state["intel_ficha_acts_df_cache"] = entry.get("ficha_acts_df", pd.DataFrame())
+    st.session_state["intel_db_path_cache"] = str(entry.get("db_path", "") or "")
+    st.session_state["intel_universe_cache_ready"] = True
+    st.session_state["intel_universe_cache_current_key"] = cache_key
     return (
-        st.session_state.get("intel_ficha_metrics_df_cache", pd.DataFrame()),
-        st.session_state.get("intel_ficha_acts_df_cache", pd.DataFrame()),
-        str(st.session_state.get("intel_db_path_cache", "") or ""),
+        st.session_state["intel_ficha_metrics_df_cache"],
+        st.session_state["intel_ficha_acts_df_cache"],
+        st.session_state["intel_db_path_cache"],
     )
 
 
-def _get_ranked_session_cached(ficha_metrics_df: pd.DataFrame, weights: dict[str, float]) -> pd.DataFrame:
+def _get_ranked_session_cached(
+    ficha_metrics_df: pd.DataFrame,
+    weights: dict[str, float],
+    universe_key: str = "base",
+) -> pd.DataFrame:
+    ranked_cache_map = st.session_state.setdefault("intel_ranked_cache_map", {})
     if ficha_metrics_df.empty:
         st.session_state["intel_ranked_df_cache"] = pd.DataFrame()
         st.session_state["intel_ranked_weights_sig"] = _weights_signature(weights)
         st.session_state["intel_ranked_rows"] = 0
+        ranked_cache_map[universe_key] = {
+            "df": pd.DataFrame(),
+            "sig": st.session_state["intel_ranked_weights_sig"],
+            "rows": 0,
+        }
         return pd.DataFrame()
 
     sig = _weights_signature(weights)
-    cached_sig = str(st.session_state.get("intel_ranked_weights_sig", "") or "")
-    cached_rows = int(st.session_state.get("intel_ranked_rows", -1))
-    cached_df = st.session_state.get("intel_ranked_df_cache", pd.DataFrame())
+    cached_entry = ranked_cache_map.get(universe_key, {})
+    cached_sig = str(cached_entry.get("sig", "") or "")
+    cached_rows = int(cached_entry.get("rows", -1))
+    cached_df = cached_entry.get("df", pd.DataFrame())
     if (
         isinstance(cached_df, pd.DataFrame)
         and cached_sig == sig
         and cached_rows == int(len(ficha_metrics_df))
     ):
+        st.session_state["intel_ranked_df_cache"] = cached_df
+        st.session_state["intel_ranked_weights_sig"] = cached_sig
+        st.session_state["intel_ranked_rows"] = cached_rows
         return cached_df
 
     ranked_df = _score_fichas(ficha_metrics_df, weights)
+    ranked_cache_map[universe_key] = {
+        "df": ranked_df,
+        "sig": sig,
+        "rows": int(len(ficha_metrics_df)),
+    }
     st.session_state["intel_ranked_df_cache"] = ranked_df
     st.session_state["intel_ranked_weights_sig"] = sig
     st.session_state["intel_ranked_rows"] = int(len(ficha_metrics_df))
@@ -9300,6 +9449,33 @@ def _get_ranked_session_cached(ficha_metrics_df: pd.DataFrame, weights: dict[str
 
 _ensure_default_weights_profile()
 _render_sidebar()
+
+selected_detection_profile = _current_detection_profile_override()
+if INTEL_IS_FLEXIBLE_VARIANT and INTEL_FLEX_PROFILE_KEYS:
+    selected_detection_profile = normalize_detection_profile_key(
+        st.selectbox(
+            "Modo de detección de ficha",
+            options=INTEL_FLEX_PROFILE_KEYS,
+            index=(
+                INTEL_FLEX_PROFILE_KEYS.index(selected_detection_profile)
+                if selected_detection_profile in INTEL_FLEX_PROFILE_KEYS
+                else INTEL_FLEX_PROFILE_KEYS.index(INTEL_FLEX_DEFAULT_PROFILE)
+            ),
+            key="intel_flexible_detection_profile",
+            format_func=lambda key: INTEL_FLEX_PROFILE_LABELS.get(str(key), str(key)),
+            help=(
+                "Esta página conserva la experiencia completa del módulo normal, "
+                "pero recalcula la ficha detectada con el perfil que elijas."
+            ),
+        )
+    )
+    st.caption(
+        "Perfil activo: "
+        f"`{INTEL_FLEX_PROFILE_LABELS.get(selected_detection_profile, selected_detection_profile)}`."
+    )
+    detection_status = str(st.session_state.get("intel_detection_profile_status", "") or "").strip()
+    if detection_status:
+        st.caption(detection_status)
 
 TAB_OPTIONS = [
     "Dashboard",
@@ -9333,17 +9509,26 @@ if needs_study_bootstrap:
 ficha_metrics_df = pd.DataFrame()
 ficha_acts_df = pd.DataFrame()
 db_path = ""
-ranked_df = st.session_state.get("intel_ranked_df_cache", pd.DataFrame())
+current_universe_key = _universe_cache_key(selected_detection_profile)
+ranked_cache_map = st.session_state.get("intel_ranked_cache_map", {})
+ranked_entry = ranked_cache_map.get(current_universe_key, {})
+ranked_df = ranked_entry.get("df", st.session_state.get("intel_ranked_df_cache", pd.DataFrame()))
 if not isinstance(ranked_df, pd.DataFrame):
     ranked_df = pd.DataFrame()
 
 if needs_universe:
-    if not st.session_state.get("intel_universe_cache_ready", False):
+    universe_cache_map = st.session_state.get("intel_universe_cache_map", {})
+    needs_current_universe = current_universe_key not in universe_cache_map
+    if needs_current_universe:
         with st.spinner("Cargando universo de fichas..."):
-            ficha_metrics_df, ficha_acts_df, db_path = _get_universe_session_cached()
+            ficha_metrics_df, ficha_acts_df, db_path = _get_universe_session_cached(selected_detection_profile)
     else:
-        ficha_metrics_df, ficha_acts_df, db_path = _get_universe_session_cached()
-    ranked_df = _get_ranked_session_cached(ficha_metrics_df, st.session_state["intel_weights"])
+        ficha_metrics_df, ficha_acts_df, db_path = _get_universe_session_cached(selected_detection_profile)
+    ranked_df = _get_ranked_session_cached(
+        ficha_metrics_df,
+        st.session_state["intel_weights"],
+        current_universe_key,
+    )
 
 if needs_study_bootstrap:
     _auto_enqueue_study_backlog_once(str(db_path or st.session_state.get("intel_db_path_cache", "") or ""))
