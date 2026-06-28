@@ -59,6 +59,11 @@ INTEL_SILENT_AUTH_KEY = (
     if INTEL_IS_FLEXIBLE_VARIANT
     else "auth_intel_ct_silent"
 )
+INTEL_ACTIVE_TAB_KEY = (
+    "intel_active_tab_flexible"
+    if INTEL_IS_FLEXIBLE_VARIANT
+    else "intel_active_tab"
+)
 INTEL_MAIN_HEADING = (
     "# 🧠 Inteligencia de Prospección CT y Proveedores Flexible"
     if INTEL_IS_FLEXIBLE_VARIANT
@@ -9486,8 +9491,8 @@ TAB_OPTIONS = [
     "Contacto y correos",
 ]
 default_tab = "Fichas en seg."
-if st.session_state.get("intel_active_tab") not in TAB_OPTIONS:
-    st.session_state["intel_active_tab"] = default_tab
+if st.session_state.get(INTEL_ACTIVE_TAB_KEY) not in TAB_OPTIONS:
+    st.session_state[INTEL_ACTIVE_TAB_KEY] = default_tab
 
 # Carga optimizada:
 # con st.tabs Streamlit ejecuta todas las pestanas en cada rerun.
@@ -9495,7 +9500,7 @@ if st.session_state.get("intel_active_tab") not in TAB_OPTIONS:
 active_tab = st.radio(
     "Secciones",
     TAB_OPTIONS,
-    key="intel_active_tab",
+    key=INTEL_ACTIVE_TAB_KEY,
     horizontal=True,
     label_visibility="collapsed",
 )
