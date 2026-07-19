@@ -50,15 +50,34 @@ def _load_credentials(subject: str | None = None):
     )
 
 
+def _build_drive(credentials):
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+def get_drive_service_account():
+    """Retorna Drive usando directamente la cuenta de servicio.
+
+    Este modo cubre archivos compartidos con ``client_email`` que no están
+    compartidos también con el usuario de Workspace delegado.
+    """
+    try:
+        drive = _build_drive(_load_credentials(subject=None))
+        drive.about().get(fields="user").execute()
+        return drive
+    except Exception as exc:  # pragma: no cover - diagnóstico en Streamlit Cloud
+        print("Error en autenticación directa de cuenta de servicio:", exc)
+        return None
+
+
 def get_drive_delegated():
     """Retorna un cliente de Drive actuando como el usuario de dominio."""
     try:
         creds = _load_credentials(subject=DOMAIN_USER)
-        drive = build("drive", "v3", credentials=creds)
+        drive = _build_drive(creds)
         user = drive.about().get(fields="user").execute().get("user", {}).get("emailAddress")
         if user:
             print("Autenticado como:", user)
         return drive
-    except Exception as e:  # pragma: no cover - logging para support remoto
-        print("⚠️ Error en autenticación delegada:", e)
-        return None
+    except Exception as exc:  # pragma: no cover - logging para soporte remoto
+        print("Error en autenticación delegada; se usará la cuenta de servicio:", exc)
+        return get_drive_service_account()

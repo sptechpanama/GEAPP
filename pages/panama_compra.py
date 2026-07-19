@@ -2,6 +2,7 @@
 
 # pages/visualizador.py
 import os
+import hashlib
 import math
 import json
 import re
@@ -26,7 +27,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
 from services.access_control import require_page_access
-from services.auth_drive import get_drive_delegated
+from services.auth_drive import get_drive_delegated, get_drive_service_account
 from services.panama_compra_keywords import (
     DEFAULT_PANAMACOMPRA_KEYWORDS,
     match_keywords_in_text,
@@ -248,31 +249,139 @@ def _panamacompra_drive_file_id() -> str:
 
 
 @st.cache_data(ttl=900)
-def _download_panamacompra_db_bytes(file_id: str) -> bytes:
-    return _download_drive_file_bytes(file_id)
+def _panamacompra_drive_metadata(file_id: str) -> dict[str, str]:
+    """Obtiene la huella del archivo mediante delegación o cuenta de servicio."""
+    fid = _normalize_drive_file_id(file_id)
+    if not fid:
+        raise RuntimeError("El ID de la base de Panamá Compra está vacío.")
+
+    errors: list[str] = []
+    for label, drive in (
+        ("delegada", get_drive_delegated()),
+        ("cuenta de servicio", get_drive_service_account()),
+    ):
+        if drive is None:
+            errors.append(f"{label}: cliente no disponible")
+            continue
+        try:
+            meta = drive.files().get(
+                fileId=fid,
+                fields="id,name,size,modifiedTime,md5Checksum",
+                supportsAllDrives=True,
+            ).execute()
+            return {key: str(value or "") for key, value in meta.items()}
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    raise RuntimeError("No se pudo consultar la base en Drive. " + " | ".join(errors))
+
+
+def _sqlite_panamacompra_is_valid(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size <= 0:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            return False
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "actos_publicos" not in tables:
+            return False
+        return int(conn.execute("SELECT COUNT(*) FROM actos_publicos").fetchone()[0]) > 0
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _file_md5(path: Path) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _download_panamacompra_db_to_path(file_id: str, target: Path) -> Path:
+    """Descarga la SQLite a disco y conserva siempre una copia válida.
+
+    Evita guardar una base de más de 200 MB dentro de ``st.cache_data``. La
+    descarga se valida por tamaño, MD5 y estructura SQLite antes de publicarse.
+    """
+    fid = _normalize_drive_file_id(file_id)
+    meta = _panamacompra_drive_metadata(fid)
+    expected_size = int(meta.get("size") or 0)
+    expected_md5 = str(meta.get("md5Checksum") or "").lower()
+    marker_path = target.with_suffix(target.suffix + ".drive.json")
+
+    if _sqlite_panamacompra_is_valid(target):
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except Exception:
+            marker = {}
+        same_marker = (
+            str(marker.get("modifiedTime") or "") == meta.get("modifiedTime", "")
+            and str(marker.get("md5Checksum") or "").lower() == expected_md5
+        )
+        same_size = not expected_size or target.stat().st_size == expected_size
+        if same_marker and same_size:
+            return target
+        if same_size and expected_md5 and _file_md5(target).lower() == expected_md5:
+            marker_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+            return target
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    for label, drive in (
+        ("delegada", get_drive_delegated()),
+        ("cuenta de servicio", get_drive_service_account()),
+    ):
+        if drive is None:
+            errors.append(f"{label}: cliente no disponible")
+            continue
+        temp_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
+        try:
+            request = drive.files().get_media(fileId=fid, supportsAllDrives=True)
+            with temp_path.open("wb") as handle:
+                downloader = MediaIoBaseDownload(handle, request, chunksize=8 * 1024 * 1024)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk(num_retries=5)
+            if expected_size and temp_path.stat().st_size != expected_size:
+                raise RuntimeError(
+                    f"tamaño incompleto: {temp_path.stat().st_size} de {expected_size} bytes"
+                )
+            if expected_md5 and _file_md5(temp_path).lower() != expected_md5:
+                raise RuntimeError("la huella MD5 descargada no coincide con Drive")
+            if not _sqlite_panamacompra_is_valid(temp_path):
+                raise RuntimeError("el archivo descargado no es una SQLite válida")
+            os.replace(temp_path, target)
+            marker_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+            return target
+        except Exception as exc:
+            temp_path.unlink(missing_ok=True)
+            errors.append(f"{label}: {exc}")
+    raise RuntimeError("No se pudo descargar la base desde Drive. " + " | ".join(errors))
 
 
 def _runtime_panamacompra_db_path() -> Path | None:
     db_path = _preferred_db_path()
+    runtime_path = Path.cwd() / "data" / "db" / "panamacompra_drive.db"
 
     file_id = _panamacompra_drive_file_id()
     if not file_id:
-        return db_path
+        return _pick_fresher_sqlite_path(db_path, runtime_path) or db_path
 
     try:
-        raw = _download_panamacompra_db_bytes(file_id)
-    except Exception:
-        return db_path
-    if not raw:
-        return db_path
-
-    runtime_path = Path.cwd() / "data" / "db" / "panamacompra_drive.db"
-    try:
-        runtime_path.parent.mkdir(parents=True, exist_ok=True)
-        if (not runtime_path.exists()) or runtime_path.stat().st_size != len(raw):
-            runtime_path.write_bytes(raw)
-    except Exception:
-        return db_path
+        _download_panamacompra_db_to_path(file_id, runtime_path)
+    except Exception as exc:
+        print("No se pudo actualizar panamacompra.db desde Drive:", exc)
+        return _pick_fresher_sqlite_path(db_path, runtime_path) or db_path
     return _pick_fresher_sqlite_path(db_path, runtime_path) or db_path or runtime_path
 
 
