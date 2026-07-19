@@ -255,9 +255,19 @@ def _panamacompra_drive_file_id() -> str:
         "DRIVE_DB_PANAMACOMPRA_FILE_ID",
     ]
     for key in candidates:
-        value = app_cfg.get(key) if isinstance(app_cfg, dict) else None
-        if value is not None and str(value).strip():
-            return str(value).strip()
+        values = []
+        try:
+            values.append(app_cfg.get(key))
+        except Exception:
+            pass
+        try:
+            values.append(st.secrets.get(key))
+        except Exception:
+            pass
+        values.append(os.environ.get(key))
+        for value in values:
+            if value is not None and str(value).strip():
+                return str(value).strip()
     return ""
 
 
@@ -394,6 +404,10 @@ def _runtime_panamacompra_db_path() -> Path | None:
 
     file_id = _panamacompra_drive_file_id()
     if not file_id:
+        PANAMACOMPRA_DB_DRIVE_ERROR = (
+            "No se encontró DRIVE_PANAMACOMPRA_FILE_ID en [app], "
+            "en los secretos raíz ni en las variables de entorno."
+        )
         return _pick_fresher_sqlite_path(db_path, runtime_path) or db_path
 
     try:
