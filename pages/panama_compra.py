@@ -7,6 +7,8 @@ import math
 import json
 import re
 import sqlite3
+import tempfile
+import threading
 import time
 import unicodedata
 from collections import Counter
@@ -117,6 +119,8 @@ HEADER_ALIASES = {
 
 FALLBACK_DB_PATH = Path(r"C:\Users\rodri\OneDrive\cl\panamacompra.db")
 SCRAPER_DB_PATH = Path(r"C:\Users\rodri\scrapers_repo\data\db\panamacompra.db")
+PANAMACOMPRA_DB_DRIVE_ERROR = ""
+_PANAMACOMPRA_DB_DOWNLOAD_LOCK = threading.RLock()
 CHAT_MAX_RAW_ROWS = 2000
 CHAT_MAX_DISPLAY_ROWS = 300
 CHAT_SUMMARY_SAMPLE_ROWS = 80
@@ -317,6 +321,11 @@ def _file_md5(path: Path) -> str:
 
 
 def _download_panamacompra_db_to_path(file_id: str, target: Path) -> Path:
+    with _PANAMACOMPRA_DB_DOWNLOAD_LOCK:
+        return _download_panamacompra_db_to_path_unlocked(file_id, target)
+
+
+def _download_panamacompra_db_to_path_unlocked(file_id: str, target: Path) -> Path:
     """Descarga la SQLite a disco y conserva siempre una copia válida.
 
     Evita guardar una base de más de 200 MB dentro de ``st.cache_data``. La
@@ -379,8 +388,9 @@ def _download_panamacompra_db_to_path(file_id: str, target: Path) -> Path:
 
 
 def _runtime_panamacompra_db_path() -> Path | None:
+    global PANAMACOMPRA_DB_DRIVE_ERROR
     db_path = _preferred_db_path()
-    runtime_path = Path.cwd() / "data" / "db" / "panamacompra_drive.db"
+    runtime_path = Path(tempfile.gettempdir()) / "geapp" / "panamacompra_drive.db"
 
     file_id = _panamacompra_drive_file_id()
     if not file_id:
@@ -388,7 +398,9 @@ def _runtime_panamacompra_db_path() -> Path | None:
 
     try:
         _download_panamacompra_db_to_path(file_id, runtime_path)
+        PANAMACOMPRA_DB_DRIVE_ERROR = ""
     except Exception as exc:
+        PANAMACOMPRA_DB_DRIVE_ERROR = str(exc)
         print("No se pudo actualizar panamacompra.db desde Drive:", exc)
         return _pick_fresher_sqlite_path(db_path, runtime_path) or db_path
     return _pick_fresher_sqlite_path(db_path, runtime_path) or db_path or runtime_path
@@ -5952,9 +5964,14 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
                 st.error(f"No fue posible conectar a Supabase: {exc}")
                 return
             if not db_path.exists():
+                drive_detail = (
+                    f" Error de Drive: {PANAMACOMPRA_DB_DRIVE_ERROR}"
+                    if PANAMACOMPRA_DB_DRIVE_ERROR
+                    else ""
+                )
                 st.error(
                     "No fue posible conectar a Supabase y no hay una base local disponible. "
-                    f"Detalle: {exc}"
+                    f"Detalle: {exc}.{drive_detail}"
                 )
                 return
 
