@@ -27,7 +27,16 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from core.config import DB_PATH
 from sheets import get_client, read_worksheet
 from services.access_control import require_page_access
-from services.auth_drive import get_drive_delegated, get_drive_service_account
+from services import auth_drive as _auth_drive
+
+get_drive_delegated = _auth_drive.get_drive_delegated
+# Streamlit puede conservar temporalmente el módulo anterior durante un
+# hot-reload. `getattr` evita que una recarga parcial tumbe toda la página.
+get_drive_service_account = getattr(
+    _auth_drive,
+    "get_drive_service_account",
+    get_drive_delegated,
+)
 from services.panama_compra_keywords import (
     DEFAULT_PANAMACOMPRA_KEYWORDS,
     match_keywords_in_text,
