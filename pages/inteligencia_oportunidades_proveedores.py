@@ -33,6 +33,7 @@ from services.inteligencia_proveedores_v3 import (
     SCORE_PRESETS,
     apply_master_filters,
     dataframe_to_csv_bytes,
+    normalize_text,
     normalize_score_weights,
     preset_range,
     score_opportunities,
@@ -122,6 +123,16 @@ def _acts_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository
 @st.cache_data(show_spinner=False, ttl=300)
 def _all_acts_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.all_acts_for_ficha(ficha)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _provider_candidates_data(query: str, _repo: AnalyticsRepository) -> pd.DataFrame:
+    return _repo.find_providers(query)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _all_provider_acts_data(provider_norm: str, _repo: AnalyticsRepository) -> pd.DataFrame:
+    return _repo.all_acts_for_provider(provider_norm)
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -696,6 +707,134 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     )
 
 
+def _render_direct_provider_lookup(repository: AnalyticsRepository) -> None:
+    st.subheader("Consulta directa por empresa")
+    st.caption(
+        "Escribe el nombre completo o una parte del nombre de una empresa. Se mostrarán todos "
+        "los actos y fichas elegibles donde participó, incluso cuando no haya ganado. La consulta "
+        "usa el histórico completo y mantiene la exclusión de fichas con registro sanitario."
+    )
+
+    with st.form("intel_v3_provider_lookup_form", clear_on_submit=False):
+        raw_provider = st.text_input(
+            "Empresa",
+            key="intel_v3_provider_lookup_input",
+            placeholder="Ej.: Medical Supplies, Promocion Medica o parte del nombre",
+        )
+        submitted = st.form_submit_button("Buscar empresa", type="primary")
+
+    if submitted:
+        normalized_query = normalize_text(raw_provider)
+        if not normalized_query:
+            st.session_state.pop("intel_v3_provider_lookup_query", None)
+            st.session_state.pop("intel_v3_provider_lookup_selected", None)
+            st.warning("Escribe un nombre de empresa válido.")
+        else:
+            st.session_state["intel_v3_provider_lookup_query"] = normalized_query
+            st.session_state.pop("intel_v3_provider_lookup_selected", None)
+
+    provider_query = str(st.session_state.get("intel_v3_provider_lookup_query", "") or "").strip()
+    if not provider_query:
+        st.info("Ingresa una empresa y presiona **Buscar empresa**.")
+        return
+
+    candidates = _provider_candidates_data(provider_query, repository)
+    if candidates.empty:
+        st.warning(
+            "No se encontraron empresas participantes con ese nombre dentro de los actos elegibles. "
+            "Prueba con una parte mas corta o diferente del nombre."
+        )
+        return
+
+    candidates = candidates.drop_duplicates(subset=["proveedor_norm"], keep="first").reset_index(drop=True)
+    candidate_labels = {
+        str(row.proveedor_norm): f"{row.proveedor} ({_safe_int(row.actos):,} actos elegibles)"
+        for row in candidates.itertuples(index=False)
+    }
+    options = candidates["proveedor_norm"].astype(str).tolist()
+    selected_provider = st.selectbox(
+        "Coincidencia encontrada",
+        options,
+        format_func=lambda value: candidate_labels.get(value, value),
+        key="intel_v3_provider_lookup_selected",
+    )
+
+    associations = _all_provider_acts_data(selected_provider, repository)
+    if associations.empty:
+        st.warning(
+            "La empresa seleccionada no tiene actos/fichas elegibles. Los actos que requieren "
+            "registro sanitario o no tienen esa condición clasificada quedan excluidos."
+        )
+        return
+
+    associations = associations.drop_duplicates(subset=["acto_key", "ficha"], keep="first").reset_index(drop=True)
+    unique_acts = associations.drop_duplicates(subset=["acto_key"], keep="first")
+    reference_total = pd.to_numeric(unique_acts.get("reference_amount"), errors="coerce").fillna(0).sum()
+    award_total = pd.to_numeric(unique_acts.get("award_amount"), errors="coerce").fillna(0).sum()
+    won_acts = _safe_int(pd.to_numeric(unique_acts.get("is_winner"), errors="coerce").fillna(0).gt(0).sum())
+    provider_name = str(associations.iloc[0].get("proveedor", "") or selected_provider)
+
+    cols = st.columns(6)
+    cols[0].metric("Empresa", provider_name)
+    cols[1].metric("Actos", f"{len(unique_acts):,}")
+    cols[2].metric("Fichas distintas", f"{associations['ficha'].astype(str).nunique():,}")
+    cols[3].metric("Actos ganados", f"{won_acts:,}")
+    cols[4].metric("Monto referencial", _money(reference_total))
+    cols[5].metric("Monto adjudicado", _money(award_total))
+    st.caption(
+        f"Asociaciones acto/ficha: **{len(associations):,}**. Los montos superiores se calculan "
+        "una sola vez por acto para evitar duplicarlos cuando el acto contiene varias fichas."
+    )
+
+    display_columns = [
+        "enlace", "acto_key", "ficha", "nombre_ficha", "titulo", "entidad", "estado",
+        "publication_date", "celebration_date", "award_date", "reference_amount",
+        "award_amount", "offered_amount", "is_winner", "winner", "participant_count",
+        "is_unique_ficha", "detection_score", "detection_method", "detection_evidence",
+    ]
+    display = associations[[column for column in display_columns if column in associations.columns]].copy()
+    if "is_winner" in display.columns:
+        display["is_winner"] = pd.to_numeric(display["is_winner"], errors="coerce").fillna(0).gt(0)
+    if "is_unique_ficha" in display.columns:
+        display["is_unique_ficha"] = pd.to_numeric(display["is_unique_ficha"], errors="coerce").fillna(0).gt(0)
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        height=760,
+        column_config={
+            "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
+            "acto_key": st.column_config.TextColumn("Identificador"),
+            "ficha": st.column_config.TextColumn("Ficha"),
+            "nombre_ficha": st.column_config.TextColumn("Nombre ficha", width="large"),
+            "titulo": st.column_config.TextColumn("Título", width="large"),
+            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
+            "estado": st.column_config.TextColumn("Estado"),
+            "publication_date": st.column_config.DateColumn("Publicación", format="YYYY-MM-DD"),
+            "celebration_date": st.column_config.DateColumn("Celebración", format="YYYY-MM-DD"),
+            "award_date": st.column_config.DateColumn("Adjudicación", format="YYYY-MM-DD"),
+            "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
+            "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
+            "offered_amount": st.column_config.NumberColumn("Oferta empresa", format="$ %.2f"),
+            "is_winner": st.column_config.CheckboxColumn("Empresa ganó"),
+            "winner": st.column_config.TextColumn("Ganador del acto", width="medium"),
+            "participant_count": st.column_config.NumberColumn("Participantes", format="%d"),
+            "is_unique_ficha": st.column_config.CheckboxColumn("Ficha única"),
+            "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
+            "detection_method": st.column_config.TextColumn("Método"),
+            "detection_evidence": st.column_config.TextColumn("Evidencia", width="large"),
+        },
+    )
+    safe_name = re.sub(r"[^a-z0-9]+", "_", selected_provider).strip("_") or "empresa"
+    st.download_button(
+        "Descargar participaciones de la empresa",
+        data=dataframe_to_csv_bytes(associations),
+        file_name=f"actos_empresa_{safe_name}.csv",
+        mime="text/csv",
+        key="intel_v3_provider_lookup_download",
+    )
+
+
 def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_preset: str) -> None:
     st.subheader("Estudio profundo con el orquestador")
     st.caption("El estudio recibe exactamente el mismo periodo, dimensión temporal, perfil de detección y filtros usados en este análisis.")
@@ -914,13 +1053,18 @@ metric_cols[4].metric("Score promedio", f"{float(filtered_master.get('score_opor
 if filtered_master.empty:
     st.warning("Ninguna ficha cumple todos los filtros. Amplía el periodo o relaja las condiciones del ranking.")
 
-tab_master, tab_lookup, tab_trends, tab_competition, tab_providers, tab_study = st.tabs(
-    ["Oportunidades", "Consulta por ficha", "Tendencias", "Competencia", "Proveedores", "Estudio profundo"]
+tab_master, tab_lookup, tab_provider_lookup, tab_trends, tab_competition, tab_providers, tab_study = st.tabs(
+    [
+        "Oportunidades", "Consulta por ficha", "Consulta por empresa", "Tendencias",
+        "Competencia", "Proveedores", "Estudio profundo",
+    ]
 )
 with tab_master:
     _render_master_table(filtered_master)
 with tab_lookup:
     _render_direct_ficha_lookup(repo)
+with tab_provider_lookup:
+    _render_direct_provider_lookup(repo)
 with tab_trends:
     _render_trends(filtered_master, filters, repo)
 with tab_competition:

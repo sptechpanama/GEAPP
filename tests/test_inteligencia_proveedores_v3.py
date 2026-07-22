@@ -179,6 +179,33 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertTrue(self.repo.all_acts_for_ficha("99999").empty)
         self.assertTrue(self.repo.all_acts_for_ficha("88888").empty)
 
+    def test_direct_provider_lookup_finds_participations_even_without_winning(self) -> None:
+        with self.repo.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO intel_acto_proponentes VALUES (?,?,?,?,?,?,?)",
+                ("a1", "1", 2, "COMPETIDOR MEDICO, S.A.", "competidor medico s a", 8000, 0),
+            )
+
+        candidates = self.repo.find_providers("competidor medico")
+        self.assertEqual(candidates["proveedor_norm"].tolist(), ["competidor medico s a"])
+        self.assertEqual(int(candidates.iloc[0]["actos"]), 1)
+
+        acts = self.repo.all_acts_for_provider("COMPETIDOR MÉDICO, S.A.")
+        self.assertEqual(len(acts), 1)
+        self.assertEqual(acts.iloc[0]["acto_key"], "a1")
+        self.assertEqual(acts.iloc[0]["ficha"], "43358")
+        self.assertEqual(float(acts.iloc[0]["offered_amount"]), 8000.0)
+        self.assertEqual(int(acts.iloc[0]["is_winner"]), 0)
+
+    def test_direct_provider_lookup_keeps_registration_policy(self) -> None:
+        candidates = self.repo.find_providers("medical")
+        self.assertEqual(candidates["proveedor_norm"].tolist(), ["medical"])
+        self.assertEqual(self.repo.all_acts_for_provider("medical")["acto_key"].tolist(), ["a3"])
+
+        self.assertTrue(self.repo.find_providers("rs ganador").empty)
+        self.assertTrue(self.repo.all_acts_for_provider("rs ganador").empty)
+        self.assertTrue(self.repo.find_providers("sin clasificar").empty)
+
     def test_accent_insensitive_search_and_and_or_groups(self) -> None:
         filters = AnalyticsFilters(
             detection_profile="muy_flexible",
