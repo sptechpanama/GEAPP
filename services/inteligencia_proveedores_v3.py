@@ -661,6 +661,18 @@ class AnalyticsRepository:
         """
         return pd.read_sql_query(text(query), self.engine, params=params)
 
+    def all_acts_for_ficha(self, ficha: str) -> pd.DataFrame:
+        """Devuelve el histórico completo aceptado de una ficha exacta.
+
+        La consulta usa el perfil más flexible disponible, no hereda el rango
+        temporal ni los filtros del mapa maestro y conserva todas las políticas
+        globales, incluida la exclusión por registro sanitario.
+        """
+        return self.acts_for_ficha(
+            str(ficha),
+            AnalyticsFilters(detection_profile="muy_flexible"),
+        )
+
     def providers_for_ficha(self, ficha: str, filters: AnalyticsFilters) -> pd.DataFrame:
         where_sql, params = self._filter_sql(filters)
         params["selected_ficha"] = str(ficha)

@@ -170,6 +170,15 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertEqual(providers.iloc[0]["proveedor"], "BTS")
         self.assertEqual(len(acts), 1)
 
+    def test_direct_ficha_lookup_returns_full_history_and_keeps_rs_policy(self) -> None:
+        acts = self.repo.all_acts_for_ficha("43358")
+        self.assertEqual(len(acts), 2)
+        self.assertEqual(acts["acto_key"].tolist(), ["a1", "a2"])
+        self.assertEqual(acts["reference_amount"].astype(float).tolist(), [10000.0, 5000.0])
+
+        self.assertTrue(self.repo.all_acts_for_ficha("99999").empty)
+        self.assertTrue(self.repo.all_acts_for_ficha("88888").empty)
+
     def test_accent_insensitive_search_and_and_or_groups(self) -> None:
         filters = AnalyticsFilters(
             detection_profile="muy_flexible",

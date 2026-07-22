@@ -120,6 +120,11 @@ def _acts_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository
 
 
 @st.cache_data(show_spinner=False, ttl=300)
+def _all_acts_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
+    return _repo.all_acts_for_ficha(ficha)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
 def _provider_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.providers_for_ficha(ficha, filters)
 
@@ -597,7 +602,98 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
                     "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
                     "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
                 },
-            )
+              )
+
+
+def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
+    st.subheader("Consulta directa por ficha")
+    st.caption(
+        "Escribe un número de ficha para consultar todo su histórico de actos detectados. "
+        "Esta consulta es independiente del rango de fechas del mapa maestro y mantiene "
+        "la exclusión de fichas que requieren registro sanitario."
+    )
+
+    with st.form("intel_v3_direct_lookup_form", clear_on_submit=False):
+        raw_ficha = st.text_input(
+            "Número de ficha",
+            key="intel_v3_direct_lookup_input",
+            placeholder="Ej.: 43358 o *43358",
+        )
+        submitted = st.form_submit_button("Buscar actos", type="primary")
+
+    if submitted:
+        ficha = _normalize_ficha(raw_ficha)
+        if not ficha:
+            st.session_state.pop("intel_v3_direct_lookup_ficha", None)
+            st.warning("Escribe un número de ficha válido.")
+        else:
+            st.session_state["intel_v3_direct_lookup_ficha"] = ficha
+
+    ficha = str(st.session_state.get("intel_v3_direct_lookup_ficha", "") or "").strip()
+    if not ficha:
+        st.info("Ingresa una ficha y presiona **Buscar actos**.")
+        return
+
+    acts = _all_acts_data(ficha, repository)
+    if acts.empty:
+        st.warning(
+            f"No se encontraron actos elegibles para la ficha {ficha}. Puede no existir en la capa "
+            "analítica, requerir registro sanitario o no tener esa condición clasificada."
+        )
+        return
+
+    acts = acts.drop_duplicates(subset=["acto_key"], keep="first").reset_index(drop=True)
+    reference_total = pd.to_numeric(acts.get("reference_amount"), errors="coerce").fillna(0).sum()
+    award_total = pd.to_numeric(acts.get("award_amount"), errors="coerce").fillna(0).sum()
+    publication_dates = acts.get("publication_date", pd.Series(dtype=str)).astype(str)
+    valid_dates = publication_dates[publication_dates.str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)]
+
+    cols = st.columns(4)
+    cols[0].metric("Ficha consultada", ficha)
+    cols[1].metric("Actos encontrados", f"{len(acts):,}")
+    cols[2].metric("Monto referencial", _money(reference_total))
+    cols[3].metric("Monto adjudicado", _money(award_total))
+    if not valid_dates.empty:
+        st.caption(f"Cobertura temporal encontrada: **{valid_dates.min()} → {valid_dates.max()}**")
+
+    display_columns = [
+        "enlace", "acto_key", "titulo", "entidad", "estado", "publication_date",
+        "celebration_date", "award_date", "reference_amount", "award_amount",
+        "winner", "participant_count", "is_unique_ficha", "detection_score",
+        "detection_method", "detection_evidence",
+    ]
+    display = acts[[column for column in display_columns if column in acts.columns]].copy()
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        height=760,
+        column_config={
+            "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
+            "acto_key": st.column_config.TextColumn("Identificador"),
+            "titulo": st.column_config.TextColumn("Título", width="large"),
+            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
+            "estado": st.column_config.TextColumn("Estado"),
+            "publication_date": st.column_config.DateColumn("Publicación", format="YYYY-MM-DD"),
+            "celebration_date": st.column_config.DateColumn("Celebración", format="YYYY-MM-DD"),
+            "award_date": st.column_config.DateColumn("Adjudicación", format="YYYY-MM-DD"),
+            "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
+            "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
+            "winner": st.column_config.TextColumn("Ganador", width="medium"),
+            "participant_count": st.column_config.NumberColumn("Participantes", format="%d"),
+            "is_unique_ficha": st.column_config.CheckboxColumn("Ficha única"),
+            "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
+            "detection_method": st.column_config.TextColumn("Método"),
+            "detection_evidence": st.column_config.TextColumn("Evidencia", width="large"),
+        },
+    )
+    st.download_button(
+        "Descargar actos de la ficha",
+        data=dataframe_to_csv_bytes(acts),
+        file_name=f"actos_ficha_{ficha}.csv",
+        mime="text/csv",
+        key="intel_v3_direct_lookup_download",
+    )
 
 
 def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_preset: str) -> None:
@@ -817,13 +913,14 @@ metric_cols[4].metric("Score promedio", f"{float(filtered_master.get('score_opor
 
 if filtered_master.empty:
     st.warning("Ninguna ficha cumple todos los filtros. Amplía el periodo o relaja las condiciones del ranking.")
-    st.stop()
 
-tab_master, tab_trends, tab_competition, tab_providers, tab_study = st.tabs(
-    ["Oportunidades", "Tendencias", "Competencia", "Proveedores", "Estudio profundo"]
+tab_master, tab_lookup, tab_trends, tab_competition, tab_providers, tab_study = st.tabs(
+    ["Oportunidades", "Consulta por ficha", "Tendencias", "Competencia", "Proveedores", "Estudio profundo"]
 )
 with tab_master:
     _render_master_table(filtered_master)
+with tab_lookup:
+    _render_direct_ficha_lookup(repo)
 with tab_trends:
     _render_trends(filtered_master, filters, repo)
 with tab_competition:
