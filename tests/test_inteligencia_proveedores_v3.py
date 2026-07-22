@@ -107,15 +107,17 @@ class RepositoryIntegrationTests(unittest.TestCase):
             ("a1", "1", "43358", 1, 1, 96, "nombre_exacto", "titulo", "kit", "3.1", "cat", "https://acto/1", "KIT CIRCUITO", "CSS", "Compras", "Adjudicado", "2026-01-10", "2026-01-15", "2026-01-15", "2026-01-20", "2026-01-21", 10000, 9000, "ganador", "BTS", "BTS", 1, "kit circuito refrigeracion css adjudicado"),
             ("a2", "2", "43358", 1, 1, 90, "nombre_compacto", "titulo", "kit", "3.1", "cat", "https://acto/2", "KIT CIRCUITO", "MINSA", "Compras", "Adjudicado", "2025-01-10", "2025-01-15", "2025-01-15", "2025-01-20", "2025-01-21", 5000, 4500, "ganador", "OTRO", "OTRO", 3, "kit circuito minsa adjudicado"),
             ("a3", "3", "103169", 1, 1, 100, "codigo_contextual", "descripcion", "ficha", "3.1", "cat", "https://acto/3", "ESTERILIZACION", "CSS", "Compras", "Adjudicado", "2026-02-10", "2026-02-15", "2026-02-15", "2026-02-20", "2026-02-21", 20000, 18000, "ganador", "MEDICAL", "MEDICAL", 2, "esterilizacion css adjudicado"),
+            ("a4", "4", "99999", 1, 1, 100, "codigo_contextual", "descripcion", "ficha", "3.1", "cat", "https://acto/4", "PRODUCTO CON REGISTRO", "CSS", "Compras", "Adjudicado", "2026-03-10", "2026-03-15", "2026-03-15", "2026-03-20", "2026-03-21", 50000, 45000, "ganador", "RS GANADOR", "RS GANADOR", 1, "producto con registro sanitario"),
+            ("a5", "5", "88888", 1, 1, 100, "codigo_contextual", "descripcion", "ficha", "3.1", "cat", "https://acto/5", "PRODUCTO SIN CLASIFICAR", "CSS", "Compras", "Adjudicado", "2026-04-10", "2026-04-15", "2026-04-15", "2026-04-20", "2026-04-21", 60000, 55000, "ganador", "SIN CLASIFICAR", "SIN CLASIFICAR", 1, "producto sin clasificar"),
         ]
         connection.executemany("INSERT INTO intel_actos_fichas VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", facts)
         connection.executemany(
             "INSERT INTO intel_acto_proponentes VALUES (?,?,?,?,?,?,?)",
-            [("a1", "1", 1, "BTS", "bts", 9000, 1), ("a2", "2", 1, "OTRO", "otro", 4500, 1), ("a3", "3", 1, "MEDICAL", "medical", 18000, 1)],
+            [("a1", "1", 1, "BTS", "bts", 9000, 1), ("a2", "2", 1, "OTRO", "otro", 4500, 1), ("a3", "3", 1, "MEDICAL", "medical", 18000, 1), ("a4", "4", 1, "RS GANADOR", "rs ganador", 45000, 1), ("a5", "5", 1, "SIN CLASIFICAR", "sin clasificar", 55000, 1)],
         )
         connection.executemany(
             "INSERT INTO intel_ficha_metadata VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            [("43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO", "ANESTESIA", "Si", "No", "https://minsa/43358", "test", "43358 kit circuito paciente anestesia medico insumo"), ("103169", "ESTERILIZACION", "", "MEDICO", "INSUMO", "", "Si", "No", "https://minsa/103169", "test", "103169 esterilizacion medico insumo")],
+            [("43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO", "ANESTESIA", "Si", "No", "https://minsa/43358", "test", "43358 kit circuito paciente anestesia medico insumo"), ("103169", "ESTERILIZACION", "", "MEDICO", "INSUMO", "", "Si", "No", "https://minsa/103169", "test", "103169 esterilizacion medico insumo"), ("99999", "PRODUCTO CON REGISTRO", "", "MEDICO", "INSUMO", "", "Si", "Si", "https://minsa/99999", "test", "99999 producto con registro sanitario"), ("88888", "PRODUCTO SIN CLASIFICAR", "", "MEDICO", "INSUMO", "", "Si", "", "https://minsa/88888", "test", "88888 producto sin clasificar")],
         )
         connection.execute("INSERT INTO intel_ficha_catalogo VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("43358", "PROVEEDOR C", "Ana", "123", "a@test", "C1", "KIT", "LAB", "M", "X", "Activo"))
         connection.commit()
@@ -139,6 +141,21 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertEqual(float(row["monto_referencia"]), 10000.0)
         self.assertEqual(str(row["top_1_ganador"]), "BTS")
         self.assertEqual(int(row["proveedores_catalogo"]), 1)
+
+    def test_global_policy_excludes_rs_required_and_unclassified(self) -> None:
+        result = self.repo.master_metrics(AnalyticsFilters(detection_profile="muy_flexible"))
+        self.assertEqual(set(result["ficha"]), {"43358", "103169"})
+
+        # Una vista guardada antigua no puede desactivar la política global.
+        legacy_filter = AnalyticsFilters(
+            detection_profile="muy_flexible",
+            rs_status="Si",
+            fichas=("99999", "88888"),
+        )
+        self.assertTrue(self.repo.master_metrics(legacy_filter).empty)
+        self.assertEqual(legacy_filter.as_payload()["registro_sanitario"], "No")
+        self.assertTrue(self.repo.acts_for_ficha("99999", legacy_filter).empty)
+        self.assertTrue(self.repo.providers_for_ficha("99999", legacy_filter).empty)
 
     def test_strict_profile_excludes_score_90(self) -> None:
         filters = AnalyticsFilters(detection_profile="estricto")

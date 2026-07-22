@@ -38,6 +38,11 @@ PROFILE_LABELS = {
     "muy_flexible": "Muy flexible (score ≥ 70)",
 }
 
+# Regla comercial global de esta inteligencia: solo se analizan fichas cuya
+# metadata confirme expresamente que NO requieren registro sanitario. Esto
+# excluye tanto las fichas marcadas "Si" como aquellas sin clasificar.
+ELIGIBLE_RS_STATUS = "No"
+
 DEFAULT_SCORE_WEIGHTS = {
     "demanda": 28.0,
     "economia": 27.0,
@@ -108,7 +113,9 @@ class AnalyticsFilters:
     product_types: tuple[str, ...] = field(default_factory=tuple)
     fichas: tuple[str, ...] = field(default_factory=tuple)
     ct_status: str = "Todos"
-    rs_status: str = "Todos"
+    # Se conserva el campo por compatibilidad con vistas guardadas anteriores,
+    # pero la política global siempre aplica ELIGIBLE_RS_STATUS.
+    rs_status: str = ELIGIBLE_RS_STATUS
     search_groups: tuple[str, ...] = field(default_factory=tuple)
     search_mode: str = "OR"
     min_reference_amount: float = 0.0
@@ -143,7 +150,7 @@ class AnalyticsFilters:
             "tipos_producto": list(self.product_types),
             "fichas": list(self.fichas),
             "criterio_tecnico": self.ct_status,
-            "registro_sanitario": self.rs_status,
+            "registro_sanitario": ELIGIBLE_RS_STATUS,
             "busqueda": list(self.search_groups),
             "modo_busqueda": self.search_mode,
             "monto_minimo": self.min_reference_amount,
@@ -301,9 +308,11 @@ class AnalyticsRepository:
         if filters.ct_status in {"Si", "No"}:
             clauses.append("COALESCE(m.tiene_ct, '') = :ct_status")
             params["ct_status"] = filters.ct_status
-        if filters.rs_status in {"Si", "No"}:
-            clauses.append("COALESCE(m.registro_sanitario, '') = :rs_status")
-            params["rs_status"] = filters.rs_status
+        # La exclusión ocurre dentro del SQL antes de agregar, puntuar u ordenar.
+        # De esta manera una ficha que requiere registro sanitario no influye en
+        # métricas, rankings, exportaciones ni estudios detallados.
+        clauses.append("LOWER(TRIM(COALESCE(m.registro_sanitario, ''))) = :eligible_rs_status")
+        params["eligible_rs_status"] = ELIGIBLE_RS_STATUS.lower()
         if filters.search_groups:
             group_clauses: list[str] = []
             if self._has_normalized_search:

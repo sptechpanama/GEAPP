@@ -28,6 +28,7 @@ from services.inteligencia_proveedores_v3 import (
     AnalyticsRepository,
     AnalyticsUnavailable,
     DATE_COLUMNS,
+    ELIGIBLE_RS_STATUS,
     PROFILE_LABELS,
     SCORE_PRESETS,
     apply_master_filters,
@@ -246,7 +247,7 @@ def _apply_pending_saved_view() -> None:
         "intel_v3_areas": list(payload.get("areas", []) or []),
         "intel_v3_product_types": list(payload.get("tipos_producto", []) or []),
         "intel_v3_ct": str(payload.get("criterio_tecnico", "Todos") or "Todos"),
-        "intel_v3_rs": str(payload.get("registro_sanitario", "Todos") or "Todos"),
+        "intel_v3_rs": ELIGIBLE_RS_STATUS,
         "intel_v3_search": ", ".join(str(value) for value in payload.get("busqueda", []) or []),
         "intel_v3_search_mode": str(payload.get("modo_busqueda", "OR") or "OR"),
         "intel_v3_min_ref": float(payload.get("monto_minimo", 0) or 0),
@@ -711,7 +712,11 @@ with st.sidebar:
         selected_areas = tuple(st.multiselect("Areas", options.get("areas", []), key="intel_v3_areas"))
         selected_product_types = tuple(st.multiselect("Clase / tipo de producto", options.get("product_types", []), key="intel_v3_product_types"))
         ct_status = st.selectbox("Criterio técnico", ["Todos", "Si", "No"], key="intel_v3_ct")
-        rs_status = st.selectbox("Registro sanitario", ["Todos", "Si", "No"], key="intel_v3_rs")
+        rs_status = ELIGIBLE_RS_STATUS
+        st.caption(
+            "Registro sanitario: solo fichas confirmadas como **No requiere**. "
+            "Las fichas marcadas Sí o sin clasificación se excluyen del análisis."
+        )
         search_raw = st.text_input("Buscar grupos o frases (separar por coma)", key="intel_v3_search", placeholder="chiller, refrigeración, aire acondicionado")
         search_mode = st.radio("Relación entre grupos", ["OR", "AND"], horizontal=True, key="intel_v3_search_mode")
         min_reference = float(st.number_input("Precio referencia mínimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_ref"))
