@@ -673,6 +673,94 @@ class AnalyticsRepository:
             AnalyticsFilters(detection_profile="muy_flexible"),
         )
 
+    def find_providers(self, query: str, *, limit: int = 50) -> pd.DataFrame:
+        """Busca empresas participantes por nombre dentro del universo elegible.
+
+        ``proveedor_norm`` ya contiene el nombre sin tildes, puntuación ni
+        diferencias de mayúsculas. La búsqueda se limita a empresas vinculadas
+        con al menos un acto/ficha aceptado y conserva la exclusion global de
+        fichas que requieren registro sanitario.
+        """
+        normalized_query = normalize_text(query)
+        if not normalized_query:
+            return pd.DataFrame(columns=["proveedor_norm", "proveedor", "actos"])
+
+        where_sql, params = self._filter_sql(AnalyticsFilters(detection_profile="muy_flexible"))
+        params.update(
+            {
+                "provider_query": f"%{normalized_query}%",
+                "provider_exact": normalized_query,
+                "provider_limit": max(1, min(int(limit), 100)),
+            }
+        )
+        query_sql = f"""
+            WITH eligible_acts AS (
+                SELECT DISTINCT f.acto_key
+                FROM intel_actos_fichas f
+                LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
+                WHERE {where_sql}
+            )
+            SELECT p.proveedor_norm,
+                   MAX(p.proveedor) AS proveedor,
+                   COUNT(DISTINCT p.acto_key) AS actos
+            FROM intel_acto_proponentes p
+            INNER JOIN eligible_acts a ON a.acto_key = p.acto_key
+            WHERE COALESCE(p.proveedor_norm, '') <> ''
+              AND p.proveedor_norm LIKE :provider_query
+            GROUP BY p.proveedor_norm
+            ORDER BY CASE WHEN p.proveedor_norm = :provider_exact THEN 0 ELSE 1 END,
+                     actos DESC, proveedor
+            LIMIT :provider_limit
+        """
+        return pd.read_sql_query(text(query_sql), self.engine, params=params)
+
+    def all_acts_for_provider(self, provider_norm: str) -> pd.DataFrame:
+        """Devuelve todos los actos/fichas elegibles donde participó una empresa.
+
+        La empresa se identifica por su nombre normalizado exacto, pero no tiene
+        que haber ganado el acto. Cada asociación acto/ficha aparece una sola vez.
+        El periodo es histórico completo y la política de registro sanitario se
+        aplica en SQL antes de devolver resultados.
+        """
+        normalized_provider = normalize_text(provider_norm)
+        if not normalized_provider:
+            return pd.DataFrame()
+
+        where_sql, params = self._filter_sql(AnalyticsFilters(detection_profile="muy_flexible"))
+        params["selected_provider"] = normalized_provider
+        query = f"""
+            WITH selected_participations AS (
+                SELECT p.acto_key,
+                       MAX(p.proveedor) AS proveedor,
+                       MAX(p.offered_amount) AS offered_amount,
+                       MAX(CASE WHEN p.is_winner = 1 THEN 1 ELSE 0 END) AS is_winner
+                FROM intel_acto_proponentes p
+                WHERE p.proveedor_norm = :selected_provider
+                GROUP BY p.acto_key
+            ),
+            ficha_metadata AS (
+                SELECT ficha,
+                       MAX(COALESCE(nombre_ficha, '')) AS nombre_ficha,
+                       MAX(COALESCE(registro_sanitario, '')) AS registro_sanitario
+                FROM intel_ficha_metadata
+                GROUP BY ficha
+            )
+            SELECT DISTINCT sp.proveedor, :selected_provider AS proveedor_norm,
+                   f.ficha, m.nombre_ficha, f.acto_key, f.enlace, f.titulo,
+                   f.entidad, f.estado, f.publication_date, f.celebration_date,
+                   f.award_date, f.update_date, f.reference_amount, f.award_amount,
+                   f.award_amount_source, sp.offered_amount, sp.is_winner,
+                   f.winner, f.winner_short, f.participant_count,
+                   f.is_unique_ficha, f.detection_score, f.detection_method,
+                   f.detection_evidence
+            FROM selected_participations sp
+            INNER JOIN intel_actos_fichas f ON f.acto_key = sp.acto_key
+            LEFT JOIN ficha_metadata m ON m.ficha = f.ficha
+            WHERE {where_sql}
+            ORDER BY f.reference_amount DESC, f.acto_key, f.ficha
+        """
+        return pd.read_sql_query(text(query), self.engine, params=params)
+
     def providers_for_ficha(self, ficha: str, filters: AnalyticsFilters) -> pd.DataFrame:
         where_sql, params = self._filter_sql(filters)
         params["selected_ficha"] = str(ficha)
