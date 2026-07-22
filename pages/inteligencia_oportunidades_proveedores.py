@@ -44,6 +44,7 @@ from ui.theme import apply_global_theme
 
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
+ANALYTICS_REPOSITORY_API_VERSION = "2026-07-22-provider-lookup-v1"
 LOCAL_ANALYTICS_CANDIDATES = (
     APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
     APP_ROOT / "data" / "inteligencia_proveedores.db",
@@ -96,7 +97,11 @@ def _database_url() -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def _repository(database_url: str) -> AnalyticsRepository:
+def _repository(database_url: str, api_version: str) -> AnalyticsRepository:
+    # ``api_version`` forma parte de la clave del cache. Al agregar metodos al
+    # repositorio se cambia esta constante para impedir que Streamlit reutilice
+    # una instancia creada por una version anterior del servicio.
+    _ = api_version
     return AnalyticsRepository.connect(database_url=database_url, local_candidates=LOCAL_ANALYTICS_CANDIDATES)
 
 
@@ -122,7 +127,15 @@ def _acts_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository
 
 @st.cache_data(show_spinner=False, ttl=300)
 def _all_acts_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
-    return _repo.all_acts_for_ficha(ficha)
+    method = getattr(_repo, "all_acts_for_ficha", None)
+    if callable(method):
+        return method(ficha)
+    # Compatibilidad defensiva durante un despliegue en caliente: versiones
+    # anteriores ya tenian acts_for_ficha, pero no el acceso historico directo.
+    return _repo.acts_for_ficha(
+        ficha,
+        AnalyticsFilters(detection_profile="muy_flexible"),
+    )
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -917,7 +930,7 @@ st.caption(
 )
 
 try:
-    repo = _repository(_database_url())
+    repo = _repository(_database_url(), ANALYTICS_REPOSITORY_API_VERSION)
 except AnalyticsUnavailable as exc:
     st.error(
         "No se encontró la capa analítica de Inteligencia. Ejecuta "
