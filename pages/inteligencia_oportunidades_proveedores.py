@@ -33,6 +33,7 @@ from services.inteligencia_proveedores_v3 import (
     SCORE_PRESETS,
     apply_master_filters,
     dataframe_to_csv_bytes,
+    normalize_ficha_list,
     normalize_text,
     normalize_score_weights,
     preset_range,
@@ -44,7 +45,7 @@ from ui.theme import apply_global_theme
 
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
-ANALYTICS_REPOSITORY_API_VERSION = "2026-07-22-provider-lookup-v1"
+ANALYTICS_REPOSITORY_API_VERSION = "2026-07-22-multi-ficha-lookup-v1"
 LOCAL_ANALYTICS_CANDIDATES = (
     APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
     APP_ROOT / "data" / "inteligencia_proveedores.db",
@@ -136,6 +137,46 @@ def _all_acts_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
         ficha,
         AnalyticsFilters(detection_profile="muy_flexible"),
     )
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _all_multi_ficha_acts_data(
+    fichas: tuple[str, ...], _repo: AnalyticsRepository
+) -> pd.DataFrame:
+    method = getattr(_repo, "all_acts_for_fichas", None)
+    if callable(method):
+        return method(fichas)
+
+    # Compatibilidad defensiva durante un despliegue en caliente. La rama
+    # normal usa una sola consulta SQL; este camino solo evita una pantalla
+    # rota si Streamlit conserva temporalmente una instancia anterior.
+    frames: list[pd.DataFrame] = []
+    for ficha in fichas:
+        frame = _repo.acts_for_ficha(
+            ficha, AnalyticsFilters(detection_profile="muy_flexible")
+        )
+        if frame.empty:
+            continue
+        frame = frame.copy()
+        frame["ficha_coincidente"] = ficha
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+
+    associations = pd.concat(frames, ignore_index=True).drop_duplicates(
+        subset=["acto_key", "ficha_coincidente"], keep="first"
+    )
+    matches = (
+        associations.groupby("acto_key", sort=False)["ficha_coincidente"]
+        .agg(lambda values: ", ".join(dict.fromkeys(values.astype(str))))
+        .rename("fichas_coincidentes")
+    )
+    result = associations.drop_duplicates(subset=["acto_key"], keep="first").copy()
+    result = result.merge(matches, left_on="acto_key", right_index=True, how="left")
+    result["fichas_coincidentes_count"] = result["fichas_coincidentes"].fillna("").map(
+        lambda value: len([part for part in str(value).split(",") if part.strip()])
+    )
+    return result.reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -720,6 +761,124 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     )
 
 
+def _render_multi_ficha_lookup(repository: AnalyticsRepository) -> None:
+    st.subheader("Consulta combinada por varias fichas")
+    st.caption(
+        "Escribe hasta 100 fichas separadas por comas, espacios, punto y coma o saltos de linea. "
+        "Se muestran todos los actos asociados a cualquiera de ellas. Si un mismo acto contiene "
+        "varias fichas seleccionadas, aparece una sola vez y se indican todas sus coincidencias. "
+        "La consulta usa el histórico completo y excluye fichas que requieren registro sanitario."
+    )
+
+    with st.form("intel_v3_multi_lookup_form", clear_on_submit=False):
+        raw_fichas = st.text_area(
+            "Números de ficha",
+            key="intel_v3_multi_lookup_input",
+            height=130,
+            placeholder=(
+                "Ej.: 52617, 23009, 21833, 21834, 21836, 52697, "
+                "52698, 21839, 32624, 21841, 52699"
+            ),
+        )
+        submitted = st.form_submit_button("Buscar actos combinados", type="primary")
+
+    if submitted:
+        fichas = normalize_ficha_list(raw_fichas)
+        if not fichas:
+            st.session_state.pop("intel_v3_multi_lookup_fichas", None)
+            st.warning("Escribe al menos un número de ficha válido.")
+        else:
+            st.session_state["intel_v3_multi_lookup_fichas"] = fichas
+
+    selected = normalize_ficha_list(
+        st.session_state.get("intel_v3_multi_lookup_fichas", ())
+    )
+    if not selected:
+        st.info("Ingresa varias fichas y presiona **Buscar actos combinados**.")
+        return
+
+    acts = _all_multi_ficha_acts_data(selected, repository)
+    if acts.empty:
+        st.warning(
+            "No se encontraron actos elegibles para las fichas solicitadas. Pueden no existir "
+            "en la capa analitica, requerir registro sanitario o no tener esa condicion clasificada."
+        )
+        return
+
+    acts = acts.drop_duplicates(subset=["acto_key"], keep="first").reset_index(drop=True)
+    found: set[str] = set()
+    for value in acts.get("fichas_coincidentes", pd.Series(dtype=str)).fillna(""):
+        found.update(part.strip() for part in str(value).split(",") if part.strip())
+    missing = [ficha for ficha in selected if ficha not in found]
+
+    reference_total = pd.to_numeric(acts.get("reference_amount"), errors="coerce").fillna(0).sum()
+    award_total = pd.to_numeric(acts.get("award_amount"), errors="coerce").fillna(0).sum()
+    publication_dates = acts.get("publication_date", pd.Series(dtype=str)).astype(str)
+    valid_dates = publication_dates[publication_dates.str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)]
+
+    cols = st.columns(5)
+    cols[0].metric("Fichas solicitadas", f"{len(selected):,}")
+    cols[1].metric("Fichas con actos", f"{len(found):,}")
+    cols[2].metric("Actos únicos", f"{len(acts):,}")
+    cols[3].metric("Monto referencial", _money(reference_total))
+    cols[4].metric("Monto adjudicado", _money(award_total))
+    st.caption("Fichas consultadas: **" + ", ".join(selected) + "**")
+    if missing:
+        st.caption(
+            "Sin actos elegibles o excluidas por registro sanitario: **"
+            + ", ".join(missing)
+            + "**"
+        )
+    if not valid_dates.empty:
+        st.caption(f"Cobertura temporal encontrada: **{valid_dates.min()} -> {valid_dates.max()}**")
+
+    display_columns = [
+        "enlace", "fichas_coincidentes", "fichas_coincidentes_count", "acto_key",
+        "titulo", "entidad", "estado", "publication_date", "celebration_date",
+        "award_date", "reference_amount", "award_amount", "winner",
+        "participant_count", "is_unique_ficha", "detection_score",
+        "detection_method", "detection_evidence",
+    ]
+    display = acts[[column for column in display_columns if column in acts.columns]].copy()
+    if "is_unique_ficha" in display.columns:
+        display["is_unique_ficha"] = pd.to_numeric(
+            display["is_unique_ficha"], errors="coerce"
+        ).fillna(0).gt(0)
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        height=760,
+        column_config={
+            "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
+            "fichas_coincidentes": st.column_config.TextColumn("Fichas coincidentes", width="medium"),
+            "fichas_coincidentes_count": st.column_config.NumberColumn("Cantidad fichas", format="%d"),
+            "acto_key": st.column_config.TextColumn("Identificador"),
+            "titulo": st.column_config.TextColumn("Título", width="large"),
+            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
+            "estado": st.column_config.TextColumn("Estado"),
+            "publication_date": st.column_config.DateColumn("Publicación", format="YYYY-MM-DD"),
+            "celebration_date": st.column_config.DateColumn("Celebración", format="YYYY-MM-DD"),
+            "award_date": st.column_config.DateColumn("Adjudicación", format="YYYY-MM-DD"),
+            "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
+            "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
+            "winner": st.column_config.TextColumn("Ganador", width="medium"),
+            "participant_count": st.column_config.NumberColumn("Participantes", format="%d"),
+            "is_unique_ficha": st.column_config.CheckboxColumn("Ficha única"),
+            "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
+            "detection_method": st.column_config.TextColumn("Método"),
+            "detection_evidence": st.column_config.TextColumn("Evidencia", width="large"),
+        },
+    )
+    st.download_button(
+        "Descargar consulta combinada",
+        data=dataframe_to_csv_bytes(acts),
+        file_name="actos_fichas_" + "_".join(selected) + ".csv",
+        mime="text/csv",
+        key="intel_v3_multi_lookup_download",
+    )
+
+
 def _render_direct_provider_lookup(repository: AnalyticsRepository) -> None:
     st.subheader("Consulta directa por empresa")
     st.caption(
@@ -1066,16 +1225,18 @@ metric_cols[4].metric("Score promedio", f"{float(filtered_master.get('score_opor
 if filtered_master.empty:
     st.warning("Ninguna ficha cumple todos los filtros. Amplía el periodo o relaja las condiciones del ranking.")
 
-tab_master, tab_lookup, tab_provider_lookup, tab_trends, tab_competition, tab_providers, tab_study = st.tabs(
+tab_master, tab_lookup, tab_multi_lookup, tab_provider_lookup, tab_trends, tab_competition, tab_providers, tab_study = st.tabs(
     [
-        "Oportunidades", "Consulta por ficha", "Consulta por empresa", "Tendencias",
-        "Competencia", "Proveedores", "Estudio profundo",
+        "Oportunidades", "Consulta por ficha", "Varias fichas", "Consulta por empresa",
+        "Tendencias", "Competencia", "Proveedores", "Estudio profundo",
     ]
 )
 with tab_master:
     _render_master_table(filtered_master)
 with tab_lookup:
     _render_direct_ficha_lookup(repo)
+with tab_multi_lookup:
+    _render_multi_ficha_lookup(repo)
 with tab_provider_lookup:
     _render_direct_provider_lookup(repo)
 with tab_trends:
