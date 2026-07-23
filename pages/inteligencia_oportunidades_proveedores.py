@@ -1447,7 +1447,11 @@ def _render_study_result(
 
 def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_preset: str) -> None:
     st.subheader("Estudio profundo con el orquestador")
-    st.caption("El estudio recibe exactamente el mismo periodo, dimensión temporal, perfil de detección y filtros usados en este análisis.")
+    st.caption(
+        "Por defecto, el estudio consulta el historial completo de la ficha para "
+        "no perder actos por el rango temporal visible. Si lo necesitas, puedes "
+        "limitarlo expresamente al periodo y filtros del análisis actual."
+    )
     ficha = _selected_ficha(frame, "intel_v3_study_ficha")
     if not ficha:
         st.info("No hay una ficha seleccionable.")
@@ -1457,6 +1461,25 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
     _render_tracking_panel(row, tracking_sheet_ids)
     st.divider()
     notes = st.text_area("Objetivo o notas para el estudio", key="intel_v3_study_notes", placeholder="Ej.: validar marcas, modelos, tiempos de entrega y proveedores alternativos.")
+    scope_label = st.selectbox(
+        "Alcance del estudio",
+        (
+            "Histórico completo de la ficha",
+            "Solo periodo y filtros del análisis actual",
+        ),
+        index=0,
+        key="intel_v3_study_scope",
+        help=(
+            "Histórico completo ignora los filtros visuales de fecha, monto, "
+            "entidad y búsqueda. La segunda opción reproduce exactamente el "
+            "universo filtrado que ves en la página."
+        ),
+    )
+    study_scope = (
+        "historico_completo"
+        if scope_label == "Histórico completo de la ficha"
+        else "analisis_actual"
+    )
     max_queries = int(st.number_input("Máximo de consultas detalladas", 5, 500, 80, 5, key="intel_v3_max_queries"))
     manual_sheet_ids = _sheet_id_candidates("manual")
     config_sheet_ids = _sheet_id_candidates("config")
@@ -1466,13 +1489,27 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
     if st.button("Iniciar estudio profundo", type="primary", key="intel_v3_queue_study"):
         from sheets import get_client
 
-        filter_payload = filters.as_payload()
-        scope_raw = json.dumps({"ficha": ficha, "filters": filter_payload, "preset": score_preset}, ensure_ascii=False, sort_keys=True)
+        filter_payload = (
+            {}
+            if study_scope == "historico_completo"
+            else filters.as_payload()
+        )
+        scope_raw = json.dumps(
+            {
+                "ficha": ficha,
+                "study_scope": study_scope,
+                "filters": filter_payload,
+                "preset": score_preset,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         payload = {
             "ficha": ficha,
             "nombre_ficha": str(row.get("nombre_ficha", "")),
             "db_path": r"C:\Users\rodri\scrapers_repo\data\db\panamacompra.db",
             "analytics_db_path": r"C:\Users\rodri\scrapers_repo\data\db\inteligencia_proveedores.db",
+            "study_scope": study_scope,
             "max_queries": max_queries,
             "notes": notes,
             "headless": False,
