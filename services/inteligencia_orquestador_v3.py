@@ -41,6 +41,39 @@ DEFAULT_JOB_PYTHON = r"C:\Users\rodri\scrapers_repo\.venv\Scripts\python.exe"
 DEFAULT_JOB_SCRIPT = r"C:\Users\rodri\scrapers_repo\orquestador\intel_ficha_worker.py"
 
 
+def _sheet_candidates(value: str | Sequence[str]) -> list[str]:
+    raw_values = [value] if isinstance(value, str) else list(value)
+    output: list[str] = []
+    for raw in raw_values:
+        sheet_id = str(raw or "").strip()
+        if sheet_id and sheet_id not in output:
+            output.append(sheet_id)
+    return output
+
+
+def _open_spreadsheet(client, sheet_ids: str | Sequence[str], *, purpose: str):
+    """Abre la primera hoja nativa valida entre varios IDs configurados.
+
+    Google Drive permite guardar archivos XLSX, pero gspread no puede agregarles
+    pestanas. Si el primer candidato es un archivo Office, se prueba el siguiente
+    ID (normalmente ``SHEET_ID``) sin interrumpir el flujo del usuario.
+    """
+    candidates = _sheet_candidates(sheet_ids)
+    if not candidates:
+        raise ValueError(f"No hay una hoja configurada para {purpose}.")
+    last_error: Exception | None = None
+    for sheet_id in candidates:
+        try:
+            return _retry(lambda sid=sheet_id: client.open_by_key(sid))
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(
+        f"No se encontro una hoja nativa de Google Sheets valida para {purpose}. "
+        "Revisa SHEET_ID y evita usar un archivo .xlsx. "
+        f"Ultimo error: {last_error}"
+    )
+
+
 def _retry(action, *, attempts: int = 5):
     last_error: Exception | None = None
     for attempt in range(attempts):
@@ -75,13 +108,13 @@ def _ensure_worksheet(spreadsheet, title: str, headers: Sequence[str]):
 
 def ensure_study_job(
     client,
-    config_sheet_id: str,
+    config_sheet_id: str | Sequence[str],
     *,
     job_name: str = DEFAULT_JOB_NAME,
     python_executable: str = DEFAULT_JOB_PYTHON,
     script_path: str = DEFAULT_JOB_SCRIPT,
 ) -> None:
-    spreadsheet = _retry(lambda: client.open_by_key(config_sheet_id))
+    spreadsheet = _open_spreadsheet(client, config_sheet_id, purpose="configuracion del orquestador")
     worksheet = _ensure_worksheet(spreadsheet, PC_CONFIG_WORKSHEET, PC_CONFIG_HEADERS)
     rows = _retry(lambda: worksheet.get_all_records()) or []
     header_map = {str(value).strip().lower(): index + 1 for index, value in enumerate(_retry(lambda: worksheet.row_values(1)))}
@@ -107,15 +140,15 @@ def ensure_study_job(
 def queue_study(
     client,
     *,
-    manual_sheet_id: str,
-    config_sheet_id: str,
+    manual_sheet_id: str | Sequence[str],
+    config_sheet_id: str | Sequence[str],
     requested_by: str,
     payload: Mapping[str, Any],
     notes: str = "",
     job_name: str = DEFAULT_JOB_NAME,
 ) -> str:
     ensure_study_job(client, config_sheet_id, job_name=job_name)
-    spreadsheet = _retry(lambda: client.open_by_key(manual_sheet_id))
+    spreadsheet = _open_spreadsheet(client, manual_sheet_id, purpose="solicitudes manuales")
     worksheet = _ensure_worksheet(spreadsheet, PC_MANUAL_WORKSHEET, PC_MANUAL_HEADERS)
     request_id = uuid.uuid4().hex
     payload_out = dict(payload)
@@ -137,8 +170,10 @@ def queue_study(
     return request_id
 
 
-def get_request_status(client, *, manual_sheet_id: str, request_id: str) -> dict[str, str]:
-    spreadsheet = _retry(lambda: client.open_by_key(manual_sheet_id))
+def get_request_status(
+    client, *, manual_sheet_id: str | Sequence[str], request_id: str
+) -> dict[str, str]:
+    spreadsheet = _open_spreadsheet(client, manual_sheet_id, purpose="estado de solicitudes")
     worksheet = _ensure_worksheet(spreadsheet, PC_MANUAL_WORKSHEET, PC_MANUAL_HEADERS)
     rows = _retry(lambda: worksheet.get_all_records()) or []
     for row in reversed(rows):
@@ -147,9 +182,11 @@ def get_request_status(client, *, manual_sheet_id: str, request_id: str) -> dict
     return {}
 
 
-def list_saved_views(client, *, sheet_id: str, username: str) -> list[dict[str, Any]]:
+def list_saved_views(
+    client, *, sheet_id: str | Sequence[str], username: str
+) -> list[dict[str, Any]]:
     """Devuelve únicamente las vistas del usuario autenticado."""
-    spreadsheet = _retry(lambda: client.open_by_key(sheet_id))
+    spreadsheet = _open_spreadsheet(client, sheet_id, purpose="vistas guardadas")
     worksheet = _ensure_worksheet(spreadsheet, INTEL_VIEWS_WORKSHEET, INTEL_VIEWS_HEADERS)
     rows = _retry(lambda: worksheet.get_all_records()) or []
     owner = str(username or "").strip().lower()
@@ -176,7 +213,7 @@ def list_saved_views(client, *, sheet_id: str, username: str) -> list[dict[str, 
 def save_saved_view(
     client,
     *,
-    sheet_id: str,
+    sheet_id: str | Sequence[str],
     username: str,
     name: str,
     payload: Mapping[str, Any],
@@ -186,7 +223,7 @@ def save_saved_view(
     view_name = str(name or "").strip()
     if not owner or not view_name:
         raise ValueError("Usuario y nombre de vista son obligatorios.")
-    spreadsheet = _retry(lambda: client.open_by_key(sheet_id))
+    spreadsheet = _open_spreadsheet(client, sheet_id, purpose="vistas guardadas")
     worksheet = _ensure_worksheet(spreadsheet, INTEL_VIEWS_WORKSHEET, INTEL_VIEWS_HEADERS)
     rows = _retry(lambda: worksheet.get_all_records()) or []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -207,13 +244,15 @@ def save_saved_view(
     return view_id
 
 
-def delete_saved_view(client, *, sheet_id: str, username: str, view_id: str) -> bool:
+def delete_saved_view(
+    client, *, sheet_id: str | Sequence[str], username: str, view_id: str
+) -> bool:
     """Elimina una vista solo si pertenece al usuario indicado."""
     owner = str(username or "").strip().lower()
     target = str(view_id or "").strip()
     if not owner or not target:
         return False
-    spreadsheet = _retry(lambda: client.open_by_key(sheet_id))
+    spreadsheet = _open_spreadsheet(client, sheet_id, purpose="vistas guardadas")
     worksheet = _ensure_worksheet(spreadsheet, INTEL_VIEWS_WORKSHEET, INTEL_VIEWS_HEADERS)
     rows = _retry(lambda: worksheet.get_all_records()) or []
     for row_index, row in enumerate(rows, start=2):

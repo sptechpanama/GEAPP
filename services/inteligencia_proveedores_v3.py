@@ -493,6 +493,25 @@ class AnalyticsRepository:
                 FROM intel_ficha_catalogo
                 GROUP BY ficha
             ),
+            catalog_name_counts AS (
+                SELECT ficha, TRIM(producto) AS nombre_catalogo, COUNT(*) AS apariciones
+                FROM intel_ficha_catalogo
+                WHERE COALESCE(TRIM(producto), '') <> ''
+                GROUP BY ficha, TRIM(producto)
+            ),
+            catalog_name_ranked AS (
+                SELECT ficha, nombre_catalogo,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ficha
+                           ORDER BY apariciones DESC, LENGTH(nombre_catalogo) DESC, nombre_catalogo
+                       ) AS name_rank
+                FROM catalog_name_counts
+            ),
+            catalog_name AS (
+                SELECT ficha, nombre_catalogo
+                FROM catalog_name_ranked
+                WHERE name_rank = 1
+            ),
             winner_counts AS (
                 SELECT ficha,
                        CASE WHEN COALESCE(winner, '') <> '' THEN winner ELSE winner_short END AS ganador,
@@ -546,13 +565,15 @@ class AnalyticsRepository:
                    COALESCE(w.top_3_actos, 0) AS top_3_actos,
                    COALESCE(w.top_3_pct, 0) AS top_3_pct,
                    COALESCE(w.top_3_concentracion_pct, 0) AS top_3_concentracion_pct,
-                   COALESCE(w.concentracion_hhi, 0) AS concentracion_hhi
+                   COALESCE(w.concentracion_hhi, 0) AS concentracion_hhi,
+                   COALESCE(n.nombre_catalogo, '') AS nombre_ficha_catalogo
             FROM agg a
             LEFT JOIN provider_agg p ON p.ficha = a.ficha
             LEFT JOIN catalog_agg c ON c.ficha = a.ficha
             LEFT JOIN ticket_median tm ON tm.ficha = a.ficha
             LEFT JOIN participant_median pm ON pm.ficha = a.ficha
             LEFT JOIN winner_agg w ON w.ficha = a.ficha
+            LEFT JOIN catalog_name n ON n.ficha = a.ficha
             {catalog_filter_sql}
         """
         frame = pd.read_sql_query(text(query), self.engine, params=params)
@@ -590,7 +611,12 @@ class AnalyticsRepository:
             * 100
         ).clip(-100, 500)
         frame["nombre_ficha"] = frame["nombre_ficha"].fillna("").astype(str)
+        catalog_names = frame.get("nombre_ficha_catalogo", pd.Series("", index=frame.index))
+        catalog_names = catalog_names.fillna("").astype(str)
+        missing_names = frame["nombre_ficha"].str.strip().eq("")
+        frame.loc[missing_names, "nombre_ficha"] = catalog_names[missing_names]
         frame.loc[frame["nombre_ficha"].str.strip().eq(""), "nombre_ficha"] = frame["ficha"].map(lambda value: f"Ficha {value}")
+        frame = frame.drop(columns=["nombre_ficha_catalogo"], errors="ignore")
         return frame
 
     @staticmethod

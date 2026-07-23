@@ -187,6 +187,24 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertTrue(self.repo.all_acts_for_ficha("99999").empty)
         self.assertTrue(self.repo.all_acts_for_ficha("88888").empty)
 
+    def test_master_uses_catalog_product_when_metadata_name_is_missing(self) -> None:
+        with self.repo.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE intel_ficha_metadata SET nombre_ficha = '' WHERE ficha = ?",
+                ("103169",),
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO intel_ficha_catalogo VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "103169", "PROVEEDOR", "", "", "", "1",
+                    "NOMBRE GENERICO RECUPERADO DEL CATALOGO", "FAB", "MARCA", "M", "Activo",
+                ),
+            )
+
+        result = self.repo.master_metrics(AnalyticsFilters(detection_profile="muy_flexible"))
+        row = result[result["ficha"].eq("103169")].iloc[0]
+        self.assertEqual(row["nombre_ficha"], "NOMBRE GENERICO RECUPERADO DEL CATALOGO")
+
     def test_multi_ficha_lookup_unions_and_deduplicates_acts(self) -> None:
         # El acto a1 contiene dos fichas seleccionadas. Debe aparecer una sola
         # vez y conservar ambas coincidencias sin duplicar su monto.

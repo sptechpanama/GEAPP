@@ -345,14 +345,14 @@ def _apply_pending_saved_view() -> None:
 def _render_saved_views(current_payload: dict[str, object]) -> None:
     with st.sidebar.expander("Vistas guardadas", expanded=False):
         username = current_username()
-        sheet_id, _ = _sheet_ids()
+        sheet_ids = _sheet_id_candidates("views")
         views = st.session_state.get("intel_v3_saved_views", [])
         if st.button("Cargar / actualizar vistas", key="intel_v3_load_views", width="stretch"):
             try:
                 from sheets import get_client
 
                 client, _ = get_client()
-                views = list_saved_views(client, sheet_id=sheet_id, username=username)
+                views = list_saved_views(client, sheet_id=sheet_ids, username=username)
                 st.session_state["intel_v3_saved_views"] = views
                 st.success(f"{len(views)} vista(s) disponible(s).")
             except Exception as exc:
@@ -377,7 +377,7 @@ def _render_saved_views(current_payload: dict[str, object]) -> None:
                     from sheets import get_client
 
                     client, _ = get_client()
-                    if delete_saved_view(client, sheet_id=sheet_id, username=username, view_id=selected_id):
+                    if delete_saved_view(client, sheet_id=sheet_ids, username=username, view_id=selected_id):
                         st.session_state["intel_v3_saved_views"] = [
                             item for item in views if str(item.get("id", "")) != selected_id
                         ]
@@ -395,13 +395,13 @@ def _render_saved_views(current_payload: dict[str, object]) -> None:
                     client, _ = get_client()
                     save_saved_view(
                         client,
-                        sheet_id=sheet_id,
+                        sheet_id=sheet_ids,
                         username=username,
                         name=view_name,
                         payload=current_payload,
                     )
                     st.session_state["intel_v3_saved_views"] = list_saved_views(
-                        client, sheet_id=sheet_id, username=username
+                        client, sheet_id=sheet_ids, username=username
                     )
                     st.success("Vista guardada.")
                 except Exception as exc:
@@ -476,11 +476,19 @@ def _selected_ficha(frame: pd.DataFrame, key: str) -> str:
     return str(selected)
 
 
-def _sheet_ids() -> tuple[str, str]:
-    fallback = _config_value("SHEET_ID")
-    manual = _config_value("PC_MANUAL_SHEET_ID", fallback) or fallback
-    config = _config_value("PC_CONFIG_SHEET_ID", manual) or manual
-    return manual, config
+def _sheet_id_candidates(kind: str) -> tuple[str, ...]:
+    """Devuelve IDs candidatos y conserva ``SHEET_ID`` como respaldo nativo."""
+    key_order = {
+        "manual": ("PC_MANUAL_SHEET_ID", "SHEET_ID", "PC_CONFIG_SHEET_ID"),
+        "config": ("PC_CONFIG_SHEET_ID", "SHEET_ID", "PC_MANUAL_SHEET_ID"),
+        "views": ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"),
+    }.get(kind, ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"))
+    output: list[str] = []
+    for key in key_order:
+        sheet_id = _config_value(key)
+        if sheet_id and sheet_id not in output:
+            output.append(sheet_id)
+    return tuple(output)
 
 
 def _render_data_status(repository: AnalyticsRepository) -> None:
@@ -1017,8 +1025,9 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
     row = frame[frame["ficha"].astype(str).eq(ficha)].iloc[0]
     notes = st.text_area("Objetivo o notas para el estudio", key="intel_v3_study_notes", placeholder="Ej.: validar marcas, modelos, tiempos de entrega y proveedores alternativos.")
     max_queries = int(st.number_input("Máximo de consultas detalladas", 5, 500, 80, 5, key="intel_v3_max_queries"))
-    manual_sheet_id, config_sheet_id = _sheet_ids()
-    if not manual_sheet_id or not config_sheet_id:
+    manual_sheet_ids = _sheet_id_candidates("manual")
+    config_sheet_ids = _sheet_id_candidates("config")
+    if not manual_sheet_ids or not config_sheet_ids:
         st.warning("Configura PC_MANUAL_SHEET_ID/PC_CONFIG_SHEET_ID (o SHEET_ID) para usar el orquestador.")
         return
     if st.button("Iniciar estudio profundo", type="primary", key="intel_v3_queue_study"):
@@ -1043,8 +1052,8 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
             client, _ = get_client()
             request_id = queue_study(
                 client,
-                manual_sheet_id=manual_sheet_id,
-                config_sheet_id=config_sheet_id,
+                manual_sheet_id=manual_sheet_ids,
+                config_sheet_id=config_sheet_ids,
                 requested_by=current_username(),
                 payload=payload,
                 notes=notes,
@@ -1062,7 +1071,9 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                 from sheets import get_client
 
                 client, _ = get_client()
-                status = get_request_status(client, manual_sheet_id=manual_sheet_id, request_id=request_id)
+                status = get_request_status(
+                    client, manual_sheet_id=manual_sheet_ids, request_id=request_id
+                )
                 st.session_state["intel_v3_request_status"] = status
             except Exception as exc:
                 st.error(f"No se pudo consultar el estado: {exc}")
