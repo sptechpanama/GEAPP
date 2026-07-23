@@ -19,9 +19,13 @@ from services.auth_drive import get_drive_delegated
 from services.inteligencia_orquestador_v3 import (
     delete_saved_view,
     get_request_status,
+    get_study_result,
+    list_tracking_fichas,
     list_saved_views,
     queue_study,
+    remove_tracking_ficha,
     save_saved_view,
+    upsert_tracking_ficha,
 )
 from services.inteligencia_proveedores_v3 import (
     AnalyticsFilters,
@@ -211,6 +215,14 @@ def _safe_int(value: object) -> int:
         return int(float(value or 0))
     except Exception:
         return 0
+
+
+def _safe_float(value: object) -> float:
+    try:
+        result = float(value or 0)
+        return result if pd.notna(result) else 0.0
+    except Exception:
+        return 0.0
 
 
 def _normalize_ficha(value: object) -> str:
@@ -482,6 +494,8 @@ def _sheet_id_candidates(kind: str) -> tuple[str, ...]:
         "manual": ("PC_MANUAL_SHEET_ID", "SHEET_ID", "PC_CONFIG_SHEET_ID"),
         "config": ("PC_CONFIG_SHEET_ID", "SHEET_ID", "PC_MANUAL_SHEET_ID"),
         "views": ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"),
+        "tracking": ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"),
+        "intel": ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"),
     }.get(kind, ("SHEET_ID", "PC_MANUAL_SHEET_ID", "PC_CONFIG_SHEET_ID"))
     output: list[str] = []
     for key in key_order:
@@ -489,6 +503,33 @@ def _sheet_id_candidates(kind: str) -> tuple[str, ...]:
         if sheet_id and sheet_id not in output:
             output.append(sheet_id)
     return tuple(output)
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def _tracking_records_cached(
+    sheet_ids: tuple[str, ...],
+) -> list[dict[str, str]]:
+    from sheets import get_client
+
+    client, _ = get_client()
+    return list_tracking_fichas(client, sheet_id=sheet_ids)
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def _study_result_cached(
+    sheet_ids: tuple[str, ...],
+    ficha: str,
+    request_id: str = "",
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    from sheets import get_client
+
+    client, _ = get_client()
+    return get_study_result(
+        client,
+        sheet_id=sheet_ids,
+        ficha=ficha,
+        request_id=request_id,
+    )
 
 
 def _render_data_status(repository: AnalyticsRepository) -> None:
@@ -1015,6 +1056,366 @@ def _render_direct_provider_lookup(repository: AnalyticsRepository) -> None:
     )
 
 
+def _tracking_payload(
+    row: pd.Series,
+    *,
+    estado: str = "pendiente de estudio profundo",
+    notas: str = "",
+) -> dict[str, object]:
+    actos = _safe_int(row.get("actos", 0))
+    actos_unicos = _safe_int(row.get("actos_ficha_unica", 0))
+    return {
+        "ficha": _normalize_ficha(row.get("ficha", "")),
+        "nombre_ficha": str(row.get("nombre_ficha", "") or "").strip(),
+        "clase_riesgo": str(
+            row.get("area", "") or row.get("tipo_producto", "") or ""
+        ).strip(),
+        "enlace_minsa": str(row.get("enlace_minsa", "") or "").strip(),
+        "score_inicial": _safe_float(row.get("score_oportunidad", 0)),
+        "clasificacion": str(row.get("recomendacion", "") or "").strip(),
+        "actos": actos,
+        "actos_solo_ficha": actos_unicos,
+        "actos_con_otras_fichas": max(0, actos - actos_unicos),
+        "monto_historico": _safe_float(row.get("monto_referencia", 0)),
+        "proponentes_promedio": _safe_float(
+            row.get("participantes_promedio", 0)
+        ),
+        "revision_proponentes": "si"
+        if _safe_int(row.get("proponentes_distintos", 0)) == 0
+        else "no",
+        "top1_ganador": str(row.get("top_1_ganador", "") or "").strip(),
+        "top1_pct_ganadas": _safe_float(row.get("top_1_pct", 0)),
+        "top2_ganador": str(row.get("top_2_ganador", "") or "").strip(),
+        "top2_pct_ganadas": _safe_float(row.get("top_2_pct", 0)),
+        "top3_ganador": str(row.get("top_3_ganador", "") or "").strip(),
+        "top3_pct_ganadas": _safe_float(row.get("top_3_pct", 0)),
+        "estado": estado,
+        "notas": notas,
+    }
+
+
+def _render_tracking_panel(
+    row: pd.Series, sheet_ids: tuple[str, ...]
+) -> list[dict[str, str]]:
+    st.markdown("#### Fichas en seguimiento")
+    st.caption(
+        "El seguimiento es persistente: se guarda en Google Sheets y también "
+        "es visible desde la sección anterior de Inteligencia de proveedores."
+    )
+    if not sheet_ids:
+        st.warning("Configura SHEET_ID para habilitar el seguimiento persistente.")
+        return []
+    try:
+        records = _tracking_records_cached(sheet_ids)
+    except Exception as exc:
+        st.error(f"No fue posible leer las fichas en seguimiento: {exc}")
+        return []
+
+    ficha = _normalize_ficha(row.get("ficha", ""))
+    current = next(
+        (record for record in records if record.get("ficha", "") == ficha), None
+    )
+    action_cols = st.columns([1.4, 4])
+    with action_cols[0]:
+        if st.button(
+            "Agregar a seguimiento",
+            type="primary",
+            disabled=current is not None,
+            key="intel_v3_add_tracking",
+        ):
+            try:
+                from sheets import get_client
+
+                client, _ = get_client()
+                upsert_tracking_ficha(
+                    client,
+                    sheet_id=sheet_ids,
+                    record=_tracking_payload(row),
+                )
+                _tracking_records_cached.clear()
+                st.success(f"Ficha {ficha} agregada al seguimiento.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No se pudo guardar la ficha: {exc}")
+    with action_cols[1]:
+        if current:
+            st.success(
+                f"Ficha {ficha} en seguimiento · Estado: "
+                f"{current.get('estado') or 'pendiente'}"
+            )
+        else:
+            st.caption(
+                "También se agregará automáticamente al iniciar un estudio profundo."
+            )
+
+    if not records:
+        return []
+
+    with st.expander(
+        f"Administrar seguimiento ({len(records):,} fichas)", expanded=False
+    ):
+        tracking_frame = pd.DataFrame(records)
+        display_columns = [
+            "ficha",
+            "nombre_ficha",
+            "estado",
+            "score_inicial",
+            "actos",
+            "monto_historico",
+            "fecha_ingreso",
+            "updated_at",
+        ]
+        st.dataframe(
+            tracking_frame[
+                [column for column in display_columns if column in tracking_frame]
+            ],
+            width="stretch",
+            hide_index=True,
+            height=min(520, 85 + 34 * max(1, len(tracking_frame))),
+            column_config={
+                "ficha": "Ficha",
+                "nombre_ficha": st.column_config.TextColumn(
+                    "Nombre", width="large"
+                ),
+                "estado": "Estado",
+                "score_inicial": st.column_config.NumberColumn(
+                    "Score inicial", format="%.1f"
+                ),
+                "monto_historico": st.column_config.NumberColumn(
+                    "Monto histórico", format="$ %.2f"
+                ),
+                "fecha_ingreso": "Ingreso",
+                "updated_at": "Última actualización",
+            },
+        )
+        labels = {
+            record["ficha"]: (
+                f"{record['ficha']} | "
+                f"{str(record.get('nombre_ficha', '') or '')[:90]}"
+            )
+            for record in records
+        }
+        selected = st.selectbox(
+            "Ficha a administrar",
+            list(labels),
+            format_func=lambda value: labels[value],
+            key="intel_v3_tracking_admin_ficha",
+        )
+        selected_record = next(
+            record for record in records if record["ficha"] == selected
+        )
+        states = [
+            "pendiente de estudio profundo",
+            "en estudio",
+            "listo para búsqueda de proveedores",
+            "en evaluación comercial",
+            "descartada",
+        ]
+        current_state = str(selected_record.get("estado", "") or states[0])
+        if current_state not in states:
+            states.insert(0, current_state)
+        state = st.selectbox(
+            "Estado",
+            states,
+            index=states.index(current_state),
+            key=f"intel_v3_tracking_state_{selected}",
+        )
+        notes = st.text_input(
+            "Notas",
+            value=str(selected_record.get("notas", "") or ""),
+            key=f"intel_v3_tracking_notes_{selected}",
+        )
+        save_col, remove_col = st.columns(2)
+        if save_col.button(
+            "Guardar cambios",
+            key="intel_v3_tracking_save",
+            use_container_width=True,
+        ):
+            try:
+                from sheets import get_client
+
+                client, _ = get_client()
+                upsert_tracking_ficha(
+                    client,
+                    sheet_id=sheet_ids,
+                    record={"ficha": selected, "estado": state, "notas": notes},
+                )
+                _tracking_records_cached.clear()
+                st.success("Seguimiento actualizado.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No se pudo actualizar: {exc}")
+        if remove_col.button(
+            "Quitar del seguimiento",
+            key="intel_v3_tracking_remove",
+            use_container_width=True,
+        ):
+            try:
+                from sheets import get_client
+
+                client, _ = get_client()
+                if remove_tracking_ficha(
+                    client, sheet_id=sheet_ids, ficha=selected
+                ):
+                    _tracking_records_cached.clear()
+                    st.success(f"Ficha {selected} eliminada del seguimiento.")
+                    st.rerun()
+                else:
+                    st.warning("La ficha ya no estaba en seguimiento.")
+            except Exception as exc:
+                st.error(f"No se pudo eliminar: {exc}")
+    return records
+
+
+def _render_study_result(
+    run: dict[str, str],
+    details: list[dict[str, str]],
+    *,
+    is_previous: bool = False,
+) -> None:
+    if not run:
+        return
+    title = "Último resultado disponible"
+    if is_previous:
+        title += " (anterior a la solicitud activa)"
+    st.markdown(f"#### {title}")
+    status = str(run.get("estado_run", "") or "").strip().lower()
+    if status in {"error", "failed", "fallido"}:
+        st.error(str(run.get("error", "") or "El estudio terminó con error."))
+        return
+    st.caption(
+        "Ficha {ficha} · Inicio {inicio} · Fin {fin} · Ejecución {run_id}".format(
+            ficha=run.get("ficha", ""),
+            inicio=run.get("fecha_inicio", "") or "sin dato",
+            fin=run.get("fecha_fin", "") or "sin dato",
+            run_id=run.get("run_id_remote", "") or "sin identificador",
+        )
+    )
+    detail = pd.DataFrame(details)
+    if detail.empty:
+        st.info(
+            "El estudio está registrado, pero no produjo renglones de detalle."
+        )
+        return
+    for column in [
+        "cantidad",
+        "precio_unitario_participacion",
+        "precio_unitario_referencia",
+        "dias_acto_a_oc",
+        "dias_acto_a_oc_mas_entrega",
+        "tiempo_entrega_dias",
+        "nivel_certeza",
+    ]:
+        if column in detail:
+            detail[column] = pd.to_numeric(detail[column], errors="coerce")
+    for column in ["es_ganador", "requiere_revision"]:
+        if column in detail:
+            detail[column] = (
+                detail[column]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .isin({"1", "true", "si", "sí", "yes", "x"})
+            )
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Renglones", f"{len(detail):,}")
+    metric_cols[1].metric(
+        "Actos",
+        f"{detail.get('acto_id', pd.Series(dtype=str)).replace('', pd.NA).nunique(dropna=True):,}",
+    )
+    metric_cols[2].metric(
+        "Proveedores",
+        f"{detail.get('proveedor', pd.Series(dtype=str)).replace('', pd.NA).nunique(dropna=True):,}",
+    )
+    metric_cols[3].metric(
+        "Renglones ganadores",
+        f"{int(detail.get('es_ganador', pd.Series(dtype=bool)).sum()):,}",
+    )
+    display_columns = [
+        "acto_id",
+        "acto_nombre",
+        "acto_url",
+        "entidad",
+        "renglon_texto",
+        "proveedor",
+        "proveedor_ganador",
+        "es_ganador",
+        "marca",
+        "modelo",
+        "pais_origen",
+        "cantidad",
+        "unidad_medida",
+        "precio_unitario_participacion",
+        "precio_unitario_referencia",
+        "fecha_publicacion",
+        "fecha_celebracion",
+        "fecha_adjudicacion",
+        "fecha_orden_compra",
+        "dias_acto_a_oc",
+        "dias_acto_a_oc_mas_entrega",
+        "tiempo_entrega_dias",
+        "enlace_evidencia",
+        "estado_revision",
+        "nivel_certeza",
+        "requiere_revision",
+        "observaciones",
+    ]
+    st.dataframe(
+        detail[[column for column in display_columns if column in detail]],
+        width="stretch",
+        hide_index=True,
+        height=min(780, 100 + 35 * max(1, len(detail))),
+        column_config={
+            "acto_id": "Acto",
+            "acto_nombre": st.column_config.TextColumn(
+                "Nombre del acto", width="large"
+            ),
+            "acto_url": st.column_config.LinkColumn(
+                "Panamá Compra", display_text="Abrir"
+            ),
+            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
+            "renglon_texto": st.column_config.TextColumn(
+                "Renglón", width="large"
+            ),
+            "proveedor": st.column_config.TextColumn(
+                "Proveedor", width="medium"
+            ),
+            "proveedor_ganador": st.column_config.TextColumn(
+                "Ganador", width="medium"
+            ),
+            "es_ganador": st.column_config.CheckboxColumn("Ganó"),
+            "precio_unitario_participacion": st.column_config.NumberColumn(
+                "Precio participación", format="$ %.2f"
+            ),
+            "precio_unitario_referencia": st.column_config.NumberColumn(
+                "Precio referencia", format="$ %.2f"
+            ),
+            "enlace_evidencia": st.column_config.LinkColumn(
+                "Evidencia", display_text="Abrir"
+            ),
+            "nivel_certeza": st.column_config.NumberColumn(
+                "Certeza", format="%.2f"
+            ),
+            "requiere_revision": st.column_config.CheckboxColumn(
+                "Requiere revisión"
+            ),
+            "observaciones": st.column_config.TextColumn(
+                "Observaciones", width="large"
+            ),
+        },
+    )
+    st.download_button(
+        "Descargar resultado del estudio (CSV)",
+        data=dataframe_to_csv_bytes(detail),
+        file_name=(
+            f"estudio_ficha_{run.get('ficha', 'resultado')}_"
+            f"{str(run.get('fecha_fin', '') or '')[:10].replace('-', '')}.csv"
+        ),
+        mime="text/csv",
+        key=f"intel_v3_download_study_{run.get('run_id_remote', 'latest')}",
+    )
+
+
 def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_preset: str) -> None:
     st.subheader("Estudio profundo con el orquestador")
     st.caption("El estudio recibe exactamente el mismo periodo, dimensión temporal, perfil de detección y filtros usados en este análisis.")
@@ -1023,6 +1424,9 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
         st.info("No hay una ficha seleccionable.")
         return
     row = frame[frame["ficha"].astype(str).eq(ficha)].iloc[0]
+    tracking_sheet_ids = _sheet_id_candidates("tracking")
+    _render_tracking_panel(row, tracking_sheet_ids)
+    st.divider()
     notes = st.text_area("Objetivo o notas para el estudio", key="intel_v3_study_notes", placeholder="Ej.: validar marcas, modelos, tiempos de entrega y proveedores alternativos.")
     max_queries = int(st.number_input("Máximo de consultas detalladas", 5, 500, 80, 5, key="intel_v3_max_queries"))
     manual_sheet_ids = _sheet_id_candidates("manual")
@@ -1059,6 +1463,23 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                 notes=notes,
             )
             st.session_state["intel_v3_request_id"] = request_id
+            st.session_state["intel_v3_request_ficha"] = ficha
+            st.session_state.pop("intel_v3_request_status", None)
+            if tracking_sheet_ids:
+                try:
+                    upsert_tracking_ficha(
+                        client,
+                        sheet_id=tracking_sheet_ids,
+                        record=_tracking_payload(
+                            row, estado="en estudio", notas=notes
+                        ),
+                    )
+                    _tracking_records_cached.clear()
+                except Exception as tracking_exc:
+                    st.warning(
+                        "El estudio fue encolado, pero no se pudo actualizar "
+                        f"el seguimiento: {tracking_exc}"
+                    )
             st.success(f"Estudio encolado correctamente. Solicitud: {request_id}")
         except Exception as exc:
             st.error(f"No fue posible encolar el estudio: {exc}")
@@ -1066,7 +1487,7 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
     request_id = str(st.session_state.get("intel_v3_request_id", "") or "").strip()
     if request_id:
         st.caption(f"Solicitud activa: `{request_id}`")
-        if st.button("Consultar estado", key="intel_v3_poll_study"):
+        if st.button("Actualizar estado y resultados", key="intel_v3_poll_study"):
             try:
                 from sheets import get_client
 
@@ -1075,6 +1496,25 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                     client, manual_sheet_id=manual_sheet_ids, request_id=request_id
                 )
                 st.session_state["intel_v3_request_status"] = status
+                _study_result_cached.clear()
+                state = str(status.get("status", "") or "").lower()
+                if (
+                    state in {"done", "success", "completed", "completado"}
+                    and tracking_sheet_ids
+                ):
+                    upsert_tracking_ficha(
+                        client,
+                        sheet_id=tracking_sheet_ids,
+                        record={
+                            "ficha": str(
+                                st.session_state.get(
+                                    "intel_v3_request_ficha", ficha
+                                )
+                            ),
+                            "estado": "listo para búsqueda de proveedores",
+                        },
+                    )
+                    _tracking_records_cached.clear()
             except Exception as exc:
                 st.error(f"No se pudo consultar el estado: {exc}")
         status = st.session_state.get("intel_v3_request_status", {})
@@ -1089,6 +1529,48 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
             result_url = str(status.get("result_file_url", "") or "").strip()
             if result_url:
                 st.link_button("Abrir resultado", result_url)
+
+    result_sheet_ids = _sheet_id_candidates("intel")
+    if result_sheet_ids:
+        try:
+            request_ficha = str(
+                st.session_state.get("intel_v3_request_ficha", "") or ""
+            )
+            active_request_for_ficha = bool(
+                request_id and request_ficha == ficha
+            )
+            result_run: dict[str, str] = {}
+            result_details: list[dict[str, str]] = []
+            previous_result = False
+            if active_request_for_ficha:
+                result_run, result_details = _study_result_cached(
+                    result_sheet_ids,
+                    ficha,
+                    request_id,
+                )
+            if not result_run:
+                result_run, result_details = _study_result_cached(
+                    result_sheet_ids,
+                    ficha,
+                )
+                previous_result = active_request_for_ficha and bool(result_run)
+            if result_run:
+                _render_study_result(
+                    result_run,
+                    result_details,
+                    is_previous=previous_result,
+                )
+            else:
+                st.caption(
+                    "Aún no hay resultados publicados para esta ficha. Cuando "
+                    "el orquestador termine, pulsa «Actualizar estado y resultados»."
+                )
+            st.caption(
+                "Los resultados se almacenan en Google Sheets, pestañas "
+                "`intel_study_runs_remote` e `intel_study_detail_remote`."
+            )
+        except Exception as exc:
+            st.warning(f"No fue posible leer los resultados publicados: {exc}")
 
 
 _apply_pending_saved_view()
