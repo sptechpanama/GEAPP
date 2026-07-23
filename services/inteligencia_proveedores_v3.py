@@ -71,6 +71,37 @@ def normalize_text(value: object) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", result)).strip()
 
 
+def normalize_ficha_list(value: object, *, limit: int = 100) -> tuple[str, ...]:
+    """Normaliza una lista de fichas escrita con comas, espacios o saltos.
+
+    Acepta tambien el asterisco visual usado por Panama Compra (``*43358``),
+    elimina duplicados conservando el orden y limita la consulta para evitar
+    formularios accidentales excesivamente grandes.
+    """
+    if isinstance(value, str):
+        tokens = re.split(r"[\s,;]+", value.strip())
+    elif isinstance(value, Iterable):
+        tokens = [str(item).strip() for item in value]
+    else:
+        tokens = [str(value).strip()]
+
+    max_items = max(1, min(int(limit), 100))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        match = re.fullmatch(r"\*?(\d{3,8})\*?", token)
+        if not match:
+            continue
+        code = match.group(1).lstrip("0") or "0"
+        if code in seen:
+            continue
+        seen.add(code)
+        normalized.append(code)
+        if len(normalized) >= max_items:
+            break
+    return tuple(normalized)
+
+
 def split_search_groups(value: object) -> tuple[str, ...]:
     groups: list[str] = []
     for raw in str(value or "").split(","):
@@ -462,6 +493,25 @@ class AnalyticsRepository:
                 FROM intel_ficha_catalogo
                 GROUP BY ficha
             ),
+            catalog_name_counts AS (
+                SELECT ficha, TRIM(producto) AS nombre_catalogo, COUNT(*) AS apariciones
+                FROM intel_ficha_catalogo
+                WHERE COALESCE(TRIM(producto), '') <> ''
+                GROUP BY ficha, TRIM(producto)
+            ),
+            catalog_name_ranked AS (
+                SELECT ficha, nombre_catalogo,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ficha
+                           ORDER BY apariciones DESC, LENGTH(nombre_catalogo) DESC, nombre_catalogo
+                       ) AS name_rank
+                FROM catalog_name_counts
+            ),
+            catalog_name AS (
+                SELECT ficha, nombre_catalogo
+                FROM catalog_name_ranked
+                WHERE name_rank = 1
+            ),
             winner_counts AS (
                 SELECT ficha,
                        CASE WHEN COALESCE(winner, '') <> '' THEN winner ELSE winner_short END AS ganador,
@@ -515,13 +565,15 @@ class AnalyticsRepository:
                    COALESCE(w.top_3_actos, 0) AS top_3_actos,
                    COALESCE(w.top_3_pct, 0) AS top_3_pct,
                    COALESCE(w.top_3_concentracion_pct, 0) AS top_3_concentracion_pct,
-                   COALESCE(w.concentracion_hhi, 0) AS concentracion_hhi
+                   COALESCE(w.concentracion_hhi, 0) AS concentracion_hhi,
+                   COALESCE(n.nombre_catalogo, '') AS nombre_ficha_catalogo
             FROM agg a
             LEFT JOIN provider_agg p ON p.ficha = a.ficha
             LEFT JOIN catalog_agg c ON c.ficha = a.ficha
             LEFT JOIN ticket_median tm ON tm.ficha = a.ficha
             LEFT JOIN participant_median pm ON pm.ficha = a.ficha
             LEFT JOIN winner_agg w ON w.ficha = a.ficha
+            LEFT JOIN catalog_name n ON n.ficha = a.ficha
             {catalog_filter_sql}
         """
         frame = pd.read_sql_query(text(query), self.engine, params=params)
@@ -559,7 +611,12 @@ class AnalyticsRepository:
             * 100
         ).clip(-100, 500)
         frame["nombre_ficha"] = frame["nombre_ficha"].fillna("").astype(str)
+        catalog_names = frame.get("nombre_ficha_catalogo", pd.Series("", index=frame.index))
+        catalog_names = catalog_names.fillna("").astype(str)
+        missing_names = frame["nombre_ficha"].str.strip().eq("")
+        frame.loc[missing_names, "nombre_ficha"] = catalog_names[missing_names]
         frame.loc[frame["nombre_ficha"].str.strip().eq(""), "nombre_ficha"] = frame["ficha"].map(lambda value: f"Ficha {value}")
+        frame = frame.drop(columns=["nombre_ficha_catalogo"], errors="ignore")
         return frame
 
     @staticmethod
@@ -672,6 +729,87 @@ class AnalyticsRepository:
             str(ficha),
             AnalyticsFilters(detection_profile="muy_flexible"),
         )
+
+    def all_acts_for_fichas(self, fichas: Sequence[str]) -> pd.DataFrame:
+        """Devuelve la union historica de actos para varias fichas.
+
+        La base filtra todas las fichas solicitadas en una sola consulta. Luego
+        se consolida una fila por acto para que un acto que contenga dos o mas
+        fichas seleccionadas no duplique conteos ni montos. La columna
+        ``fichas_coincidentes`` conserva todas las coincidencias del acto.
+        """
+        selected = normalize_ficha_list(fichas)
+        if not selected:
+            return pd.DataFrame()
+
+        where_sql, params = self._filter_sql(
+            AnalyticsFilters(detection_profile="muy_flexible", fichas=selected)
+        )
+        query = f"""
+            SELECT f.ficha AS ficha_coincidente,
+                   f.acto_key, f.enlace, f.titulo, f.entidad, f.estado,
+                   f.publication_date, f.celebration_date, f.award_date, f.update_date,
+                   f.reference_amount, f.award_amount, f.award_amount_source,
+                   f.winner, f.winner_short, f.participant_count, f.is_unique_ficha,
+                   f.detection_score, f.detection_method, f.detection_evidence
+            FROM intel_actos_fichas f
+            LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
+            WHERE {where_sql}
+            ORDER BY f.reference_amount DESC, f.acto_key, f.ficha
+        """
+        associations = pd.read_sql_query(text(query), self.engine, params=params)
+        if associations.empty:
+            return associations
+
+        associations = associations.drop_duplicates(
+            subset=["acto_key", "ficha_coincidente"], keep="first"
+        ).copy()
+        associations["_score"] = pd.to_numeric(
+            associations.get("detection_score"), errors="coerce"
+        ).fillna(0.0)
+        selected_order = {ficha: index for index, ficha in enumerate(selected)}
+        rows: list[dict[str, Any]] = []
+
+        for _acto_key, group in associations.groupby("acto_key", sort=False, dropna=False):
+            ranked = group.sort_values(
+                ["_score", "reference_amount"], ascending=[False, False], kind="stable"
+            )
+            record = ranked.iloc[0].drop(labels=["_score"]).to_dict()
+            record.pop("ficha_coincidente", None)
+            codes = sorted(
+                {clean_text(value) for value in group["ficha_coincidente"] if clean_text(value)},
+                key=lambda value: (selected_order.get(value, len(selected_order)), value),
+            )
+            record["fichas_coincidentes"] = ", ".join(codes)
+            record["fichas_coincidentes_count"] = len(codes)
+            record["detection_score"] = float(ranked["_score"].max())
+            methods = [
+                clean_text(value)
+                for value in group.get("detection_method", pd.Series(dtype=str))
+                if clean_text(value)
+            ]
+            record["detection_method"] = ", ".join(dict.fromkeys(methods))
+            evidence: list[str] = []
+            for row in group.itertuples(index=False):
+                ficha = clean_text(getattr(row, "ficha_coincidente", ""))
+                detail = clean_text(getattr(row, "detection_evidence", ""))
+                if ficha and detail:
+                    evidence.append(f"{ficha}: {detail}")
+            record["detection_evidence"] = " | ".join(dict.fromkeys(evidence))
+            rows.append(record)
+
+        result = pd.DataFrame(rows)
+        if result.empty:
+            return result
+        result["_reference_sort"] = pd.to_numeric(
+            result.get("reference_amount"), errors="coerce"
+        ).fillna(0.0)
+        result = result.sort_values(
+            ["_reference_sort", "publication_date", "acto_key"],
+            ascending=[False, False, True],
+            kind="stable",
+        ).drop(columns=["_reference_sort"])
+        return result.reset_index(drop=True)
 
     def find_providers(self, query: str, *, limit: int = 50) -> pd.DataFrame:
         """Busca empresas participantes por nombre dentro del universo elegible.
