@@ -95,6 +95,18 @@ JOB_NAME_LABELS = {
     "rir1": "Licitaciones",
 }
 JOB_NAME_ORDER = ["clrir", "clv", "rir1"]
+DATA_COMPONENT_LABELS = {
+    "db_local": "Base local PanamáCompra",
+    "supabase_operational": "Supabase operacional",
+    "analytics": "Analítica de proveedores",
+    "minsa_weekly": "Catálogos MINSA",
+}
+DATA_COMPONENT_ORDER = [
+    "db_local",
+    "supabase_operational",
+    "analytics",
+    "minsa_weekly",
+]
 JOB_SOURCE_SHEETS = {
     "clrir": ["cl_prog_sin_ficha", "cl_prog_sin_requisitos", "cl_prog_con_ct"],
     "clv": ["cl_abiertas", "cl_abiertas_rir_sin_requisitos", "cl_abiertas_rir_con_ct"],
@@ -105,6 +117,10 @@ STATUS_BADGES = {
     "running": ("🟡", "En curso"),
     "failed": ("🔴", "Error"),
     "error": ("🔴", "Error"),
+    "blocked": ("⚪", "Bloqueado"),
+    "skipped": ("⚪", "Omitido"),
+    "timeout": ("🔴", "Tiempo agotado"),
+    "exception": ("🔴", "Error"),
 }
 
 HEADER_ALIASES = {
@@ -4657,6 +4673,7 @@ def load_pc_state() -> pd.DataFrame:
             "finished_at",
             "duration_display",
             "duration_seconds",
+            "detail",
         )
         if col in df.columns
     ]
@@ -4787,6 +4804,42 @@ def _latest_sheet_update_by_job() -> dict[str, str]:
     return latest_map
 
 
+def _render_data_component_states(rows: pd.DataFrame) -> None:
+    component_rows = rows[rows["__job_key"].isin(DATA_COMPONENT_LABELS)].copy()
+    row_by_job = {
+        str(row.get("__job_key", "")).strip().lower(): row
+        for _, row in component_rows.iterrows()
+    }
+
+    st.markdown("##### Estado de actualización de datos")
+    st.caption(
+        "Seguimiento independiente de la base local, Supabase, la capa analítica "
+        "y los catálogos MINSA."
+    )
+    columns = st.columns(len(DATA_COMPONENT_ORDER))
+    for column, job_key in zip(columns, DATA_COMPONENT_ORDER):
+        row = row_by_job.get(job_key, {})
+        status_key = str(row.get("status", "")).strip().lower()
+        icon, status_label = STATUS_BADGES.get(
+            status_key,
+            ("⚪", status_key.capitalize() or "Sin dato"),
+        )
+        with column:
+            with st.container(border=True):
+                st.markdown(f"**{DATA_COMPONENT_LABELS.get(job_key, job_key)}**")
+                st.caption(f"{icon} {status_label}")
+                st.caption(f"Fecha: {_format_pc_datetime(row.get('finished_at'))}")
+                st.caption(f"Duración: {_format_pc_duration(row)}")
+                detail_value = row.get("detail", "")
+                detail = (
+                    ""
+                    if pd.isna(detail_value)
+                    else str(detail_value or "").strip()
+                )
+                if detail:
+                    st.caption(detail[:320])
+
+
 def render_pc_state_cards(
     pc_state_df: pd.DataFrame | None,
     pc_config_df: pd.DataFrame | None,
@@ -4794,6 +4847,23 @@ def render_pc_state_cards(
 ) -> None:
     """Renderiza tarjetas discretas con el estado de los bots de PanamáCompra."""
     if pc_state_df is None or pc_state_df.empty:
+        empty_rows = pd.DataFrame(columns=["job_name", "__job_key"])
+        _render_data_component_states(empty_rows)
+        return
+
+    rows = pc_state_df.drop(
+        columns=[col for col in pc_state_df.columns if col.startswith("__")]
+    ).copy()
+    if "job_name" not in rows.columns:
+        rows["__job_key"] = ""
+        _render_data_component_states(rows)
+        return
+    rows["__job_key"] = rows["job_name"].astype(str).str.strip().str.lower()
+    _render_data_component_states(rows)
+
+    allowed = {key.lower() for key in JOB_NAME_LABELS}
+    rows = rows[rows["__job_key"].isin(allowed)].copy()
+    if rows.empty:
         return
 
     st.markdown(
@@ -4804,13 +4874,6 @@ def render_pc_state_cards(
 """,
         unsafe_allow_html=True,
     )
-    rows = pc_state_df.drop(columns=[col for col in pc_state_df.columns if col.startswith("__")]).copy()
-    if "job_name" in rows.columns:
-        rows["__job_key"] = rows["job_name"].astype(str).str.strip().str.lower()
-        allowed = {k.lower() for k in JOB_NAME_LABELS.keys()}
-        rows = rows[rows["__job_key"].isin(allowed)].copy()
-    if rows.empty:
-        return
 
     config_map = {}
     name_col = None

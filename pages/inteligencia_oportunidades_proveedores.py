@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -16,17 +17,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from core.config import APP_ROOT
 from services.access_control import build_authenticator, current_username, require_page_access
 from services.auth_drive import get_drive_delegated
-from services.inteligencia_orquestador_v3 import (
-    delete_saved_view,
-    get_request_status,
-    get_study_result,
-    list_tracking_fichas,
-    list_saved_views,
-    queue_study,
-    remove_tracking_ficha,
-    save_saved_view,
-    upsert_tracking_ficha,
-)
+from services import inteligencia_orquestador_v3 as _orchestrator_v3
 from services.inteligencia_proveedores_v3 import (
     AnalyticsFilters,
     AnalyticsRepository,
@@ -46,6 +37,44 @@ from services.inteligencia_proveedores_v3 import (
     split_search_groups,
 )
 from ui.theme import apply_global_theme
+
+
+# Streamlit puede conservar en memoria una versión anterior de un módulo de
+# servicio durante un despliegue incremental. Si faltan exports recién
+# incorporados, recargamos el módulo desde el código actualmente desplegado
+# antes de enlazar las funciones que usa esta página.
+_ORCHESTRATOR_EXPORTS = (
+    "delete_saved_view",
+    "get_request_status",
+    "get_study_result",
+    "list_tracking_fichas",
+    "list_saved_views",
+    "queue_study",
+    "remove_tracking_ficha",
+    "save_saved_view",
+    "upsert_tracking_ficha",
+)
+if any(not hasattr(_orchestrator_v3, name) for name in _ORCHESTRATOR_EXPORTS):
+    _orchestrator_v3 = importlib.reload(_orchestrator_v3)
+
+_missing_orchestrator_exports = [
+    name for name in _ORCHESTRATOR_EXPORTS if not hasattr(_orchestrator_v3, name)
+]
+if _missing_orchestrator_exports:
+    raise ImportError(
+        "El servicio de inteligencia desplegado está incompleto. Faltan: "
+        + ", ".join(_missing_orchestrator_exports)
+    )
+
+delete_saved_view = _orchestrator_v3.delete_saved_view
+get_request_status = _orchestrator_v3.get_request_status
+get_study_result = _orchestrator_v3.get_study_result
+list_tracking_fichas = _orchestrator_v3.list_tracking_fichas
+list_saved_views = _orchestrator_v3.list_saved_views
+queue_study = _orchestrator_v3.queue_study
+remove_tracking_ficha = _orchestrator_v3.remove_tracking_ficha
+save_saved_view = _orchestrator_v3.save_saved_view
+upsert_tracking_ficha = _orchestrator_v3.upsert_tracking_ficha
 
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
