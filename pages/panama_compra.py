@@ -44,6 +44,7 @@ from services.panama_compra_keywords import (
     match_keywords_in_text,
     normalize_keyword_term,
 )
+from services.cl_opportunities import render_cl_opportunities_panel
 
 apply_global_theme()
 
@@ -6427,6 +6428,14 @@ catalogos_table = _first_app_value(
 st.divider()
 with st.expander("Base de datos de actos publicos, fichas y oferentes", expanded=False):
     render_panamacompra_db_panel(show_header=False)
+
+with st.expander("Oportunidades CL sin propuestas", expanded=False):
+    render_cl_opportunities_panel(
+        backend=backend_refs,
+        db_url=db_url_refs,
+        db_path=db_path_refs,
+        key_prefix="pc_cl_opportunities",
+    )
 
 with st.expander("Prospeccion RIR", expanded=False):
     render_prospeccion_rir_panel(
