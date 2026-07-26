@@ -32,11 +32,17 @@ from services.inteligencia_proveedores_v3 import (
     SCORE_PRESETS,
     apply_master_filters,
     dataframe_to_csv_bytes,
+    intelligence_view_frame,
     normalize_score_weights,
     preset_range,
     score_opportunities,
     sort_and_page,
     split_search_groups,
+)
+from services.inteligencia_renglones_v3 import (
+    display_line_results,
+    prepare_line_results,
+    summarize_line_results,
 )
 from ui.theme import apply_global_theme
 
@@ -431,11 +437,8 @@ def _render_master_table(frame: pd.DataFrame) -> None:
         "Monto adjudicado confirmado": "monto_adjudicado",
         "Número de actos": "actos",
         "Actos de ficha única": "actos_ficha_unica",
-        "Entidades distintas": "entidades",
         "Menor competencia promedio": "participantes_promedio",
         "Mayor crecimiento reciente": "tendencia_6m_pct",
-        "Mayor confianza": "score_confianza",
-        "Menor complejidad": "score_complejidad",
         "Mayor cobertura de datos": "cobertura_monto_referencia_pct",
         "Ficha": "ficha",
     }
@@ -453,8 +456,7 @@ def _render_master_table(frame: pd.DataFrame) -> None:
     st.caption(f"Orden aplicado sobre las **{total:,} fichas filtradas**. Página {page} de {pages}.")
 
     display_columns = [
-        "ficha", "nombre_ficha", "recomendacion", "score_oportunidad", "score_demanda", "score_economia",
-        "score_competencia", "score_viabilidad", "score_complejidad", "score_confianza", "actos", "actos_ficha_unica", "entidades",
+        "ficha", "nombre_ficha", "recomendacion", "score_oportunidad", "actos", "actos_ficha_unica",
         "monto_referencia", "monto_adjudicado", "cobertura_monto_referencia_pct", "cobertura_monto_adjudicado_pct",
         "cobertura_ganador_pct", "cobertura_participantes_pct", "ticket_promedio", "ticket_mediano",
         "participantes_promedio", "participantes_mediana", "proponentes_distintos", "top_1_ganador", "top_1_pct",
@@ -462,7 +464,9 @@ def _render_master_table(frame: pd.DataFrame) -> None:
         "proveedores_catalogo", "proveedores_contactables", "tiene_ct", "registro_sanitario", "tendencia_6m_pct",
         "ultima_fecha", "razones", "enlace_minsa",
     ]
-    display = page_frame[[column for column in display_columns if column in page_frame.columns]].copy()
+    display = intelligence_view_frame(
+        page_frame[[column for column in display_columns if column in page_frame.columns]]
+    )
     st.dataframe(
         display,
         width="stretch",
@@ -473,12 +477,6 @@ def _render_master_table(frame: pd.DataFrame) -> None:
             "nombre_ficha": st.column_config.TextColumn("Nombre de ficha", width="large"),
             "recomendacion": st.column_config.TextColumn("Recomendación", width="medium"),
             "score_oportunidad": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
-            "score_demanda": st.column_config.NumberColumn("Demanda", format="%.1f"),
-            "score_economia": st.column_config.NumberColumn("Economía", format="%.1f"),
-            "score_competencia": st.column_config.NumberColumn("Competencia", format="%.1f"),
-            "score_viabilidad": st.column_config.NumberColumn("Viabilidad", format="%.1f"),
-            "score_complejidad": st.column_config.NumberColumn("Complejidad favorable", format="%.1f"),
-            "score_confianza": st.column_config.NumberColumn("Confianza", format="%.1f"),
             "monto_referencia": st.column_config.NumberColumn("Monto referencia", format="$ %.2f"),
             "monto_adjudicado": st.column_config.NumberColumn("Adjudicado confirmado", format="$ %.2f"),
             "ticket_promedio": st.column_config.NumberColumn("Ticket promedio", format="$ %.2f"),
@@ -498,7 +496,11 @@ def _render_master_table(frame: pd.DataFrame) -> None:
     )
     st.download_button(
         "Descargar todas las fichas filtradas (CSV)",
-        dataframe_to_csv_bytes(frame.sort_values(sort_options[sort_label], ascending=ascending, kind="stable")),
+        dataframe_to_csv_bytes(
+            intelligence_view_frame(
+                frame.sort_values(sort_options[sort_label], ascending=ascending, kind="stable")
+            )
+        ),
         file_name=f"inteligencia_oportunidades_{date.today():%Y%m%d}.csv",
         mime="text/csv",
         key="intel_v3_download_master",
@@ -523,7 +525,12 @@ def _render_trends(frame: pd.DataFrame, filters: AnalyticsFilters, repository: A
     metric_map = {"Actos": "actos", "Monto de referencia": "monto_referencia", "Monto adjudicado": "monto_adjudicado"}
     pivot = monthly.pivot_table(index="mes", columns="ficha", values=metric_map[metric_label], aggfunc="sum", fill_value=0)
     st.line_chart(pivot, height=430)
-    st.dataframe(monthly, width="stretch", hide_index=True, height=380)
+    st.dataframe(
+        intelligence_view_frame(monthly),
+        width="stretch",
+        hide_index=True,
+        height=380,
+    )
 
 
 def _render_competition(frame: pd.DataFrame) -> None:
@@ -537,7 +544,21 @@ def _render_competition(frame: pd.DataFrame) -> None:
     st.caption("Arriba a la izquierda: mayor mercado con menos participantes. El color/tamaño representa el score integral.")
     detail = frame.sort_values(["score_competencia", "monto_referencia"], ascending=[False, False]).head(250)
     st.dataframe(
-        detail[["ficha", "nombre_ficha", "participantes_promedio", "proporcion_unico_proponente", "proponentes_distintos", "concentracion_hhi", "top_1_ganador", "top_1_pct", "score_competencia"]],
+        intelligence_view_frame(
+            detail[
+                [
+                    "ficha",
+                    "nombre_ficha",
+                    "participantes_promedio",
+                    "proporcion_unico_proponente",
+                    "proponentes_distintos",
+                    "concentracion_hhi",
+                    "top_1_ganador",
+                    "top_1_pct",
+                    "score_competencia",
+                ]
+            ]
+        ),
         width="stretch",
         hide_index=True,
         height=650,
@@ -566,7 +587,7 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
             st.info("No se encontraron proponentes estructurados para esta ficha y periodo.")
         else:
             st.dataframe(
-                providers,
+                intelligence_view_frame(providers),
                 width="stretch",
                 hide_index=True,
                 height=650,
@@ -580,13 +601,18 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
         if catalog.empty:
             st.info("No hay proveedores vinculados a esta ficha en el catálogo actual.")
         else:
-            st.dataframe(catalog, width="stretch", hide_index=True, height=650)
+            st.dataframe(
+                intelligence_view_frame(catalog),
+                width="stretch",
+                hide_index=True,
+                height=650,
+            )
     with tab3:
         if acts.empty:
             st.info("No hay actos para la ficha bajo los filtros actuales.")
         else:
             st.dataframe(
-                acts,
+                intelligence_view_frame(acts, extra_hidden=("detection_score",)),
                 width="stretch",
                 hide_index=True,
                 height=760,
@@ -594,7 +620,6 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
                     "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
                     "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
                     "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
-                    "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
                 },
             )
 
@@ -670,6 +695,115 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
             result_url = str(status.get("result_file_url", "") or "").strip()
             if result_url:
                 st.link_button("Abrir resultado", result_url)
+
+        if st.button(
+            "Cargar detalle por renglón",
+            key="intel_v3_load_line_results",
+            help=(
+                "Lee únicamente la salida detallada de este estudio. "
+                "No vuelve a ejecutar el scraping ni modifica los indicadores actuales."
+            ),
+        ):
+            try:
+                from sheets import get_client, read_worksheet
+
+                client, _ = get_client()
+                result_sheet_id = (
+                    _config_value("INTEL_STUDY_RESULTS_SHEET_ID")
+                    or manual_sheet_id
+                )
+                raw_lines = read_worksheet(
+                    client,
+                    result_sheet_id,
+                    "intel_study_line_items_remote",
+                )
+                prepared_lines = prepare_line_results(
+                    raw_lines,
+                    request_id=request_id,
+                    ficha=ficha,
+                )
+                st.session_state["intel_v3_line_results"] = {
+                    "request_id": request_id,
+                    "ficha": ficha,
+                    "frame": prepared_lines,
+                }
+            except Exception as exc:
+                st.error(f"No se pudo cargar el detalle por renglón: {exc}")
+
+        stored_lines = st.session_state.get("intel_v3_line_results", {})
+        if (
+            isinstance(stored_lines, dict)
+            and stored_lines.get("request_id") == request_id
+            and stored_lines.get("ficha") == ficha
+            and isinstance(stored_lines.get("frame"), pd.DataFrame)
+        ):
+            line_frame = stored_lines["frame"]
+            with st.expander("Resultados atribuibles por renglón", expanded=True):
+                if line_frame.empty:
+                    st.info(
+                        "Todavía no hay resultados por renglón para esta solicitud. "
+                        "Si el estudio sigue en ejecución, vuelve a cargar al finalizar."
+                    )
+                else:
+                    summary = summarize_line_results(line_frame)
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Actos", f"{summary['actos']:,}")
+                    c2.metric("Renglones atribuibles", f"{summary['renglones']:,}")
+                    c3.metric("Ofertas vinculadas", f"{summary['ofertas']:,}")
+                    c4.metric(
+                        "Referencia atribuible",
+                        _money(summary["referencia_atribuible"]),
+                    )
+                    c5.metric(
+                        "Pendientes de revisión",
+                        f"{summary['pendientes_revision']:,}",
+                    )
+                    st.caption(
+                        "Esta capa no usa el total global del acto: solo suma renglones "
+                        "que pudieron vincularse a la ficha. Los casos ambiguos quedan "
+                        "visibles y marcados para revisión."
+                    )
+                    display = display_line_results(line_frame)
+                    st.dataframe(
+                        display,
+                        width="stretch",
+                        hide_index=True,
+                        height=720,
+                        column_config={
+                            "Acto": st.column_config.LinkColumn(
+                                "Acto",
+                                display_text="Abrir",
+                            ),
+                            "Confianza ficha–renglón": st.column_config.ProgressColumn(
+                                "Confianza ficha–renglón",
+                                min_value=0.0,
+                                max_value=1.0,
+                                format="%.2f",
+                            ),
+                            "Confianza oferta–renglón": st.column_config.ProgressColumn(
+                                "Confianza oferta–renglón",
+                                min_value=0.0,
+                                max_value=1.0,
+                                format="%.2f",
+                            ),
+                            "Referencia unitaria": st.column_config.NumberColumn(
+                                "Referencia unitaria",
+                                format="$ %.2f",
+                            ),
+                            "Referencia del renglón": st.column_config.NumberColumn(
+                                "Referencia del renglón",
+                                format="$ %.2f",
+                            ),
+                            "Oferta unitaria": st.column_config.NumberColumn(
+                                "Oferta unitaria",
+                                format="$ %.2f",
+                            ),
+                            "Oferta del renglón": st.column_config.NumberColumn(
+                                "Oferta del renglón",
+                                format="$ %.2f",
+                            ),
+                        },
+                    )
 
 
 _apply_pending_saved_view()

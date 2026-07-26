@@ -18,6 +18,7 @@ from services.inteligencia_proveedores_v3 import (  # noqa: E402
     AnalyticsFilters,
     AnalyticsRepository,
     apply_master_filters,
+    intelligence_view_frame,
     preset_range,
     score_opportunities,
     sort_and_page,
@@ -34,6 +35,32 @@ class ServiceUnitTests(unittest.TestCase):
 
     def test_period_2026_is_bounded_by_today(self) -> None:
         self.assertEqual(preset_range("2026", today=date(2026, 7, 22)), (date(2026, 1, 1), date(2026, 7, 22)))
+
+    def test_intelligence_views_hide_unhelpful_columns_without_mutating_metrics(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "ficha": "43358",
+                    "entidad": "CSS",
+                    "entidades": 4,
+                    "score_demanda": 90.0,
+                    "score_economia": 80.0,
+                    "score_competencia": 70.0,
+                    "score_viabilidad": 60.0,
+                    "score_complejidad": 50.0,
+                    "score_confianza": 95.0,
+                    "score_oportunidad": 75.0,
+                    "detection_score": 98.0,
+                }
+            ]
+        )
+
+        visible = intelligence_view_frame(frame, extra_hidden=("detection_score",))
+
+        self.assertEqual(visible.columns.tolist(), ["ficha", "score_oportunidad"])
+        self.assertIn("score_demanda", frame.columns)
+        self.assertIn("entidad", frame.columns)
+        self.assertIn("detection_score", frame.columns)
 
     def test_scoring_and_global_sort_are_deterministic(self) -> None:
         frame = pd.DataFrame(

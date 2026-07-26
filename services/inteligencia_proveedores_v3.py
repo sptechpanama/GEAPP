@@ -54,6 +54,22 @@ SCORE_PRESETS = {
     "baja_complejidad": {"demanda": 22.0, "economia": 23.0, "competencia": 15.0, "viabilidad": 15.0, "complejidad": 25.0},
 }
 
+# Estas columnas siguen formando parte del motor de puntuación y de los filtros,
+# pero se omiten de las tablas orientadas al usuario para mantener las vistas
+# de Inteligencia de proveedores más limpias.
+INTELLIGENCE_VIEW_HIDDEN_COLUMNS = frozenset(
+    {
+        "entidad",
+        "entidades",
+        "score_demanda",
+        "score_economia",
+        "score_competencia",
+        "score_viabilidad",
+        "score_complejidad",
+        "score_confianza",
+    }
+)
+
 
 def clean_text(value: object) -> str:
     result = str(value if value is not None else "").strip()
@@ -886,6 +902,20 @@ def sort_and_page(
 
 def dataframe_to_csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame.to_csv(index=False).encode("utf-8-sig")
+
+
+def intelligence_view_frame(
+    frame: pd.DataFrame,
+    *,
+    extra_hidden: Iterable[str] = (),
+) -> pd.DataFrame:
+    """Devuelve una copia apta para mostrar sin alterar el marco analítico."""
+
+    hidden = INTELLIGENCE_VIEW_HIDDEN_COLUMNS.union(str(value) for value in extra_hidden)
+    return frame.drop(
+        columns=[column for column in frame.columns if column in hidden],
+        errors="ignore",
+    ).copy()
 
 
 def preset_range(key: str, *, today: date | None = None) -> tuple[date | None, date | None]:
