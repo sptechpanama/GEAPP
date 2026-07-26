@@ -306,6 +306,7 @@ class AnalyticsRepository:
         self._has_normalized_search = (
             "search_text_norm" in fact_columns and "search_text_norm" in metadata_columns
         )
+        self._has_risk_class = "clase_riesgo" in metadata_columns
 
     def build_metadata(self) -> dict[str, str]:
         try:
@@ -473,10 +474,16 @@ class AnalyticsRepository:
             if self._has_attributed_amounts
             else "award_amount > 0"
         )
+        risk_class_select = (
+            "m.clase_riesgo"
+            if self._has_risk_class
+            else "'' AS clase_riesgo"
+        )
         query = f"""
             WITH filtered AS MATERIALIZED (
                 SELECT f.*, m.nombre_ficha, m.descripcion, m.area, m.tipo_producto,
-                       m.especialidad, m.tiene_ct, m.registro_sanitario, m.enlace_minsa
+                       m.especialidad, m.tiene_ct, m.registro_sanitario, m.enlace_minsa,
+                       {risk_class_select}
                 FROM intel_actos_fichas f
                 LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
                 WHERE {where_sql}
@@ -489,6 +496,7 @@ class AnalyticsRepository:
                        MAX(COALESCE(especialidad, '')) AS especialidad,
                        MAX(COALESCE(tiene_ct, '')) AS tiene_ct,
                        MAX(COALESCE(registro_sanitario, '')) AS registro_sanitario,
+                       MAX(COALESCE(clase_riesgo, '')) AS clase_riesgo,
                        MAX(COALESCE(enlace_minsa, '')) AS enlace_minsa,
                        COUNT(DISTINCT acto_key) AS actos,
                        COUNT(DISTINCT CASE WHEN is_unique_ficha = 1 THEN acto_key END) AS actos_ficha_unica,
@@ -1180,13 +1188,25 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             (result["cobertura_ganador_pct"].clip(0, 100), 0.12),
         ]
     )
-    result["score_complejidad"] = _weighted_mean(
+    # La facilidad regulatoria usa la clase oficial de riesgo de MINSA:
+    # A es la más favorable, B intermedia y C la más exigente. Durante una
+    # transición de esquema, las fichas todavía sin clase conservan el cálculo
+    # anterior para no convertir una ausencia de metadata en una penalización.
+    legacy_complexity = _weighted_mean(
         [
             (ct_component, 0.45),
             (rs_component, 0.35),
             (_percentile(result["pct_ficha_unica"]), 0.20),
         ]
     )
+    risk_class = (
+        result.get("clase_riesgo", pd.Series("", index=result.index))
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    risk_class_score = risk_class.map({"A": 100.0, "B": 50.0, "C": 0.0})
+    result["score_complejidad"] = risk_class_score.fillna(legacy_complexity)
     metadata_component = (
         result.get("nombre_ficha", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 55
         + result.get("enlace_minsa", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 45

@@ -509,10 +509,10 @@ def _period_inputs() -> tuple[date | None, date | None]:
 def _score_weights() -> tuple[str, dict[str, float]]:
     preset_labels = {
         "Equilibrado": "equilibrado",
-        "Priorizar volumen y dinero": "volumen",
-        "Priorizar baja competencia": "baja_competencia",
-        "Priorizar búsqueda de proveedor": "buscar_proveedor",
-        "Priorizar baja complejidad": "baja_complejidad",
+        "Priorizar número de actos y monto atribuible": "volumen",
+        "Priorizar menos participantes": "baja_competencia",
+        "Priorizar proveedores disponibles": "buscar_proveedor",
+        "Priorizar clase de riesgo favorable": "baja_complejidad",
         "Personalizado": "personalizado",
     }
     label = st.selectbox("Enfoque del ranking", list(preset_labels), index=0, key="intel_v3_score_preset")
@@ -523,16 +523,16 @@ def _score_weights() -> tuple[str, dict[str, float]]:
         columns = st.columns(3)
         raw: dict[str, float] = {}
         labels = {
-            "demanda": "Demanda",
-            "economia": "Potencial económico",
-            "competencia": "Competencia favorable",
-            "viabilidad": "Viabilidad/proveedores",
+            "demanda": "Número de actos",
+            "economia": "Monto atribuible",
+            "competencia": "Menos participantes",
+            "viabilidad": "Proveedores disponibles",
             "preparacion": "Preparación operativa",
             "confianza": "Confianza del dato",
         }
         labels.pop("preparacion", None)
         labels.pop("confianza", None)
-        labels["complejidad"] = "Complejidad favorable"
+        labels["complejidad"] = "Clase de riesgo favorable"
         for index, (name, display) in enumerate(labels.items()):
             with columns[index % 3]:
                 raw[name] = float(st.number_input(display, 0.0, 100.0, float(SCORE_PRESETS["equilibrado"][name]), 1.0, key=f"intel_v3_weight_{name}"))
@@ -642,7 +642,8 @@ def _render_master_table(frame: pd.DataFrame) -> None:
         "monto_adjudicado_contexto", "ticket_promedio", "ticket_mediano",
         "participantes_promedio", "participantes_mediana", "proponentes_distintos", "top_1_ganador", "top_1_pct",
         "top_3_concentracion_pct", "concentracion_hhi",
-        "proveedores_catalogo", "proveedores_contactables", "tiene_ct", "registro_sanitario", "tendencia_6m_pct",
+        "proveedores_catalogo", "proveedores_contactables", "tiene_ct", "registro_sanitario", "clase_riesgo",
+        "tendencia_6m_pct",
         "ultima_fecha", "razones", "enlace_minsa",
     ]
     display = intelligence_view_frame(
@@ -666,6 +667,7 @@ def _render_master_table(frame: pd.DataFrame) -> None:
             "ticket_mediano": st.column_config.NumberColumn("Ticket mediano", format="$ %.2f"),
             "participantes_promedio": st.column_config.NumberColumn("Participantes prom.", format="%.2f"),
             "participantes_mediana": st.column_config.NumberColumn("Participantes mediana", format="%.2f"),
+            "clase_riesgo": st.column_config.TextColumn("Clase de riesgo"),
             "top_1_pct": st.column_config.NumberColumn("Top 1 %", format="%.1f%%"),
             "top_3_concentracion_pct": st.column_config.NumberColumn("Concentración Top 3", format="%.1f%%"),
             "tendencia_6m_pct": st.column_config.NumberColumn("Tendencia 6m", format="%.1f%%"),

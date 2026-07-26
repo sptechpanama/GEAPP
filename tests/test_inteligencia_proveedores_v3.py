@@ -99,6 +99,26 @@ class ServiceUnitTests(unittest.TestCase):
         pd.testing.assert_series_equal(scored["score_oportunidad"], expected, check_names=False)
         self.assertTrue(scored["score_confianza"].between(0, 100).all())
 
+    def test_risk_class_controls_complexity_score(self) -> None:
+        common = {
+            "actos": 10,
+            "actos_ficha_unica": 5,
+            "pct_ficha_unica": 50,
+            "tiene_ct": "Si",
+            "registro_sanitario": "No",
+        }
+        frame = pd.DataFrame(
+            [
+                {"ficha": "A", "clase_riesgo": "A", **common},
+                {"ficha": "B", "clase_riesgo": "B", **common},
+                {"ficha": "C", "clase_riesgo": "C", **common},
+            ]
+        )
+        scored = score_opportunities(frame).set_index("ficha")
+        self.assertEqual(float(scored.loc["A", "score_complejidad"]), 100.0)
+        self.assertEqual(float(scored.loc["B", "score_complejidad"]), 50.0)
+        self.assertEqual(float(scored.loc["C", "score_complejidad"]), 0.0)
+
 
 class RepositoryIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
