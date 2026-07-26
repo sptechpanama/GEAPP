@@ -18,25 +18,7 @@ from core.config import APP_ROOT
 from services.access_control import build_authenticator, current_username, require_page_access
 from services.auth_drive import get_drive_delegated
 from services import inteligencia_orquestador_v3 as _orchestrator_v3
-from services.inteligencia_proveedores_v3 import (
-    AnalyticsFilters,
-    AnalyticsRepository,
-    AnalyticsUnavailable,
-    DATE_COLUMNS,
-    ELIGIBLE_RS_STATUS,
-    PROFILE_LABELS,
-    SCORE_PRESETS,
-    apply_master_filters,
-    dataframe_to_csv_bytes,
-    intelligence_view_frame,
-    normalize_ficha_list,
-    normalize_text,
-    normalize_score_weights,
-    preset_range,
-    score_opportunities,
-    sort_and_page,
-    split_search_groups,
-)
+from services import inteligencia_proveedores_v3 as _analytics_v3
 from ui.theme import apply_global_theme
 
 
@@ -44,6 +26,57 @@ from ui.theme import apply_global_theme
 # servicio durante un despliegue incremental. Si faltan exports recién
 # incorporados, recargamos el módulo desde el código actualmente desplegado
 # antes de enlazar las funciones que usa esta página.
+_ANALYTICS_EXPORTS = (
+    "AnalyticsFilters",
+    "AnalyticsRepository",
+    "AnalyticsUnavailable",
+    "DATE_COLUMNS",
+    "ELIGIBLE_RS_STATUS",
+    "PROFILE_LABELS",
+    "SCORE_PRESETS",
+    "apply_master_filters",
+    "dataframe_to_csv_bytes",
+    "intelligence_view_frame",
+    "normalize_ficha_list",
+    "normalize_text",
+    "normalize_score_weights",
+    "preset_range",
+    "score_opportunities",
+    "sort_and_page",
+    "split_search_groups",
+)
+if any(not hasattr(_analytics_v3, name) for name in _ANALYTICS_EXPORTS):
+    importlib.invalidate_caches()
+    _analytics_v3 = importlib.reload(_analytics_v3)
+
+_missing_analytics_exports = [
+    name for name in _ANALYTICS_EXPORTS if not hasattr(_analytics_v3, name)
+]
+if _missing_analytics_exports:
+    raise ImportError(
+        "El servicio analítico desplegado está incompleto. Faltan: "
+        + ", ".join(_missing_analytics_exports)
+    )
+
+AnalyticsFilters = _analytics_v3.AnalyticsFilters
+AnalyticsRepository = _analytics_v3.AnalyticsRepository
+AnalyticsUnavailable = _analytics_v3.AnalyticsUnavailable
+DATE_COLUMNS = _analytics_v3.DATE_COLUMNS
+ELIGIBLE_RS_STATUS = _analytics_v3.ELIGIBLE_RS_STATUS
+PROFILE_LABELS = _analytics_v3.PROFILE_LABELS
+SCORE_PRESETS = _analytics_v3.SCORE_PRESETS
+apply_master_filters = _analytics_v3.apply_master_filters
+dataframe_to_csv_bytes = _analytics_v3.dataframe_to_csv_bytes
+intelligence_view_frame = _analytics_v3.intelligence_view_frame
+normalize_ficha_list = _analytics_v3.normalize_ficha_list
+normalize_text = _analytics_v3.normalize_text
+normalize_score_weights = _analytics_v3.normalize_score_weights
+preset_range = _analytics_v3.preset_range
+score_opportunities = _analytics_v3.score_opportunities
+sort_and_page = _analytics_v3.sort_and_page
+split_search_groups = _analytics_v3.split_search_groups
+
+
 _ORCHESTRATOR_EXPORTS = (
     "delete_saved_view",
     "get_request_status",
