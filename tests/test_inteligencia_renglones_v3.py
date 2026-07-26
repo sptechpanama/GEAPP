@@ -95,4 +95,5 @@ def test_display_keeps_auditable_columns_and_link() -> None:
     display = display_line_results(result)
     assert "Acto" in display
     assert "Referencia del renglón" in display
+    assert "Entidad" not in display
     assert "Cómo se vinculó la oferta" not in display or len(display) == 3

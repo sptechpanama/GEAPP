@@ -144,7 +144,6 @@ def display_line_results(frame: pd.DataFrame) -> pd.DataFrame:
     rename = {
         "acto_url": "Acto",
         "acto_nombre": "Nombre del acto",
-        "entidad": "Entidad",
         "renglon_numero": "Renglón",
         "renglon_texto": "Descripción del renglón",
         "match_method": "Cómo se identificó",
