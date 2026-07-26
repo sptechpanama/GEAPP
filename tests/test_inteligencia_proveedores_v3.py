@@ -18,6 +18,7 @@ from services.inteligencia_proveedores_v3 import (  # noqa: E402
     AnalyticsFilters,
     AnalyticsRepository,
     apply_master_filters,
+    intelligence_view_frame,
     normalize_ficha_list,
     preset_range,
     score_opportunities,
@@ -27,6 +28,30 @@ from services.inteligencia_proveedores_v3 import (  # noqa: E402
 
 
 class ServiceUnitTests(unittest.TestCase):
+    def test_visible_tables_hide_internal_scores_coverage_and_entities(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "ficha": "43358",
+                    "entidad": "CSS",
+                    "entidades": 4,
+                    "score_demanda": 90,
+                    "score_economia": 80,
+                    "score_competencia": 70,
+                    "score_viabilidad": 60,
+                    "score_complejidad": 50,
+                    "score_confianza": 40,
+                    "cobertura_monto_adjudicado_pct": 30,
+                    "cobertura_monto_referencia_pct": 20,
+                    "cobertura_ganador_pct": 10,
+                    "cobertura_participantes_pct": 5,
+                    "monto_referencia": 1000,
+                }
+            ]
+        )
+        visible = intelligence_view_frame(frame)
+        self.assertEqual(visible.columns.tolist(), ["ficha", "monto_referencia"])
+
     def test_multiple_ficha_parser_accepts_common_separators_and_deduplicates(self) -> None:
         self.assertEqual(
             normalize_ficha_list("52617, 23009\n*21833; 21834 52617"),
@@ -318,6 +343,170 @@ class RepositoryIntegrationTests(unittest.TestCase):
             AnalyticsFilters(detection_profile="muy_flexible", contactable_only=True)
         )
         self.assertEqual(contactable["ficha"].tolist(), ["43358"])
+
+
+class AttributedAmountRepositoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp.name) / "analytics_attributed.db"
+        connection = sqlite3.connect(self.db_path)
+        connection.executescript(
+            """
+            CREATE TABLE intel_actos_fichas (
+                acto_key TEXT, source_id TEXT, ficha TEXT, is_unique_ficha INTEGER,
+                detected_ficha_count INTEGER, detection_score REAL, detection_method TEXT,
+                detection_field TEXT, detection_evidence TEXT, detector_version TEXT,
+                catalog_version TEXT, enlace TEXT, titulo TEXT, entidad TEXT,
+                unidad_solicitante TEXT, estado TEXT, publication_date TEXT,
+                celebration_date TEXT, celebration_end_date TEXT, award_date TEXT,
+                update_date TEXT, source_line_count INTEGER, attributed_line_count INTEGER,
+                reference_amount REAL, reference_amount_context REAL,
+                reference_amount_attributed REAL, reference_amount_attribution_source TEXT,
+                reference_amount_reliable INTEGER, award_amount REAL,
+                award_amount_context REAL, award_amount_attributed REAL,
+                award_amount_attribution_source TEXT, award_amount_reliable INTEGER,
+                award_amount_source TEXT, winner TEXT, winner_short TEXT,
+                participant_count INTEGER, search_text_norm TEXT
+            );
+            CREATE TABLE intel_acto_proponentes (
+                acto_key TEXT, source_id TEXT, ordinal INTEGER, proveedor TEXT,
+                proveedor_norm TEXT, offered_amount REAL, is_winner INTEGER
+            );
+            CREATE TABLE intel_ficha_metadata (
+                ficha TEXT, nombre_ficha TEXT, descripcion TEXT, area TEXT,
+                tipo_producto TEXT, especialidad TEXT, tiene_ct TEXT,
+                registro_sanitario TEXT, enlace_minsa TEXT, metadata_source TEXT,
+                search_text_norm TEXT
+            );
+            CREATE TABLE intel_ficha_catalogo (
+                ficha TEXT, oferente TEXT, contacto TEXT, telefono TEXT, correo TEXT,
+                catalogo TEXT, producto TEXT, fabricante TEXT, marca TEXT,
+                modelo_web TEXT, estado_catalogo TEXT
+            );
+            CREATE TABLE intel_build_metadata (key TEXT, value TEXT);
+            """
+        )
+        insert_sql = """
+            INSERT INTO intel_actos_fichas (
+                acto_key, source_id, ficha, is_unique_ficha, detected_ficha_count,
+                detection_score, detection_method, detection_field, detection_evidence,
+                detector_version, catalog_version, enlace, titulo, entidad,
+                unidad_solicitante, estado, publication_date, celebration_date,
+                celebration_end_date, award_date, update_date, source_line_count,
+                attributed_line_count, reference_amount, reference_amount_context,
+                reference_amount_attributed, reference_amount_attribution_source,
+                reference_amount_reliable, award_amount, award_amount_context,
+                award_amount_attributed, award_amount_attribution_source,
+                award_amount_reliable, award_amount_source, winner, winner_short,
+                participant_count, search_text_norm
+            ) VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+            )
+        """
+        connection.executemany(
+            insert_sql,
+            [
+                (
+                    "a1", "1", "43358", 0, 2, 96, "codigo_contextual", "item_1",
+                    "circuito", "3.3", "cat", "https://acto/mixto", "ACTO MIXTO", "CSS",
+                    "Compras", "Adjudicado", "2026-01-10", "2026-01-15", "2026-01-15",
+                    "2026-01-20", "2026-01-21", 3, 1, 201000, 201000, 1000,
+                    "api_renglon_detectado", 1, 190000, 190000, 0,
+                    "sin_adjudicacion_por_renglon_confirmada", 0, "proponente_ganador",
+                    "BTS", "BTS", 2, "acto mixto circuito css adjudicado",
+                ),
+                (
+                    "a2", "2", "43358", 1, 1, 98, "codigo_contextual", "item_1",
+                    "circuito", "3.3", "cat", "https://acto/unico", "ACTO UNICO", "MINSA",
+                    "Compras", "Adjudicado", "2026-02-10", "2026-02-15", "2026-02-15",
+                    "2026-02-20", "2026-02-21", 1, 1, 5000, 5000, 5000,
+                    "api_renglon_detectado", 1, 4500, 4500, 4500,
+                    "acto_un_renglon_ficha_unica", 1, "proponente_ganador",
+                    "OTRO", "OTRO", 1, "acto unico circuito minsa adjudicado",
+                ),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO intel_acto_proponentes VALUES (?,?,?,?,?,?,?)",
+            [
+                ("a1", "1", 1, "BTS", "bts", 190000, 1),
+                ("a2", "2", 1, "OTRO", "otro", 4500, 1),
+            ],
+        )
+        connection.execute(
+            "INSERT INTO intel_ficha_metadata VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO",
+                "ANESTESIA", "Si", "No", "https://minsa/43358", "test",
+                "43358 kit circuito paciente anestesia",
+            ),
+        )
+        connection.commit()
+        connection.close()
+        self.repo = AnalyticsRepository(
+            create_engine(f"sqlite:///{self.db_path.as_posix()}"),
+            source_label="test-attributed",
+        )
+
+    def tearDown(self) -> None:
+        self.repo.close()
+        self.temp.cleanup()
+
+    def test_master_uses_attributed_amount_and_keeps_global_context_separate(self) -> None:
+        result = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible")
+        )
+        row = result.iloc[0]
+        self.assertEqual(float(row["monto_referencia"]), 6000.0)
+        self.assertEqual(float(row["monto_referencia_contexto"]), 206000.0)
+        self.assertEqual(float(row["monto_adjudicado"]), 4500.0)
+        self.assertEqual(float(row["monto_adjudicado_contexto"]), 194500.0)
+        self.assertEqual(float(row["cobertura_monto_referencia_pct"]), 100.0)
+        self.assertEqual(float(row["cobertura_monto_adjudicado_pct"]), 50.0)
+
+    def test_money_filter_uses_attributed_amount_not_the_whole_act(self) -> None:
+        result = self.repo.master_metrics(
+            AnalyticsFilters(
+                detection_profile="muy_flexible",
+                min_reference_amount=2000,
+            )
+        )
+        row = result.iloc[0]
+        self.assertEqual(int(row["actos"]), 1)
+        self.assertEqual(float(row["monto_referencia"]), 5000.0)
+        self.assertEqual(float(row["monto_referencia_contexto"]), 5000.0)
+
+    def test_act_evidence_exposes_attributed_and_context_amounts(self) -> None:
+        acts = self.repo.acts_for_ficha(
+            "43358",
+            AnalyticsFilters(detection_profile="muy_flexible"),
+        )
+        mixed = acts.loc[acts["acto_key"].eq("a1")].iloc[0]
+        self.assertEqual(float(mixed["reference_amount_attributed"]), 1000.0)
+        self.assertEqual(float(mixed["reference_amount_context"]), 201000.0)
+        self.assertEqual(int(mixed["source_line_count"]), 3)
+        self.assertEqual(int(mixed["attributed_line_count"]), 1)
+
+    def test_provider_money_uses_attributed_award_and_keeps_offer_as_context(self) -> None:
+        providers = self.repo.providers_for_ficha(
+            "43358",
+            AnalyticsFilters(detection_profile="muy_flexible"),
+        ).set_index("proveedor")
+        self.assertEqual(float(providers.loc["BTS", "monto_ganado"]), 0.0)
+        self.assertEqual(float(providers.loc["BTS", "monto_ganado_contexto"]), 190000.0)
+        self.assertEqual(float(providers.loc["OTRO", "monto_ganado"]), 4500.0)
+        self.assertEqual(float(providers.loc["OTRO", "monto_ganado_contexto"]), 4500.0)
+
+    def test_multi_ficha_and_provider_lookups_keep_attributed_amounts(self) -> None:
+        combined = self.repo.all_acts_for_fichas(("43358",))
+        mixed = combined.loc[combined["acto_key"].eq("a1")].iloc[0]
+        self.assertEqual(float(mixed["reference_amount_attributed"]), 1000.0)
+        self.assertEqual(float(mixed["reference_amount_context"]), 201000.0)
+
+        provider = self.repo.all_acts_for_provider("bts")
+        self.assertEqual(len(provider), 1)
+        self.assertEqual(float(provider.iloc[0]["reference_amount_attributed"]), 1000.0)
+        self.assertEqual(float(provider.iloc[0]["reference_amount_context"]), 201000.0)
 
 
 if __name__ == "__main__":

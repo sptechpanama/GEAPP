@@ -28,6 +28,7 @@ from services.inteligencia_proveedores_v3 import (
     SCORE_PRESETS,
     apply_master_filters,
     dataframe_to_csv_bytes,
+    intelligence_view_frame,
     normalize_ficha_list,
     normalize_text,
     normalize_score_weights,
@@ -78,7 +79,7 @@ upsert_tracking_ficha = _orchestrator_v3.upsert_tracking_ficha
 
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
-ANALYTICS_REPOSITORY_API_VERSION = "2026-07-22-multi-ficha-lookup-v1"
+ANALYTICS_REPOSITORY_API_VERSION = "2026-07-26-attributed-amounts-v3"
 LOCAL_ANALYTICS_CANDIDATES = (
     APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
     APP_ROOT / "data" / "inteligencia_proveedores.db",
@@ -576,8 +577,8 @@ def _render_master_table(frame: pd.DataFrame) -> None:
     st.subheader("Mapa maestro de oportunidades")
     sort_options = {
         "Score de oportunidad": "score_oportunidad",
-        "Monto de referencia": "monto_referencia",
-        "Monto adjudicado confirmado": "monto_adjudicado",
+        "Monto referencial atribuible": "monto_referencia",
+        "Monto adjudicado atribuible": "monto_adjudicado",
         "Número de actos": "actos",
         "Actos de ficha única": "actos_ficha_unica",
         "Entidades distintas": "entidades",
@@ -602,16 +603,18 @@ def _render_master_table(frame: pd.DataFrame) -> None:
     st.caption(f"Orden aplicado sobre las **{total:,} fichas filtradas**. Página {page} de {pages}.")
 
     display_columns = [
-        "ficha", "nombre_ficha", "recomendacion", "score_oportunidad", "score_demanda", "score_economia",
-        "score_competencia", "score_viabilidad", "score_complejidad", "score_confianza", "actos", "actos_ficha_unica", "entidades",
-        "monto_referencia", "monto_adjudicado", "cobertura_monto_referencia_pct", "cobertura_monto_adjudicado_pct",
-        "cobertura_ganador_pct", "cobertura_participantes_pct", "ticket_promedio", "ticket_mediano",
+        "ficha", "nombre_ficha", "recomendacion", "score_oportunidad",
+        "actos", "actos_ficha_unica",
+        "monto_referencia", "monto_adjudicado", "monto_referencia_contexto",
+        "monto_adjudicado_contexto", "ticket_promedio", "ticket_mediano",
         "participantes_promedio", "participantes_mediana", "proponentes_distintos", "top_1_ganador", "top_1_pct",
         "top_3_concentracion_pct", "concentracion_hhi",
         "proveedores_catalogo", "proveedores_contactables", "tiene_ct", "registro_sanitario", "tendencia_6m_pct",
         "ultima_fecha", "razones", "enlace_minsa",
     ]
-    display = page_frame[[column for column in display_columns if column in page_frame.columns]].copy()
+    display = intelligence_view_frame(
+        page_frame[[column for column in display_columns if column in page_frame.columns]]
+    )
     st.dataframe(
         display,
         width="stretch",
@@ -622,20 +625,12 @@ def _render_master_table(frame: pd.DataFrame) -> None:
             "nombre_ficha": st.column_config.TextColumn("Nombre de ficha", width="large"),
             "recomendacion": st.column_config.TextColumn("Recomendación", width="medium"),
             "score_oportunidad": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
-            "score_demanda": st.column_config.NumberColumn("Demanda", format="%.1f"),
-            "score_economia": st.column_config.NumberColumn("Economía", format="%.1f"),
-            "score_competencia": st.column_config.NumberColumn("Competencia", format="%.1f"),
-            "score_viabilidad": st.column_config.NumberColumn("Viabilidad", format="%.1f"),
-            "score_complejidad": st.column_config.NumberColumn("Complejidad favorable", format="%.1f"),
-            "score_confianza": st.column_config.NumberColumn("Confianza", format="%.1f"),
-            "monto_referencia": st.column_config.NumberColumn("Monto referencia", format="$ %.2f"),
-            "monto_adjudicado": st.column_config.NumberColumn("Adjudicado confirmado", format="$ %.2f"),
+            "monto_referencia": st.column_config.NumberColumn("Referencia atribuible", format="$ %.2f"),
+            "monto_adjudicado": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
+            "monto_referencia_contexto": st.column_config.NumberColumn("Total actos (contexto)", format="$ %.2f"),
+            "monto_adjudicado_contexto": st.column_config.NumberColumn("Adjudicado actos (contexto)", format="$ %.2f"),
             "ticket_promedio": st.column_config.NumberColumn("Ticket promedio", format="$ %.2f"),
             "ticket_mediano": st.column_config.NumberColumn("Ticket mediano", format="$ %.2f"),
-            "cobertura_monto_referencia_pct": st.column_config.NumberColumn("Cobertura referencia", format="%.1f%%"),
-            "cobertura_monto_adjudicado_pct": st.column_config.NumberColumn("Cobertura adjudicado", format="%.1f%%"),
-            "cobertura_ganador_pct": st.column_config.NumberColumn("Cobertura ganador", format="%.1f%%"),
-            "cobertura_participantes_pct": st.column_config.NumberColumn("Cobertura participantes", format="%.1f%%"),
             "participantes_promedio": st.column_config.NumberColumn("Participantes prom.", format="%.2f"),
             "participantes_mediana": st.column_config.NumberColumn("Participantes mediana", format="%.2f"),
             "top_1_pct": st.column_config.NumberColumn("Top 1 %", format="%.1f%%"),
@@ -647,7 +642,11 @@ def _render_master_table(frame: pd.DataFrame) -> None:
     )
     st.download_button(
         "Descargar todas las fichas filtradas (CSV)",
-        dataframe_to_csv_bytes(frame.sort_values(sort_options[sort_label], ascending=ascending, kind="stable")),
+        dataframe_to_csv_bytes(
+            intelligence_view_frame(
+                frame.sort_values(sort_options[sort_label], ascending=ascending, kind="stable")
+            )
+        ),
         file_name=f"inteligencia_oportunidades_{date.today():%Y%m%d}.csv",
         mime="text/csv",
         key="intel_v3_download_master",
@@ -668,11 +667,26 @@ def _render_trends(frame: pd.DataFrame, filters: AnalyticsFilters, repository: A
     if monthly.empty:
         st.warning("Las fichas seleccionadas no tienen meses con la dimensión temporal elegida.")
         return
-    metric_label = st.radio("Métrica", ["Actos", "Monto de referencia", "Monto adjudicado"], horizontal=True, key="intel_v3_trend_metric")
-    metric_map = {"Actos": "actos", "Monto de referencia": "monto_referencia", "Monto adjudicado": "monto_adjudicado"}
+    metric_label = st.radio(
+        "Métrica",
+        [
+            "Actos",
+            "Monto referencial atribuible",
+            "Monto adjudicado atribuible",
+            "Monto global de actos (contexto)",
+        ],
+        horizontal=True,
+        key="intel_v3_trend_metric",
+    )
+    metric_map = {
+        "Actos": "actos",
+        "Monto referencial atribuible": "monto_referencia",
+        "Monto adjudicado atribuible": "monto_adjudicado",
+        "Monto global de actos (contexto)": "monto_referencia_contexto",
+    }
     pivot = monthly.pivot_table(index="mes", columns="ficha", values=metric_map[metric_label], aggfunc="sum", fill_value=0)
     st.line_chart(pivot, height=430)
-    st.dataframe(monthly, width="stretch", hide_index=True, height=380)
+    st.dataframe(intelligence_view_frame(monthly), width="stretch", hide_index=True, height=380)
 
 
 def _render_competition(frame: pd.DataFrame) -> None:
@@ -686,7 +700,9 @@ def _render_competition(frame: pd.DataFrame) -> None:
     st.caption("Arriba a la izquierda: mayor mercado con menos participantes. El color/tamaño representa el score integral.")
     detail = frame.sort_values(["score_competencia", "monto_referencia"], ascending=[False, False]).head(250)
     st.dataframe(
-        detail[["ficha", "nombre_ficha", "participantes_promedio", "proporcion_unico_proponente", "proponentes_distintos", "concentracion_hhi", "top_1_ganador", "top_1_pct", "score_competencia"]],
+        intelligence_view_frame(
+            detail[["ficha", "nombre_ficha", "participantes_promedio", "proporcion_unico_proponente", "proponentes_distintos", "concentracion_hhi", "top_1_ganador", "top_1_pct", "score_competencia"]]
+        ),
         width="stretch",
         hide_index=True,
         height=650,
@@ -702,7 +718,7 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
     row = frame[frame["ficha"].astype(str).eq(ficha)].iloc[0]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Actos", f"{_safe_int(row.get('actos')):,}")
-    c2.metric("Mercado referencial", _money(row.get("monto_referencia")))
+    c2.metric("Referencial atribuible", _money(row.get("monto_referencia")))
     c3.metric("Participantes promedio", f"{float(row.get('participantes_promedio', 0) or 0):,.2f}")
     c4.metric("Proveedores en catálogo", f"{_safe_int(row.get('proveedores_catalogo')):,}")
 
@@ -715,13 +731,14 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
             st.info("No se encontraron proponentes estructurados para esta ficha y periodo.")
         else:
             st.dataframe(
-                providers,
+                intelligence_view_frame(providers),
                 width="stretch",
                 hide_index=True,
                 height=650,
                 column_config={
-                    "monto_ganado": st.column_config.NumberColumn("Monto ganado", format="$ %.2f"),
-                    "oferta_promedio": st.column_config.NumberColumn("Oferta promedio", format="$ %.2f"),
+                    "monto_ganado": st.column_config.NumberColumn("Monto ganado atribuible", format="$ %.2f"),
+                    "monto_ganado_contexto": st.column_config.NumberColumn("Ganado total actos (contexto)", format="$ %.2f"),
+                    "oferta_promedio_contexto": st.column_config.NumberColumn("Oferta total promedio (contexto)", format="$ %.2f"),
                     "tasa_exito_pct": st.column_config.NumberColumn("Tasa de éxito", format="%.1f%%"),
                 },
             )
@@ -729,21 +746,31 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
         if catalog.empty:
             st.info("No hay proveedores vinculados a esta ficha en el catálogo actual.")
         else:
-            st.dataframe(catalog, width="stretch", hide_index=True, height=650)
+            st.dataframe(intelligence_view_frame(catalog), width="stretch", hide_index=True, height=650)
     with tab3:
         if acts.empty:
             st.info("No hay actos para la ficha bajo los filtros actuales.")
         else:
             st.dataframe(
-                acts,
+                intelligence_view_frame(
+                    acts,
+                    extra_hidden=(
+                        "reference_amount",
+                        "award_amount",
+                        "award_amount_source",
+                        "reference_amount_reliable",
+                        "award_amount_reliable",
+                    ),
+                ),
                 width="stretch",
                 hide_index=True,
                 height=760,
                 column_config={
                     "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
-                    "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
-                    "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
-                    "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
+                    "reference_amount_attributed": st.column_config.NumberColumn("Referencia atribuible", format="$ %.2f"),
+                    "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="$ %.2f"),
+                    "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
+                    "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="$ %.2f"),
                 },
               )
 
@@ -786,26 +813,35 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         return
 
     acts = acts.drop_duplicates(subset=["acto_key"], keep="first").reset_index(drop=True)
-    reference_total = pd.to_numeric(acts.get("reference_amount"), errors="coerce").fillna(0).sum()
-    award_total = pd.to_numeric(acts.get("award_amount"), errors="coerce").fillna(0).sum()
+    reference_total = pd.to_numeric(
+        acts.get("reference_amount_attributed"), errors="coerce"
+    ).fillna(0).sum()
+    award_total = pd.to_numeric(
+        acts.get("award_amount_attributed"), errors="coerce"
+    ).fillna(0).sum()
     publication_dates = acts.get("publication_date", pd.Series(dtype=str)).astype(str)
     valid_dates = publication_dates[publication_dates.str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)]
 
     cols = st.columns(4)
     cols[0].metric("Ficha consultada", ficha)
     cols[1].metric("Actos encontrados", f"{len(acts):,}")
-    cols[2].metric("Monto referencial", _money(reference_total))
-    cols[3].metric("Monto adjudicado", _money(award_total))
+    cols[2].metric("Referencial atribuible", _money(reference_total))
+    cols[3].metric("Adjudicado atribuible", _money(award_total))
     if not valid_dates.empty:
         st.caption(f"Cobertura temporal encontrada: **{valid_dates.min()} → {valid_dates.max()}**")
 
     display_columns = [
-        "enlace", "acto_key", "titulo", "entidad", "estado", "publication_date",
-        "celebration_date", "award_date", "reference_amount", "award_amount",
-        "winner", "participant_count", "is_unique_ficha", "detection_score",
+        "enlace", "acto_key", "titulo", "estado", "publication_date",
+        "celebration_date", "award_date", "reference_amount_attributed",
+        "reference_amount_context", "reference_amount_attribution_source",
+        "award_amount_attributed", "award_amount_context",
+        "award_amount_attribution_source", "source_line_count",
+        "attributed_line_count", "winner", "participant_count", "is_unique_ficha",
         "detection_method", "detection_evidence",
     ]
-    display = acts[[column for column in display_columns if column in acts.columns]].copy()
+    display = intelligence_view_frame(
+        acts[[column for column in display_columns if column in acts.columns]]
+    )
     st.dataframe(
         display,
         width="stretch",
@@ -815,24 +851,26 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
             "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
             "acto_key": st.column_config.TextColumn("Identificador"),
             "titulo": st.column_config.TextColumn("Título", width="large"),
-            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
             "estado": st.column_config.TextColumn("Estado"),
             "publication_date": st.column_config.DateColumn("Publicación", format="YYYY-MM-DD"),
             "celebration_date": st.column_config.DateColumn("Celebración", format="YYYY-MM-DD"),
             "award_date": st.column_config.DateColumn("Adjudicación", format="YYYY-MM-DD"),
-            "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
-            "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
+            "reference_amount_attributed": st.column_config.NumberColumn("Referencia atribuible", format="$ %.2f"),
+            "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="$ %.2f"),
+            "reference_amount_attribution_source": st.column_config.TextColumn("Fuente referencia"),
+            "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
+            "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="$ %.2f"),
+            "award_amount_attribution_source": st.column_config.TextColumn("Fuente adjudicado"),
             "winner": st.column_config.TextColumn("Ganador", width="medium"),
             "participant_count": st.column_config.NumberColumn("Participantes", format="%d"),
             "is_unique_ficha": st.column_config.CheckboxColumn("Ficha única"),
-            "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
             "detection_method": st.column_config.TextColumn("Método"),
             "detection_evidence": st.column_config.TextColumn("Evidencia", width="large"),
         },
     )
     st.download_button(
         "Descargar actos de la ficha",
-        data=dataframe_to_csv_bytes(acts),
+        data=dataframe_to_csv_bytes(intelligence_view_frame(acts)),
         file_name=f"actos_ficha_{ficha}.csv",
         mime="text/csv",
         key="intel_v3_direct_lookup_download",
@@ -889,8 +927,12 @@ def _render_multi_ficha_lookup(repository: AnalyticsRepository) -> None:
         found.update(part.strip() for part in str(value).split(",") if part.strip())
     missing = [ficha for ficha in selected if ficha not in found]
 
-    reference_total = pd.to_numeric(acts.get("reference_amount"), errors="coerce").fillna(0).sum()
-    award_total = pd.to_numeric(acts.get("award_amount"), errors="coerce").fillna(0).sum()
+    reference_total = pd.to_numeric(
+        acts.get("reference_amount_attributed"), errors="coerce"
+    ).fillna(0).sum()
+    award_total = pd.to_numeric(
+        acts.get("award_amount_attributed"), errors="coerce"
+    ).fillna(0).sum()
     publication_dates = acts.get("publication_date", pd.Series(dtype=str)).astype(str)
     valid_dates = publication_dates[publication_dates.str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)]
 
@@ -898,8 +940,8 @@ def _render_multi_ficha_lookup(repository: AnalyticsRepository) -> None:
     cols[0].metric("Fichas solicitadas", f"{len(selected):,}")
     cols[1].metric("Fichas con actos", f"{len(found):,}")
     cols[2].metric("Actos únicos", f"{len(acts):,}")
-    cols[3].metric("Monto referencial", _money(reference_total))
-    cols[4].metric("Monto adjudicado", _money(award_total))
+    cols[3].metric("Referencial atribuible", _money(reference_total))
+    cols[4].metric("Adjudicado atribuible", _money(award_total))
     st.caption("Fichas consultadas: **" + ", ".join(selected) + "**")
     if missing:
         st.caption(
@@ -912,12 +954,16 @@ def _render_multi_ficha_lookup(repository: AnalyticsRepository) -> None:
 
     display_columns = [
         "enlace", "fichas_coincidentes", "fichas_coincidentes_count", "acto_key",
-        "titulo", "entidad", "estado", "publication_date", "celebration_date",
-        "award_date", "reference_amount", "award_amount", "winner",
-        "participant_count", "is_unique_ficha", "detection_score",
+        "titulo", "estado", "publication_date", "celebration_date",
+        "award_date", "reference_amount_attributed", "reference_amount_context",
+        "reference_amount_attribution_source", "award_amount_attributed",
+        "award_amount_context", "award_amount_attribution_source", "winner",
+        "participant_count", "is_unique_ficha",
         "detection_method", "detection_evidence",
     ]
-    display = acts[[column for column in display_columns if column in acts.columns]].copy()
+    display = intelligence_view_frame(
+        acts[[column for column in display_columns if column in acts.columns]]
+    )
     if "is_unique_ficha" in display.columns:
         display["is_unique_ficha"] = pd.to_numeric(
             display["is_unique_ficha"], errors="coerce"
@@ -933,24 +979,26 @@ def _render_multi_ficha_lookup(repository: AnalyticsRepository) -> None:
             "fichas_coincidentes_count": st.column_config.NumberColumn("Cantidad fichas", format="%d"),
             "acto_key": st.column_config.TextColumn("Identificador"),
             "titulo": st.column_config.TextColumn("Título", width="large"),
-            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
             "estado": st.column_config.TextColumn("Estado"),
             "publication_date": st.column_config.DateColumn("Publicación", format="YYYY-MM-DD"),
             "celebration_date": st.column_config.DateColumn("Celebración", format="YYYY-MM-DD"),
             "award_date": st.column_config.DateColumn("Adjudicación", format="YYYY-MM-DD"),
-            "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
-            "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
+            "reference_amount_attributed": st.column_config.NumberColumn("Referencia atribuible", format="$ %.2f"),
+            "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="$ %.2f"),
+            "reference_amount_attribution_source": st.column_config.TextColumn("Fuente referencia"),
+            "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
+            "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="$ %.2f"),
+            "award_amount_attribution_source": st.column_config.TextColumn("Fuente adjudicado"),
             "winner": st.column_config.TextColumn("Ganador", width="medium"),
             "participant_count": st.column_config.NumberColumn("Participantes", format="%d"),
             "is_unique_ficha": st.column_config.CheckboxColumn("Ficha única"),
-            "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
             "detection_method": st.column_config.TextColumn("Método"),
             "detection_evidence": st.column_config.TextColumn("Evidencia", width="large"),
         },
     )
     st.download_button(
         "Descargar consulta combinada",
-        data=dataframe_to_csv_bytes(acts),
+        data=dataframe_to_csv_bytes(intelligence_view_frame(acts)),
         file_name="actos_fichas_" + "_".join(selected) + ".csv",
         mime="text/csv",
         key="intel_v3_multi_lookup_download",
@@ -1019,8 +1067,12 @@ def _render_direct_provider_lookup(repository: AnalyticsRepository) -> None:
 
     associations = associations.drop_duplicates(subset=["acto_key", "ficha"], keep="first").reset_index(drop=True)
     unique_acts = associations.drop_duplicates(subset=["acto_key"], keep="first")
-    reference_total = pd.to_numeric(unique_acts.get("reference_amount"), errors="coerce").fillna(0).sum()
-    award_total = pd.to_numeric(unique_acts.get("award_amount"), errors="coerce").fillna(0).sum()
+    reference_total = pd.to_numeric(
+        unique_acts.get("reference_amount_attributed"), errors="coerce"
+    ).fillna(0).sum()
+    award_total = pd.to_numeric(
+        unique_acts.get("award_amount_attributed"), errors="coerce"
+    ).fillna(0).sum()
     won_acts = _safe_int(pd.to_numeric(unique_acts.get("is_winner"), errors="coerce").fillna(0).gt(0).sum())
     provider_name = str(associations.iloc[0].get("proveedor", "") or selected_provider)
 
@@ -1029,20 +1081,25 @@ def _render_direct_provider_lookup(repository: AnalyticsRepository) -> None:
     cols[1].metric("Actos", f"{len(unique_acts):,}")
     cols[2].metric("Fichas distintas", f"{associations['ficha'].astype(str).nunique():,}")
     cols[3].metric("Actos ganados", f"{won_acts:,}")
-    cols[4].metric("Monto referencial", _money(reference_total))
-    cols[5].metric("Monto adjudicado", _money(award_total))
+    cols[4].metric("Referencial atribuible", _money(reference_total))
+    cols[5].metric("Adjudicado atribuible", _money(award_total))
     st.caption(
         f"Asociaciones acto/ficha: **{len(associations):,}**. Los montos superiores se calculan "
         "una sola vez por acto para evitar duplicarlos cuando el acto contiene varias fichas."
     )
 
     display_columns = [
-        "enlace", "acto_key", "ficha", "nombre_ficha", "titulo", "entidad", "estado",
-        "publication_date", "celebration_date", "award_date", "reference_amount",
-        "award_amount", "offered_amount", "is_winner", "winner", "participant_count",
-        "is_unique_ficha", "detection_score", "detection_method", "detection_evidence",
+        "enlace", "acto_key", "ficha", "nombre_ficha", "titulo", "estado",
+        "publication_date", "celebration_date", "award_date",
+        "reference_amount_attributed", "reference_amount_context",
+        "reference_amount_attribution_source", "award_amount_attributed",
+        "award_amount_context", "award_amount_attribution_source",
+        "offered_amount", "is_winner", "winner", "participant_count",
+        "is_unique_ficha", "detection_method", "detection_evidence",
     ]
-    display = associations[[column for column in display_columns if column in associations.columns]].copy()
+    display = intelligence_view_frame(
+        associations[[column for column in display_columns if column in associations.columns]]
+    )
     if "is_winner" in display.columns:
         display["is_winner"] = pd.to_numeric(display["is_winner"], errors="coerce").fillna(0).gt(0)
     if "is_unique_ficha" in display.columns:
@@ -1058,19 +1115,21 @@ def _render_direct_provider_lookup(repository: AnalyticsRepository) -> None:
             "ficha": st.column_config.TextColumn("Ficha"),
             "nombre_ficha": st.column_config.TextColumn("Nombre ficha", width="large"),
             "titulo": st.column_config.TextColumn("Título", width="large"),
-            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
             "estado": st.column_config.TextColumn("Estado"),
             "publication_date": st.column_config.DateColumn("Publicación", format="YYYY-MM-DD"),
             "celebration_date": st.column_config.DateColumn("Celebración", format="YYYY-MM-DD"),
             "award_date": st.column_config.DateColumn("Adjudicación", format="YYYY-MM-DD"),
-            "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
-            "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
+            "reference_amount_attributed": st.column_config.NumberColumn("Referencia atribuible", format="$ %.2f"),
+            "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="$ %.2f"),
+            "reference_amount_attribution_source": st.column_config.TextColumn("Fuente referencia"),
+            "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
+            "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="$ %.2f"),
+            "award_amount_attribution_source": st.column_config.TextColumn("Fuente adjudicado"),
             "offered_amount": st.column_config.NumberColumn("Oferta empresa", format="$ %.2f"),
             "is_winner": st.column_config.CheckboxColumn("Empresa ganó"),
             "winner": st.column_config.TextColumn("Ganador del acto", width="medium"),
             "participant_count": st.column_config.NumberColumn("Participantes", format="%d"),
             "is_unique_ficha": st.column_config.CheckboxColumn("Ficha única"),
-            "detection_score": st.column_config.NumberColumn("Confianza", format="%.1f"),
             "detection_method": st.column_config.TextColumn("Método"),
             "detection_evidence": st.column_config.TextColumn("Evidencia", width="large"),
         },
@@ -1078,7 +1137,7 @@ def _render_direct_provider_lookup(repository: AnalyticsRepository) -> None:
     safe_name = re.sub(r"[^a-z0-9]+", "_", selected_provider).strip("_") or "empresa"
     st.download_button(
         "Descargar participaciones de la empresa",
-        data=dataframe_to_csv_bytes(associations),
+        data=dataframe_to_csv_bytes(intelligence_view_frame(associations)),
         file_name=f"actos_empresa_{safe_name}.csv",
         mime="text/csv",
         key="intel_v3_provider_lookup_download",
@@ -1364,7 +1423,6 @@ def _render_study_result(
         "acto_id",
         "acto_nombre",
         "acto_url",
-        "entidad",
         "renglon_texto",
         "proveedor",
         "proveedor_ganador",
@@ -1390,7 +1448,9 @@ def _render_study_result(
         "observaciones",
     ]
     st.dataframe(
-        detail[[column for column in display_columns if column in detail]],
+        intelligence_view_frame(
+            detail[[column for column in display_columns if column in detail]]
+        ),
         width="stretch",
         hide_index=True,
         height=min(780, 100 + 35 * max(1, len(detail))),
@@ -1402,7 +1462,6 @@ def _render_study_result(
             "acto_url": st.column_config.LinkColumn(
                 "Panamá Compra", display_text="Abrir"
             ),
-            "entidad": st.column_config.TextColumn("Entidad", width="medium"),
             "renglon_texto": st.column_config.TextColumn(
                 "Renglón", width="large"
             ),
@@ -1646,6 +1705,11 @@ st.caption(
     "Análisis temporal, económico y competitivo sobre fichas completas. "
     "La base filtra y agrega todos los registros; la interfaz recibe únicamente métricas resumidas."
 )
+st.caption(
+    "Los montos principales son **atribuibles a la ficha** y solo se suman cuando existe "
+    "evidencia fiable por renglón. Los totales completos del acto se conservan únicamente "
+    "como contexto y no inflan el valor económico de la ficha."
+)
 
 try:
     repo = _repository(_database_url(), ANALYTICS_REPOSITORY_API_VERSION)
@@ -1685,10 +1749,10 @@ with st.sidebar:
         )
         search_raw = st.text_input("Buscar grupos o frases (separar por coma)", key="intel_v3_search", placeholder="chiller, refrigeración, aire acondicionado")
         search_mode = st.radio("Relación entre grupos", ["OR", "AND"], horizontal=True, key="intel_v3_search_mode")
-        min_reference = float(st.number_input("Precio referencia mínimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_ref"))
-        max_reference = float(st.number_input("Precio referencia máximo (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_ref"))
-        min_award = float(st.number_input("Monto adjudicado minimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_award"))
-        max_award = float(st.number_input("Monto adjudicado maximo (0 = sin limite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_award"))
+        min_reference = float(st.number_input("Referencia atribuible mínima", 0.0, value=0.0, step=100.0, key="intel_v3_min_ref"))
+        max_reference = float(st.number_input("Referencia atribuible máxima (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_ref"))
+        min_award = float(st.number_input("Adjudicado atribuible mínimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_award"))
+        max_award = float(st.number_input("Adjudicado atribuible máximo (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_award"))
     with st.expander("Demanda, competencia y disponibilidad", expanded=False):
         min_acts = int(st.number_input("Actos minimos", 0, value=1, step=1, key="intel_v3_min_acts"))
         min_entities = int(st.number_input("Entidades minimas", 0, value=0, step=1, key="intel_v3_min_entities"))
@@ -1777,8 +1841,8 @@ _render_saved_views(saved_view_payload)
 metric_cols = st.columns(5)
 metric_cols[0].metric("Fichas evaluadas", f"{len(filtered_master):,}")
 metric_cols[1].metric("Actos vinculados", f"{_safe_int(filtered_master.get('actos', pd.Series(dtype=float)).sum()):,}")
-metric_cols[2].metric("Mercado referencial", _money(filtered_master.get("monto_referencia", pd.Series(dtype=float)).sum()))
-metric_cols[3].metric("Adjudicado confirmado", _money(filtered_master.get("monto_adjudicado", pd.Series(dtype=float)).sum()))
+metric_cols[2].metric("Referencial atribuible", _money(filtered_master.get("monto_referencia", pd.Series(dtype=float)).sum()))
+metric_cols[3].metric("Adjudicado atribuible", _money(filtered_master.get("monto_adjudicado", pd.Series(dtype=float)).sum()))
 metric_cols[4].metric("Score promedio", f"{float(filtered_master.get('score_oportunidad', pd.Series(dtype=float)).mean() or 0):,.1f}")
 
 if filtered_master.empty:
