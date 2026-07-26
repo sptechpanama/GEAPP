@@ -1178,8 +1178,6 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             (_percentile(result["proporcion_unico_proponente"]), 0.15),
         ]
     )
-    ct_component = result.get("tiene_ct", pd.Series("", index=result.index)).astype(str).str.lower().eq("si").astype(float) * 100
-    rs_component = result.get("registro_sanitario", pd.Series("", index=result.index)).astype(str).str.lower().eq("no").astype(float) * 100
     result["score_viabilidad"] = _weighted_mean(
         [
             (_percentile(result["proveedores_catalogo"]), 0.38),
@@ -1188,25 +1186,19 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             (result["cobertura_ganador_pct"].clip(0, 100), 0.12),
         ]
     )
-    # La facilidad regulatoria usa la clase oficial de riesgo de MINSA:
-    # A es la más favorable, B intermedia y C la más exigente. Durante una
-    # transición de esquema, las fichas todavía sin clase conservan el cálculo
-    # anterior para no convertir una ausencia de metadata en una penalización.
-    legacy_complexity = _weighted_mean(
-        [
-            (ct_component, 0.45),
-            (rs_component, 0.35),
-            (_percentile(result["pct_ficha_unica"]), 0.20),
-        ]
-    )
+    # La facilidad regulatoria usa la clase oficial de riesgo de MINSA.
     risk_class = (
         result.get("clase_riesgo", pd.Series("", index=result.index))
         .astype(str)
         .str.strip()
         .str.upper()
     )
-    risk_class_score = risk_class.map({"A": 100.0, "B": 50.0, "C": 0.0})
-    result["score_complejidad"] = risk_class_score.fillna(legacy_complexity)
+    # La clase oficial es la única fuente de esta dimensión. Las fichas sin
+    # clase, con N o con "No aplica" quedan sin componente regulatorio; no se
+    # les inventa una clase a partir de CT, RS ni otras métricas.
+    result["score_complejidad"] = risk_class.map(
+        {"A": 100.0, "B": 50.0, "C": 0.0, "D": 0.0}
+    )
     metadata_component = (
         result.get("nombre_ficha", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 55
         + result.get("enlace_minsa", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 45
@@ -1231,10 +1223,18 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     )
 
     normalized_weights = normalize_score_weights(weights)
-    result["score_oportunidad"] = sum(
-        result[f"score_{key}"] * (weight / 100.0)
-        for key, weight in normalized_weights.items()
-    ).clip(0, 100)
+    weighted_sum = pd.Series(0.0, index=result.index, dtype=float)
+    available_weight = pd.Series(0.0, index=result.index, dtype=float)
+    for key, weight in normalized_weights.items():
+        component = pd.to_numeric(result[f"score_{key}"], errors="coerce")
+        available = component.notna()
+        weighted_sum = weighted_sum.add(component.fillna(0.0) * float(weight), fill_value=0.0)
+        available_weight = available_weight.add(available.astype(float) * float(weight), fill_value=0.0)
+    result["score_oportunidad"] = (
+        weighted_sum.div(available_weight.replace(0.0, pd.NA))
+        .fillna(0.0)
+        .clip(0, 100)
+    )
     result["recomendacion"] = result.apply(_recommendation, axis=1)
     result["razones"] = result.apply(_explain_score, axis=1)
     for column in [column for column in result.columns if column.startswith("score_")]:
@@ -1258,15 +1258,21 @@ def _recommendation(row: pd.Series) -> str:
 
 
 def _explain_score(row: pd.Series) -> str:
-    dimensions = [
-        ("demanda", float(row.get("score_demanda", 0) or 0)),
-        ("economía", float(row.get("score_economia", 0) or 0)),
-        ("competencia", float(row.get("score_competencia", 0) or 0)),
-        ("viabilidad", float(row.get("score_viabilidad", 0) or 0)),
-        ("preparación", float(row.get("score_preparacion", 0) or 0)),
-        ("complejidad favorable", float(row.get("score_complejidad", 0) or 0)),
-        ("confianza", float(row.get("score_confianza", 0) or 0)),
-    ]
+    dimensions: list[tuple[str, float]] = []
+    for name, column in (
+        ("demanda", "score_demanda"),
+        ("economía", "score_economia"),
+        ("competencia", "score_competencia"),
+        ("viabilidad", "score_viabilidad"),
+        ("preparación", "score_preparacion"),
+        ("clase de riesgo favorable", "score_complejidad"),
+        ("confianza", "score_confianza"),
+    ):
+        value = pd.to_numeric(pd.Series([row.get(column)]), errors="coerce").iloc[0]
+        if pd.notna(value):
+            dimensions.append((name, float(value)))
+    if not dimensions:
+        return "No hay dimensiones suficientes para explicar el score."
     ordered = sorted(dimensions, key=lambda item: item[1], reverse=True)
     strengths = ", ".join(name for name, value in ordered[:2] if value >= 55) or "sin fortaleza dominante"
     weakness = min(dimensions, key=lambda item: item[1])

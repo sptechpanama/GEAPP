@@ -618,7 +618,7 @@ def _render_master_table(frame: pd.DataFrame) -> None:
         "Menor competencia promedio": "participantes_promedio",
         "Mayor crecimiento reciente": "tendencia_6m_pct",
         "Mayor confianza": "score_confianza",
-        "Menor complejidad": "score_complejidad",
+        "Clase de riesgo más favorable": "score_complejidad",
         "Mayor cobertura de datos": "cobertura_monto_referencia_pct",
         "Ficha": "ficha",
     }
@@ -634,6 +634,18 @@ def _render_master_table(frame: pd.DataFrame) -> None:
         page = int(st.number_input("Página", 1, max_pages, min(int(st.session_state.get("intel_v3_page", 1)), max_pages), key="intel_v3_page"))
     page_frame, pages, total = sort_and_page(frame, sort_by=sort_options[sort_label], ascending=ascending, page=page, page_size=page_size)
     st.caption(f"Orden aplicado sobre las **{total:,} fichas filtradas**. Página {page} de {pages}.")
+    official_classes = (
+        frame.get("clase_riesgo", pd.Series("", index=frame.index))
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin({"A", "B", "C", "D"})
+    )
+    coverage = (100.0 * official_classes.mean()) if len(frame) else 0.0
+    st.caption(
+        f"Clase oficial disponible en **{int(official_classes.sum()):,} de {len(frame):,}** "
+        f"fichas filtradas ({coverage:.1f} %). Las fichas sin clase no reciben un valor inferido."
+    )
 
     display_columns = [
         "ficha", "nombre_ficha", "recomendacion", "score_oportunidad",
@@ -649,6 +661,14 @@ def _render_master_table(frame: pd.DataFrame) -> None:
     display = intelligence_view_frame(
         page_frame[[column for column in display_columns if column in page_frame.columns]]
     )
+    if "clase_riesgo" in display.columns:
+        display["clase_riesgo"] = (
+            display["clase_riesgo"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace({"": "Sin clase oficial"})
+        )
     st.dataframe(
         display,
         width="stretch",
@@ -734,9 +754,15 @@ def _render_competition(frame: pd.DataFrame) -> None:
     st.scatter_chart(chart, x="participantes_promedio", y="monto_referencia", color="score_oportunidad", size="score_oportunidad", height=500)
     st.caption("Arriba a la izquierda: mayor mercado con menos participantes. El color/tamaño representa el score integral.")
     detail = frame.sort_values(["score_competencia", "monto_referencia"], ascending=[False, False]).head(250)
+    detail_columns = [
+        "ficha", "nombre_ficha", "clase_riesgo", "participantes_promedio",
+        "proporcion_unico_proponente", "proponentes_distintos",
+        "concentracion_hhi", "top_1_ganador", "top_1_pct",
+        "score_competencia",
+    ]
     st.dataframe(
         intelligence_view_frame(
-            detail[["ficha", "nombre_ficha", "participantes_promedio", "proporcion_unico_proponente", "proponentes_distintos", "concentracion_hhi", "top_1_ganador", "top_1_pct", "score_competencia"]]
+            detail[[column for column in detail_columns if column in detail.columns]]
         ),
         width="stretch",
         hide_index=True,
@@ -1190,9 +1216,7 @@ def _tracking_payload(
     return {
         "ficha": _normalize_ficha(row.get("ficha", "")),
         "nombre_ficha": str(row.get("nombre_ficha", "") or "").strip(),
-        "clase_riesgo": str(
-            row.get("area", "") or row.get("tipo_producto", "") or ""
-        ).strip(),
+        "clase_riesgo": str(row.get("clase_riesgo", "") or "").strip(),
         "enlace_minsa": str(row.get("enlace_minsa", "") or "").strip(),
         "score_inicial": _safe_float(row.get("score_oportunidad", 0)),
         "clasificacion": str(row.get("recomendacion", "") or "").strip(),

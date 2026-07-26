@@ -84,8 +84,8 @@ class ServiceUnitTests(unittest.TestCase):
     def test_opportunity_score_uses_only_the_five_declared_dimensions(self) -> None:
         frame = pd.DataFrame(
             [
-                {"ficha": "A", "actos": 10, "actos_ficha_unica": 8, "entidades": 4, "meses_activos": 6, "monto_referencia": 100000, "monto_adjudicado": 80000, "ticket_promedio": 10000, "ticket_mediano": 9000, "participantes_promedio": 1.5, "participantes_mediana": 1, "proponentes_distintos": 3, "proveedores_catalogo": 2, "proveedores_contactables": 2, "confianza_deteccion": 95, "cobertura_monto_referencia_pct": 100, "cobertura_monto_adjudicado_pct": 80, "cobertura_ganador_pct": 80, "cobertura_participantes_pct": 90, "pct_ficha_unica": 80, "tiene_ct": "Si", "registro_sanitario": "No", "nombre_ficha": "A", "enlace_minsa": "https://a"},
-                {"ficha": "B", "actos": 2, "actos_ficha_unica": 0, "entidades": 1, "meses_activos": 1, "monto_referencia": 1000, "monto_adjudicado": 0, "ticket_promedio": 500, "ticket_mediano": 500, "participantes_promedio": 5, "participantes_mediana": 5, "proponentes_distintos": 8, "proveedores_catalogo": 0, "proveedores_contactables": 0, "confianza_deteccion": 70, "cobertura_monto_referencia_pct": 50, "cobertura_monto_adjudicado_pct": 0, "cobertura_ganador_pct": 0, "cobertura_participantes_pct": 50, "pct_ficha_unica": 0, "tiene_ct": "No", "registro_sanitario": "Si", "nombre_ficha": "B", "enlace_minsa": ""},
+                {"ficha": "A", "clase_riesgo": "A", "actos": 10, "actos_ficha_unica": 8, "entidades": 4, "meses_activos": 6, "monto_referencia": 100000, "monto_adjudicado": 80000, "ticket_promedio": 10000, "ticket_mediano": 9000, "participantes_promedio": 1.5, "participantes_mediana": 1, "proponentes_distintos": 3, "proveedores_catalogo": 2, "proveedores_contactables": 2, "confianza_deteccion": 95, "cobertura_monto_referencia_pct": 100, "cobertura_monto_adjudicado_pct": 80, "cobertura_ganador_pct": 80, "cobertura_participantes_pct": 90, "pct_ficha_unica": 80, "tiene_ct": "Si", "registro_sanitario": "No", "nombre_ficha": "A", "enlace_minsa": "https://a"},
+                {"ficha": "B", "clase_riesgo": "B", "actos": 2, "actos_ficha_unica": 0, "entidades": 1, "meses_activos": 1, "monto_referencia": 1000, "monto_adjudicado": 0, "ticket_promedio": 500, "ticket_mediano": 500, "participantes_promedio": 5, "participantes_mediana": 5, "proponentes_distintos": 8, "proveedores_catalogo": 0, "proveedores_contactables": 0, "confianza_deteccion": 70, "cobertura_monto_referencia_pct": 50, "cobertura_monto_adjudicado_pct": 0, "cobertura_ganador_pct": 0, "cobertura_participantes_pct": 50, "pct_ficha_unica": 0, "tiene_ct": "No", "registro_sanitario": "Si", "nombre_ficha": "B", "enlace_minsa": ""},
             ]
         )
         scored = score_opportunities(frame)
@@ -112,12 +112,17 @@ class ServiceUnitTests(unittest.TestCase):
                 {"ficha": "A", "clase_riesgo": "A", **common},
                 {"ficha": "B", "clase_riesgo": "B", **common},
                 {"ficha": "C", "clase_riesgo": "C", **common},
+                {"ficha": "D", "clase_riesgo": "D", **common},
+                {"ficha": "SIN", "clase_riesgo": "", **common},
             ]
         )
         scored = score_opportunities(frame).set_index("ficha")
         self.assertEqual(float(scored.loc["A", "score_complejidad"]), 100.0)
         self.assertEqual(float(scored.loc["B", "score_complejidad"]), 50.0)
         self.assertEqual(float(scored.loc["C", "score_complejidad"]), 0.0)
+        self.assertEqual(float(scored.loc["D", "score_complejidad"]), 0.0)
+        self.assertTrue(pd.isna(scored.loc["SIN", "score_complejidad"]))
+        self.assertTrue(pd.notna(scored.loc["SIN", "score_oportunidad"]))
 
 
 class RepositoryIntegrationTests(unittest.TestCase):
