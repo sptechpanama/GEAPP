@@ -232,6 +232,35 @@ class AnalyticsRepository:
 
         fact_columns = {column["name"] for column in inspector.get_columns("intel_actos_fichas")}
         metadata_columns = {column["name"] for column in inspector.get_columns("intel_ficha_metadata")}
+        amount_columns = {
+            "reference_amount_context",
+            "reference_amount_attributed",
+            "reference_amount_reliable",
+            "award_amount_context",
+            "award_amount_attributed",
+            "award_amount_reliable",
+        }
+        self._has_attributed_amounts = amount_columns.issubset(fact_columns)
+        self._reference_metric_column = (
+            "reference_amount_attributed"
+            if self._has_attributed_amounts
+            else "reference_amount"
+        )
+        self._award_metric_column = (
+            "award_amount_attributed"
+            if self._has_attributed_amounts
+            else "award_amount"
+        )
+        self._reference_context_column = (
+            "reference_amount_context"
+            if self._has_attributed_amounts
+            else "reference_amount"
+        )
+        self._award_context_column = (
+            "award_amount_context"
+            if self._has_attributed_amounts
+            else "award_amount"
+        )
         self._has_normalized_search = (
             "search_text_norm" in fact_columns and "search_text_norm" in metadata_columns
         )
@@ -303,16 +332,16 @@ class AnalyticsRepository:
                 placeholders.append(f":{key}")
             clauses.append(f"{alias}.ficha IN ({', '.join(placeholders)})")
         if filters.min_reference_amount > 0:
-            clauses.append(f"{alias}.reference_amount >= :min_reference")
+            clauses.append(f"{alias}.{self._reference_metric_column} >= :min_reference")
             params["min_reference"] = float(filters.min_reference_amount)
         if filters.max_reference_amount > 0:
-            clauses.append(f"{alias}.reference_amount <= :max_reference")
+            clauses.append(f"{alias}.{self._reference_metric_column} <= :max_reference")
             params["max_reference"] = float(filters.max_reference_amount)
         if filters.min_award_amount > 0:
-            clauses.append(f"{alias}.award_amount >= :min_award")
+            clauses.append(f"{alias}.{self._award_metric_column} >= :min_award")
             params["min_award"] = float(filters.min_award_amount)
         if filters.max_award_amount > 0:
-            clauses.append(f"{alias}.award_amount <= :max_award")
+            clauses.append(f"{alias}.{self._award_metric_column} <= :max_award")
             params["max_award"] = float(filters.max_award_amount)
         if filters.ct_status in {"Si", "No"}:
             clauses.append("COALESCE(m.tiene_ct, '') = :ct_status")
@@ -386,6 +415,20 @@ class AnalyticsRepository:
             catalog_filter_sql = "WHERE COALESCE(c.proveedores_catalogo, 0) > 0"
         else:
             catalog_filter_sql = ""
+        reference_metric = self._reference_metric_column
+        award_metric = self._award_metric_column
+        reference_context = self._reference_context_column
+        award_context = self._award_context_column
+        reference_reliable = (
+            "reference_amount_reliable = 1"
+            if self._has_attributed_amounts
+            else "reference_amount > 0"
+        )
+        award_reliable = (
+            "award_amount_reliable = 1"
+            if self._has_attributed_amounts
+            else "award_amount > 0"
+        )
         query = f"""
             WITH filtered AS MATERIALIZED (
                 SELECT f.*, m.nombre_ficha, m.descripcion, m.area, m.tipo_producto,
@@ -407,12 +450,14 @@ class AnalyticsRepository:
                        COUNT(DISTINCT CASE WHEN is_unique_ficha = 1 THEN acto_key END) AS actos_ficha_unica,
                        COUNT(DISTINCT entidad) AS entidades,
                        COUNT(DISTINCT SUBSTR({date_column}, 1, 7)) AS meses_activos,
-                       SUM(reference_amount) AS monto_referencia,
-                       AVG(reference_amount) AS ticket_promedio,
-                       MAX(reference_amount) AS ticket_maximo,
-                       SUM(award_amount) AS monto_adjudicado,
-                       COUNT(DISTINCT CASE WHEN award_amount > 0 THEN acto_key END) AS actos_monto_adjudicado,
-                       COUNT(DISTINCT CASE WHEN reference_amount > 0 THEN acto_key END) AS actos_monto_referencia,
+                       SUM({reference_metric}) AS monto_referencia,
+                       AVG(CASE WHEN {reference_metric} > 0 THEN {reference_metric} END) AS ticket_promedio,
+                       MAX({reference_metric}) AS ticket_maximo,
+                       SUM({award_metric}) AS monto_adjudicado,
+                       SUM({reference_context}) AS monto_referencia_contexto,
+                       SUM({award_context}) AS monto_adjudicado_contexto,
+                       COUNT(DISTINCT CASE WHEN {award_reliable} THEN acto_key END) AS actos_monto_adjudicado,
+                       COUNT(DISTINCT CASE WHEN {reference_reliable} THEN acto_key END) AS actos_monto_referencia,
                        COUNT(DISTINCT CASE WHEN COALESCE(winner, '') <> '' OR COALESCE(winner_short, '') <> '' THEN acto_key END) AS actos_con_ganador,
                        COUNT(DISTINCT CASE WHEN participant_count > 0 THEN acto_key END) AS actos_con_participantes,
                        AVG(participant_count) AS participantes_promedio,
@@ -427,11 +472,11 @@ class AnalyticsRepository:
                 {having_sql}
             ),
             ticket_ranked AS (
-                SELECT ficha, reference_amount,
-                       ROW_NUMBER() OVER (PARTITION BY ficha ORDER BY reference_amount) AS rn,
+                SELECT ficha, {reference_metric} AS reference_amount,
+                       ROW_NUMBER() OVER (PARTITION BY ficha ORDER BY {reference_metric}) AS rn,
                        COUNT(*) OVER (PARTITION BY ficha) AS cnt
                 FROM filtered
-                WHERE reference_amount > 0
+                WHERE {reference_metric} > 0
             ),
             ticket_median AS (
                 SELECT ficha, AVG(reference_amount) AS ticket_mediano
@@ -473,7 +518,7 @@ class AnalyticsRepository:
                 SELECT ficha,
                        CASE WHEN COALESCE(winner, '') <> '' THEN winner ELSE winner_short END AS ganador,
                        COUNT(DISTINCT acto_key) AS actos_ganados,
-                       SUM(award_amount) AS monto_ganado
+                       SUM({award_metric}) AS monto_ganado
                 FROM filtered
                 WHERE COALESCE(winner, '') <> '' OR COALESCE(winner_short, '') <> ''
                 GROUP BY ficha, CASE WHEN COALESCE(winner, '') <> '' THEN winner ELSE winner_short END
@@ -641,8 +686,10 @@ class AnalyticsRepository:
             SELECT f.ficha,
                    SUBSTR(f.{filters.date_column}, 1, 7) AS mes,
                    COUNT(DISTINCT f.acto_key) AS actos,
-                   SUM(f.reference_amount) AS monto_referencia,
-                   SUM(f.award_amount) AS monto_adjudicado,
+                   SUM(f.{self._reference_metric_column}) AS monto_referencia,
+                   SUM(f.{self._award_metric_column}) AS monto_adjudicado,
+                   SUM(f.{self._reference_context_column}) AS monto_referencia_contexto,
+                   SUM(f.{self._award_context_column}) AS monto_adjudicado_contexto,
                    AVG(f.participant_count) AS participantes_promedio
             FROM intel_actos_fichas f
             LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
@@ -655,25 +702,49 @@ class AnalyticsRepository:
     def acts_for_ficha(self, ficha: str, filters: AnalyticsFilters) -> pd.DataFrame:
         where_sql, params = self._filter_sql(filters)
         params["selected_ficha"] = str(ficha)
+        if self._has_attributed_amounts:
+            amount_select = """
+                   f.reference_amount_context, f.reference_amount_attributed,
+                   f.reference_amount_attribution_source, f.reference_amount_reliable,
+                   f.award_amount_context, f.award_amount_attributed,
+                   f.award_amount_attribution_source, f.award_amount_reliable,
+                   f.source_line_count, f.attributed_line_count,
+            """
+            amount_order = "f.reference_amount_attributed DESC, f.reference_amount_context DESC"
+        else:
+            amount_select = """
+                   f.reference_amount AS reference_amount_context,
+                   f.reference_amount AS reference_amount_attributed,
+                   'esquema_legacy_total_acto' AS reference_amount_attribution_source,
+                   CASE WHEN f.reference_amount > 0 THEN 1 ELSE 0 END AS reference_amount_reliable,
+                   f.award_amount AS award_amount_context,
+                   f.award_amount AS award_amount_attributed,
+                   'esquema_legacy_total_acto' AS award_amount_attribution_source,
+                   CASE WHEN f.award_amount > 0 THEN 1 ELSE 0 END AS award_amount_reliable,
+                   0 AS source_line_count, 0 AS attributed_line_count,
+            """
+            amount_order = "f.reference_amount DESC"
         query = f"""
             SELECT f.acto_key, f.enlace, f.titulo, f.entidad, f.estado,
                    f.publication_date, f.celebration_date, f.award_date, f.update_date,
+                   {amount_select}
                    f.reference_amount, f.award_amount, f.award_amount_source,
                    f.winner, f.winner_short, f.participant_count, f.is_unique_ficha,
                    f.detection_score, f.detection_method, f.detection_evidence
             FROM intel_actos_fichas f
             LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
             WHERE {where_sql} AND f.ficha = :selected_ficha
-            ORDER BY f.reference_amount DESC, f.enlace
+            ORDER BY {amount_order}, f.enlace
         """
         return pd.read_sql_query(text(query), self.engine, params=params)
 
     def providers_for_ficha(self, ficha: str, filters: AnalyticsFilters) -> pd.DataFrame:
         where_sql, params = self._filter_sql(filters)
         params["selected_ficha"] = str(ficha)
+        award_metric = self._award_metric_column
         query = f"""
             WITH selected_acts AS (
-                SELECT DISTINCT f.acto_key
+                SELECT DISTINCT f.acto_key, f.{award_metric} AS award_amount_attributed
                 FROM intel_actos_fichas f
                 LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
                 WHERE {where_sql} AND f.ficha = :selected_ficha
@@ -681,8 +752,9 @@ class AnalyticsRepository:
             SELECT p.proveedor,
                    COUNT(DISTINCT p.acto_key) AS participaciones,
                    COUNT(DISTINCT CASE WHEN p.is_winner = 1 THEN p.acto_key END) AS actos_ganados,
-                   SUM(CASE WHEN p.is_winner = 1 THEN p.offered_amount ELSE 0 END) AS monto_ganado,
-                   AVG(CASE WHEN p.offered_amount > 0 THEN p.offered_amount END) AS oferta_promedio
+                   SUM(CASE WHEN p.is_winner = 1 THEN a.award_amount_attributed ELSE 0 END) AS monto_ganado,
+                   SUM(CASE WHEN p.is_winner = 1 THEN p.offered_amount ELSE 0 END) AS monto_ganado_contexto,
+                   AVG(CASE WHEN p.offered_amount > 0 THEN p.offered_amount END) AS oferta_promedio_contexto
             FROM intel_acto_proponentes p
             INNER JOIN selected_acts a ON a.acto_key = p.acto_key
             WHERE COALESCE(p.proveedor, '') <> ''
@@ -735,6 +807,7 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     result = frame.copy()
     numeric_columns = [
         "actos", "actos_ficha_unica", "entidades", "meses_activos", "monto_referencia", "monto_adjudicado",
+        "monto_referencia_contexto", "monto_adjudicado_contexto",
         "ticket_promedio", "ticket_mediano", "participantes_promedio", "participantes_mediana",
         "proporcion_unico_proponente", "proponentes_distintos",
         "proveedores_catalogo", "proveedores_contactables", "confianza_deteccion", "cobertura_monto_adjudicado_pct",

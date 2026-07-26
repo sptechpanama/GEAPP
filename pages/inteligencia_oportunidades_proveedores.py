@@ -433,8 +433,9 @@ def _render_master_table(frame: pd.DataFrame) -> None:
     st.subheader("Mapa maestro de oportunidades")
     sort_options = {
         "Score de oportunidad": "score_oportunidad",
-        "Monto de referencia": "monto_referencia",
-        "Monto adjudicado confirmado": "monto_adjudicado",
+        "Monto referencial atribuible": "monto_referencia",
+        "Monto adjudicado atribuible": "monto_adjudicado",
+        "Monto global de actos (contexto)": "monto_referencia_contexto",
         "Número de actos": "actos",
         "Actos de ficha única": "actos_ficha_unica",
         "Menor competencia promedio": "participantes_promedio",
@@ -457,7 +458,8 @@ def _render_master_table(frame: pd.DataFrame) -> None:
 
     display_columns = [
         "ficha", "nombre_ficha", "recomendacion", "score_oportunidad", "actos", "actos_ficha_unica",
-        "monto_referencia", "monto_adjudicado", "cobertura_monto_referencia_pct", "cobertura_monto_adjudicado_pct",
+        "monto_referencia", "monto_adjudicado", "monto_referencia_contexto", "monto_adjudicado_contexto",
+        "cobertura_monto_referencia_pct", "cobertura_monto_adjudicado_pct",
         "cobertura_ganador_pct", "cobertura_participantes_pct", "ticket_promedio", "ticket_mediano",
         "participantes_promedio", "participantes_mediana", "proponentes_distintos", "top_1_ganador", "top_1_pct",
         "top_3_concentracion_pct", "concentracion_hhi",
@@ -477,12 +479,14 @@ def _render_master_table(frame: pd.DataFrame) -> None:
             "nombre_ficha": st.column_config.TextColumn("Nombre de ficha", width="large"),
             "recomendacion": st.column_config.TextColumn("Recomendación", width="medium"),
             "score_oportunidad": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
-            "monto_referencia": st.column_config.NumberColumn("Monto referencia", format="$ %.2f"),
-            "monto_adjudicado": st.column_config.NumberColumn("Adjudicado confirmado", format="$ %.2f"),
+            "monto_referencia": st.column_config.NumberColumn("Referencia atribuible fiable", format="$ %.2f"),
+            "monto_adjudicado": st.column_config.NumberColumn("Adjudicado atribuible fiable", format="$ %.2f"),
+            "monto_referencia_contexto": st.column_config.NumberColumn("Total actos (contexto)", format="$ %.2f"),
+            "monto_adjudicado_contexto": st.column_config.NumberColumn("Adjudicado actos (contexto)", format="$ %.2f"),
             "ticket_promedio": st.column_config.NumberColumn("Ticket promedio", format="$ %.2f"),
             "ticket_mediano": st.column_config.NumberColumn("Ticket mediano", format="$ %.2f"),
-            "cobertura_monto_referencia_pct": st.column_config.NumberColumn("Cobertura referencia", format="%.1f%%"),
-            "cobertura_monto_adjudicado_pct": st.column_config.NumberColumn("Cobertura adjudicado", format="%.1f%%"),
+            "cobertura_monto_referencia_pct": st.column_config.NumberColumn("Cobertura referencia fiable", format="%.1f%%"),
+            "cobertura_monto_adjudicado_pct": st.column_config.NumberColumn("Cobertura adjudicado fiable", format="%.1f%%"),
             "cobertura_ganador_pct": st.column_config.NumberColumn("Cobertura ganador", format="%.1f%%"),
             "cobertura_participantes_pct": st.column_config.NumberColumn("Cobertura participantes", format="%.1f%%"),
             "participantes_promedio": st.column_config.NumberColumn("Participantes prom.", format="%.2f"),
@@ -522,7 +526,12 @@ def _render_trends(frame: pd.DataFrame, filters: AnalyticsFilters, repository: A
         st.warning("Las fichas seleccionadas no tienen meses con la dimensión temporal elegida.")
         return
     metric_label = st.radio("Métrica", ["Actos", "Monto de referencia", "Monto adjudicado"], horizontal=True, key="intel_v3_trend_metric")
-    metric_map = {"Actos": "actos", "Monto de referencia": "monto_referencia", "Monto adjudicado": "monto_adjudicado"}
+    metric_map = {
+        "Actos": "actos",
+        "Monto referencial atribuible": "monto_referencia",
+        "Monto adjudicado atribuible": "monto_adjudicado",
+        "Monto global de actos (contexto)": "monto_referencia_contexto",
+    }
     pivot = monthly.pivot_table(index="mes", columns="ficha", values=metric_map[metric_label], aggfunc="sum", fill_value=0)
     st.line_chart(pivot, height=430)
     st.dataframe(
@@ -574,7 +583,7 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
     row = frame[frame["ficha"].astype(str).eq(ficha)].iloc[0]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Actos", f"{_safe_int(row.get('actos')):,}")
-    c2.metric("Mercado referencial", _money(row.get("monto_referencia")))
+    c2.metric("Monto atribuible fiable", _money(row.get("monto_referencia")))
     c3.metric("Participantes promedio", f"{float(row.get('participantes_promedio', 0) or 0):,.2f}")
     c4.metric("Proveedores en catálogo", f"{_safe_int(row.get('proveedores_catalogo')):,}")
 
@@ -592,8 +601,9 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
                 hide_index=True,
                 height=650,
                 column_config={
-                    "monto_ganado": st.column_config.NumberColumn("Monto ganado", format="$ %.2f"),
-                    "oferta_promedio": st.column_config.NumberColumn("Oferta promedio", format="$ %.2f"),
+                    "monto_ganado": st.column_config.NumberColumn("Monto ganado atribuible", format="$ %.2f"),
+                    "monto_ganado_contexto": st.column_config.NumberColumn("Ganado total actos (contexto)", format="$ %.2f"),
+                    "oferta_promedio_contexto": st.column_config.NumberColumn("Oferta total promedio (contexto)", format="$ %.2f"),
                     "tasa_exito_pct": st.column_config.NumberColumn("Tasa de éxito", format="%.1f%%"),
                 },
             )
@@ -612,14 +622,27 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
             st.info("No hay actos para la ficha bajo los filtros actuales.")
         else:
             st.dataframe(
-                intelligence_view_frame(acts, extra_hidden=("detection_score",)),
+                intelligence_view_frame(
+                    acts,
+                    extra_hidden=(
+                        "detection_score",
+                        "reference_amount",
+                        "award_amount",
+                        "award_amount_source",
+                        "reference_amount_reliable",
+                        "award_amount_reliable",
+                    ),
+                ),
                 width="stretch",
                 hide_index=True,
                 height=760,
                 column_config={
                     "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
-                    "reference_amount": st.column_config.NumberColumn("Referencia", format="$ %.2f"),
-                    "award_amount": st.column_config.NumberColumn("Adjudicado", format="$ %.2f"),
+                    "reference_amount_attributed": st.column_config.NumberColumn("Referencia atribuible", format="$ %.2f"),
+                    "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="$ %.2f"),
+                    "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
+                    "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="$ %.2f"),
+                    "reference_amount_attribution_source": st.column_config.TextColumn("Fuente atribución"),
                 },
             )
 
@@ -813,6 +836,11 @@ st.caption(
     "Análisis temporal, económico y competitivo sobre fichas completas. "
     "La base filtra y agrega todos los registros; la interfaz recibe únicamente métricas resumidas."
 )
+st.caption(
+    "Los montos principales son atribuibles y conservadores: se aceptan importes "
+    "confirmados por renglón o actos de una sola ficha y un solo renglón. "
+    "El total global del acto se conserva únicamente como contexto."
+)
 
 try:
     repo = _repository(_database_url())
@@ -848,10 +876,10 @@ with st.sidebar:
         rs_status = st.selectbox("Registro sanitario", ["Todos", "Si", "No"], key="intel_v3_rs")
         search_raw = st.text_input("Buscar grupos o frases (separar por coma)", key="intel_v3_search", placeholder="chiller, refrigeración, aire acondicionado")
         search_mode = st.radio("Relación entre grupos", ["OR", "AND"], horizontal=True, key="intel_v3_search_mode")
-        min_reference = float(st.number_input("Precio referencia mínimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_ref"))
-        max_reference = float(st.number_input("Precio referencia máximo (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_ref"))
-        min_award = float(st.number_input("Monto adjudicado minimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_award"))
-        max_award = float(st.number_input("Monto adjudicado maximo (0 = sin limite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_award"))
+        min_reference = float(st.number_input("Monto referencial atribuible mínimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_ref"))
+        max_reference = float(st.number_input("Monto referencial atribuible máximo (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_ref"))
+        min_award = float(st.number_input("Monto adjudicado atribuible mínimo", 0.0, value=0.0, step=100.0, key="intel_v3_min_award"))
+        max_award = float(st.number_input("Monto adjudicado atribuible máximo (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_award"))
     with st.expander("Demanda, competencia y disponibilidad", expanded=False):
         min_acts = int(st.number_input("Actos minimos", 0, value=1, step=1, key="intel_v3_min_acts"))
         min_entities = int(st.number_input("Entidades minimas", 0, value=0, step=1, key="intel_v3_min_entities"))
@@ -940,8 +968,8 @@ _render_saved_views(saved_view_payload)
 metric_cols = st.columns(5)
 metric_cols[0].metric("Fichas evaluadas", f"{len(filtered_master):,}")
 metric_cols[1].metric("Actos vinculados", f"{_safe_int(filtered_master.get('actos', pd.Series(dtype=float)).sum()):,}")
-metric_cols[2].metric("Mercado referencial", _money(filtered_master.get("monto_referencia", pd.Series(dtype=float)).sum()))
-metric_cols[3].metric("Adjudicado confirmado", _money(filtered_master.get("monto_adjudicado", pd.Series(dtype=float)).sum()))
+metric_cols[2].metric("Referencial atribuible", _money(filtered_master.get("monto_referencia", pd.Series(dtype=float)).sum()))
+metric_cols[3].metric("Adjudicado atribuible", _money(filtered_master.get("monto_adjudicado", pd.Series(dtype=float)).sum()))
 metric_cols[4].metric("Score promedio", f"{float(filtered_master.get('score_oportunidad', pd.Series(dtype=float)).mean() or 0):,.1f}")
 
 if filtered_master.empty:
