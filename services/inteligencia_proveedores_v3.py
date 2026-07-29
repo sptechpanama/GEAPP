@@ -71,6 +71,8 @@ DEFAULT_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
+ANALYTICS_SERVICE_VERSION = "2026-07-29-primary-amounts-v1"
+
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
     "volumen": {"demanda": 40.0, "economia": 35.0, "competencia": 10.0, "viabilidad": 10.0, "complejidad": 5.0},

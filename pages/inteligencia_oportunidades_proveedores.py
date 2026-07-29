@@ -27,6 +27,7 @@ from ui.theme import apply_global_theme
 # incorporados, recargamos el módulo desde el código actualmente desplegado
 # antes de enlazar las funciones que usa esta página.
 _ANALYTICS_EXPORTS = (
+    "ANALYTICS_SERVICE_VERSION",
     "AnalyticsFilters",
     "AnalyticsRepository",
     "AnalyticsUnavailable",
@@ -75,6 +76,7 @@ preset_range = _analytics_v3.preset_range
 score_opportunities = _analytics_v3.score_opportunities
 sort_and_page = _analytics_v3.sort_and_page
 split_search_groups = _analytics_v3.split_search_groups
+ANALYTICS_SERVICE_VERSION = _analytics_v3.ANALYTICS_SERVICE_VERSION
 
 
 _ORCHESTRATOR_EXPORTS = (
@@ -112,7 +114,8 @@ upsert_tracking_ficha = _orchestrator_v3.upsert_tracking_ficha
 
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
-ANALYTICS_REPOSITORY_API_VERSION = "2026-07-26-attributed-amounts-v3"
+ANALYTICS_REPOSITORY_API_VERSION = ANALYTICS_SERVICE_VERSION
+MASTER_QUERY_CACHE_VERSION = "2026-07-29-total-and-unique-v1"
 LOCAL_ANALYTICS_CANDIDATES = (
     APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
     APP_ROOT / "data" / "inteligencia_proveedores.db",
@@ -174,7 +177,15 @@ def _repository(database_url: str, api_version: str) -> AnalyticsRepository:
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def _master_data(filters: AnalyticsFilters, _repo: AnalyticsRepository) -> pd.DataFrame:
+def _master_data(
+    filters: AnalyticsFilters,
+    cache_version: str,
+    _repo: AnalyticsRepository,
+) -> pd.DataFrame:
+    # ``cache_version`` se incluye deliberadamente en la clave de Streamlit.
+    # Así una consulta agregada nueva no puede reutilizar un DataFrame antiguo
+    # que todavía no contenga sus columnas.
+    _ = cache_version
     return _repo.master_metrics(filters)
 
 
@@ -1879,7 +1890,23 @@ filters = AnalyticsFilters(
 )
 
 with st.spinner("Calculando métricas globales del periodo..."):
-    master = score_opportunities(_master_data(filters, repo), weights)
+    raw_master = _master_data(filters, MASTER_QUERY_CACHE_VERSION, repo)
+    required_amount_columns = {"monto_total_actos", "monto_ficha_unica"}
+    if not required_amount_columns.issubset(raw_master.columns):
+        # Protección adicional para despliegues en caliente: si Streamlit
+        # conservara un resultado viejo pese a la versión de cache, se fuerza
+        # una consulta directa antes de permitir que la tabla oculte columnas.
+        _master_data.clear()
+        raw_master = repo.master_metrics(filters)
+    missing_amount_columns = required_amount_columns - set(raw_master.columns)
+    if missing_amount_columns:
+        st.error(
+            "La capa analítica no devolvió las columnas monetarias requeridas: "
+            + ", ".join(sorted(missing_amount_columns))
+            + ". Reinicia la aplicación para cargar la versión actual del servicio."
+        )
+        st.stop()
+    master = score_opportunities(raw_master, weights)
 
 with st.expander("Decisión final", expanded=False):
     c1, c2 = st.columns(2)
