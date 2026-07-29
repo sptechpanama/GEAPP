@@ -99,6 +99,31 @@ class ServiceUnitTests(unittest.TestCase):
         pd.testing.assert_series_equal(scored["score_oportunidad"], expected, check_names=False)
         self.assertTrue(scored["score_confianza"].between(0, 100).all())
 
+    def test_economic_score_prioritizes_total_and_unique_amounts_not_attributed_amount(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "ficha": "TOTAL",
+                    "monto_total_actos": 100_000,
+                    "monto_ficha_unica": 80_000,
+                    "monto_referencia": 1,
+                    "monto_adjudicado": 1,
+                },
+                {
+                    "ficha": "ATRIBUIBLE",
+                    "monto_total_actos": 10_000,
+                    "monto_ficha_unica": 0,
+                    "monto_referencia": 1_000_000,
+                    "monto_adjudicado": 1_000_000,
+                },
+            ]
+        )
+        scored = score_opportunities(frame).set_index("ficha")
+        self.assertGreater(
+            float(scored.loc["TOTAL", "score_economia"]),
+            float(scored.loc["ATRIBUIBLE", "score_economia"]),
+        )
+
     def test_risk_class_controls_complexity_score(self) -> None:
         common = {
             "actos": 10,
@@ -483,6 +508,9 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
         )
         row = result.iloc[0]
         self.assertEqual(float(row["monto_referencia"]), 6000.0)
+        self.assertEqual(float(row["monto_total_actos"]), 206000.0)
+        self.assertEqual(float(row["monto_ficha_unica"]), 5000.0)
+        self.assertEqual(float(row["monto_adjudicado_ficha_unica"]), 4500.0)
         self.assertEqual(float(row["monto_referencia_contexto"]), 206000.0)
         self.assertEqual(float(row["monto_adjudicado"]), 4500.0)
         self.assertEqual(float(row["monto_adjudicado_contexto"]), 194500.0)
@@ -499,6 +527,8 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
         row = result.iloc[0]
         self.assertEqual(int(row["actos"]), 1)
         self.assertEqual(float(row["monto_referencia"]), 5000.0)
+        self.assertEqual(float(row["monto_total_actos"]), 5000.0)
+        self.assertEqual(float(row["monto_ficha_unica"]), 5000.0)
         self.assertEqual(float(row["monto_referencia_contexto"]), 5000.0)
 
     def test_act_evidence_exposes_attributed_and_context_amounts(self) -> None:

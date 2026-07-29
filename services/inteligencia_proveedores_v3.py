@@ -506,6 +506,9 @@ class AnalyticsRepository:
                        AVG(CASE WHEN {reference_metric} > 0 THEN {reference_metric} END) AS ticket_promedio,
                        MAX({reference_metric}) AS ticket_maximo,
                        SUM({award_metric}) AS monto_adjudicado,
+                       SUM({reference_context}) AS monto_total_actos,
+                       SUM(CASE WHEN is_unique_ficha = 1 THEN {reference_context} ELSE 0 END) AS monto_ficha_unica,
+                       SUM(CASE WHEN is_unique_ficha = 1 THEN {award_context} ELSE 0 END) AS monto_adjudicado_ficha_unica,
                        SUM({reference_context}) AS monto_referencia_contexto,
                        SUM({award_context}) AS monto_adjudicado_contexto,
                        COUNT(DISTINCT CASE WHEN {award_reliable} THEN acto_key END) AS actos_monto_adjudicado,
@@ -1140,6 +1143,7 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     result = frame.copy()
     numeric_columns = [
         "actos", "actos_ficha_unica", "entidades", "meses_activos", "monto_referencia", "monto_adjudicado",
+        "monto_total_actos", "monto_ficha_unica", "monto_adjudicado_ficha_unica",
         "monto_referencia_contexto", "monto_adjudicado_contexto",
         "ticket_promedio", "ticket_mediano", "participantes_promedio", "participantes_mediana",
         "proporcion_unico_proponente", "proponentes_distintos",
@@ -1152,6 +1156,14 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             result[column] = 0.0
         result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0.0)
 
+    # ``monto_total_actos`` conserva el monto completo de cada acto en el que
+    # aparece la ficha. ``monto_ficha_unica`` es el subconjunto más confiable:
+    # solo suma actos que contienen una única ficha técnica distinta. Los
+    # montos atribuibles se conservan como diagnóstico experimental, pero ya
+    # no gobiernan el componente económico principal del ranking.
+    if "monto_total_actos" not in frame.columns:
+        result["monto_total_actos"] = result["monto_referencia_contexto"]
+
     result["score_demanda"] = _weighted_mean(
         [
             (_percentile(result["actos"]), 0.38),
@@ -1163,10 +1175,8 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     )
     result["score_economia"] = _weighted_mean(
         [
-            (_percentile(result["monto_referencia"]), 0.42),
-            (_percentile(result["monto_adjudicado"]), 0.33),
-            (_percentile(result["ticket_mediano"]), 0.17),
-            (_percentile(result["ticket_promedio"]), 0.08),
+            (_percentile(result["monto_total_actos"]), 0.55),
+            (_percentile(result["monto_ficha_unica"]), 0.45),
         ]
     )
     result["score_competencia"] = _weighted_mean(
