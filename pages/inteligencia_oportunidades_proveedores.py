@@ -121,7 +121,7 @@ upsert_tracking_ficha = _orchestrator_v3.upsert_tracking_ficha
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
 ANALYTICS_REPOSITORY_API_VERSION = ANALYTICS_SERVICE_VERSION
-MASTER_QUERY_CACHE_VERSION = "2026-07-29-total-and-unique-v1"
+MASTER_QUERY_CACHE_VERSION = "2026-08-01-profile-unique-v3"
 LOCAL_ANALYTICS_CANDIDATES = (
     APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
     APP_ROOT / "data" / "inteligencia_proveedores.db",
@@ -550,6 +550,118 @@ def _period_inputs() -> tuple[date | None, date | None]:
         st.error("La fecha inicial no puede ser posterior a la final.")
         st.stop()
     return start, end
+
+
+_ANALYSIS_FILTER_SESSION_KEYS = {
+    "intel_v3_period",
+    "intel_v3_start",
+    "intel_v3_end",
+    "intel_v3_date_basis",
+    "intel_v3_profile",
+    "intel_v3_states",
+    "intel_v3_entities",
+    "intel_v3_areas",
+    "intel_v3_product_types",
+    "intel_v3_ct",
+    "intel_v3_rs",
+    "intel_v3_search",
+    "intel_v3_search_mode",
+    "intel_v3_min_ref",
+    "intel_v3_max_ref",
+    "intel_v3_min_award",
+    "intel_v3_max_award",
+    "intel_v3_min_acts",
+    "intel_v3_min_entities",
+    "intel_v3_min_active_months",
+    "intel_v3_max_participants",
+    "intel_v3_availability",
+    "intel_v3_score_preset",
+    "intel_v3_min_score",
+    "intel_v3_recommendations",
+    "intel_v3_sort",
+    "intel_v3_direction",
+    "intel_v3_page",
+    "intel_v3_page_size",
+    *(f"intel_v3_risk_{value}" for value in ("a", "b", "c", "d", "other")),
+    *(f"intel_v3_weight_{name}" for name in MANUAL_SCORE_WEIGHTS),
+}
+
+
+def _reset_analysis_filters() -> None:
+    """Elimina solo controles analíticos; conserva seguimiento y estudios."""
+    for key in _ANALYSIS_FILTER_SESSION_KEYS:
+        st.session_state.pop(key, None)
+    st.session_state.pop("intel_v3_pending_saved_view", None)
+
+
+def _render_active_scope(
+    filters: AnalyticsFilters,
+    availability_mode: str,
+    *,
+    min_score: float = 0.0,
+    recommendations: tuple[str, ...] = (),
+) -> None:
+    """Hace visible el universo exacto usado por conteos, montos y score."""
+    date_basis_labels = {
+        "publicacion": "publicación",
+        "celebracion": "celebración",
+        "adjudicacion": "adjudicación",
+        "actualizacion": "actualización",
+    }
+    date_range = (
+        f"{filters.start_date.isoformat() if filters.start_date else 'inicio'} a "
+        f"{filters.end_date.isoformat() if filters.end_date else 'hoy'}"
+    )
+    items = [
+        f"periodo {date_range}",
+        f"fecha de {date_basis_labels.get(filters.date_basis, filters.date_basis)}",
+        f"perfil {filters.detection_profile} (score >= {filters.detection_threshold:g})",
+        "registro sanitario: No requiere",
+    ]
+    restrictions: list[str] = []
+    if filters.states:
+        restrictions.append(f"estados: {', '.join(filters.states)}")
+    if filters.entities:
+        restrictions.append(f"entidades: {len(filters.entities)} seleccionadas")
+    if filters.areas:
+        restrictions.append(f"áreas: {', '.join(filters.areas)}")
+    if filters.risk_classes:
+        restrictions.append(f"clases: {', '.join(filters.risk_classes)}")
+    if filters.ct_status in {"Si", "No"}:
+        restrictions.append(f"CT: {filters.ct_status}")
+    if filters.search_groups:
+        restrictions.append(
+            f"búsqueda {filters.search_mode}: {', '.join(filters.search_groups)}"
+        )
+    if filters.min_reference_amount or filters.max_reference_amount:
+        restrictions.append("rango de referencia atribuible")
+    if filters.min_award_amount or filters.max_award_amount:
+        restrictions.append("rango de adjudicado atribuible")
+    if filters.min_acts > 1:
+        restrictions.append(f"mínimo {filters.min_acts} actos")
+    if filters.min_entities:
+        restrictions.append(f"mínimo {filters.min_entities} entidades")
+    if filters.min_active_months:
+        restrictions.append(f"mínimo {filters.min_active_months} meses")
+    if filters.max_average_participants:
+        restrictions.append(
+            f"máximo {filters.max_average_participants:g} participantes promedio"
+        )
+    if availability_mode != "Todas":
+        restrictions.append(f"disponibilidad: {availability_mode}")
+    if min_score > 0:
+        restrictions.append(f"score mínimo: {min_score:g}")
+    if recommendations:
+        restrictions.append(f"recomendaciones: {', '.join(recommendations)}")
+
+    st.info(
+        "**Alcance de los conteos y montos:** " + " | ".join(items) + "."
+        + (
+            " **Filtros reductores activos:** " + "; ".join(restrictions) + "."
+            if restrictions
+            else " No hay filtros reductores adicionales."
+        )
+    )
 
 
 def _score_weights() -> tuple[str, dict[str, float]]:
@@ -1850,6 +1962,15 @@ options = _filter_options(repo)
 
 with st.sidebar:
     st.header("Filtros del estudio")
+    if st.button(
+        "Restablecer filtros",
+        key="intel_v3_reset_filters",
+        width="stretch",
+        help="Vuelve al año 2026, perfil moderado y elimina filtros reductores.",
+    ):
+        _reset_analysis_filters()
+        _master_data.clear()
+        st.rerun()
     start_date, end_date = _period_inputs()
     date_labels = {
         "Fecha de publicación": "publicacion",
@@ -1994,6 +2115,13 @@ filtered_master = apply_master_filters(
     master,
     min_score=min_score,
     recommendations=selected_recommendations,
+)
+
+_render_active_scope(
+    filters,
+    availability_mode,
+    min_score=min_score,
+    recommendations=tuple(selected_recommendations),
 )
 
 saved_view_payload: dict[str, object] = filters.as_payload()

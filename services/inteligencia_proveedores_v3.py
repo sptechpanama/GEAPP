@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-08-01-risk-score-v2"
+ANALYTICS_SERVICE_VERSION = "2026-08-01-profile-unique-v3"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -464,6 +464,44 @@ class AnalyticsRepository:
             clauses.append("(" + connector.join(group_clauses) + ")")
         return " AND ".join(clauses), params
 
+    def _profile_act_scope_sql(
+        self, filters: AnalyticsFilters, *, alias: str = "pf"
+    ) -> tuple[str, dict[str, Any]]:
+        """Limita el conteo de fichas por acto sin aplicar filtros de ficha.
+
+        Fecha, estado y entidad pertenecen al acto y pueden reducir la lectura.
+        CT, RS, clase, busqueda y montos pertenecen a la ficha/asociacion y no
+        deben hacer que un acto multificha parezca artificialmente unico.
+        """
+        params: dict[str, Any] = {"score_min": filters.detection_threshold}
+        clauses = [f"{alias}.detection_score >= :score_min"]
+        date_col = f"{alias}.{filters.date_column}"
+        if filters.start_date:
+            clauses.extend(
+                [f"{date_col} IS NOT NULL", f"{date_col} <> ''", f"{date_col} >= :start_date"]
+            )
+            params["start_date"] = filters.start_date.isoformat()
+        if filters.end_date:
+            clauses.extend(
+                [f"{date_col} IS NOT NULL", f"{date_col} <> ''", f"{date_col} <= :end_date"]
+            )
+            params["end_date"] = filters.end_date.isoformat()
+        if filters.states:
+            placeholders: list[str] = []
+            for index, state in enumerate(filters.states):
+                key = f"state_{index}"
+                params[key] = state
+                placeholders.append(f":{key}")
+            clauses.append(f"{alias}.estado IN ({', '.join(placeholders)})")
+        if filters.entities:
+            placeholders = []
+            for index, entity in enumerate(filters.entities):
+                key = f"entity_{index}"
+                params[key] = entity
+                placeholders.append(f":{key}")
+            clauses.append(f"{alias}.entidad IN ({', '.join(placeholders)})")
+        return " AND ".join(clauses), params
+
     def filter_options(self) -> dict[str, list[str]]:
         states = pd.read_sql_query(text("SELECT DISTINCT estado FROM intel_actos_fichas WHERE COALESCE(estado, '') <> '' ORDER BY estado"), self.engine)
         entities = pd.read_sql_query(text("SELECT DISTINCT entidad FROM intel_actos_fichas WHERE COALESCE(entidad, '') <> '' ORDER BY entidad"), self.engine)
@@ -478,6 +516,8 @@ class AnalyticsRepository:
 
     def master_metrics(self, filters: AnalyticsFilters) -> pd.DataFrame:
         where_sql, params = self._filter_sql(filters)
+        profile_scope_sql, profile_params = self._profile_act_scope_sql(filters)
+        params.update(profile_params)
         end = filters.end_date or date.today()
         params.update(
             {
@@ -527,11 +567,27 @@ class AnalyticsRepository:
             else "'' AS clase_riesgo"
         )
         query = f"""
-            WITH filtered AS MATERIALIZED (
-                SELECT f.*, m.nombre_ficha, m.descripcion, m.area, m.tipo_producto,
+            WITH profile_act_counts AS MATERIALIZED (
+                -- La unicidad debe respetar el perfil de confianza elegido.
+                -- El indicador persistido en la capa fue calculado con todas
+                -- las detecciones, incluidas coincidencias de menor confianza,
+                -- y por eso subcontaba actos de ficha unica en perfiles como
+                -- Moderado o Estricto. Este conteo se hace antes de aplicar
+                -- filtros comerciales (RS, CT, clase, etc.) para no convertir
+                -- artificialmente un acto multificha en unico al ocultar una
+                -- de sus fichas.
+                SELECT acto_key, COUNT(DISTINCT ficha) AS profile_ficha_count
+                FROM intel_actos_fichas pf
+                WHERE {profile_scope_sql}
+                GROUP BY acto_key
+            ),
+            filtered AS MATERIALIZED (
+                SELECT f.*, pc.profile_ficha_count,
+                       m.nombre_ficha, m.descripcion, m.area, m.tipo_producto,
                        m.especialidad, m.tiene_ct, m.registro_sanitario, m.enlace_minsa,
                        {risk_class_select}
                 FROM intel_actos_fichas f
+                INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key
                 LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
                 WHERE {where_sql}
             ),
@@ -546,7 +602,7 @@ class AnalyticsRepository:
                        MAX(COALESCE(clase_riesgo, '')) AS clase_riesgo,
                        MAX(COALESCE(enlace_minsa, '')) AS enlace_minsa,
                        COUNT(DISTINCT acto_key) AS actos,
-                       COUNT(DISTINCT CASE WHEN is_unique_ficha = 1 THEN acto_key END) AS actos_ficha_unica,
+                       COUNT(DISTINCT CASE WHEN profile_ficha_count = 1 THEN acto_key END) AS actos_ficha_unica,
                        COUNT(DISTINCT entidad) AS entidades,
                        COUNT(DISTINCT SUBSTR({date_column}, 1, 7)) AS meses_activos,
                        SUM({reference_metric}) AS monto_referencia,
@@ -554,8 +610,8 @@ class AnalyticsRepository:
                        MAX({reference_metric}) AS ticket_maximo,
                        SUM({award_metric}) AS monto_adjudicado,
                        SUM({reference_context}) AS monto_total_actos,
-                       SUM(CASE WHEN is_unique_ficha = 1 THEN {reference_context} ELSE 0 END) AS monto_ficha_unica,
-                       SUM(CASE WHEN is_unique_ficha = 1 THEN {award_context} ELSE 0 END) AS monto_adjudicado_ficha_unica,
+                       SUM(CASE WHEN profile_ficha_count = 1 THEN {reference_context} ELSE 0 END) AS monto_ficha_unica,
+                       SUM(CASE WHEN profile_ficha_count = 1 THEN {award_context} ELSE 0 END) AS monto_adjudicado_ficha_unica,
                        SUM({reference_context}) AS monto_referencia_contexto,
                        SUM({award_context}) AS monto_adjudicado_contexto,
                        COUNT(DISTINCT CASE WHEN {award_reliable} THEN acto_key END) AS actos_monto_adjudicado,
@@ -829,6 +885,8 @@ class AnalyticsRepository:
 
     def acts_for_ficha(self, ficha: str, filters: AnalyticsFilters) -> pd.DataFrame:
         where_sql, params = self._filter_sql(filters)
+        profile_scope_sql, profile_params = self._profile_act_scope_sql(filters)
+        params.update(profile_params)
         params["selected_ficha"] = str(ficha)
         if self._has_attributed_amounts:
             amount_select = """
@@ -853,13 +911,21 @@ class AnalyticsRepository:
             """
             amount_order = "f.reference_amount DESC"
         query = f"""
+            WITH profile_act_counts AS MATERIALIZED (
+                SELECT acto_key, COUNT(DISTINCT ficha) AS profile_ficha_count
+                FROM intel_actos_fichas pf
+                WHERE {profile_scope_sql}
+                GROUP BY acto_key
+            )
             SELECT f.acto_key, f.enlace, f.titulo, f.entidad, f.estado,
                    f.publication_date, f.celebration_date, f.award_date, f.update_date,
                    {amount_select}
                    f.reference_amount, f.award_amount, f.award_amount_source,
-                   f.winner, f.winner_short, f.participant_count, f.is_unique_ficha,
+                   f.winner, f.winner_short, f.participant_count,
+                   CASE WHEN pc.profile_ficha_count = 1 THEN 1 ELSE 0 END AS is_unique_ficha,
                    f.detection_score, f.detection_method, f.detection_evidence
             FROM intel_actos_fichas f
+            INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key
             LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
             WHERE {where_sql} AND f.ficha = :selected_ficha
             ORDER BY {amount_order}, f.enlace
@@ -916,14 +982,22 @@ class AnalyticsRepository:
             """
             amount_order = "f.reference_amount DESC"
         query = f"""
+            WITH profile_act_counts AS MATERIALIZED (
+                SELECT acto_key, COUNT(DISTINCT ficha) AS profile_ficha_count
+                FROM intel_actos_fichas
+                WHERE detection_score >= :score_min
+                GROUP BY acto_key
+            )
             SELECT f.ficha AS ficha_coincidente,
                    f.acto_key, f.enlace, f.titulo, f.entidad, f.estado,
                    f.publication_date, f.celebration_date, f.award_date, f.update_date,
                    {amount_select}
                    f.reference_amount, f.award_amount, f.award_amount_source,
-                   f.winner, f.winner_short, f.participant_count, f.is_unique_ficha,
+                   f.winner, f.winner_short, f.participant_count,
+                   CASE WHEN pc.profile_ficha_count = 1 THEN 1 ELSE 0 END AS is_unique_ficha,
                    f.detection_score, f.detection_method, f.detection_evidence
             FROM intel_actos_fichas f
+            INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key
             LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
             WHERE {where_sql}
             ORDER BY {amount_order}, f.acto_key, f.ficha
@@ -1088,7 +1162,13 @@ class AnalyticsRepository:
             """
             amount_order = "f.reference_amount DESC"
         query = f"""
-            WITH selected_participations AS (
+            WITH profile_act_counts AS MATERIALIZED (
+                SELECT acto_key, COUNT(DISTINCT ficha) AS profile_ficha_count
+                FROM intel_actos_fichas
+                WHERE detection_score >= :score_min
+                GROUP BY acto_key
+            ),
+            selected_participations AS (
                 SELECT p.acto_key,
                        MAX(p.proveedor) AS proveedor,
                        MAX(p.offered_amount) AS offered_amount,
@@ -1111,10 +1191,12 @@ class AnalyticsRepository:
                    f.reference_amount, f.award_amount,
                    f.award_amount_source, sp.offered_amount, sp.is_winner,
                    f.winner, f.winner_short, f.participant_count,
-                   f.is_unique_ficha, f.detection_score, f.detection_method,
+                   CASE WHEN pc.profile_ficha_count = 1 THEN 1 ELSE 0 END AS is_unique_ficha,
+                   f.detection_score, f.detection_method,
                    f.detection_evidence
             FROM selected_participations sp
             INNER JOIN intel_actos_fichas f ON f.acto_key = sp.acto_key
+            INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key
             LEFT JOIN ficha_metadata m ON m.ficha = f.ficha
             WHERE {where_sql}
             ORDER BY {amount_order}, f.acto_key, f.ficha

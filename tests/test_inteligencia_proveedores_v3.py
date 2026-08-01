@@ -265,7 +265,8 @@ class RepositoryIntegrationTests(unittest.TestCase):
             """
         )
         facts = [
-            ("a1", "1", "43358", 1, 1, 96, "nombre_exacto", "titulo", "kit", "3.1", "cat", "https://acto/1", "KIT CIRCUITO", "CSS", "Compras", "Adjudicado", "2026-01-10", "2026-01-15", "2026-01-15", "2026-01-20", "2026-01-21", 10000, 9000, "ganador", "BTS", "BTS", 1, "kit circuito refrigeracion css adjudicado"),
+            ("a1", "1", "43358", 0, 2, 96, "nombre_exacto", "titulo", "kit", "3.1", "cat", "https://acto/1", "KIT CIRCUITO", "CSS", "Compras", "Adjudicado", "2026-01-10", "2026-01-15", "2026-01-15", "2026-01-20", "2026-01-21", 10000, 9000, "ganador", "BTS", "BTS", 1, "kit circuito refrigeracion css adjudicado"),
+            ("a1", "1-low", "77777", 0, 2, 80, "alias_flexible", "titulo", "secundaria", "3.1", "cat", "https://acto/1", "KIT CIRCUITO", "CSS", "Compras", "Adjudicado", "2026-01-10", "2026-01-15", "2026-01-15", "2026-01-20", "2026-01-21", 10000, 9000, "ganador", "BTS", "BTS", 1, "kit circuito secundaria css adjudicado"),
             ("a2", "2", "43358", 1, 1, 90, "nombre_compacto", "titulo", "kit", "3.1", "cat", "https://acto/2", "KIT CIRCUITO", "MINSA", "Compras", "Adjudicado", "2025-01-10", "2025-01-15", "2025-01-15", "2025-01-20", "2025-01-21", 5000, 4500, "ganador", "OTRO", "OTRO", 3, "kit circuito minsa adjudicado"),
             ("a3", "3", "103169", 1, 1, 100, "codigo_contextual", "descripcion", "ficha", "3.1", "cat", "https://acto/3", "ESTERILIZACION", "CSS", "Compras", "Adjudicado", "2026-02-10", "2026-02-15", "2026-02-15", "2026-02-20", "2026-02-21", 20000, 18000, "ganador", "MEDICAL", "MEDICAL", 2, "esterilizacion css adjudicado"),
             ("a4", "4", "99999", 1, 1, 100, "codigo_contextual", "descripcion", "ficha", "3.1", "cat", "https://acto/4", "PRODUCTO CON REGISTRO", "CSS", "Compras", "Adjudicado", "2026-03-10", "2026-03-15", "2026-03-15", "2026-03-20", "2026-03-21", 50000, 45000, "ganador", "RS GANADOR", "RS GANADOR", 1, "producto con registro sanitario"),
@@ -278,7 +279,7 @@ class RepositoryIntegrationTests(unittest.TestCase):
         )
         connection.executemany(
             "INSERT INTO intel_ficha_metadata VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            [("43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO", "ANESTESIA", "Si", "No", "https://minsa/43358", "test", "43358 kit circuito paciente anestesia medico insumo"), ("103169", "ESTERILIZACION", "", "MEDICO", "INSUMO", "", "Si", "No", "https://minsa/103169", "test", "103169 esterilizacion medico insumo"), ("99999", "PRODUCTO CON REGISTRO", "", "MEDICO", "INSUMO", "", "Si", "Si", "https://minsa/99999", "test", "99999 producto con registro sanitario"), ("88888", "PRODUCTO SIN CLASIFICAR", "", "MEDICO", "INSUMO", "", "Si", "", "https://minsa/88888", "test", "88888 producto sin clasificar")],
+            [("43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO", "ANESTESIA", "Si", "No", "https://minsa/43358", "test", "43358 kit circuito paciente anestesia medico insumo"), ("103169", "ESTERILIZACION", "", "MEDICO", "INSUMO", "", "Si", "No", "https://minsa/103169", "test", "103169 esterilizacion medico insumo"), ("99999", "PRODUCTO CON REGISTRO", "", "MEDICO", "INSUMO", "", "Si", "Si", "https://minsa/99999", "test", "99999 producto con registro sanitario"), ("88888", "PRODUCTO SIN CLASIFICAR", "", "MEDICO", "INSUMO", "", "Si", "", "https://minsa/88888", "test", "88888 producto sin clasificar"), ("77777", "FICHA SECUNDARIA", "", "MEDICO", "INSUMO", "", "No", "Si", "", "test", "77777 ficha secundaria")],
         )
         connection.execute("ALTER TABLE intel_ficha_metadata ADD COLUMN clase_riesgo TEXT")
         connection.execute("UPDATE intel_ficha_metadata SET clase_riesgo = 'A' WHERE ficha = '43358'")
@@ -302,6 +303,7 @@ class RepositoryIntegrationTests(unittest.TestCase):
         result = self.repo.master_metrics(filters)
         row = result[result.ficha.eq("43358")].iloc[0]
         self.assertEqual(int(row["actos"]), 1)
+        self.assertEqual(int(row["actos_ficha_unica"]), 1)
         self.assertEqual(float(row["monto_referencia"]), 10000.0)
         self.assertEqual(str(row["top_1_ganador"]), "BTS")
         self.assertEqual(int(row["proveedores_catalogo"]), 1)
@@ -573,6 +575,16 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
                     "acto_un_renglon_ficha_unica", 1, "proponente_ganador",
                     "OTRO", "OTRO", 1, "acto unico circuito minsa adjudicado",
                 ),
+                (
+                    "a1", "1-low", "99999", 0, 2, 80, "alias_flexible", "item_2",
+                    "coincidencia secundaria", "3.3", "cat", "https://acto/mixto",
+                    "ACTO MIXTO", "CSS", "Compras", "Adjudicado", "2026-01-10",
+                    "2026-01-15", "2026-01-15", "2026-01-20", "2026-01-21",
+                    3, 0, 201000, 201000, 0, "sin_renglon_atribuible", 0,
+                    190000, 190000, 0, "sin_adjudicacion_por_renglon_confirmada",
+                    0, "proponente_ganador", "BTS", "BTS", 2,
+                    "acto mixto coincidencia secundaria",
+                ),
             ],
         )
         connection.executemany(
@@ -588,6 +600,13 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
                 "43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO",
                 "ANESTESIA", "Si", "No", "https://minsa/43358", "test",
                 "43358 kit circuito paciente anestesia",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO intel_ficha_metadata VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "99999", "FICHA SECUNDARIA", "", "MEDICO", "INSUMO", "",
+                "No", "Si", "", "test", "99999 ficha secundaria",
             ),
         )
         connection.commit()
@@ -629,6 +648,24 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
         self.assertEqual(float(row["monto_total_actos"]), 5000.0)
         self.assertEqual(float(row["monto_ficha_unica"]), 5000.0)
         self.assertEqual(float(row["monto_referencia_contexto"]), 5000.0)
+
+    def test_unique_ficha_respects_the_selected_detection_profile(self) -> None:
+        moderate = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="moderado")
+        ).iloc[0]
+        flexible = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible")
+        ).iloc[0]
+        self.assertEqual(int(moderate["actos_ficha_unica"]), 2)
+        self.assertEqual(int(flexible["actos_ficha_unica"]), 1)
+        moderate_acts = self.repo.acts_for_ficha(
+            "43358", AnalyticsFilters(detection_profile="moderado")
+        ).set_index("acto_key")
+        flexible_acts = self.repo.acts_for_ficha(
+            "43358", AnalyticsFilters(detection_profile="muy_flexible")
+        ).set_index("acto_key")
+        self.assertEqual(int(moderate_acts.loc["a1", "is_unique_ficha"]), 1)
+        self.assertEqual(int(flexible_acts.loc["a1", "is_unique_ficha"]), 0)
 
     def test_act_evidence_exposes_attributed_and_context_amounts(self) -> None:
         acts = self.repo.acts_for_ficha(
