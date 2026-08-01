@@ -28,6 +28,7 @@ from services.inteligencia_proveedores_v3 import (
     AnalyticsRepository,
     AnalyticsUnavailable,
     DATE_COLUMNS,
+    MANUAL_SCORE_WEIGHTS,
     PROFILE_LABELS,
     RISK_CLASS_NONE,
     RISK_CLASS_OTHER,
@@ -354,8 +355,22 @@ def _apply_pending_saved_view() -> None:
             st.session_state[state_key] = all_selected or token in saved_classes
     score_preset = str(payload.get("score_preset", "equilibrado") or "equilibrado")
     st.session_state["intel_v3_score_preset"] = preset_label_by_value.get(score_preset, "Equilibrado")
-    for name, value in dict(payload.get("score_weights", {}) or {}).items():
-        if name in SCORE_PRESETS["equilibrado"]:
+    saved_weights = dict(payload.get("score_weights", {}) or {})
+    has_new_dimensions = any(name in saved_weights for name in ("actos_totales", "actos_ficha_unica", "monto_ficha_unica"))
+    if saved_weights and not has_new_dimensions:
+        # Migra una vista personalizada anterior: divide el antiguo peso de
+        # demanda entre ambos conteos y asigna economía al monto de ficha única.
+        old_demand = float(saved_weights.get("demanda", 0) or 0)
+        saved_weights = {
+            "actos_totales": old_demand / 2.0,
+            "actos_ficha_unica": old_demand / 2.0,
+            "monto_ficha_unica": float(saved_weights.get("economia", 0) or 0),
+            "competencia": float(saved_weights.get("competencia", 0) or 0),
+            "viabilidad": float(saved_weights.get("viabilidad", 0) or 0),
+            "complejidad": float(saved_weights.get("complejidad", 0) or 0),
+        }
+    for name, value in saved_weights.items():
+        if name in MANUAL_SCORE_WEIGHTS:
             st.session_state[f"intel_v3_weight_{name}"] = float(value or 0)
 
 
@@ -469,15 +484,16 @@ def _score_weights() -> tuple[str, dict[str, float]]:
         columns = st.columns(3)
         raw: dict[str, float] = {}
         labels = {
-            "demanda": "Número de actos",
-            "economia": "Monto total de ficha única",
+            "actos_totales": "Número de actos totales",
+            "actos_ficha_unica": "Número de actos de ficha única",
+            "monto_ficha_unica": "Monto total de ficha única",
             "competencia": "Competencia favorable",
             "viabilidad": "Proveedores disponibles",
             "complejidad": "Clase favorable",
         }
         for index, (name, display) in enumerate(labels.items()):
             with columns[index % 3]:
-                raw[name] = float(st.number_input(display, 0.0, 100.0, float(SCORE_PRESETS["equilibrado"][name]), 1.0, key=f"intel_v3_weight_{name}"))
+                raw[name] = float(st.number_input(display, 0.0, 100.0, float(MANUAL_SCORE_WEIGHTS[name]), 1.0, key=f"intel_v3_weight_{name}"))
     return key, normalize_score_weights(raw)
 
 

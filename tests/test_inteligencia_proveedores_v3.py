@@ -156,6 +156,46 @@ class ServiceUnitTests(unittest.TestCase):
             first = scored.sort_values("score_oportunidad", ascending=False).iloc[0]["ficha"]
             self.assertEqual(first, expected, msg=f"Fallo el control exclusivo de {dimension}")
 
+    def test_custom_total_and_unique_act_counts_are_independent(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"ficha": "TOTAL", "actos": 100, "actos_ficha_unica": 2, "monto_ficha_unica": 100},
+                {"ficha": "UNICA", "actos": 50, "actos_ficha_unica": 40, "monto_ficha_unica": 100},
+            ]
+        )
+        dimensions = (
+            "actos_totales", "actos_ficha_unica", "monto_ficha_unica",
+            "competencia", "viabilidad", "complejidad",
+        )
+        total_weights = {name: 100.0 if name == "actos_totales" else 0.0 for name in dimensions}
+        unique_weights = {name: 100.0 if name == "actos_ficha_unica" else 0.0 for name in dimensions}
+
+        total_rank = score_opportunities(frame, total_weights, strict_manual=True)
+        unique_rank = score_opportunities(frame, unique_weights, strict_manual=True)
+
+        self.assertEqual(total_rank.sort_values("score_oportunidad", ascending=False).iloc[0]["ficha"], "TOTAL")
+        self.assertEqual(unique_rank.sort_values("score_oportunidad", ascending=False).iloc[0]["ficha"], "UNICA")
+
+    def test_custom_amount_uses_only_single_ficha_amount(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"ficha": "UNICA_ALTA", "actos": 1, "actos_ficha_unica": 1, "monto_ficha_unica": 900_000, "monto_referencia": 1},
+                {"ficha": "CONTEXTO_ALTO", "actos": 1, "actos_ficha_unica": 1, "monto_ficha_unica": 10_000, "monto_referencia": 9_000_000},
+            ]
+        )
+        weights = {
+            "actos_totales": 0,
+            "actos_ficha_unica": 0,
+            "monto_ficha_unica": 100,
+            "competencia": 0,
+            "viabilidad": 0,
+            "complejidad": 0,
+        }
+
+        scored = score_opportunities(frame, weights, strict_manual=True)
+
+        self.assertEqual(scored.sort_values("score_oportunidad", ascending=False).iloc[0]["ficha"], "UNICA_ALTA")
+
 
 class RepositoryIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:

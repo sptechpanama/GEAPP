@@ -46,6 +46,17 @@ DEFAULT_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
+# Controles directos del modo personalizado. Cada peso representa una sola
+# columna real y no una dimensión compuesta oculta.
+MANUAL_SCORE_WEIGHTS = {
+    "actos_totales": 14.0,
+    "actos_ficha_unica": 14.0,
+    "monto_ficha_unica": 27.0,
+    "competencia": 18.0,
+    "viabilidad": 17.0,
+    "complejidad": 10.0,
+}
+
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
     "volumen": {"demanda": 40.0, "economia": 35.0, "competencia": 10.0, "viabilidad": 10.0, "complejidad": 5.0},
@@ -845,10 +856,14 @@ def _weighted_mean(parts: Sequence[tuple[pd.Series, float]]) -> pd.Series:
 
 def normalize_score_weights(weights: Mapping[str, float] | None = None) -> dict[str, float]:
     raw = dict(DEFAULT_SCORE_WEIGHTS if weights is None else weights)
-    output = {key: max(0.0, float(raw.get(key, 0.0) or 0.0)) for key in DEFAULT_SCORE_WEIGHTS}
+    # Conserva compatibilidad con perfiles y vistas guardadas anteriores,
+    # mientras reconoce las métricas independientes del modo personalizado.
+    uses_manual_dimensions = any(key in raw for key in MANUAL_SCORE_WEIGHTS if key not in DEFAULT_SCORE_WEIGHTS)
+    template = MANUAL_SCORE_WEIGHTS if uses_manual_dimensions else DEFAULT_SCORE_WEIGHTS
+    output = {key: max(0.0, float(raw.get(key, 0.0) or 0.0)) for key in template}
     total = sum(output.values())
     if total <= 0:
-        return dict(DEFAULT_SCORE_WEIGHTS)
+        return dict(template)
     return {key: value / total * 100.0 for key, value in output.items()}
 
 
@@ -885,14 +900,9 @@ def score_opportunities(
             (_percentile(result["tendencia_6m_pct"]), 0.12),
         ]
     )
-    composite_economy = _weighted_mean(
-        [
-            (_percentile(result["monto_referencia"]), 0.42),
-            (_percentile(result["monto_adjudicado"]), 0.33),
-            (_percentile(result["ticket_mediano"]), 0.17),
-            (_percentile(result["ticket_promedio"]), 0.08),
-        ]
-    )
+    # La señal monetaria usa exclusivamente el monto de actos de ficha única.
+    # Así, otros renglones de un acto multificha no inflan este componente.
+    composite_economy = _percentile(result["monto_ficha_unica"])
     composite_competition = _weighted_mean(
         [
             (_percentile(result["participantes_promedio"], higher_is_better=False), 0.38),
@@ -928,6 +938,15 @@ def score_opportunities(
     )
     official_class_score = raw_class.map({"A": 100.0, "B": 50.0, "C": 0.0, "D": 0.0})
     class_complexity = official_class_score.where(official_class_score.notna(), legacy_complexity)
+
+    direct_manual_scores = {
+        "actos_totales": _percentile(result["actos"]),
+        "actos_ficha_unica": _percentile(result["actos_ficha_unica"]),
+        "monto_ficha_unica": _percentile(result["monto_ficha_unica"]),
+        "competencia": _percentile(result["participantes_promedio"], higher_is_better=False),
+        "viabilidad": _percentile(result["proveedores_catalogo"]),
+        "complejidad": official_class_score.fillna(0.0),
+    }
 
     if strict_manual:
         # En modo personalizado cada control representa una metrica directa.
@@ -970,8 +989,19 @@ def score_opportunities(
     )
 
     normalized_weights = normalize_score_weights(weights)
+    direct_only_keys = set(MANUAL_SCORE_WEIGHTS).difference(DEFAULT_SCORE_WEIGHTS)
+    if strict_manual and any(key in direct_only_keys for key in normalized_weights):
+        score_components = direct_manual_scores
+    else:
+        score_components = {
+            "demanda": result["score_demanda"],
+            "economia": result["score_economia"],
+            "competencia": result["score_competencia"],
+            "viabilidad": result["score_viabilidad"],
+            "complejidad": result["score_complejidad"],
+        }
     result["score_oportunidad"] = sum(
-        result[f"score_{key}"] * (weight / 100.0)
+        score_components[key] * (weight / 100.0)
         for key, weight in normalized_weights.items()
     ).clip(0, 100)
     result["recomendacion"] = result.apply(_recommendation, axis=1)
