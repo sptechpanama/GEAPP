@@ -71,7 +71,19 @@ DEFAULT_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-07-29-primary-amounts-v1"
+# En modo personalizado cada control corresponde a una columna real. Los dos
+# conteos se mantienen separados y el único componente monetario es el monto
+# de actos donde aparece una sola ficha técnica distinta.
+MANUAL_SCORE_WEIGHTS = {
+    "actos_totales": 14.0,
+    "actos_ficha_unica": 14.0,
+    "monto_ficha_unica": 27.0,
+    "competencia": 18.0,
+    "viabilidad": 17.0,
+    "complejidad": 10.0,
+}
+
+ANALYTICS_SERVICE_VERSION = "2026-08-01-risk-score-v2"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -80,6 +92,10 @@ SCORE_PRESETS = {
     "buscar_proveedor": {"demanda": 28.0, "economia": 22.0, "competencia": 15.0, "viabilidad": 28.0, "complejidad": 7.0},
     "baja_complejidad": {"demanda": 22.0, "economia": 23.0, "competencia": 15.0, "viabilidad": 15.0, "complejidad": 25.0},
 }
+
+RISK_CLASS_OTHER = "__OTRA_SIN_CLASE__"
+RISK_CLASS_NONE = "__NINGUNA__"
+RISK_CLASS_CANONICAL = ("A", "B", "C", "D")
 
 
 def clean_text(value: object) -> str:
@@ -164,6 +180,7 @@ class AnalyticsFilters:
     entities: tuple[str, ...] = field(default_factory=tuple)
     areas: tuple[str, ...] = field(default_factory=tuple)
     product_types: tuple[str, ...] = field(default_factory=tuple)
+    risk_classes: tuple[str, ...] = field(default_factory=tuple)
     fichas: tuple[str, ...] = field(default_factory=tuple)
     ct_status: str = "Todos"
     # Se conserva el campo por compatibilidad con vistas guardadas anteriores,
@@ -201,6 +218,7 @@ class AnalyticsFilters:
             "entidades": list(self.entities),
             "areas": list(self.areas),
             "tipos_producto": list(self.product_types),
+            "clases_riesgo": list(self.risk_classes),
             "fichas": list(self.fichas),
             "criterio_tecnico": self.ct_status,
             "registro_sanitario": ELIGIBLE_RS_STATUS,
@@ -369,6 +387,33 @@ class AnalyticsRepository:
                 params[key] = product_type
                 placeholders.append(f":{key}")
             clauses.append(f"m.tipo_producto IN ({', '.join(placeholders)})")
+        if filters.risk_classes:
+            selected_classes = {str(value).strip().upper() for value in filters.risk_classes}
+            if RISK_CLASS_NONE in selected_classes:
+                clauses.append("1 = 0")
+            elif self._has_risk_class:
+                class_clauses: list[str] = []
+                canonical = [value for value in RISK_CLASS_CANONICAL if value in selected_classes]
+                if canonical:
+                    placeholders = []
+                    for index, risk_class in enumerate(canonical):
+                        key = f"risk_class_{index}"
+                        params[key] = risk_class
+                        placeholders.append(f":{key}")
+                    class_clauses.append(
+                        "UPPER(TRIM(COALESCE(m.clase_riesgo, ''))) "
+                        f"IN ({', '.join(placeholders)})"
+                    )
+                if RISK_CLASS_OTHER in selected_classes:
+                    class_clauses.append(
+                        "UPPER(TRIM(COALESCE(m.clase_riesgo, ''))) "
+                        "NOT IN ('A', 'B', 'C', 'D')"
+                    )
+                clauses.append("(" + " OR ".join(class_clauses or ["1 = 0"]) + ")")
+            elif RISK_CLASS_OTHER not in selected_classes:
+                # Una capa antigua sin clase solo puede representar el grupo
+                # "Otra / sin clase"; seleccionar A-D no debe devolver falsos.
+                clauses.append("1 = 0")
         if filters.fichas:
             placeholders = []
             for index, ficha in enumerate(filters.fichas):
@@ -1132,14 +1177,21 @@ def _weighted_mean(parts: Sequence[tuple[pd.Series, float]]) -> pd.Series:
 
 def normalize_score_weights(weights: Mapping[str, float] | None = None) -> dict[str, float]:
     raw = dict(DEFAULT_SCORE_WEIGHTS if weights is None else weights)
-    output = {key: max(0.0, float(raw.get(key, 0.0) or 0.0)) for key in DEFAULT_SCORE_WEIGHTS}
+    uses_manual_dimensions = any(key in raw for key in MANUAL_SCORE_WEIGHTS if key not in DEFAULT_SCORE_WEIGHTS)
+    template = MANUAL_SCORE_WEIGHTS if uses_manual_dimensions else DEFAULT_SCORE_WEIGHTS
+    output = {key: max(0.0, float(raw.get(key, 0.0) or 0.0)) for key in template}
     total = sum(output.values())
     if total <= 0:
-        return dict(DEFAULT_SCORE_WEIGHTS)
+        return dict(template)
     return {key: value / total * 100.0 for key, value in output.items()}
 
 
-def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None = None) -> pd.DataFrame:
+def score_opportunities(
+    frame: pd.DataFrame,
+    weights: Mapping[str, float] | None = None,
+    *,
+    strict_manual: bool = False,
+) -> pd.DataFrame:
     if frame.empty:
         return frame.copy()
     result = frame.copy()
@@ -1175,12 +1227,10 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             (_percentile(result["tendencia_6m_pct"]), 0.12),
         ]
     )
-    result["score_economia"] = _weighted_mean(
-        [
-            (_percentile(result["monto_total_actos"]), 0.55),
-            (_percentile(result["monto_ficha_unica"]), 0.45),
-        ]
-    )
+    # El componente monetario usa exclusivamente el monto de ficha única.
+    # Los montos totales de actos se mantienen visibles y ordenables, pero no
+    # contaminan el peso económico del score.
+    result["score_economia"] = _percentile(result["monto_ficha_unica"])
     result["score_competencia"] = _weighted_mean(
         [
             (_percentile(result["participantes_promedio"], higher_is_better=False), 0.38),
@@ -1211,6 +1261,14 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     result["score_complejidad"] = risk_class.map(
         {"A": 100.0, "B": 50.0, "C": 0.0, "D": 0.0}
     )
+    direct_manual_scores = {
+        "actos_totales": _percentile(result["actos"]),
+        "actos_ficha_unica": _percentile(result["actos_ficha_unica"]),
+        "monto_ficha_unica": _percentile(result["monto_ficha_unica"]),
+        "competencia": _percentile(result["participantes_promedio"], higher_is_better=False),
+        "viabilidad": _percentile(result["proveedores_catalogo"]),
+        "complejidad": result["score_complejidad"],
+    }
     metadata_component = (
         result.get("nombre_ficha", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 55
         + result.get("enlace_minsa", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 45
@@ -1235,10 +1293,21 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     )
 
     normalized_weights = normalize_score_weights(weights)
+    direct_only_keys = set(MANUAL_SCORE_WEIGHTS).difference(DEFAULT_SCORE_WEIGHTS)
+    if strict_manual and any(key in direct_only_keys for key in normalized_weights):
+        score_components = direct_manual_scores
+    else:
+        score_components = {
+            "demanda": result["score_demanda"],
+            "economia": result["score_economia"],
+            "competencia": result["score_competencia"],
+            "viabilidad": result["score_viabilidad"],
+            "complejidad": result["score_complejidad"],
+        }
     weighted_sum = pd.Series(0.0, index=result.index, dtype=float)
     available_weight = pd.Series(0.0, index=result.index, dtype=float)
     for key, weight in normalized_weights.items():
-        component = pd.to_numeric(result[f"score_{key}"], errors="coerce")
+        component = pd.to_numeric(score_components[key], errors="coerce")
         available = component.notna()
         weighted_sum = weighted_sum.add(component.fillna(0.0) * float(weight), fill_value=0.0)
         available_weight = available_weight.add(available.astype(float) * float(weight), fill_value=0.0)
@@ -1250,7 +1319,10 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     result["recomendacion"] = result.apply(_recommendation, axis=1)
     result["razones"] = result.apply(_explain_score, axis=1)
     for column in [column for column in result.columns if column.startswith("score_")]:
-        result[column] = result[column].round(1)
+        if column == "score_oportunidad" and strict_manual:
+            result[column] = result[column].round(6)
+        else:
+            result[column] = result[column].round(1)
     return result
 
 

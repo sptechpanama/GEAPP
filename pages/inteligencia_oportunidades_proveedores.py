@@ -33,7 +33,10 @@ _ANALYTICS_EXPORTS = (
     "AnalyticsUnavailable",
     "DATE_COLUMNS",
     "ELIGIBLE_RS_STATUS",
+    "MANUAL_SCORE_WEIGHTS",
     "PROFILE_LABELS",
+    "RISK_CLASS_NONE",
+    "RISK_CLASS_OTHER",
     "SCORE_PRESETS",
     "apply_master_filters",
     "dataframe_to_csv_bytes",
@@ -64,7 +67,10 @@ AnalyticsRepository = _analytics_v3.AnalyticsRepository
 AnalyticsUnavailable = _analytics_v3.AnalyticsUnavailable
 DATE_COLUMNS = _analytics_v3.DATE_COLUMNS
 ELIGIBLE_RS_STATUS = _analytics_v3.ELIGIBLE_RS_STATUS
+MANUAL_SCORE_WEIGHTS = _analytics_v3.MANUAL_SCORE_WEIGHTS
 PROFILE_LABELS = _analytics_v3.PROFILE_LABELS
+RISK_CLASS_NONE = _analytics_v3.RISK_CLASS_NONE
+RISK_CLASS_OTHER = _analytics_v3.RISK_CLASS_OTHER
 SCORE_PRESETS = _analytics_v3.SCORE_PRESETS
 apply_master_filters = _analytics_v3.apply_master_filters
 dataframe_to_csv_bytes = _analytics_v3.dataframe_to_csv_bytes
@@ -421,11 +427,40 @@ def _apply_pending_saved_view() -> None:
     }
     for key, value in assignments.items():
         st.session_state[key] = value
+    saved_risk_classes = {
+        str(value).strip().upper()
+        for value in payload.get("clases_riesgo", []) or []
+        if str(value).strip()
+    }
+    # Una lista vacia significa "sin filtro": todas las clases quedan activas.
+    all_risk_classes = not saved_risk_classes
+    for risk_class in ("A", "B", "C", "D"):
+        st.session_state[f"intel_v3_risk_{risk_class.lower()}"] = (
+            all_risk_classes or risk_class in saved_risk_classes
+        )
+    st.session_state["intel_v3_risk_other"] = (
+        all_risk_classes or RISK_CLASS_OTHER in saved_risk_classes
+    )
     score_preset = str(payload.get("score_preset", "equilibrado") or "equilibrado")
     st.session_state["intel_v3_score_preset"] = preset_label_by_value.get(score_preset, "Equilibrado")
-    for name, value in dict(payload.get("score_weights", {}) or {}).items():
-        if name in SCORE_PRESETS["equilibrado"]:
-            st.session_state[f"intel_v3_weight_{name}"] = float(value or 0)
+    saved_weights = dict(payload.get("score_weights", {}) or {})
+    if any(name in saved_weights for name in MANUAL_SCORE_WEIGHTS):
+        migrated_weights = saved_weights
+    else:
+        # Compatibilidad con vistas antiguas: "demanda" combinaba ambos
+        # conteos y "economia" representaba el componente monetario.
+        demand_weight = float(saved_weights.get("demanda", 28.0) or 0)
+        migrated_weights = {
+            "actos_totales": demand_weight / 2.0,
+            "actos_ficha_unica": demand_weight / 2.0,
+            "monto_ficha_unica": float(saved_weights.get("economia", 27.0) or 0),
+            "competencia": float(saved_weights.get("competencia", 18.0) or 0),
+            "viabilidad": float(saved_weights.get("viabilidad", 17.0) or 0),
+            "complejidad": float(saved_weights.get("complejidad", 10.0) or 0),
+        }
+    for name in MANUAL_SCORE_WEIGHTS:
+        if name in migrated_weights:
+            st.session_state[f"intel_v3_weight_{name}"] = float(migrated_weights[name] or 0)
 
 
 def _render_saved_views(current_payload: dict[str, object]) -> None:
@@ -531,22 +566,32 @@ def _score_weights() -> tuple[str, dict[str, float]]:
     if key != "personalizado":
         return key, dict(SCORE_PRESETS[key])
     with st.expander("Pesos personalizados", expanded=True):
+        st.caption(
+            "Los pesos personalizados se aplican estrictamente a cada métrica. "
+            "Un peso de 100% ordena el score solo por ese indicador."
+        )
         columns = st.columns(3)
         raw: dict[str, float] = {}
         labels = {
-            "demanda": "Número de actos",
-            "economia": "Monto total + ficha única",
+            "actos_totales": "Número de actos totales",
+            "actos_ficha_unica": "Número de actos de ficha única",
+            "monto_ficha_unica": "Monto total de ficha única",
             "competencia": "Menos participantes",
             "viabilidad": "Proveedores disponibles",
-            "preparacion": "Preparación operativa",
-            "confianza": "Confianza del dato",
+            "complejidad": "Clase de riesgo favorable",
         }
-        labels.pop("preparacion", None)
-        labels.pop("confianza", None)
-        labels["complejidad"] = "Clase de riesgo favorable"
         for index, (name, display) in enumerate(labels.items()):
             with columns[index % 3]:
-                raw[name] = float(st.number_input(display, 0.0, 100.0, float(SCORE_PRESETS["equilibrado"][name]), 1.0, key=f"intel_v3_weight_{name}"))
+                raw[name] = float(
+                    st.number_input(
+                        display,
+                        0.0,
+                        100.0,
+                        float(MANUAL_SCORE_WEIGHTS[name]),
+                        1.0,
+                        key=f"intel_v3_weight_{name}",
+                    )
+                )
     return key, normalize_score_weights(raw)
 
 
@@ -1819,7 +1864,33 @@ with st.sidebar:
         selected_states = tuple(st.multiselect("Estado del acto", options.get("states", []), key="intel_v3_states"))
         selected_entities = tuple(st.multiselect("Entidades", options.get("entities", []), key="intel_v3_entities"))
         selected_areas = tuple(st.multiselect("Areas", options.get("areas", []), key="intel_v3_areas"))
-        selected_product_types = tuple(st.multiselect("Clase / tipo de producto", options.get("product_types", []), key="intel_v3_product_types"))
+        # La clase oficial sustituye el selector ambiguo de tipo de producto.
+        # Todas quedan incluidas por defecto; desmarcar una la excluye en SQL.
+        selected_product_types: tuple[str, ...] = ()
+        st.markdown("**Clase de riesgo**")
+        st.caption("Todas incluidas por defecto")
+        risk_columns = st.columns(5)
+        selected_risk_values: list[str] = []
+        for index, risk_class in enumerate(("A", "B", "C", "D")):
+            if risk_columns[index].checkbox(
+                risk_class,
+                value=True,
+                key=f"intel_v3_risk_{risk_class.lower()}",
+            ):
+                selected_risk_values.append(risk_class)
+        if risk_columns[4].checkbox(
+            "Otra",
+            value=True,
+            key="intel_v3_risk_other",
+            help="Incluye fichas sin clase o con una clase distinta de A, B, C o D.",
+        ):
+            selected_risk_values.append(RISK_CLASS_OTHER)
+        if len(selected_risk_values) == 5:
+            selected_risk_classes: tuple[str, ...] = ()
+        elif selected_risk_values:
+            selected_risk_classes = tuple(selected_risk_values)
+        else:
+            selected_risk_classes = (RISK_CLASS_NONE,)
         ct_status = st.selectbox("Criterio técnico", ["Todos", "Si", "No"], key="intel_v3_ct")
         rs_status = ELIGIBLE_RS_STATUS
         st.caption(
@@ -1872,6 +1943,7 @@ filters = AnalyticsFilters(
     entities=selected_entities,
     areas=selected_areas,
     product_types=selected_product_types,
+    risk_classes=selected_risk_classes,
     fichas=availability_fichas,
     ct_status=ct_status,
     rs_status=rs_status,
@@ -1906,7 +1978,11 @@ with st.spinner("Calculando métricas globales del periodo..."):
             + ". Reinicia la aplicación para cargar la versión actual del servicio."
         )
         st.stop()
-    master = score_opportunities(raw_master, weights)
+    master = score_opportunities(
+        raw_master,
+        weights,
+        strict_manual=score_preset == "personalizado",
+    )
 
 with st.expander("Decisión final", expanded=False):
     c1, c2 = st.columns(2)

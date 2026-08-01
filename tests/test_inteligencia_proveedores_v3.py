@@ -17,6 +17,8 @@ sys.path.insert(0, str(APP_ROOT))
 from services.inteligencia_proveedores_v3 import (  # noqa: E402
     AnalyticsFilters,
     AnalyticsRepository,
+    RISK_CLASS_NONE,
+    RISK_CLASS_OTHER,
     apply_master_filters,
     intelligence_view_frame,
     normalize_ficha_list,
@@ -124,6 +126,82 @@ class ServiceUnitTests(unittest.TestCase):
             float(scored.loc["ATRIBUIBLE", "score_economia"]),
         )
 
+    def test_economic_score_uses_only_unique_ficha_amount(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "ficha": "MAYOR_UNICA",
+                    "monto_total_actos": 1_000,
+                    "monto_ficha_unica": 900_000,
+                    "monto_referencia": 1,
+                },
+                {
+                    "ficha": "MAYOR_CONTEXTO",
+                    "monto_total_actos": 9_000_000,
+                    "monto_ficha_unica": 10_000,
+                    "monto_referencia": 9_000_000,
+                },
+            ]
+        )
+        scored = score_opportunities(frame).set_index("ficha")
+        self.assertGreater(
+            float(scored.loc["MAYOR_UNICA", "score_economia"]),
+            float(scored.loc["MAYOR_CONTEXTO", "score_economia"]),
+        )
+
+    def test_manual_act_weights_are_independent_and_strict(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"ficha": "MAS_TOTAL", "actos": 100, "actos_ficha_unica": 2},
+                {"ficha": "MAS_UNICA", "actos": 50, "actos_ficha_unica": 40},
+            ]
+        )
+        total_score = score_opportunities(
+            frame,
+            {"actos_totales": 100.0},
+            strict_manual=True,
+        ).set_index("ficha")
+        unique_score = score_opportunities(
+            frame,
+            {"actos_ficha_unica": 100.0},
+            strict_manual=True,
+        ).set_index("ficha")
+        self.assertGreater(
+            float(total_score.loc["MAS_TOTAL", "score_oportunidad"]),
+            float(total_score.loc["MAS_UNICA", "score_oportunidad"]),
+        )
+        self.assertGreater(
+            float(unique_score.loc["MAS_UNICA", "score_oportunidad"]),
+            float(unique_score.loc["MAS_TOTAL", "score_oportunidad"]),
+        )
+
+    def test_manual_unique_amount_weight_is_strict(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "ficha": "UNICA_ALTA",
+                    "monto_total_actos": 1_000,
+                    "monto_ficha_unica": 500_000,
+                    "monto_referencia": 1,
+                },
+                {
+                    "ficha": "TOTAL_ALTO",
+                    "monto_total_actos": 10_000_000,
+                    "monto_ficha_unica": 2_000,
+                    "monto_referencia": 10_000_000,
+                },
+            ]
+        )
+        scored = score_opportunities(
+            frame,
+            {"monto_ficha_unica": 100.0},
+            strict_manual=True,
+        ).set_index("ficha")
+        self.assertGreater(
+            float(scored.loc["UNICA_ALTA", "score_oportunidad"]),
+            float(scored.loc["TOTAL_ALTO", "score_oportunidad"]),
+        )
+
     def test_risk_class_controls_complexity_score(self) -> None:
         common = {
             "actos": 10,
@@ -202,6 +280,9 @@ class RepositoryIntegrationTests(unittest.TestCase):
             "INSERT INTO intel_ficha_metadata VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [("43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO", "ANESTESIA", "Si", "No", "https://minsa/43358", "test", "43358 kit circuito paciente anestesia medico insumo"), ("103169", "ESTERILIZACION", "", "MEDICO", "INSUMO", "", "Si", "No", "https://minsa/103169", "test", "103169 esterilizacion medico insumo"), ("99999", "PRODUCTO CON REGISTRO", "", "MEDICO", "INSUMO", "", "Si", "Si", "https://minsa/99999", "test", "99999 producto con registro sanitario"), ("88888", "PRODUCTO SIN CLASIFICAR", "", "MEDICO", "INSUMO", "", "Si", "", "https://minsa/88888", "test", "88888 producto sin clasificar")],
         )
+        connection.execute("ALTER TABLE intel_ficha_metadata ADD COLUMN clase_riesgo TEXT")
+        connection.execute("UPDATE intel_ficha_metadata SET clase_riesgo = 'A' WHERE ficha = '43358'")
+        connection.execute("UPDATE intel_ficha_metadata SET clase_riesgo = 'C' WHERE ficha = '103169'")
         connection.execute("INSERT INTO intel_ficha_catalogo VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("43358", "PROVEEDOR C", "Ana", "123", "a@test", "C1", "KIT", "LAB", "M", "X", "Activo"))
         connection.commit()
         connection.close()
@@ -239,6 +320,24 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertEqual(legacy_filter.as_payload()["registro_sanitario"], "No")
         self.assertTrue(self.repo.acts_for_ficha("99999", legacy_filter).empty)
         self.assertTrue(self.repo.providers_for_ficha("99999", legacy_filter).empty)
+
+    def test_risk_class_filters_are_applied_in_sql(self) -> None:
+        class_a = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=("A",))
+        )
+        class_c = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=("C",))
+        )
+        other = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=(RISK_CLASS_OTHER,))
+        )
+        none = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=(RISK_CLASS_NONE,))
+        )
+        self.assertEqual(class_a["ficha"].tolist(), ["43358"])
+        self.assertEqual(class_c["ficha"].tolist(), ["103169"])
+        self.assertTrue(other.empty)
+        self.assertTrue(none.empty)
 
     def test_strict_profile_excludes_score_90(self) -> None:
         filters = AnalyticsFilters(detection_profile="estricto")
