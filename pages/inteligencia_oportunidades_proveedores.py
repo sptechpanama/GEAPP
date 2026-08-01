@@ -981,8 +981,9 @@ with st.sidebar:
         selected_states = tuple(st.multiselect("Estado del acto", options.get("states", []), key="intel_v3_states"))
         selected_entities = tuple(st.multiselect("Entidades", options.get("entities", []), key="intel_v3_entities"))
         selected_areas = tuple(st.multiselect("Areas", options.get("areas", []), key="intel_v3_areas"))
-        selected_product_types = tuple(st.multiselect("Clase / tipo de producto", options.get("product_types", []), key="intel_v3_product_types"))
-        st.caption("Clases de riesgo (todas incluidas por defecto)")
+        selected_product_types: tuple[str, ...] = ()
+        st.markdown("**Clase**")
+        st.caption("Todas incluidas por defecto")
         risk_columns = st.columns(3)
         risk_definitions = (
             ("A", "A", "intel_v3_risk_class_a"),
