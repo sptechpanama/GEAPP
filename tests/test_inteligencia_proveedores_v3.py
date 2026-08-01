@@ -17,6 +17,8 @@ sys.path.insert(0, str(APP_ROOT))
 from services.inteligencia_proveedores_v3 import (  # noqa: E402
     AnalyticsFilters,
     AnalyticsRepository,
+    RISK_CLASS_NONE,
+    RISK_CLASS_OTHER,
     apply_master_filters,
     intelligence_view_frame,
     preset_range,
@@ -93,6 +95,67 @@ class ServiceUnitTests(unittest.TestCase):
         pd.testing.assert_series_equal(scored["score_oportunidad"], expected, check_names=False)
         self.assertTrue(scored["score_confianza"].between(0, 100).all())
 
+    def test_strict_manual_weight_follows_single_ficha_amount_exactly(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "ficha": "MAYOR",
+                    "actos": 1,
+                    "monto_ficha_unica": 1_000_000,
+                    "participantes_promedio": 8,
+                    "proveedores_catalogo": 0,
+                    "clase_riesgo": "C",
+                },
+                {
+                    "ficha": "MENOR",
+                    "actos": 100,
+                    "monto_ficha_unica": 10_000,
+                    "participantes_promedio": 1,
+                    "proveedores_catalogo": 20,
+                    "clase_riesgo": "A",
+                },
+            ]
+        )
+        weights = {
+            "demanda": 0,
+            "economia": 100,
+            "competencia": 0,
+            "viabilidad": 0,
+            "complejidad": 0,
+        }
+
+        scored = score_opportunities(frame, weights, strict_manual=True)
+        ordered = scored.sort_values("score_oportunidad", ascending=False)
+
+        self.assertEqual(ordered["ficha"].tolist(), ["MAYOR", "MENOR"])
+        pd.testing.assert_series_equal(
+            scored["score_oportunidad"],
+            scored["score_economia"].astype(float),
+            check_names=False,
+        )
+
+    def test_each_strict_manual_dimension_can_control_the_ranking_alone(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"ficha": "A", "actos": 30, "monto_ficha_unica": 100, "participantes_promedio": 5, "proveedores_catalogo": 1, "clase_riesgo": "C"},
+                {"ficha": "B", "actos": 20, "monto_ficha_unica": 300, "participantes_promedio": 3, "proveedores_catalogo": 2, "clase_riesgo": "B"},
+                {"ficha": "C", "actos": 10, "monto_ficha_unica": 200, "participantes_promedio": 1, "proveedores_catalogo": 3, "clase_riesgo": "A"},
+            ]
+        )
+        expected_first = {
+            "demanda": "A",
+            "economia": "B",
+            "competencia": "C",
+            "viabilidad": "C",
+            "complejidad": "C",
+        }
+
+        for dimension, expected in expected_first.items():
+            weights = {name: 100.0 if name == dimension else 0.0 for name in expected_first}
+            scored = score_opportunities(frame, weights, strict_manual=True)
+            first = scored.sort_values("score_oportunidad", ascending=False).iloc[0]["ficha"]
+            self.assertEqual(first, expected, msg=f"Fallo el control exclusivo de {dimension}")
+
 
 class RepositoryIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -145,6 +208,9 @@ class RepositoryIntegrationTests(unittest.TestCase):
             [("43358", "KIT CIRCUITO PACIENTE", "ANESTESIA", "MEDICO", "INSUMO", "ANESTESIA", "Si", "No", "https://minsa/43358", "test", "43358 kit circuito paciente anestesia medico insumo"), ("103169", "ESTERILIZACION", "", "MEDICO", "INSUMO", "", "Si", "No", "https://minsa/103169", "test", "103169 esterilizacion medico insumo")],
         )
         connection.execute("INSERT INTO intel_ficha_catalogo VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("43358", "PROVEEDOR C", "Ana", "123", "a@test", "C1", "KIT", "LAB", "M", "X", "Activo"))
+        connection.execute("ALTER TABLE intel_ficha_metadata ADD COLUMN clase_riesgo TEXT")
+        connection.execute("UPDATE intel_ficha_metadata SET clase_riesgo = 'A' WHERE ficha = '43358'")
+        connection.execute("UPDATE intel_ficha_metadata SET clase_riesgo = 'C' WHERE ficha = '103169'")
         connection.commit()
         connection.close()
         self.repo = AnalyticsRepository(create_engine(f"sqlite:///{self.db_path.as_posix()}"), source_label="test")
@@ -230,6 +296,25 @@ class RepositoryIntegrationTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["ficha"].tolist(), ["103169"])
+
+    def test_risk_class_checkboxes_filter_in_sql(self) -> None:
+        class_a = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=("A",))
+        )
+        class_c = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=("C",))
+        )
+        other = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=(RISK_CLASS_OTHER,))
+        )
+        none = self.repo.master_metrics(
+            AnalyticsFilters(detection_profile="muy_flexible", risk_classes=(RISK_CLASS_NONE,))
+        )
+
+        self.assertEqual(class_a["ficha"].tolist(), ["43358"])
+        self.assertEqual(class_c["ficha"].tolist(), ["103169"])
+        self.assertTrue(other.empty)
+        self.assertTrue(none.empty)
 
     def test_favorite_list_and_contactable_provider_filters_are_exact(self) -> None:
         selected = self.repo.master_metrics(
@@ -356,6 +441,7 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
         row = result.iloc[0]
         self.assertEqual(float(row["monto_referencia"]), 6000.0)
         self.assertEqual(float(row["monto_referencia_contexto"]), 206000.0)
+        self.assertEqual(float(row["monto_ficha_unica"]), 5000.0)
         self.assertEqual(float(row["monto_adjudicado"]), 4500.0)
         self.assertEqual(float(row["monto_adjudicado_contexto"]), 194500.0)
         self.assertEqual(float(row["cobertura_monto_referencia_pct"]), 100.0)

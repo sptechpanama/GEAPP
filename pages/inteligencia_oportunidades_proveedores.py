@@ -29,6 +29,8 @@ from services.inteligencia_proveedores_v3 import (
     AnalyticsUnavailable,
     DATE_COLUMNS,
     PROFILE_LABELS,
+    RISK_CLASS_NONE,
+    RISK_CLASS_OTHER,
     SCORE_PRESETS,
     apply_master_filters,
     dataframe_to_csv_bytes,
@@ -146,6 +148,74 @@ def _safe_int(value: object) -> int:
         return int(float(value or 0))
     except Exception:
         return 0
+
+
+def _table_number_config(
+    frame: pd.DataFrame,
+    overrides: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Añade separadores de miles sin convertir los números a texto."""
+
+    config: dict[str, object] = {}
+    identifier_names = {
+        "ficha",
+        "ficha_numero",
+        "numero_ficha",
+        "numero_acto",
+        "id",
+        "request_id",
+        "renglon",
+        "renglon_numero",
+    }
+    money_markers = (
+        "monto",
+        "amount",
+        "ticket",
+        "precio",
+        "oferta",
+        "referencia",
+        "adjudicado",
+        "ganado",
+    )
+
+    for column in frame.columns:
+        if not pd.api.types.is_numeric_dtype(frame[column]):
+            continue
+        normalized = (
+            str(column)
+            .strip()
+            .lower()
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ú", "u")
+            .replace("–", "_")
+            .replace("—", "_")
+            .replace(" ", "_")
+        )
+        if normalized in identifier_names or normalized.endswith("_id"):
+            continue
+
+        is_percentage = (
+            normalized.endswith("_pct")
+            or "%" in str(column)
+            or "porcentaje" in normalized
+            or "cobertura" in normalized
+            or normalized.startswith("tasa_")
+            or "tendencia" in normalized
+        )
+        is_money = not is_percentage and any(
+            marker in normalized for marker in money_markers
+        )
+        config[column] = st.column_config.NumberColumn(
+            str(column),
+            format="dollar" if is_money else "localized",
+        )
+
+    if overrides:
+        config.update(dict(overrides))
+    return config
 
 
 def _normalize_ficha(value: object) -> str:
@@ -270,6 +340,18 @@ def _apply_pending_saved_view() -> None:
     }
     for key, value in assignments.items():
         st.session_state[key] = value
+    if "clases_riesgo" in payload:
+        saved_classes = {str(value) for value in payload.get("clases_riesgo", []) or []}
+        all_selected = not saved_classes
+        class_keys = {
+            "A": "intel_v3_risk_class_a",
+            "B": "intel_v3_risk_class_b",
+            "C": "intel_v3_risk_class_c",
+            "D": "intel_v3_risk_class_d",
+            RISK_CLASS_OTHER: "intel_v3_risk_class_other",
+        }
+        for token, state_key in class_keys.items():
+            st.session_state[state_key] = all_selected or token in saved_classes
     score_preset = str(payload.get("score_preset", "equilibrado") or "equilibrado")
     st.session_state["intel_v3_score_preset"] = preset_label_by_value.get(score_preset, "Equilibrado")
     for name, value in dict(payload.get("score_weights", {}) or {}).items():
@@ -380,19 +462,19 @@ def _score_weights() -> tuple[str, dict[str, float]]:
     if key != "personalizado":
         return key, dict(SCORE_PRESETS[key])
     with st.expander("Pesos personalizados", expanded=True):
+        st.caption(
+            "Modo estricto: cada peso controla directamente la métrica indicada. "
+            "Si una métrica recibe 100 %, el ranking sigue exclusivamente esa columna."
+        )
         columns = st.columns(3)
         raw: dict[str, float] = {}
         labels = {
-            "demanda": "Demanda",
-            "economia": "Potencial económico",
+            "demanda": "Número de actos",
+            "economia": "Monto total de ficha única",
             "competencia": "Competencia favorable",
-            "viabilidad": "Viabilidad/proveedores",
-            "preparacion": "Preparación operativa",
-            "confianza": "Confianza del dato",
+            "viabilidad": "Proveedores disponibles",
+            "complejidad": "Clase favorable",
         }
-        labels.pop("preparacion", None)
-        labels.pop("confianza", None)
-        labels["complejidad"] = "Complejidad favorable"
         for index, (name, display) in enumerate(labels.items()):
             with columns[index % 3]:
                 raw[name] = float(st.number_input(display, 0.0, 100.0, float(SCORE_PRESETS["equilibrado"][name]), 1.0, key=f"intel_v3_weight_{name}"))
@@ -435,6 +517,7 @@ def _render_master_table(frame: pd.DataFrame) -> None:
         "Score de oportunidad": "score_oportunidad",
         "Monto referencial atribuible": "monto_referencia",
         "Monto adjudicado atribuible": "monto_adjudicado",
+        "Monto total de ficha única": "monto_ficha_unica",
         "Monto global de actos (contexto)": "monto_referencia_contexto",
         "Número de actos": "actos",
         "Actos de ficha única": "actos_ficha_unica",
@@ -458,12 +541,12 @@ def _render_master_table(frame: pd.DataFrame) -> None:
 
     display_columns = [
         "ficha", "nombre_ficha", "recomendacion", "score_oportunidad", "actos", "actos_ficha_unica",
-        "monto_referencia", "monto_adjudicado", "monto_referencia_contexto", "monto_adjudicado_contexto",
+        "monto_ficha_unica", "monto_referencia", "monto_adjudicado", "monto_referencia_contexto", "monto_adjudicado_contexto",
         "cobertura_monto_referencia_pct", "cobertura_monto_adjudicado_pct",
         "cobertura_ganador_pct", "cobertura_participantes_pct", "ticket_promedio", "ticket_mediano",
         "participantes_promedio", "participantes_mediana", "proponentes_distintos", "top_1_ganador", "top_1_pct",
         "top_3_concentracion_pct", "concentracion_hhi",
-        "proveedores_catalogo", "proveedores_contactables", "tiene_ct", "registro_sanitario", "tendencia_6m_pct",
+        "proveedores_catalogo", "proveedores_contactables", "clase_riesgo", "tiene_ct", "registro_sanitario", "tendencia_6m_pct",
         "ultima_fecha", "razones", "enlace_minsa",
     ]
     display = intelligence_view_frame(
@@ -474,29 +557,31 @@ def _render_master_table(frame: pd.DataFrame) -> None:
         width="stretch",
         height=min(1_000, 90 + max(1, len(display)) * 35),
         hide_index=True,
-        column_config={
+        column_config=_table_number_config(display, {
             "ficha": "Ficha",
             "nombre_ficha": st.column_config.TextColumn("Nombre de ficha", width="large"),
             "recomendacion": st.column_config.TextColumn("Recomendación", width="medium"),
             "score_oportunidad": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
-            "monto_referencia": st.column_config.NumberColumn("Referencia atribuible fiable", format="$ %.2f"),
-            "monto_adjudicado": st.column_config.NumberColumn("Adjudicado atribuible fiable", format="$ %.2f"),
-            "monto_referencia_contexto": st.column_config.NumberColumn("Total actos (contexto)", format="$ %.2f"),
-            "monto_adjudicado_contexto": st.column_config.NumberColumn("Adjudicado actos (contexto)", format="$ %.2f"),
-            "ticket_promedio": st.column_config.NumberColumn("Ticket promedio", format="$ %.2f"),
-            "ticket_mediano": st.column_config.NumberColumn("Ticket mediano", format="$ %.2f"),
+            "monto_ficha_unica": st.column_config.NumberColumn("Monto total ficha única", format="dollar"),
+            "monto_referencia": st.column_config.NumberColumn("Referencia atribuible fiable", format="dollar"),
+            "monto_adjudicado": st.column_config.NumberColumn("Adjudicado atribuible fiable", format="dollar"),
+            "monto_referencia_contexto": st.column_config.NumberColumn("Total actos (contexto)", format="dollar"),
+            "monto_adjudicado_contexto": st.column_config.NumberColumn("Adjudicado actos (contexto)", format="dollar"),
+            "ticket_promedio": st.column_config.NumberColumn("Ticket promedio", format="dollar"),
+            "ticket_mediano": st.column_config.NumberColumn("Ticket mediano", format="dollar"),
             "cobertura_monto_referencia_pct": st.column_config.NumberColumn("Cobertura referencia fiable", format="%.1f%%"),
             "cobertura_monto_adjudicado_pct": st.column_config.NumberColumn("Cobertura adjudicado fiable", format="%.1f%%"),
             "cobertura_ganador_pct": st.column_config.NumberColumn("Cobertura ganador", format="%.1f%%"),
             "cobertura_participantes_pct": st.column_config.NumberColumn("Cobertura participantes", format="%.1f%%"),
-            "participantes_promedio": st.column_config.NumberColumn("Participantes prom.", format="%.2f"),
-            "participantes_mediana": st.column_config.NumberColumn("Participantes mediana", format="%.2f"),
+            "participantes_promedio": st.column_config.NumberColumn("Participantes prom.", format="localized"),
+            "participantes_mediana": st.column_config.NumberColumn("Participantes mediana", format="localized"),
             "top_1_pct": st.column_config.NumberColumn("Top 1 %", format="%.1f%%"),
             "top_3_concentracion_pct": st.column_config.NumberColumn("Concentración Top 3", format="%.1f%%"),
             "tendencia_6m_pct": st.column_config.NumberColumn("Tendencia 6m", format="%.1f%%"),
+            "clase_riesgo": st.column_config.TextColumn("Clase"),
             "enlace_minsa": st.column_config.LinkColumn("Ficha MINSA", display_text="Abrir"),
             "razones": st.column_config.TextColumn("Explicación", width="large"),
-        },
+        }),
     )
     st.download_button(
         "Descargar todas las fichas filtradas (CSV)",
@@ -534,11 +619,13 @@ def _render_trends(frame: pd.DataFrame, filters: AnalyticsFilters, repository: A
     }
     pivot = monthly.pivot_table(index="mes", columns="ficha", values=metric_map[metric_label], aggfunc="sum", fill_value=0)
     st.line_chart(pivot, height=430)
+    monthly_display = intelligence_view_frame(monthly)
     st.dataframe(
-        intelligence_view_frame(monthly),
+        monthly_display,
         width="stretch",
         hide_index=True,
         height=380,
+        column_config=_table_number_config(monthly_display),
     )
 
 
@@ -552,25 +639,32 @@ def _render_competition(frame: pd.DataFrame) -> None:
     st.scatter_chart(chart, x="participantes_promedio", y="monto_referencia", color="score_oportunidad", size="score_oportunidad", height=500)
     st.caption("Arriba a la izquierda: mayor mercado con menos participantes. El color/tamaño representa el score integral.")
     detail = frame.sort_values(["score_competencia", "monto_referencia"], ascending=[False, False]).head(250)
-    st.dataframe(
-        intelligence_view_frame(
-            detail[
-                [
-                    "ficha",
-                    "nombre_ficha",
-                    "participantes_promedio",
-                    "proporcion_unico_proponente",
-                    "proponentes_distintos",
-                    "concentracion_hhi",
-                    "top_1_ganador",
-                    "top_1_pct",
-                    "score_competencia",
-                ]
+    competition_display = intelligence_view_frame(
+        detail[
+            [
+                "ficha",
+                "nombre_ficha",
+                "participantes_promedio",
+                "proporcion_unico_proponente",
+                "proponentes_distintos",
+                "concentracion_hhi",
+                "top_1_ganador",
+                "top_1_pct",
+                "score_competencia",
             ]
-        ),
+        ]
+    )
+    st.dataframe(
+        competition_display,
         width="stretch",
         hide_index=True,
         height=650,
+        column_config=_table_number_config(
+            competition_display,
+            {
+                "top_1_pct": st.column_config.NumberColumn("Top 1 %", format="%.1f%%"),
+            },
+        ),
     )
 
 
@@ -595,55 +689,65 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
         if providers.empty:
             st.info("No se encontraron proponentes estructurados para esta ficha y periodo.")
         else:
+            providers_display = intelligence_view_frame(providers)
             st.dataframe(
-                intelligence_view_frame(providers),
+                providers_display,
                 width="stretch",
                 hide_index=True,
                 height=650,
-                column_config={
-                    "monto_ganado": st.column_config.NumberColumn("Monto ganado atribuible", format="$ %.2f"),
-                    "monto_ganado_contexto": st.column_config.NumberColumn("Ganado total actos (contexto)", format="$ %.2f"),
-                    "oferta_promedio_contexto": st.column_config.NumberColumn("Oferta total promedio (contexto)", format="$ %.2f"),
-                    "tasa_exito_pct": st.column_config.NumberColumn("Tasa de éxito", format="%.1f%%"),
-                },
+                column_config=_table_number_config(
+                    providers_display,
+                    {
+                        "monto_ganado": st.column_config.NumberColumn("Monto ganado atribuible", format="dollar"),
+                        "monto_ganado_contexto": st.column_config.NumberColumn("Ganado total actos (contexto)", format="dollar"),
+                        "oferta_promedio_contexto": st.column_config.NumberColumn("Oferta total promedio (contexto)", format="dollar"),
+                        "tasa_exito_pct": st.column_config.NumberColumn("Tasa de éxito", format="%.1f%%"),
+                    },
+                ),
             )
     with tab2:
         if catalog.empty:
             st.info("No hay proveedores vinculados a esta ficha en el catálogo actual.")
         else:
+            catalog_display = intelligence_view_frame(catalog)
             st.dataframe(
-                intelligence_view_frame(catalog),
+                catalog_display,
                 width="stretch",
                 hide_index=True,
                 height=650,
+                column_config=_table_number_config(catalog_display),
             )
     with tab3:
         if acts.empty:
             st.info("No hay actos para la ficha bajo los filtros actuales.")
         else:
-            st.dataframe(
-                intelligence_view_frame(
-                    acts,
-                    extra_hidden=(
-                        "detection_score",
-                        "reference_amount",
-                        "award_amount",
-                        "award_amount_source",
-                        "reference_amount_reliable",
-                        "award_amount_reliable",
-                    ),
+            acts_display = intelligence_view_frame(
+                acts,
+                extra_hidden=(
+                    "detection_score",
+                    "reference_amount",
+                    "award_amount",
+                    "award_amount_source",
+                    "reference_amount_reliable",
+                    "award_amount_reliable",
                 ),
+            )
+            st.dataframe(
+                acts_display,
                 width="stretch",
                 hide_index=True,
                 height=760,
-                column_config={
-                    "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
-                    "reference_amount_attributed": st.column_config.NumberColumn("Referencia atribuible", format="$ %.2f"),
-                    "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="$ %.2f"),
-                    "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
-                    "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="$ %.2f"),
-                    "reference_amount_attribution_source": st.column_config.TextColumn("Fuente atribución"),
-                },
+                column_config=_table_number_config(
+                    acts_display,
+                    {
+                        "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
+                        "reference_amount_attributed": st.column_config.NumberColumn("Referencia atribuible", format="dollar"),
+                        "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="dollar"),
+                        "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="dollar"),
+                        "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="dollar"),
+                        "reference_amount_attribution_source": st.column_config.TextColumn("Fuente atribución"),
+                    },
+                ),
             )
 
 
@@ -792,40 +896,43 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                         width="stretch",
                         hide_index=True,
                         height=720,
-                        column_config={
-                            "Acto": st.column_config.LinkColumn(
-                                "Acto",
-                                display_text="Abrir",
-                            ),
-                            "Confianza ficha–renglón": st.column_config.ProgressColumn(
-                                "Confianza ficha–renglón",
-                                min_value=0.0,
-                                max_value=1.0,
-                                format="%.2f",
-                            ),
-                            "Confianza oferta–renglón": st.column_config.ProgressColumn(
-                                "Confianza oferta–renglón",
-                                min_value=0.0,
-                                max_value=1.0,
-                                format="%.2f",
-                            ),
-                            "Referencia unitaria": st.column_config.NumberColumn(
-                                "Referencia unitaria",
-                                format="$ %.2f",
-                            ),
-                            "Referencia del renglón": st.column_config.NumberColumn(
-                                "Referencia del renglón",
-                                format="$ %.2f",
-                            ),
-                            "Oferta unitaria": st.column_config.NumberColumn(
-                                "Oferta unitaria",
-                                format="$ %.2f",
-                            ),
-                            "Oferta del renglón": st.column_config.NumberColumn(
-                                "Oferta del renglón",
-                                format="$ %.2f",
-                            ),
-                        },
+                        column_config=_table_number_config(
+                            display,
+                            {
+                                "Acto": st.column_config.LinkColumn(
+                                    "Acto",
+                                    display_text="Abrir",
+                                ),
+                                "Confianza ficha–renglón": st.column_config.ProgressColumn(
+                                    "Confianza ficha–renglón",
+                                    min_value=0.0,
+                                    max_value=1.0,
+                                    format="%.2f",
+                                ),
+                                "Confianza oferta–renglón": st.column_config.ProgressColumn(
+                                    "Confianza oferta–renglón",
+                                    min_value=0.0,
+                                    max_value=1.0,
+                                    format="%.2f",
+                                ),
+                                "Referencia unitaria": st.column_config.NumberColumn(
+                                    "Referencia unitaria",
+                                    format="dollar",
+                                ),
+                                "Referencia del renglón": st.column_config.NumberColumn(
+                                    "Referencia del renglón",
+                                    format="dollar",
+                                ),
+                                "Oferta unitaria": st.column_config.NumberColumn(
+                                    "Oferta unitaria",
+                                    format="dollar",
+                                ),
+                                "Oferta del renglón": st.column_config.NumberColumn(
+                                    "Oferta del renglón",
+                                    format="dollar",
+                                ),
+                            },
+                        ),
                     )
 
 
@@ -867,11 +974,36 @@ with st.sidebar:
     date_basis_label = st.selectbox("Dimensión temporal", list(date_labels), index=0, key="intel_v3_date_basis")
     profile_labels_reverse = {label: key for key, label in PROFILE_LABELS.items()}
     profile_label = st.selectbox("Perfil de confianza", list(profile_labels_reverse), index=1, key="intel_v3_profile")
+    st.caption(
+        "Filtra la confianza de detección ficha–acto; no modifica los pesos del ranking."
+    )
     with st.expander("Filtros de mercado", expanded=True):
         selected_states = tuple(st.multiselect("Estado del acto", options.get("states", []), key="intel_v3_states"))
         selected_entities = tuple(st.multiselect("Entidades", options.get("entities", []), key="intel_v3_entities"))
         selected_areas = tuple(st.multiselect("Areas", options.get("areas", []), key="intel_v3_areas"))
         selected_product_types = tuple(st.multiselect("Clase / tipo de producto", options.get("product_types", []), key="intel_v3_product_types"))
+        st.caption("Clases de riesgo (todas incluidas por defecto)")
+        risk_columns = st.columns(3)
+        risk_definitions = (
+            ("A", "A", "intel_v3_risk_class_a"),
+            ("B", "B", "intel_v3_risk_class_b"),
+            ("C", "C", "intel_v3_risk_class_c"),
+            ("D", "D", "intel_v3_risk_class_d"),
+            (RISK_CLASS_OTHER, "Otra / sin clase", "intel_v3_risk_class_other"),
+        )
+        selected_risk_tokens: list[str] = []
+        for index, (token, display, state_key) in enumerate(risk_definitions):
+            with risk_columns[index % len(risk_columns)]:
+                if state_key not in st.session_state:
+                    st.session_state[state_key] = True
+                if st.checkbox(display, key=state_key):
+                    selected_risk_tokens.append(token)
+        if len(selected_risk_tokens) == len(risk_definitions):
+            selected_risk_classes: tuple[str, ...] = ()
+        elif selected_risk_tokens:
+            selected_risk_classes = tuple(selected_risk_tokens)
+        else:
+            selected_risk_classes = (RISK_CLASS_NONE,)
         ct_status = st.selectbox("Criterio técnico", ["Todos", "Si", "No"], key="intel_v3_ct")
         rs_status = st.selectbox("Registro sanitario", ["Todos", "Si", "No"], key="intel_v3_rs")
         search_raw = st.text_input("Buscar grupos o frases (separar por coma)", key="intel_v3_search", placeholder="chiller, refrigeración, aire acondicionado")
@@ -920,6 +1052,7 @@ filters = AnalyticsFilters(
     entities=selected_entities,
     areas=selected_areas,
     product_types=selected_product_types,
+    risk_classes=selected_risk_classes,
     fichas=availability_fichas,
     ct_status=ct_status,
     rs_status=rs_status,
@@ -938,7 +1071,11 @@ filters = AnalyticsFilters(
 )
 
 with st.spinner("Calculando métricas globales del periodo..."):
-    master = score_opportunities(_master_data(filters, repo), weights)
+    master = score_opportunities(
+        _master_data(filters, repo),
+        weights,
+        strict_manual=score_preset == "personalizado",
+    )
 
 with st.expander("Decisión final", expanded=False):
     c1, c2 = st.columns(2)

@@ -54,6 +54,10 @@ SCORE_PRESETS = {
     "baja_complejidad": {"demanda": 22.0, "economia": 23.0, "competencia": 15.0, "viabilidad": 15.0, "complejidad": 25.0},
 }
 
+RISK_CLASS_OTHER = "__OTRA_SIN_CLASE__"
+RISK_CLASS_NONE = "__NINGUNA__"
+RISK_CLASS_CANONICAL = ("A", "B", "C", "D")
+
 # Estas columnas siguen formando parte del motor de puntuación y de los filtros,
 # pero se omiten de las tablas orientadas al usuario para mantener las vistas
 # de Inteligencia de proveedores más limpias.
@@ -122,6 +126,7 @@ class AnalyticsFilters:
     entities: tuple[str, ...] = field(default_factory=tuple)
     areas: tuple[str, ...] = field(default_factory=tuple)
     product_types: tuple[str, ...] = field(default_factory=tuple)
+    risk_classes: tuple[str, ...] = field(default_factory=tuple)
     fichas: tuple[str, ...] = field(default_factory=tuple)
     ct_status: str = "Todos"
     rs_status: str = "Todos"
@@ -157,6 +162,7 @@ class AnalyticsFilters:
             "entidades": list(self.entities),
             "areas": list(self.areas),
             "tipos_producto": list(self.product_types),
+            "clases_riesgo": list(self.risk_classes),
             "fichas": list(self.fichas),
             "criterio_tecnico": self.ct_status,
             "registro_sanitario": self.rs_status,
@@ -264,6 +270,7 @@ class AnalyticsRepository:
         self._has_normalized_search = (
             "search_text_norm" in fact_columns and "search_text_norm" in metadata_columns
         )
+        self._has_risk_class = "clase_riesgo" in metadata_columns
 
     def build_metadata(self) -> dict[str, str]:
         try:
@@ -324,6 +331,33 @@ class AnalyticsRepository:
                 params[key] = product_type
                 placeholders.append(f":{key}")
             clauses.append(f"m.tipo_producto IN ({', '.join(placeholders)})")
+        if filters.risk_classes:
+            selected_classes = {str(value).strip().upper() for value in filters.risk_classes}
+            if RISK_CLASS_NONE in selected_classes:
+                clauses.append("1 = 0")
+            elif self._has_risk_class:
+                class_clauses: list[str] = []
+                canonical = [value for value in RISK_CLASS_CANONICAL if value in selected_classes]
+                if canonical:
+                    placeholders = []
+                    for index, risk_class in enumerate(canonical):
+                        key = f"risk_class_{index}"
+                        params[key] = risk_class
+                        placeholders.append(f":{key}")
+                    class_clauses.append(
+                        "UPPER(TRIM(COALESCE(m.clase_riesgo, ''))) "
+                        f"IN ({', '.join(placeholders)})"
+                    )
+                if RISK_CLASS_OTHER in selected_classes:
+                    class_clauses.append(
+                        "UPPER(TRIM(COALESCE(m.clase_riesgo, ''))) "
+                        "NOT IN ('A', 'B', 'C', 'D')"
+                    )
+                clauses.append("(" + " OR ".join(class_clauses or ["1 = 0"]) + ")")
+            elif RISK_CLASS_OTHER not in selected_classes:
+                # Una capa analitica antigua no tiene clase: todas sus fichas son
+                # equivalentes a "Otra / sin clase" hasta que se reconstruya.
+                clauses.append("1 = 0")
         if filters.fichas:
             placeholders = []
             for index, ficha in enumerate(filters.fichas):
@@ -377,11 +411,24 @@ class AnalyticsRepository:
         entities = pd.read_sql_query(text("SELECT DISTINCT entidad FROM intel_actos_fichas WHERE COALESCE(entidad, '') <> '' ORDER BY entidad"), self.engine)
         areas = pd.read_sql_query(text("SELECT DISTINCT area FROM intel_ficha_metadata WHERE COALESCE(area, '') <> '' ORDER BY area"), self.engine)
         product_types = pd.read_sql_query(text("SELECT DISTINCT tipo_producto FROM intel_ficha_metadata WHERE COALESCE(tipo_producto, '') <> '' ORDER BY tipo_producto"), self.engine)
+        if self._has_risk_class:
+            risk_classes = pd.read_sql_query(
+                text(
+                    "SELECT UPPER(TRIM(clase_riesgo)) AS clase_riesgo "
+                    "FROM intel_ficha_metadata "
+                    "WHERE COALESCE(TRIM(clase_riesgo), '') <> '' "
+                    "GROUP BY UPPER(TRIM(clase_riesgo)) ORDER BY clase_riesgo"
+                ),
+                self.engine,
+            )
+        else:
+            risk_classes = pd.DataFrame(columns=["clase_riesgo"])
         return {
             "states": states.iloc[:, 0].astype(str).tolist() if not states.empty else [],
             "entities": entities.iloc[:, 0].astype(str).tolist() if not entities.empty else [],
             "areas": areas.iloc[:, 0].astype(str).tolist() if not areas.empty else [],
             "product_types": product_types.iloc[:, 0].astype(str).tolist() if not product_types.empty else [],
+            "risk_classes": risk_classes.iloc[:, 0].astype(str).tolist() if not risk_classes.empty else [],
         }
 
     def master_metrics(self, filters: AnalyticsFilters) -> pd.DataFrame:
@@ -429,10 +476,12 @@ class AnalyticsRepository:
             if self._has_attributed_amounts
             else "award_amount > 0"
         )
+        risk_class_expression = "m.clase_riesgo" if self._has_risk_class else "''"
         query = f"""
             WITH filtered AS MATERIALIZED (
                 SELECT f.*, m.nombre_ficha, m.descripcion, m.area, m.tipo_producto,
-                       m.especialidad, m.tiene_ct, m.registro_sanitario, m.enlace_minsa
+                       m.especialidad, m.tiene_ct, m.registro_sanitario, m.enlace_minsa,
+                       {risk_class_expression} AS clase_riesgo
                 FROM intel_actos_fichas f
                 LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
                 WHERE {where_sql}
@@ -445,12 +494,14 @@ class AnalyticsRepository:
                        MAX(COALESCE(especialidad, '')) AS especialidad,
                        MAX(COALESCE(tiene_ct, '')) AS tiene_ct,
                        MAX(COALESCE(registro_sanitario, '')) AS registro_sanitario,
+                       MAX(COALESCE(clase_riesgo, '')) AS clase_riesgo,
                        MAX(COALESCE(enlace_minsa, '')) AS enlace_minsa,
                        COUNT(DISTINCT acto_key) AS actos,
                        COUNT(DISTINCT CASE WHEN is_unique_ficha = 1 THEN acto_key END) AS actos_ficha_unica,
                        COUNT(DISTINCT entidad) AS entidades,
                        COUNT(DISTINCT SUBSTR({date_column}, 1, 7)) AS meses_activos,
                        SUM({reference_metric}) AS monto_referencia,
+                       SUM(CASE WHEN is_unique_ficha = 1 THEN {reference_context} ELSE 0 END) AS monto_ficha_unica,
                        AVG(CASE WHEN {reference_metric} > 0 THEN {reference_metric} END) AS ticket_promedio,
                        MAX({reference_metric}) AS ticket_maximo,
                        SUM({award_metric}) AS monto_adjudicado,
@@ -801,12 +852,18 @@ def normalize_score_weights(weights: Mapping[str, float] | None = None) -> dict[
     return {key: value / total * 100.0 for key, value in output.items()}
 
 
-def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None = None) -> pd.DataFrame:
+def score_opportunities(
+    frame: pd.DataFrame,
+    weights: Mapping[str, float] | None = None,
+    *,
+    strict_manual: bool = False,
+) -> pd.DataFrame:
     if frame.empty:
         return frame.copy()
     result = frame.copy()
     numeric_columns = [
         "actos", "actos_ficha_unica", "entidades", "meses_activos", "monto_referencia", "monto_adjudicado",
+        "monto_ficha_unica",
         "monto_referencia_contexto", "monto_adjudicado_contexto",
         "ticket_promedio", "ticket_mediano", "participantes_promedio", "participantes_mediana",
         "proporcion_unico_proponente", "proponentes_distintos",
@@ -819,7 +876,7 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             result[column] = 0.0
         result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0.0)
 
-    result["score_demanda"] = _weighted_mean(
+    composite_demand = _weighted_mean(
         [
             (_percentile(result["actos"]), 0.38),
             (_percentile(result["actos_ficha_unica"]), 0.20),
@@ -828,7 +885,7 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             (_percentile(result["tendencia_6m_pct"]), 0.12),
         ]
     )
-    result["score_economia"] = _weighted_mean(
+    composite_economy = _weighted_mean(
         [
             (_percentile(result["monto_referencia"]), 0.42),
             (_percentile(result["monto_adjudicado"]), 0.33),
@@ -836,7 +893,7 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             (_percentile(result["ticket_promedio"]), 0.08),
         ]
     )
-    result["score_competencia"] = _weighted_mean(
+    composite_competition = _weighted_mean(
         [
             (_percentile(result["participantes_promedio"], higher_is_better=False), 0.38),
             (_percentile(result["participantes_mediana"], higher_is_better=False), 0.14),
@@ -847,7 +904,7 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     )
     ct_component = result.get("tiene_ct", pd.Series("", index=result.index)).astype(str).str.lower().eq("si").astype(float) * 100
     rs_component = result.get("registro_sanitario", pd.Series("", index=result.index)).astype(str).str.lower().eq("no").astype(float) * 100
-    result["score_viabilidad"] = _weighted_mean(
+    composite_viability = _weighted_mean(
         [
             (_percentile(result["proveedores_catalogo"]), 0.38),
             (_percentile(result["proveedores_contactables"]), 0.32),
@@ -855,13 +912,40 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
             (result["cobertura_ganador_pct"].clip(0, 100), 0.12),
         ]
     )
-    result["score_complejidad"] = _weighted_mean(
+    legacy_complexity = _weighted_mean(
         [
             (ct_component, 0.45),
             (rs_component, 0.35),
             (_percentile(result["pct_ficha_unica"]), 0.20),
         ]
     )
+    raw_class = (
+        result.get("clase_riesgo", pd.Series("", index=result.index))
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(r"^CLASE\s+", "", regex=True)
+    )
+    official_class_score = raw_class.map({"A": 100.0, "B": 50.0, "C": 0.0, "D": 0.0})
+    class_complexity = official_class_score.where(official_class_score.notna(), legacy_complexity)
+
+    if strict_manual:
+        # En modo personalizado cada control representa una metrica directa.
+        # Por tanto, un peso de 100 % produce exactamente el orden de esa
+        # metrica y no el de una dimension compuesta oculta.
+        result["score_demanda"] = _percentile(result["actos"])
+        result["score_economia"] = _percentile(result["monto_ficha_unica"])
+        result["score_competencia"] = _percentile(
+            result["participantes_promedio"], higher_is_better=False
+        )
+        result["score_viabilidad"] = _percentile(result["proveedores_catalogo"])
+        result["score_complejidad"] = official_class_score.fillna(0.0)
+    else:
+        result["score_demanda"] = composite_demand
+        result["score_economia"] = composite_economy
+        result["score_competencia"] = composite_competition
+        result["score_viabilidad"] = composite_viability
+        result["score_complejidad"] = class_complexity
     metadata_component = (
         result.get("nombre_ficha", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 55
         + result.get("enlace_minsa", pd.Series("", index=result.index)).astype(str).str.strip().ne("").astype(float) * 45
@@ -893,7 +977,12 @@ def score_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None
     result["recomendacion"] = result.apply(_recommendation, axis=1)
     result["razones"] = result.apply(_explain_score, axis=1)
     for column in [column for column in result.columns if column.startswith("score_")]:
-        result[column] = result[column].round(1)
+        if column == "score_oportunidad" and strict_manual:
+            # Conserva precision interna para que miles de fichas no empaten
+            # artificialmente al ordenar. La interfaz sigue mostrando 1 decimal.
+            result[column] = result[column].round(6)
+        else:
+            result[column] = result[column].round(1)
     return result
 
 
