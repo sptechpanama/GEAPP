@@ -20,6 +20,7 @@ from services.inteligencia_proveedores_v3 import (  # noqa: E402
     RISK_CLASS_NONE,
     RISK_CLASS_OTHER,
     apply_master_filters,
+    build_priority_portfolio,
     intelligence_view_frame,
     preset_range,
     score_opportunities,
@@ -29,6 +30,40 @@ from services.inteligencia_proveedores_v3 import (  # noqa: E402
 
 
 class ServiceUnitTests(unittest.TestCase):
+    def test_priority_portfolio_uses_exact_top_150_and_deduplicates(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "ficha": f"{index:06d}",
+                    "nombre_ficha": f"Ficha {index}",
+                    "score_oportunidad": 1_000 - index,
+                    "monto_ficha_unica": 1_000 - abs(index - 174.5),
+                    "actos_ficha_unica": index,
+                    "actos": index + 1,
+                    "clase_riesgo": "A",
+                    "registro_sanitario": "No",
+                }
+                for index in range(360)
+            ]
+        )
+
+        portfolio = build_priority_portfolio(frame, top_n=150)
+
+        self.assertEqual(portfolio["ficha"].nunique(), len(portfolio))
+        self.assertEqual(int(portfolio["rank_score"].notna().sum()), 150)
+        self.assertEqual(int(portfolio["rank_monto_ficha_unica"].notna().sum()), 150)
+        self.assertEqual(int(portfolio["rank_actos_ficha_unica"].notna().sum()), 150)
+        self.assertEqual(
+            set(portfolio.loc[portfolio["rank_score"].notna(), "ficha"]),
+            {f"{index:06d}" for index in range(150)},
+        )
+        self.assertEqual(
+            set(portfolio.loc[portfolio["rank_actos_ficha_unica"].notna(), "ficha"]),
+            {f"{index:06d}" for index in range(210, 360)},
+        )
+        overlap = portfolio.loc[portfolio["ficha"].eq("000120")].iloc[0]
+        self.assertGreaterEqual(int(overlap["cantidad_criterios"]), 2)
+
     def test_search_groups_preserve_phrases(self) -> None:
         self.assertEqual(
             split_search_groups("Chiller, refrigeración, aires acondicionados"),

@@ -1092,6 +1092,113 @@ def sort_and_page(
     return ordered.iloc[start : start + size].copy(), pages, len(ordered)
 
 
+PRIORITY_PORTFOLIO_METRICS = {
+    "score": ("score_oportunidad", "Score de oportunidad"),
+    "monto_ficha_unica": ("monto_ficha_unica", "Monto de ficha única"),
+    "actos_ficha_unica": ("actos_ficha_unica", "Actos de ficha única"),
+}
+
+
+def build_priority_portfolio(frame: pd.DataFrame, *, top_n: int = 150) -> pd.DataFrame:
+    """Une tres rankings exactos y conserva la trazabilidad de cada selección.
+
+    Cada lista aporta como máximo ``top_n`` fichas. Una ficha presente en más de
+    una lista aparece una sola vez, pero conserva su posición y todos los motivos
+    de inclusión. El desempate por código de ficha hace el resultado reproducible.
+    """
+
+    output_columns = [
+        "ficha",
+        "nombre_ficha",
+        "rank_score",
+        "rank_monto_ficha_unica",
+        "rank_actos_ficha_unica",
+        "criterios_seleccion",
+        "cantidad_criterios",
+        "score_oportunidad",
+        "monto_ficha_unica",
+        "actos_ficha_unica",
+        "actos",
+        "clase_riesgo",
+        "registro_sanitario",
+    ]
+    if frame is None or frame.empty or top_n <= 0:
+        return pd.DataFrame(columns=output_columns)
+
+    required = {"ficha", *(column for column, _ in PRIORITY_PORTFOLIO_METRICS.values())}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("Faltan columnas para construir la cartera: " + ", ".join(missing))
+
+    source = frame.copy()
+    source["ficha"] = source["ficha"].fillna("").astype(str).str.replace(r"\D", "", regex=True)
+    source = source[source["ficha"].ne("")].drop_duplicates("ficha", keep="first")
+    for column, _ in PRIORITY_PORTFOLIO_METRICS.values():
+        source[column] = pd.to_numeric(source[column], errors="coerce").fillna(0.0)
+    if source.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    source_by_ficha = source.set_index("ficha", drop=False)
+    selected: dict[str, dict[str, Any]] = {}
+    for key, (column, label) in PRIORITY_PORTFOLIO_METRICS.items():
+        ranked = source.sort_values(
+            [column, "ficha"],
+            ascending=[False, True],
+            kind="stable",
+        ).head(min(int(top_n), len(source)))
+        rank_column = f"rank_{key}"
+        for rank, (_, row) in enumerate(ranked.iterrows(), start=1):
+            ficha = str(row["ficha"])
+            record = selected.setdefault(
+                ficha,
+                {
+                    "ficha": ficha,
+                    "rank_score": pd.NA,
+                    "rank_monto_ficha_unica": pd.NA,
+                    "rank_actos_ficha_unica": pd.NA,
+                    "_criterios": [],
+                },
+            )
+            record[rank_column] = rank
+            record["_criterios"].append(label)
+
+    records: list[dict[str, Any]] = []
+    passthrough = [
+        "nombre_ficha",
+        "score_oportunidad",
+        "monto_ficha_unica",
+        "actos_ficha_unica",
+        "actos",
+        "clase_riesgo",
+        "registro_sanitario",
+    ]
+    for ficha, record in selected.items():
+        original = source_by_ficha.loc[ficha]
+        if isinstance(original, pd.DataFrame):
+            original = original.iloc[0]
+        for column in passthrough:
+            record[column] = original.get(column, "")
+        criteria = list(record.pop("_criterios"))
+        record["criterios_seleccion"] = ", ".join(criteria)
+        record["cantidad_criterios"] = len(criteria)
+        records.append(record)
+
+    result = pd.DataFrame(records)
+    best_rank = result[
+        ["rank_score", "rank_monto_ficha_unica", "rank_actos_ficha_unica"]
+    ].apply(pd.to_numeric, errors="coerce").min(axis=1, skipna=True)
+    result["_mejor_rank"] = best_rank.fillna(top_n + 1)
+    result = result.sort_values(
+        ["cantidad_criterios", "_mejor_rank", "score_oportunidad", "ficha"],
+        ascending=[False, True, False, True],
+        kind="stable",
+    ).drop(columns="_mejor_rank").reset_index(drop=True)
+    for column in output_columns:
+        if column not in result.columns:
+            result[column] = ""
+    return result[output_columns]
+
+
 def dataframe_to_csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame.to_csv(index=False).encode("utf-8-sig")
 

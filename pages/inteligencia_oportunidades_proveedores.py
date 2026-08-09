@@ -17,9 +17,13 @@ from core.config import APP_ROOT
 from services.access_control import build_authenticator, current_username, require_page_access
 from services.auth_drive import get_drive_delegated
 from services.inteligencia_orquestador_v3 import (
+    completed_study_fichas,
+    create_priority_portfolio,
     delete_saved_view,
     get_request_status,
+    list_priority_portfolio,
     list_saved_views,
+    queue_priority_portfolio,
     queue_study,
     save_saved_view,
 )
@@ -34,6 +38,7 @@ from services.inteligencia_proveedores_v3 import (
     RISK_CLASS_OTHER,
     SCORE_PRESETS,
     apply_master_filters,
+    build_priority_portfolio,
     dataframe_to_csv_bytes,
     intelligence_view_frame,
     normalize_score_weights,
@@ -796,6 +801,7 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
             "headless": False,
             "filters": filter_payload,
             "score_preset": score_preset,
+            "study_scope": "analisis_actual",
             "scope_id": hashlib.sha256(scope_raw.encode("utf-8")).hexdigest()[:20],
             "requested_from": PAGE_PATH,
         }
@@ -950,6 +956,253 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                             },
                         ),
                     )
+
+
+def _render_priority_portfolio(
+    frame: pd.DataFrame,
+    filters: AnalyticsFilters,
+    score_preset: str,
+) -> None:
+    st.divider()
+    st.subheader("Cartera prioritaria Top 150")
+    st.caption(
+        "Combina los Top 150 por score, monto de actos con ficha única y número de actos "
+        "con ficha única. Las fichas repetidas se estudian una sola vez y conservan sus tres rankings."
+    )
+    c1, c2, c3 = st.columns(3)
+    only_ab = c1.checkbox(
+        "Solo clases A y B",
+        value=True,
+        key="intel_v3_priority_only_ab",
+        help="Evita destinar estudios masivos a fichas de mayor complejidad regulatoria.",
+    )
+    exclude_rs = c2.checkbox(
+        "Excluir registro sanitario",
+        value=True,
+        key="intel_v3_priority_exclude_rs",
+    )
+    reuse_completed = c3.checkbox(
+        "Reutilizar estudios completados",
+        value=True,
+        key="intel_v3_priority_reuse",
+        help="Una ficha ya estudiada se marca como completada sin volver a abrir Selenium.",
+    )
+
+    eligible = frame.copy()
+    if only_ab and "clase_riesgo" in eligible.columns:
+        eligible = eligible[
+            eligible["clase_riesgo"].fillna("").astype(str).str.strip().str.upper().isin({"A", "B"})
+        ].copy()
+    if exclude_rs and "registro_sanitario" in eligible.columns:
+        eligible = eligible[
+            ~eligible["registro_sanitario"].fillna("").astype(str).str.strip().str.lower().isin(
+                {"si", "sí", "true", "1"}
+            )
+        ].copy()
+
+    try:
+        portfolio = build_priority_portfolio(eligible, top_n=150)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    if portfolio.empty:
+        st.info("No hay fichas elegibles con los filtros y reglas actuales.")
+        return
+
+    ranks = portfolio[["rank_score", "rank_monto_ficha_unica", "rank_actos_ficha_unica"]]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Fichas únicas", f"{len(portfolio):,}")
+    m2.metric("En Top score", f"{ranks['rank_score'].notna().sum():,}")
+    m3.metric("En Top monto único", f"{ranks['rank_monto_ficha_unica'].notna().sum():,}")
+    m4.metric("En Top actos únicos", f"{ranks['rank_actos_ficha_unica'].notna().sum():,}")
+    st.caption(
+        f"Universo elegible: {len(eligible):,} fichas del periodo y filtros activos. "
+        "El orden de ejecución prioriza la mejor posición alcanzada en cualquiera de las tres listas."
+    )
+    preview_columns = [
+        "ficha",
+        "nombre_ficha",
+        "criterios_seleccion",
+        "rank_score",
+        "rank_monto_ficha_unica",
+        "rank_actos_ficha_unica",
+        "score_oportunidad",
+        "monto_ficha_unica",
+        "actos_ficha_unica",
+    ]
+    with st.expander("Ver composición exacta de la cartera", expanded=False):
+        st.dataframe(
+            portfolio[preview_columns],
+            width="stretch",
+            hide_index=True,
+            height=520,
+            column_config=_table_number_config(
+                portfolio[preview_columns],
+                {
+                    "monto_ficha_unica": st.column_config.NumberColumn(
+                        "Monto ficha única", format="dollar"
+                    ),
+                    "score_oportunidad": st.column_config.NumberColumn("Score", format="%.1f"),
+                },
+            ),
+        )
+
+    manual_sheet_id, config_sheet_id = _sheet_ids()
+    if not manual_sheet_id or not config_sheet_id:
+        st.warning("Configura PC_MANUAL_SHEET_ID/PC_CONFIG_SHEET_ID (o SHEET_ID) para ejecutar la cartera.")
+        return
+    batch_size = int(
+        st.number_input(
+            "Fichas por lote del orquestador",
+            min_value=1,
+            max_value=10,
+            value=1,
+            step=1,
+            key="intel_v3_priority_batch_size",
+            help="Un lote pequeño evita que una ficha extensa bloquee la cartera completa.",
+        )
+    )
+    filter_payload = filters.as_payload()
+    scope_definition = {
+        "filters": filter_payload,
+        "preset": score_preset,
+        "top_n": 150,
+        "only_ab": only_ab,
+        "exclude_rs": exclude_rs,
+    }
+    scope_id = hashlib.sha256(
+        json.dumps(scope_definition, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:20]
+
+    if st.button(
+        "Preparar e iniciar cartera prioritaria",
+        type="primary",
+        key="intel_v3_priority_start",
+    ):
+        try:
+            from sheets import get_client
+
+            client, _ = get_client()
+            result_sheet_id = _config_value("INTEL_STUDY_RESULTS_SHEET_ID") or manual_sheet_id
+            completed = (
+                completed_study_fichas(
+                    client,
+                    sheet_id=result_sheet_id,
+                    scope_id=scope_id,
+                )
+                if reuse_completed
+                else set()
+            )
+            batch_id = create_priority_portfolio(
+                client,
+                sheet_id=manual_sheet_id,
+                requested_by=current_username(),
+                scope_id=scope_id,
+                records=portfolio.to_dict("records"),
+                reuse_completed=reuse_completed,
+                completed_fichas=completed,
+            )
+            pending_count = len(set(portfolio["ficha"].astype(str)) - completed)
+            payload = {
+                "batch_id": batch_id,
+                "scope_id": scope_id,
+                "requested_by": current_username(),
+                "db_path": r"C:\Users\rodri\scrapers_repo\data\db\panamacompra.db",
+                "analytics_db_path": r"C:\Users\rodri\scrapers_repo\data\db\inteligencia_proveedores.db",
+                "filters": filter_payload,
+                "score_preset": score_preset,
+                "study_scope": "analisis_actual",
+                "batch_size": batch_size,
+                "max_attempts": 3,
+                "timeout_ficha_seconds": 3900,
+                "requested_from": PAGE_PATH,
+            }
+            request_id = ""
+            if pending_count:
+                request_id = queue_priority_portfolio(
+                    client,
+                    manual_sheet_id=manual_sheet_id,
+                    config_sheet_id=config_sheet_id,
+                    requested_by=current_username(),
+                    payload=payload,
+                    notes=f"Cartera Top 150 deduplicada ({len(portfolio)} fichas)",
+                )
+            st.session_state["intel_v3_priority_batch_id"] = batch_id
+            st.session_state["intel_v3_priority_payload"] = payload
+            st.session_state["intel_v3_priority_request_id"] = request_id
+            if pending_count:
+                st.success(
+                    f"Cartera creada con {len(portfolio):,} fichas únicas; "
+                    f"{pending_count:,} quedan en procesamiento reanudable."
+                )
+            else:
+                st.success("Todas las fichas de la cartera ya tenían un estudio completado.")
+        except Exception as exc:
+            st.error(f"No fue posible crear la cartera prioritaria: {exc}")
+
+    batch_id = str(st.session_state.get("intel_v3_priority_batch_id", "") or "").strip()
+    if not batch_id:
+        return
+    st.caption(f"Cartera activa: `{batch_id}`")
+    try:
+        from sheets import get_client
+
+        client, _ = get_client()
+        progress = list_priority_portfolio(client, sheet_id=manual_sheet_id, batch_id=batch_id)
+    except Exception as exc:
+        st.error(f"No se pudo consultar el progreso de la cartera: {exc}")
+        return
+    if not progress:
+        st.info("La cartera aún no tiene filas de seguimiento.")
+        return
+    progress_frame = pd.DataFrame(progress)
+    states = progress_frame["estado"].fillna("").astype(str).str.lower().value_counts()
+    state_columns = st.columns(5)
+    for column, (state, label) in zip(
+        state_columns,
+        [
+            ("completado", "Completadas nuevas"),
+            ("completado_previo", "Reutilizadas"),
+            ("procesando", "Procesando"),
+            ("pendiente", "Pendientes"),
+            ("fallido", "Fallidas definitivas"),
+        ],
+    ):
+        column.metric(label, f"{int(states.get(state, 0)):,}")
+    progress_display = progress_frame[
+        [
+            "ficha",
+            "nombre_ficha",
+            "criterios_seleccion",
+            "estado",
+            "intentos",
+            "fecha_inicio",
+            "fecha_fin",
+            "error",
+        ]
+    ]
+    with st.expander("Progreso ficha por ficha", expanded=False):
+        st.dataframe(progress_display, width="stretch", hide_index=True, height=520)
+
+    resumable = states.get("pendiente", 0) + states.get("error", 0) > 0
+    payload = st.session_state.get("intel_v3_priority_payload", {})
+    if resumable and isinstance(payload, dict) and st.button(
+        "Reanudar pendientes",
+        key="intel_v3_priority_resume",
+    ):
+        try:
+            request_id = queue_priority_portfolio(
+                client,
+                manual_sheet_id=manual_sheet_id,
+                config_sheet_id=config_sheet_id,
+                requested_by=current_username(),
+                payload=payload,
+                notes=f"Reanudación manual de cartera {batch_id}",
+            )
+            st.session_state["intel_v3_priority_request_id"] = request_id
+            st.success(f"Reanudación encolada: {request_id}")
+        except Exception as exc:
+            st.error(f"No fue posible reanudar la cartera: {exc}")
 
 
 _apply_pending_saved_view()
@@ -1143,3 +1396,4 @@ with tab_providers:
     _render_provider_detail(filtered_master, filters, repo)
 with tab_study:
     _render_deep_study(filtered_master, filters, score_preset)
+    _render_priority_portfolio(filtered_master, filters, score_preset)
