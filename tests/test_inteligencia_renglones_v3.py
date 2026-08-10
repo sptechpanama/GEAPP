@@ -4,6 +4,7 @@ import pandas as pd
 
 from services.inteligencia_renglones_v3 import (
     display_line_results,
+    enrich_line_results_context,
     prepare_line_results,
     summarize_line_results,
 )
@@ -97,3 +98,41 @@ def test_display_keeps_auditable_columns_and_link() -> None:
     assert "Referencia del renglón" in display
     assert "Entidad" not in display
     assert "Cómo se vinculó la oferta" not in display or len(display) == 3
+
+
+def test_enrichment_adds_whole_act_total_and_minsa_without_changing_line_amounts() -> None:
+    result = prepare_line_results(_sample(), request_id="req-a", ficha="43358")
+    acts = pd.DataFrame(
+        [
+            {
+                "acto_key": "A-1",
+                "enlace": "https://example.test/a1",
+                "reference_amount_context": 150_000.25,
+            },
+            {
+                "acto_key": "A-2",
+                "enlace": "https://example.test/a2",
+                "reference_amount_context": 2_750.0,
+            },
+        ]
+    )
+    enriched = enrich_line_results_context(
+        result,
+        acts=acts,
+        minsa_url="https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha=43358",
+    )
+
+    assert enriched.loc[enriched["acto_id"].eq("A-1"), "precio_total_acto"].tolist() == [
+        150_000.25,
+        150_000.25,
+    ]
+    assert enriched.loc[enriched["acto_id"].eq("A-2"), "precio_total_acto"].tolist() == [
+        2_750.0
+    ]
+    assert enriched["precio_referencia_total"].tolist() == [1000.0, 1000.0, 2500.0]
+    assert enriched["enlace_ficha_minsa"].str.startswith("https://ctni.minsa").all()
+
+    display = display_line_results(enriched)
+    columns = list(display.columns)
+    assert columns.index("Precio total del acto") == columns.index("Oferta unitaria") + 1
+    assert "Ficha MINSA" in display

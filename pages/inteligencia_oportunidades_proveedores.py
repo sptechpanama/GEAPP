@@ -49,6 +49,7 @@ from services.inteligencia_proveedores_v3 import (
 )
 from services.inteligencia_renglones_v3 import (
     display_line_results,
+    enrich_line_results_context,
     prepare_line_results,
     summarize_line_results,
 )
@@ -772,7 +773,12 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
             )
 
 
-def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_preset: str) -> None:
+def _render_deep_study(
+    frame: pd.DataFrame,
+    filters: AnalyticsFilters,
+    score_preset: str,
+    repository: AnalyticsRepository,
+) -> None:
     st.subheader("Estudio profundo con el orquestador")
     st.caption("El estudio recibe exactamente el mismo periodo, dimensión temporal, perfil de detección y filtros usados en este análisis.")
     ficha = _selected_ficha(frame, "intel_v3_study_ficha")
@@ -794,6 +800,7 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
         payload = {
             "ficha": ficha,
             "nombre_ficha": str(row.get("nombre_ficha", "")),
+            "enlace_minsa": str(row.get("enlace_minsa", "") or "").strip(),
             "db_path": r"C:\Users\rodri\scrapers_repo\data\db\panamacompra.db",
             "analytics_db_path": r"C:\Users\rodri\scrapers_repo\data\db\inteligencia_proveedores.db",
             "max_queries": max_queries,
@@ -871,6 +878,11 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                     request_id=request_id,
                     ficha=ficha,
                 )
+                prepared_lines = enrich_line_results_context(
+                    prepared_lines,
+                    acts=_acts_data(ficha, filters, repository),
+                    minsa_url=str(row.get("enlace_minsa", "") or "").strip(),
+                )
                 st.session_state["intel_v3_line_results"] = {
                     "request_id": request_id,
                     "ficha": ficha,
@@ -886,7 +898,11 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
             and stored_lines.get("ficha") == ficha
             and isinstance(stored_lines.get("frame"), pd.DataFrame)
         ):
-            line_frame = stored_lines["frame"]
+            line_frame = enrich_line_results_context(
+                stored_lines["frame"],
+                acts=_acts_data(ficha, filters, repository),
+                minsa_url=str(row.get("enlace_minsa", "") or "").strip(),
+            )
             with st.expander("Resultados atribuibles por renglón", expanded=True):
                 if line_frame.empty:
                     st.info(
@@ -925,6 +941,10 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                                     "Acto",
                                     display_text="Abrir",
                                 ),
+                                "Ficha MINSA": st.column_config.LinkColumn(
+                                    "Ficha MINSA",
+                                    display_text="Abrir ficha",
+                                ),
                                 "Confianza ficha–renglón": st.column_config.ProgressColumn(
                                     "Confianza ficha–renglón",
                                     min_value=0.0,
@@ -948,6 +968,14 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                                 "Oferta unitaria": st.column_config.NumberColumn(
                                     "Oferta unitaria",
                                     format="dollar",
+                                ),
+                                "Precio total del acto": st.column_config.NumberColumn(
+                                    "Precio total del acto",
+                                    format="dollar",
+                                    help=(
+                                        "Precio de referencia completo del acto. Se muestra "
+                                        "como contexto y no se suma al monto atribuible de la ficha."
+                                    ),
                                 ),
                                 "Oferta del renglón": st.column_config.NumberColumn(
                                     "Oferta del renglón",
@@ -1395,5 +1423,5 @@ with tab_competition:
 with tab_providers:
     _render_provider_detail(filtered_master, filters, repo)
 with tab_study:
-    _render_deep_study(filtered_master, filters, score_preset)
+    _render_deep_study(filtered_master, filters, score_preset, repo)
     _render_priority_portfolio(filtered_master, filters, score_preset)

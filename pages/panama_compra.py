@@ -44,6 +44,13 @@ from services.panama_compra_keywords import (
     match_keywords_in_text,
     normalize_keyword_term,
 )
+from services.ct_rir_registry import (
+    REGISTRY_HEADERS as CT_RIR_REGISTRY_HEADERS,
+    enrich_registry_names,
+    merge_registry_tokens,
+    parse_registry_values,
+    registry_sheet_values,
+)
 from services.cl_opportunities import render_cl_opportunities_panel
 
 apply_global_theme()
@@ -2787,68 +2794,120 @@ def _parse_manual_ficha_tokens(raw_value: object) -> list[str]:
     return tokens
 
 
-def _load_ct_rir_tokens() -> list[str]:
-    try:
-        sh = get_gc().open_by_key(SHEET_ID)
-    except Exception:
-        return []
-    try:
-        ws = sh.worksheet(CT_RIR_LIST_WORKSHEET)
-    except Exception:
+CT_RIR_REGISTRY_SESSION_KEY = "__ct_rir_registry_last_good__"
+CT_RIR_REGISTRY_TTL_SECONDS = 60.0
+
+
+def _load_ct_rir_records(*, force: bool = False) -> list[dict[str, str]]:
+    """Lee el registro sin convertir una falla transitoria en una lista vacia."""
+
+    cached = st.session_state.get(CT_RIR_REGISTRY_SESSION_KEY, {})
+    if (
+        not force
+        and isinstance(cached, dict)
+        and time.monotonic() - float(cached.get("loaded_at", 0.0) or 0.0)
+        < CT_RIR_REGISTRY_TTL_SECONDS
+    ):
+        return [dict(record) for record in cached.get("records", [])]
+
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
-            ws = sh.add_worksheet(title=CT_RIR_LIST_WORKSHEET, rows=2000, cols=3)
-            ws.update("A1:C1", [["Ficha #", "Actualizado por", "Actualizado"]])
-        except Exception:
-            return []
+            sh = get_gc().open_by_key(SHEET_ID)
+            try:
+                ws = sh.worksheet(CT_RIR_LIST_WORKSHEET)
+            except Exception:
+                ws = sh.add_worksheet(title=CT_RIR_LIST_WORKSHEET, rows=2000, cols=4)
+                ws.update("A1:D1", [CT_RIR_REGISTRY_HEADERS])
+            values = ws.get_all_values()
+            records = parse_registry_values(values)
+            st.session_state[CT_RIR_REGISTRY_SESSION_KEY] = {
+                "records": records,
+                "loaded_at": time.monotonic(),
+                "source": "Google Sheets",
+                "warning": "",
+            }
+            return [dict(record) for record in records]
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.4 * (2**attempt))
 
-    try:
-        values = ws.get_all_values()
-    except Exception:
-        return []
-
-    seen: set[str] = set()
-    tokens: list[str] = []
-    for row in values:
-        if not row:
-            continue
-        token = _normalize_ficha_token(row[0])
-        if not token or token in seen:
-            continue
-        seen.add(token)
-        tokens.append(token)
-    return tokens
+    fallback = cached.get("records", []) if isinstance(cached, dict) else []
+    st.session_state[CT_RIR_REGISTRY_SESSION_KEY] = {
+        "records": fallback,
+        "loaded_at": time.monotonic(),
+        "source": "ultima lectura valida",
+        "warning": str(last_error or "No se pudo leer Google Sheets."),
+    }
+    return [dict(record) for record in fallback]
 
 
-def _save_ct_rir_tokens(tokens: list[str]) -> bool:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for token in tokens:
-        clean_token = _normalize_ficha_token(token)
-        if not clean_token or clean_token in seen:
-            continue
-        seen.add(clean_token)
-        normalized.append(clean_token)
+def _load_ct_rir_tokens() -> list[str]:
+    return [record["ficha"] for record in _load_ct_rir_records()]
+
+
+def _save_ct_rir_records(records: list[dict[str, str]]) -> bool:
+    """Escribe primero y limpia el sobrante despues; nunca vacia antes de guardar."""
 
     try:
         sh = get_gc().open_by_key(SHEET_ID)
         try:
             ws = sh.worksheet(CT_RIR_LIST_WORKSHEET)
         except Exception:
-            ws = sh.add_worksheet(title=CT_RIR_LIST_WORKSHEET, rows=2000, cols=3)
-    except Exception:
+            ws = sh.add_worksheet(title=CT_RIR_LIST_WORKSHEET, rows=2000, cols=4)
+        if int(getattr(ws, "col_count", 0) or 0) < 4:
+            ws.add_cols(4 - int(getattr(ws, "col_count", 0) or 0))
+
+        previous_values = ws.get_all_values()
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = registry_sheet_values(
+            records,
+            updated_by=_current_user(),
+            updated_at=now_text,
+        )
+        end_row = max(1, len(rows))
+        ws.update(f"A1:D{end_row}", rows)
+        if len(previous_values) > len(rows):
+            ws.batch_clear([f"A{len(rows) + 1}:D{len(previous_values)}"])
+
+        verified = parse_registry_values(ws.get_all_values())
+        expected_codes = [record["ficha"] for record in enrich_registry_names(records)]
+        verified_codes = [record["ficha"] for record in verified]
+        if verified_codes != expected_codes:
+            raise RuntimeError("La verificacion posterior no coincide con la lista solicitada.")
+        st.session_state[CT_RIR_REGISTRY_SESSION_KEY] = {
+            "records": verified,
+            "loaded_at": time.monotonic(),
+            "source": "Google Sheets",
+            "warning": "",
+        }
+        return True
+    except Exception as exc:
+        print(f"[panama_compra] No se pudo guardar CT_RIR: {exc}")
         return False
 
-    user_name = _current_user()
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = [["Ficha #", "Actualizado por", "Actualizado"]]
-    rows.extend([[token, user_name, now_text] for token in normalized])
-    try:
-        ws.clear()
-        end_row = max(1, len(rows))
-        ws.update(f"A1:C{end_row}", rows)
-        return True
-    except Exception:
+
+def _save_ct_rir_tokens(
+    tokens: list[str],
+    *,
+    name_lookup: dict[str, str] | None = None,
+) -> bool:
+    # Antes de modificar, exige una lectura remota fresca. Si Sheets esta
+    # temporalmente inaccesible, es mas seguro bloquear el cambio que guardar
+    # sobre una lista cacheada/incompleta y perder fichas ya registradas.
+    current = _load_ct_rir_records(force=True)
+    registry_state = st.session_state.get(CT_RIR_REGISTRY_SESSION_KEY, {})
+    if isinstance(registry_state, dict) and registry_state.get("warning"):
         return False
+    requested = {_normalize_ficha_token(token) for token in tokens}
+    requested.discard("")
+    kept = [record for record in current if record["ficha"] in requested]
+    missing = [token for token in tokens if _normalize_ficha_token(token) not in {r["ficha"] for r in kept}]
+    updated = merge_registry_tokens(kept, missing, name_lookup=name_lookup)
+    ordered = {token: index for index, token in enumerate(tokens)}
+    updated.sort(key=lambda record: ordered.get(record["ficha"], len(ordered)))
+    return _save_ct_rir_records(updated)
 
 
 def _parse_manual_keyword_terms(raw_value: object) -> list[str]:
@@ -2995,9 +3054,102 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
     return current_terms
 
 
+def _ct_rir_catalog_file_id() -> str:
+    try:
+        cfg = st.secrets.get("app", {})
+    except Exception:
+        cfg = {}
+    for key in (
+        "DRIVE_FICHAS_CTNI_CON_ENLACE_FILE_ID",
+        "DRIVE_FICHAS_CON_ENLACE_FILE_ID",
+        "DRIVE_FICHAS_CTNI_FILE_ID",
+        "DRIVE_FICHAS_TECNICAS_FILE_ID",
+    ):
+        value = cfg.get(key) if hasattr(cfg, "get") else ""
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _ct_rir_catalog_names(file_id: str) -> dict[str, str]:
+    if not file_id:
+        return {}
+    try:
+        frame = load_drive_excel(file_id)
+    except Exception:
+        return {}
+    if frame.empty:
+        return {}
+    columns = list(frame.columns)
+    ficha_col = _resolve_column_by_alias(
+        columns,
+        ["ficha", "numero ficha", "ficha tecnica", "codigo ficha", "id ficha"],
+    )
+    name_col = _resolve_column_exact(columns, ["Nombre Genérico", "Nombre Generico"])
+    if not name_col:
+        name_col = _resolve_column_by_alias(
+            columns,
+            ["nombre generico", "nombre ficha", "nombre", "descripcion"],
+        )
+    if not ficha_col or not name_col:
+        return {}
+    lookup: dict[str, str] = {}
+    for raw_code, raw_name in zip(frame[ficha_col].tolist(), frame[name_col].tolist()):
+        code = _normalize_ficha_token(raw_code)
+        name = _clean_text(raw_name)
+        if code and name and code not in lookup:
+            lookup[code] = name
+    return lookup
+
+
+def _ct_rir_source_names(source_df: pd.DataFrame) -> dict[str, str]:
+    if not isinstance(source_df, pd.DataFrame) or source_df.empty:
+        return {}
+    columns = list(source_df.columns)
+    ficha_col = _resolve_column_by_alias(
+        columns,
+        ["ficha #", "ficha", "ficha detectada", "ficha_detectada", "numero ficha"],
+    )
+    name_col = _resolve_column_by_alias(
+        columns,
+        ["nombre ficha", "nombre generico", "nombre_ficha"],
+    )
+    if not ficha_col or not name_col:
+        return {}
+    lookup: dict[str, str] = {}
+    for raw_code, raw_name in zip(source_df[ficha_col].tolist(), source_df[name_col].tolist()):
+        tokens = _parse_manual_ficha_tokens(raw_code)
+        name = _clean_text(raw_name)
+        if len(tokens) == 1 and name:
+            lookup.setdefault(tokens[0], name)
+    return lookup
+
+
 def _render_ct_rir_manager(source_df: pd.DataFrame, *, key_prefix: str = "ct_rir") -> None:
-    current_tokens = _load_ct_rir_tokens()
+    current_records = _load_ct_rir_records()
+    name_lookup = _ct_rir_catalog_names(_ct_rir_catalog_file_id())
+    name_lookup.update(_ct_rir_source_names(source_df))
+    enriched_records = enrich_registry_names(current_records, name_lookup)
+
+    # Migra silenciosamente el esquema legado para que numero y nombre queden
+    # guardados, no solo reconstruidos a partir de la corrida visible.
+    should_backfill = any(
+        name_lookup.get(record["ficha"])
+        and name_lookup.get(record["ficha"]) != str(record.get("nombre", "") or "").strip()
+        for record in current_records
+    )
+    migration_key = f"{key_prefix}_names_backfilled"
+    if should_backfill and not st.session_state.get(migration_key):
+        if _save_ct_rir_records(enriched_records):
+            current_records = enriched_records
+        st.session_state[migration_key] = True
+    else:
+        current_records = enriched_records
+
+    current_tokens = [record["ficha"] for record in current_records]
     current_set = set(current_tokens)
+    display_names = {record["ficha"]: record["nombre"] for record in current_records}
 
     detected_tokens: list[str] = []
     if isinstance(source_df, pd.DataFrame) and not source_df.empty:
@@ -3012,14 +3164,18 @@ def _render_ct_rir_manager(source_df: pd.DataFrame, *, key_prefix: str = "ct_rir
                 if token and token not in detected_tokens:
                     detected_tokens.append(token)
 
-    options = detected_tokens if detected_tokens else (current_tokens if current_tokens else [""])
+    options = list(dict.fromkeys(current_tokens + detected_tokens)) or [""]
     controls = st.columns([2.2, 2.2, 1.1, 1.1])
     with controls[0]:
         selected = st.selectbox(
             "Ficha detectada",
             options=options,
             key=f"{key_prefix}_selector",
-            format_func=lambda value: value if value else "Sin fichas detectadas en esta hoja",
+            format_func=lambda value: (
+                f"{value} | {name_lookup.get(value) or display_names.get(value) or f'Ficha tecnica {value}'}"
+                if value
+                else "Sin fichas registradas o detectadas"
+            ),
             label_visibility="collapsed",
             disabled=(options == [""]),
         )
@@ -3045,20 +3201,39 @@ def _render_ct_rir_manager(source_df: pd.DataFrame, *, key_prefix: str = "ct_rir
                 remove_set = set(target_tokens)
                 updated = [token for token in current_tokens if token not in remove_set]
 
-            if _save_ct_rir_tokens(updated):
+            if _save_ct_rir_tokens(updated, name_lookup=name_lookup):
                 action = "agregaron" if add_clicked else "quitaron"
                 st.success(f"Lista CT_RIR actualizada: se {action} {len(target_tokens)} ficha(s).")
                 st.rerun()
             else:
                 st.error("No se pudo guardar la lista CT_RIR en Google Sheets.")
 
-    with st.expander("Fichas incluidas en CT_RIR", expanded=False):
-        if not current_tokens:
-            st.caption("Sin fichas configuradas.")
-        else:
-            ct_df = pd.DataFrame({"Ficha #": current_tokens})
-            st.dataframe(ct_df, use_container_width=True, height=240, hide_index=True)
-            st.caption(f"Total fichas CT_RIR: {len(current_tokens)}")
+    registry_state = st.session_state.get(CT_RIR_REGISTRY_SESSION_KEY, {})
+    warning = str(registry_state.get("warning", "") or "") if isinstance(registry_state, dict) else ""
+    if warning:
+        st.warning(
+            "No se pudo refrescar el registro remoto; se mantiene visible la ultima lectura valida."
+        )
+    if not current_tokens:
+        st.caption("Sin fichas configuradas en el registro persistente CT_RIR.")
+    else:
+        ct_df = pd.DataFrame(
+            {
+                "Ficha #": current_tokens,
+                "Nombre ficha": [
+                    name_lookup.get(token)
+                    or display_names.get(token)
+                    or f"Ficha tecnica {token}"
+                    for token in current_tokens
+                ],
+            }
+        )
+        st.dataframe(ct_df, use_container_width=True, height=260, hide_index=True)
+        source_label = str(registry_state.get("source", "Google Sheets") or "Google Sheets")
+        st.caption(
+            f"Registro persistente CT_RIR: {len(current_tokens)} ficha(s). "
+            f"Fuente: {source_label}. Todas se buscan en Abiertas, Programadas y Licitaciones."
+        )
 
 
 def _coerce_ct_label(value: object) -> str:
