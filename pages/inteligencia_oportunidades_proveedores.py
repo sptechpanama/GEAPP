@@ -19,6 +19,7 @@ from services.access_control import build_authenticator, current_username, requi
 from services.auth_drive import get_drive_delegated
 from services import inteligencia_orquestador_v3 as _orchestrator_v3
 from services import inteligencia_proveedores_v3 as _analytics_v3
+from services.inteligencia_estudio_contexto import enrich_study_details
 from ui.theme import apply_global_theme
 
 
@@ -1596,6 +1597,8 @@ def _render_study_result(
     details: list[dict[str, str]],
     *,
     is_previous: bool = False,
+    acts: pd.DataFrame | None = None,
+    minsa_url: str = "",
 ) -> None:
     if not run:
         return
@@ -1615,7 +1618,11 @@ def _render_study_result(
             run_id=run.get("run_id_remote", "") or "sin identificador",
         )
     )
-    detail = pd.DataFrame(details)
+    detail = enrich_study_details(
+        pd.DataFrame(details),
+        acts=acts,
+        minsa_url=minsa_url,
+    )
     if detail.empty:
         st.info(
             "El estudio está registrado, pero no produjo renglones de detalle."
@@ -1624,6 +1631,7 @@ def _render_study_result(
     for column in [
         "cantidad",
         "precio_unitario_participacion",
+        "precio_total_acto",
         "precio_unitario_referencia",
         "dias_acto_a_oc",
         "dias_acto_a_oc_mas_entrega",
@@ -1659,6 +1667,7 @@ def _render_study_result(
         "acto_id",
         "acto_nombre",
         "acto_url",
+        "enlace_ficha_minsa",
         "renglon_texto",
         "proveedor",
         "proveedor_ganador",
@@ -1669,6 +1678,7 @@ def _render_study_result(
         "cantidad",
         "unidad_medida",
         "precio_unitario_participacion",
+        "precio_total_acto",
         "precio_unitario_referencia",
         "fecha_publicacion",
         "fecha_celebracion",
@@ -1698,6 +1708,9 @@ def _render_study_result(
             "acto_url": st.column_config.LinkColumn(
                 "Panamá Compra", display_text="Abrir"
             ),
+            "enlace_ficha_minsa": st.column_config.LinkColumn(
+                "Ficha MINSA", display_text="Abrir ficha"
+            ),
             "renglon_texto": st.column_config.TextColumn(
                 "Renglón", width="large"
             ),
@@ -1710,6 +1723,14 @@ def _render_study_result(
             "es_ganador": st.column_config.CheckboxColumn("Ganó"),
             "precio_unitario_participacion": st.column_config.NumberColumn(
                 "Precio participación", format="$ %.2f"
+            ),
+            "precio_total_acto": st.column_config.NumberColumn(
+                "Precio total del acto",
+                format="$ %.2f",
+                help=(
+                    "Precio de referencia completo del acto. Es contexto y no "
+                    "modifica el precio unitario ni los montos atribuibles."
+                ),
             ),
             "precio_unitario_referencia": st.column_config.NumberColumn(
                 "Precio referencia", format="$ %.2f"
@@ -1740,7 +1761,12 @@ def _render_study_result(
     )
 
 
-def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_preset: str) -> None:
+def _render_deep_study(
+    frame: pd.DataFrame,
+    filters: AnalyticsFilters,
+    score_preset: str,
+    repository: AnalyticsRepository,
+) -> None:
     st.subheader("Estudio profundo con el orquestador")
     st.caption(
         "Por defecto, el estudio consulta el historial completo de la ficha para "
@@ -1802,6 +1828,7 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
         payload = {
             "ficha": ficha,
             "nombre_ficha": str(row.get("nombre_ficha", "")),
+            "enlace_minsa": str(row.get("enlace_minsa", "") or "").strip(),
             "db_path": r"C:\Users\rodri\scrapers_repo\data\db\panamacompra.db",
             "analytics_db_path": r"C:\Users\rodri\scrapers_repo\data\db\inteligencia_proveedores.db",
             "study_scope": study_scope,
@@ -1916,10 +1943,17 @@ def _render_deep_study(frame: pd.DataFrame, filters: AnalyticsFilters, score_pre
                 )
                 previous_result = active_request_for_ficha and bool(result_run)
             if result_run:
+                historical_context = _acts_data(
+                    ficha,
+                    AnalyticsFilters(detection_profile="flexible"),
+                    repository,
+                )
                 _render_study_result(
                     result_run,
                     result_details,
                     is_previous=previous_result,
+                    acts=historical_context,
+                    minsa_url=str(row.get("enlace_minsa", "") or "").strip(),
                 )
             else:
                 st.caption(
@@ -2168,4 +2202,4 @@ with tab_competition:
 with tab_providers:
     _render_provider_detail(filtered_master, filters, repo)
 with tab_study:
-    _render_deep_study(filtered_master, filters, score_preset)
+    _render_deep_study(filtered_master, filters, score_preset, repo)
