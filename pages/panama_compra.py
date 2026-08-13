@@ -6524,13 +6524,14 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         if category_name == "Criterios Tecnicos RIR":
             ficha_tokens = _load_ct_rir_tokens()
             ficha_names = _ct_rir_catalog_names(_ct_rir_catalog_file_id())
-            ficha_names.update(
-                {
-                    record["ficha"]: str(record.get("nombre", "") or "").strip()
-                    for record in _load_ct_rir_records()
-                    if str(record.get("nombre", "") or "").strip()
-                }
-            )
+            for record in _load_ct_rir_records():
+                code = str(record.get("ficha", "") or "").strip()
+                name = str(record.get("nombre", "") or "").strip()
+                # El catalogo suele tener el nombre completo. El registro
+                # manual puede venir truncado por la hoja y solo se usa como
+                # respaldo cuando el catalogo no conoce la ficha.
+                if code and name and not ficha_names.get(code):
+                    ficha_names[code] = name
             parts: list[pd.DataFrame] = []
             for source_sheet in CT_RIR_SCAN_SHEETS:
                 source_df = load_df(source_sheet)

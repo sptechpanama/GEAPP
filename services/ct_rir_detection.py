@@ -45,14 +45,21 @@ def _equivalent(left: str, right: str) -> bool:
 
 
 def _contains_specific_name(text: str, name: str) -> bool:
+    raw_name = str(name or "")
+    truncated = "..." in raw_name or "…" in raw_name or "Ã¢â‚¬Â¦" in raw_name
     text_tokens = [token for token in normalize_text(text).split() if token not in _STOPWORDS]
-    name_tokens = [token for token in normalize_text(name).split() if token not in _STOPWORDS]
+    name_tokens = [token for token in normalize_text(raw_name).split() if token not in _STOPWORDS]
     if len(name_tokens) < 4 or sum(map(len, name_tokens)) < 18:
         return False
     width = len(name_tokens)
     for start in range(0, len(text_tokens) - width + 1):
         window = text_tokens[start : start + width]
-        if all(_equivalent(actual, expected) for actual, expected in zip(window, name_tokens)):
+        if all(
+            actual.startswith(expected)
+            if truncated and index == width - 1
+            else _equivalent(actual, expected)
+            for index, (actual, expected) in enumerate(zip(window, name_tokens))
+        ):
             return True
     return False
 
@@ -69,4 +76,3 @@ def detect_watched_fichas(
         if code and name and _contains_specific_name(combined, name)
     ]
     return tuple(sorted(set(matches), key=lambda value: int(value)))
-

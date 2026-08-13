@@ -26,6 +26,15 @@ class CtRirDetectionTests(unittest.TestCase):
         }
         self.assertEqual(detect_watched_fichas(fields, watched), ("43358",))
 
+    def test_recovers_with_truncated_registry_name_as_fallback(self) -> None:
+        fields = {
+            "titulo": "KIT DE CIRCUITO DE PACIENTES PARA MAQUINA DE ANESTESIA",
+        }
+        watched = {
+            "43358": "KIT DE CIRCUITO DE PACIENTE PARA MAQUINA DE ANESTE...",
+        }
+        self.assertEqual(detect_watched_fichas(fields, watched), ("43358",))
+
     def test_does_not_match_generic_anesthesia_text(self) -> None:
         watched = {
             "43358": "KIT DE CIRCUITO DE PACIENTE PARA MAQUINA DE ANESTESIA",
@@ -44,4 +53,3 @@ class CtRirDetectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
