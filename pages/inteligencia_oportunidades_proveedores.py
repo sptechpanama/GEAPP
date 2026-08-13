@@ -224,6 +224,14 @@ def _all_acts_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
     )
 
 
+@st.cache_data(show_spinner=False, ttl=900)
+def _ficha_search_options(_repo: AnalyticsRepository) -> pd.DataFrame:
+    method = getattr(_repo, "ficha_search_options", None)
+    if callable(method):
+        return method()
+    return pd.DataFrame(columns=["ficha", "nombre_ficha"])
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def _all_multi_ficha_acts_data(
     fichas: tuple[str, ...], _repo: AnalyticsRepository
@@ -1017,30 +1025,30 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
 def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     st.subheader("Consulta directa por ficha")
     st.caption(
-        "Escribe un número de ficha para consultar todo su histórico de actos detectados. "
+        "Escribe el número o el nombre y selecciona una coincidencia para consultar todo "
+        "su histórico de actos detectados. "
         "Esta consulta es independiente del rango de fechas del mapa maestro y mantiene "
         "la exclusión de fichas que requieren registro sanitario."
     )
 
-    with st.form("intel_v3_direct_lookup_form", clear_on_submit=False):
-        raw_ficha = st.text_input(
-            "Número de ficha",
-            key="intel_v3_direct_lookup_input",
-            placeholder="Ej.: 43358 o *43358",
-        )
-        submitted = st.form_submit_button("Buscar actos", type="primary")
-
-    if submitted:
-        ficha = _normalize_ficha(raw_ficha)
-        if not ficha:
-            st.session_state.pop("intel_v3_direct_lookup_ficha", None)
-            st.warning("Escribe un número de ficha válido.")
-        else:
-            st.session_state["intel_v3_direct_lookup_ficha"] = ficha
-
-    ficha = str(st.session_state.get("intel_v3_direct_lookup_ficha", "") or "").strip()
+    options_frame = _ficha_search_options(repository)
+    labels: dict[str, str] = {}
+    for _, row in options_frame.iterrows():
+        code = str(row.get("ficha", "") or "").strip()
+        name = str(row.get("nombre_ficha", "") or "").strip()
+        if code:
+            labels[code] = f"{code} | {name or f'Ficha {code}'}"
+    ficha = st.selectbox(
+        "Ficha",
+        options=list(labels),
+        index=None,
+        placeholder="Escribe número o nombre de ficha...",
+        format_func=lambda value: labels.get(str(value), str(value)),
+        key="intel_v3_direct_lookup_selector",
+    )
+    ficha = str(ficha or "").strip()
     if not ficha:
-        st.info("Ingresa una ficha y presiona **Buscar actos**.")
+        st.info("Escribe parte del número o nombre y selecciona una coincidencia.")
         return
 
     acts = _all_acts_data(ficha, repository)
@@ -1062,7 +1070,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     valid_dates = publication_dates[publication_dates.str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)]
 
     cols = st.columns(4)
-    cols[0].metric("Ficha consultada", ficha)
+    cols[0].metric("Ficha consultada", labels.get(ficha, ficha))
     cols[1].metric("Actos encontrados", f"{len(acts):,}")
     cols[2].metric("Referencial atribuible", _money(reference_total))
     cols[3].metric("Adjudicado atribuible", _money(award_total))

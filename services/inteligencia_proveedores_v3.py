@@ -944,6 +944,22 @@ class AnalyticsRepository:
             AnalyticsFilters(detection_profile="muy_flexible"),
         )
 
+    def ficha_search_options(self) -> pd.DataFrame:
+        """Lista completa y liviana para autocompletar ficha por codigo/nombre."""
+        return pd.read_sql_query(
+            text(
+                """
+                SELECT ficha,
+                       MAX(COALESCE(NULLIF(TRIM(nombre_ficha), ''), '')) AS nombre_ficha
+                FROM intel_ficha_metadata
+                WHERE COALESCE(TRIM(ficha), '') <> ''
+                GROUP BY ficha
+                ORDER BY ficha
+                """
+            ),
+            self.engine,
+        )
+
     def all_acts_for_fichas(self, fichas: Sequence[str]) -> pd.DataFrame:
         """Devuelve la union historica de actos para varias fichas.
 

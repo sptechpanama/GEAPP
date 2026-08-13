@@ -363,6 +363,14 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertTrue(self.repo.all_acts_for_ficha("99999").empty)
         self.assertTrue(self.repo.all_acts_for_ficha("88888").empty)
 
+    def test_ficha_search_options_exposes_code_and_name_for_typeahead(self) -> None:
+        options = self.repo.ficha_search_options().set_index("ficha")
+        self.assertEqual(
+            options.loc["43358", "nombre_ficha"],
+            "KIT CIRCUITO PACIENTE",
+        )
+        self.assertIn("103169", options.index)
+
     def test_master_uses_catalog_product_when_metadata_name_is_missing(self) -> None:
         with self.repo.engine.begin() as connection:
             connection.exec_driver_sql(

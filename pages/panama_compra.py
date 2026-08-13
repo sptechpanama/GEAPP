@@ -3405,6 +3405,7 @@ def _ct_rir_match_columns(
     ficha_tokens: list[str],
     *,
     include_all: bool = False,
+    ficha_names: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
@@ -3414,17 +3415,43 @@ def _ct_rir_match_columns(
     if include_all:
         return work.reset_index(drop=True)
 
-    ficha_col = _resolve_column_by_alias(work.columns.tolist(), ["ficha_detectada", "ficha #"])
-    if not ficha_col:
-        return pd.DataFrame()
-
     token_set = {_normalize_ficha_token(token) for token in ficha_tokens if _normalize_ficha_token(token)}
     if not token_set:
         return pd.DataFrame()
 
-    mask = work[ficha_col].fillna("").astype(str).map(
-        lambda raw: any(token in token_set for token in _parse_manual_ficha_tokens(raw))
-    )
+    ficha_col = _resolve_column_by_alias(work.columns.tolist(), ["ficha_detectada", "ficha #"])
+    mask = pd.Series(False, index=work.index)
+    if ficha_col:
+        mask = work[ficha_col].fillna("").astype(str).map(
+            lambda raw: any(token in token_set for token in _parse_manual_ficha_tokens(raw))
+        )
+
+    # Recupera actos historicos clasificados como ``No Detectada``. La
+    # comparacion usa solo nombres largos y especificos de las fichas que el
+    # usuario mantiene en CT_RIR, por lo que no convierte textos genericos en
+    # coincidencias.
+    names = {
+        code: str(name or "").strip()
+        for code, name in (ficha_names or {}).items()
+        if code in token_set and str(name or "").strip()
+    }
+    unresolved = work.index[~mask]
+    content_columns = _panamacompra_content_columns(work)
+    if names and len(unresolved) and content_columns:
+        from services.ct_rir_detection import detect_watched_fichas
+
+        for index in unresolved:
+            fields = {column: work.at[index, column] for column in content_columns}
+            detected = detect_watched_fichas(fields, names)
+            if not detected:
+                continue
+            mask.at[index] = True
+            inferred = ", ".join(f"* {code}" for code in detected)
+            if ficha_col:
+                work.at[index, ficha_col] = inferred
+            else:
+                work.at[index, "ficha_detectada"] = inferred
+
     if not mask.any():
         return pd.DataFrame()
     return work.loc[mask].copy().reset_index(drop=True)
@@ -6496,6 +6523,14 @@ for tab, category_name in zip(category_tabs, ordered_categories):
 
         if category_name == "Criterios Tecnicos RIR":
             ficha_tokens = _load_ct_rir_tokens()
+            ficha_names = _ct_rir_catalog_names(_ct_rir_catalog_file_id())
+            ficha_names.update(
+                {
+                    record["ficha"]: str(record.get("nombre", "") or "").strip()
+                    for record in _load_ct_rir_records()
+                    if str(record.get("nombre", "") or "").strip()
+                }
+            )
             parts: list[pd.DataFrame] = []
             for source_sheet in CT_RIR_SCAN_SHEETS:
                 source_df = load_df(source_sheet)
@@ -6505,6 +6540,7 @@ for tab, category_name in zip(category_tabs, ordered_categories):
                     source_df,
                     ficha_tokens,
                     include_all=(source_sheet in CT_RIR_DIRECT_SHEETS),
+                    ficha_names=ficha_names,
                 )
                 if matched_df.empty:
                     continue
