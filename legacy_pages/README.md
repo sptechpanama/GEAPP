@@ -1,16 +1,23 @@
-# Páginas históricas de Inteligencia CT
+# Páginas históricas
 
-Estas páginas se conservaron temporalmente fuera de `pages/` para que
-Streamlit no las muestre en la navegación:
+Esta carpeta conserva temporalmente páginas retiradas de la navegación de
+Streamlit para evitar duplicidad sin perder capacidad de recuperación.
+
+## Inteligencia CT
 
 - `inteligencia_ct_proveedores.py`
 - `inteligencia_ct_proveedores_flexible.py`
 
-La página activa y unificada es:
+La página activa y unificada es
+`pages/inteligencia_oportunidades_proveedores.py`.
 
-- `pages/inteligencia_oportunidades_proveedores.py`
+## Panamá Compra
 
-No se debe volver a copiar una página histórica dentro de `pages/` sin revisar
-antes qué funcionalidad concreta falta en la página unificada. Este respaldo
-se puede eliminar después de uno o dos ciclos completos de actualización y
-validación sin incidencias.
+- `panama_compra2_0.py`: antigua variante de validación.
+
+La página oficial es `pages/panama_compra.py`; el detector reutilizable sigue
+disponible en `services/panama_compra_detection_v2.py`.
+
+Los archivos de esta carpeta no son descubiertos automáticamente por
+Streamlit. No deben volver a copiarse dentro de `pages/` sin revisar primero
+qué funcionalidad concreta falta en la página unificada correspondiente.
