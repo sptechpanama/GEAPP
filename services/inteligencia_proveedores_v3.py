@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-08-01-profile-unique-v3"
+ANALYTICS_SERVICE_VERSION = "2026-08-14-direct-ficha-v4"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -910,25 +910,41 @@ class AnalyticsRepository:
                    0 AS source_line_count, 0 AS attributed_line_count,
             """
             amount_order = "f.reference_amount DESC"
+        # Primero se limita la tabla a la ficha solicitada. La version anterior
+        # calculaba ``profile_act_counts`` para toda la historia antes de aplicar
+        # ``selected_ficha``; en Supabase eso hacia innecesariamente lenta una
+        # consulta exacta. El conteo de fichas del perfil sigue considerando
+        # todas las fichas de cada acto seleccionado, por lo que no cambia la
+        # semantica de ``is_unique_ficha``.
+        selected_amount_select = amount_select.replace("f.", "s.")
+        selected_amount_order = amount_order.replace("f.", "s.")
         query = f"""
-            WITH profile_act_counts AS MATERIALIZED (
-                SELECT acto_key, COUNT(DISTINCT ficha) AS profile_ficha_count
+            WITH selected_rows AS MATERIALIZED (
+                SELECT f.*
+                FROM intel_actos_fichas f
+                LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
+                WHERE {where_sql} AND f.ficha = :selected_ficha
+            ),
+            selected_act_keys AS MATERIALIZED (
+                SELECT DISTINCT acto_key FROM selected_rows
+            ),
+            profile_act_counts AS MATERIALIZED (
+                SELECT pf.acto_key, COUNT(DISTINCT pf.ficha) AS profile_ficha_count
                 FROM intel_actos_fichas pf
+                INNER JOIN selected_act_keys sk ON sk.acto_key = pf.acto_key
                 WHERE {profile_scope_sql}
-                GROUP BY acto_key
+                GROUP BY pf.acto_key
             )
-            SELECT f.acto_key, f.enlace, f.titulo, f.entidad, f.estado,
-                   f.publication_date, f.celebration_date, f.award_date, f.update_date,
-                   {amount_select}
-                   f.reference_amount, f.award_amount, f.award_amount_source,
-                   f.winner, f.winner_short, f.participant_count,
+            SELECT s.acto_key, s.enlace, s.titulo, s.entidad, s.estado,
+                   s.publication_date, s.celebration_date, s.award_date, s.update_date,
+                   {selected_amount_select}
+                   s.reference_amount, s.award_amount, s.award_amount_source,
+                   s.winner, s.winner_short, s.participant_count,
                    CASE WHEN pc.profile_ficha_count = 1 THEN 1 ELSE 0 END AS is_unique_ficha,
-                   f.detection_score, f.detection_method, f.detection_evidence
-            FROM intel_actos_fichas f
-            INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key
-            LEFT JOIN intel_ficha_metadata m ON m.ficha = f.ficha
-            WHERE {where_sql} AND f.ficha = :selected_ficha
-            ORDER BY {amount_order}, f.enlace
+                   s.detection_score, s.detection_method, s.detection_evidence
+            FROM selected_rows s
+            INNER JOIN profile_act_counts pc ON pc.acto_key = s.acto_key
+            ORDER BY {selected_amount_order}, s.enlace
         """
         return pd.read_sql_query(text(query), self.engine, params=params)
 
@@ -945,19 +961,83 @@ class AnalyticsRepository:
         )
 
     def ficha_search_options(self) -> pd.DataFrame:
-        """Lista completa y liviana para autocompletar ficha por codigo/nombre."""
+        """Opciones elegibles y con el mejor nombre para consulta directa.
+
+        Solo se envian al navegador fichas que realmente tienen al menos un acto
+        aceptado por el perfil ``muy_flexible`` y cuya metadata confirma que no
+        requieren registro sanitario. Para nombres vacios o truncados se usa el
+        nombre generico mas limpio del catalogo de oferentes como respaldo.
+        """
+        if self.dialect == "postgresql":
+            catalog_cte = ""
+            catalog_join = """
+                LEFT JOIN LATERAL (
+                    SELECT TRIM(c0.producto) AS catalog_name
+                    FROM intel_ficha_catalogo c0
+                    WHERE c0.ficha = e.ficha
+                      AND COALESCE(TRIM(c0.producto), '') <> ''
+                    ORDER BY LENGTH(TRIM(c0.producto)), TRIM(c0.producto)
+                    LIMIT 1
+                ) c ON TRUE
+            """
+        else:
+            # SQLite no implementa LATERAL. El catalogo se limita primero a las
+            # fichas elegibles para evitar ordenar productos que nunca se
+            # mostraran en el selector.
+            catalog_cte = """
+                , catalog_ranked AS (
+                    SELECT c.ficha, TRIM(c.producto) AS catalog_name,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY c.ficha
+                               ORDER BY LENGTH(TRIM(c.producto)), TRIM(c.producto)
+                           ) AS position
+                    FROM intel_ficha_catalogo c
+                    INNER JOIN eligible_fichas e ON e.ficha = c.ficha
+                    WHERE COALESCE(TRIM(c.producto), '') <> ''
+                )
+            """
+            catalog_join = """
+                LEFT JOIN catalog_ranked c ON c.ficha = e.ficha AND c.position = 1
+            """
+
+        query = f"""
+                WITH eligible_fichas AS MATERIALIZED (
+                    SELECT DISTINCT f.ficha
+                    FROM intel_actos_fichas f
+                    INNER JOIN intel_ficha_metadata m ON m.ficha = f.ficha
+                    WHERE f.detection_score >= :score_min
+                      AND LOWER(TRIM(COALESCE(m.registro_sanitario, ''))) = :eligible_rs_status
+                      AND COALESCE(TRIM(f.ficha), '') <> ''
+                ),
+                metadata_names AS (
+                    SELECT ficha,
+                           MAX(COALESCE(NULLIF(TRIM(nombre_ficha), ''), '')) AS metadata_name
+                    FROM intel_ficha_metadata
+                    GROUP BY ficha
+                )
+                {catalog_cte}
+                SELECT e.ficha,
+                       CASE
+                           WHEN COALESCE(c.catalog_name, '') <> ''
+                                AND (
+                                    COALESCE(n.metadata_name, '') = ''
+                                    OR n.metadata_name LIKE '%...%'
+                                )
+                               THEN c.catalog_name
+                           ELSE COALESCE(n.metadata_name, '')
+                       END AS nombre_ficha
+                FROM eligible_fichas e
+                LEFT JOIN metadata_names n ON n.ficha = e.ficha
+                {catalog_join}
+                ORDER BY e.ficha
+        """
         return pd.read_sql_query(
-            text(
-                """
-                SELECT ficha,
-                       MAX(COALESCE(NULLIF(TRIM(nombre_ficha), ''), '')) AS nombre_ficha
-                FROM intel_ficha_metadata
-                WHERE COALESCE(TRIM(ficha), '') <> ''
-                GROUP BY ficha
-                ORDER BY ficha
-                """
-            ),
+            text(query),
             self.engine,
+            params={
+                "score_min": PROFILE_THRESHOLDS["muy_flexible"],
+                "eligible_rs_status": ELIGIBLE_RS_STATUS.lower(),
+            },
         )
 
     def all_acts_for_fichas(self, fichas: Sequence[str]) -> pd.DataFrame:

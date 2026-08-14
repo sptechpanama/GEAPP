@@ -370,6 +370,28 @@ class RepositoryIntegrationTests(unittest.TestCase):
             "KIT CIRCUITO PACIENTE",
         )
         self.assertIn("103169", options.index)
+        self.assertNotIn("99999", options.index)
+        self.assertNotIn("88888", options.index)
+
+    def test_ficha_search_options_recovers_full_catalog_name(self) -> None:
+        with self.repo.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE intel_ficha_metadata SET nombre_ficha = ? WHERE ficha = ?",
+                ("KIT DE CIRCUITO DE PACIENTE PARA MAQUINA DE ANESTE...", "43358"),
+            )
+            connection.exec_driver_sql(
+                "UPDATE intel_ficha_catalogo SET producto = ? WHERE ficha = ?",
+                (
+                    "KIT DE CIRCUITO DE PACIENTE PARA MAQUINA DE ANESTESIA",
+                    "43358",
+                ),
+            )
+
+        options = self.repo.ficha_search_options().set_index("ficha")
+        self.assertEqual(
+            options.loc["43358", "nombre_ficha"],
+            "KIT DE CIRCUITO DE PACIENTE PARA MAQUINA DE ANESTESIA",
+        )
 
     def test_master_uses_catalog_product_when_metadata_name_is_missing(self) -> None:
         with self.repo.engine.begin() as connection:

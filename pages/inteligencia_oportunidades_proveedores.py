@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -212,7 +213,12 @@ def _acts_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def _all_acts_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
+def _all_acts_data(
+    ficha: str,
+    cache_version: str,
+    _repo: AnalyticsRepository,
+) -> pd.DataFrame:
+    _ = cache_version
     method = getattr(_repo, "all_acts_for_ficha", None)
     if callable(method):
         return method(ficha)
@@ -224,8 +230,12 @@ def _all_acts_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
     )
 
 
-@st.cache_data(show_spinner=False, ttl=900)
-def _ficha_search_options(_repo: AnalyticsRepository) -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=3600)
+def _ficha_search_options(
+    cache_version: str,
+    _repo: AnalyticsRepository,
+) -> pd.DataFrame:
+    _ = cache_version
     method = getattr(_repo, "ficha_search_options", None)
     if callable(method):
         return method()
@@ -1031,27 +1041,86 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         "la exclusión de fichas que requieren registro sanitario."
     )
 
-    options_frame = _ficha_search_options(repository)
+    try:
+        options_frame = _ficha_search_options(
+            ANALYTICS_REPOSITORY_API_VERSION,
+            repository,
+        )
+    except Exception:
+        logging.exception("No se pudo cargar el catálogo para Consulta por ficha")
+        options_frame = pd.DataFrame(columns=["ficha", "nombre_ficha"])
+        st.warning(
+            "No se pudo cargar temporalmente el catálogo de sugerencias. "
+            "Aún puedes escribir un número de ficha exacto."
+        )
     labels: dict[str, str] = {}
     for _, row in options_frame.iterrows():
         code = str(row.get("ficha", "") or "").strip()
         name = str(row.get("nombre_ficha", "") or "").strip()
         if code:
             labels[code] = f"{code} | {name or f'Ficha {code}'}"
-    ficha = st.selectbox(
-        "Ficha",
-        options=list(labels),
-        index=None,
-        placeholder="Escribe número o nombre de ficha...",
-        format_func=lambda value: labels.get(str(value), str(value)),
-        key="intel_v3_direct_lookup_selector",
-    )
-    ficha = str(ficha or "").strip()
+
+    st.caption(f"{len(labels):,} fichas con actos elegibles disponibles para consulta.")
+    choices = list(labels.values())
+    with st.form("intel_v3_direct_lookup_form", clear_on_submit=False):
+        selected_choice = st.selectbox(
+            "Número o nombre de ficha",
+            options=choices,
+            index=None,
+            placeholder="Empieza a escribir el número o el nombre...",
+            key="intel_v3_direct_lookup_selector_v2",
+            accept_new_options=True,
+            help=(
+                "Escribe para filtrar las coincidencias. Selecciona una opción de la lista; "
+                "también puedes escribir un número de ficha exacto."
+            ),
+        )
+        submit_col, clear_col = st.columns([1, 1])
+        submitted = submit_col.form_submit_button("Consultar ficha", type="primary")
+        cleared = clear_col.form_submit_button("Limpiar")
+
+    if cleared:
+        st.session_state.pop("intel_v3_direct_lookup_code", None)
+    elif submitted:
+        raw_choice = str(selected_choice or "").strip()
+        code_match = re.match(r"^\s*\*?(\d{3,8})(?:\s*\||\s*$)", raw_choice)
+        if code_match:
+            st.session_state["intel_v3_direct_lookup_code"] = (
+                code_match.group(1).lstrip("0") or "0"
+            )
+        else:
+            st.session_state.pop("intel_v3_direct_lookup_code", None)
+            st.warning(
+                "Selecciona una coincidencia de la lista o escribe un número de ficha exacto."
+            )
+
+    ficha = str(st.session_state.get("intel_v3_direct_lookup_code", "") or "").strip()
     if not ficha:
-        st.info("Escribe parte del número o nombre y selecciona una coincidencia.")
+        st.info(
+            "Escribe parte del número o nombre, selecciona una coincidencia y presiona "
+            "**Consultar ficha**."
+        )
         return
 
-    acts = _all_acts_data(ficha, repository)
+    refresh_col, current_col = st.columns([1, 4])
+    if refresh_col.button("Actualizar resultados", key="intel_v3_direct_lookup_refresh"):
+        _all_acts_data.clear()
+    current_col.caption(f"Consulta activa: **{labels.get(ficha, ficha)}**")
+
+    try:
+        with st.spinner(f"Consultando el histórico completo de la ficha {ficha}..."):
+            acts = _all_acts_data(
+                ficha,
+                ANALYTICS_REPOSITORY_API_VERSION,
+                repository,
+            )
+    except Exception:
+        logging.exception("Falló la consulta directa de la ficha %s", ficha)
+        st.error(
+            "No fue posible consultar esa ficha en este momento. "
+            "Presiona **Actualizar resultados** e inténtalo nuevamente."
+        )
+        return
     if acts.empty:
         st.warning(
             f"No se encontraron actos elegibles para la ficha {ficha}. Puede no existir en la capa "
