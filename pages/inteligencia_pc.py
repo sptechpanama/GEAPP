@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import importlib
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date, timedelta
@@ -12,25 +13,51 @@ import streamlit as st
 
 from core.config import APP_ROOT
 from services.access_control import build_authenticator, current_username, require_page_access
-from services.inteligencia_pc import (
-    FAMILY_RULES,
-    PCAnalyticsUnavailable,
-    PCFilters,
-    InteligenciaPCRepository,
-    build_deep_report,
-    clean_text,
-    company_summary,
-    company_yearly_trend,
-    comparable_providers,
-    competitor_summary,
-    family_market_concentration,
-    near_miss_opportunities,
-    provider_growth_ranking,
-    score_entity_opportunities,
-    score_family_opportunities,
-    score_provider_opportunities,
-)
+import services.inteligencia_pc as inteligencia_pc_service
 from ui.theme import apply_global_theme
+
+
+# Streamlit puede conservar en memoria un modulo auxiliar durante el cambio de
+# commit. Si la pagina nueva llega antes que el servicio actualizado, un
+# ``from ... import`` directo deja toda la pagina inutilizable. Comprobamos el
+# contrato y solo recargamos cuando detectamos ese estado transitorio.
+_SERVICE_EXPORTS = (
+    "FAMILY_RULES",
+    "PCAnalyticsUnavailable",
+    "PCFilters",
+    "InteligenciaPCRepository",
+    "build_deep_report",
+    "clean_text",
+    "company_summary",
+    "company_yearly_trend",
+    "comparable_providers",
+    "competitor_summary",
+    "family_market_concentration",
+    "near_miss_opportunities",
+    "provider_growth_ranking",
+    "score_entity_opportunities",
+    "score_family_opportunities",
+    "score_provider_opportunities",
+)
+if any(not hasattr(inteligencia_pc_service, name) for name in _SERVICE_EXPORTS):
+    inteligencia_pc_service = importlib.reload(inteligencia_pc_service)
+
+FAMILY_RULES = inteligencia_pc_service.FAMILY_RULES
+PCAnalyticsUnavailable = inteligencia_pc_service.PCAnalyticsUnavailable
+PCFilters = inteligencia_pc_service.PCFilters
+InteligenciaPCRepository = inteligencia_pc_service.InteligenciaPCRepository
+build_deep_report = inteligencia_pc_service.build_deep_report
+clean_text = inteligencia_pc_service.clean_text
+company_summary = inteligencia_pc_service.company_summary
+company_yearly_trend = inteligencia_pc_service.company_yearly_trend
+comparable_providers = inteligencia_pc_service.comparable_providers
+competitor_summary = inteligencia_pc_service.competitor_summary
+family_market_concentration = inteligencia_pc_service.family_market_concentration
+near_miss_opportunities = inteligencia_pc_service.near_miss_opportunities
+provider_growth_ranking = inteligencia_pc_service.provider_growth_ranking
+score_entity_opportunities = inteligencia_pc_service.score_entity_opportunities
+score_family_opportunities = inteligencia_pc_service.score_family_opportunities
+score_provider_opportunities = inteligencia_pc_service.score_provider_opportunities
 
 
 PAGE_PATH = "pages/inteligencia_pc.py"
