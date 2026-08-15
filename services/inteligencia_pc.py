@@ -276,6 +276,7 @@ class InteligenciaPCRepository:
         self.tables = tables
         self.has_pc_layer = {"pc_actos", "pc_propuestas", "pc_proveedores_catalogo"}.issubset(tables)
         self.has_provider_daily = "pc_proveedores_dia" in tables
+        self.has_provider_context = "pc_proveedores_contexto_dia" in tables
         self.has_family_daily = "pc_familias_dia_entidad" in tables
         if "actos_publicos" not in tables and not self.has_pc_layer:
             raise PCAnalyticsUnavailable("No existe actos_publicos ni la capa pc_actos.")
@@ -605,11 +606,42 @@ class InteligenciaPCRepository:
         frame["num_participantes"] = pd.to_numeric(frame.get("num_participantes", 0), errors="coerce").fillna(0)
         return frame, total
 
-    def provider_market_ranking(self, filters: PCFilters, *, limit: int = 300) -> pd.DataFrame:
+    def provider_market_ranking(
+        self,
+        filters: PCFilters,
+        *,
+        limit: int = 300,
+        detailed: bool = False,
+    ) -> pd.DataFrame:
         """Ranking completo calculado en PostgreSQL, sin enviar todas las ofertas al navegador."""
 
         if not self.has_pc_layer:
             return provider_ranking(self.load_proposals(filters)).head(limit)
+        if detailed and self._provider_context_compatible(filters):
+            where, params = self._provider_context_where(filters, alias="c")
+            params["pc_provider_limit"] = max(1, min(int(limit), 20_000))
+            query = f"""
+                SELECT MIN(k.proveedor) AS proveedor,
+                       c.proveedor_norm,
+                       SUM(c.participaciones) AS participaciones,
+                       SUM(c.adjudicaciones) AS adjudicaciones,
+                       100.0 * SUM(c.adjudicaciones) / NULLIF(SUM(c.participaciones),0) AS tasa_exito,
+                       SUM(c.monto_ofertado) AS monto_ofertado,
+                       SUM(c.monto_ganado) AS monto_ganado,
+                       MIN(c.oferta_minima) AS oferta_minima,
+                       SUM(c.monto_ofertado) / NULLIF(SUM(c.ofertas_validas),0) AS oferta_promedio,
+                       MAX(c.oferta_maxima) AS oferta_maxima,
+                       COUNT(DISTINCT c.familia) AS familias,
+                       COUNT(DISTINCT c.entidad) AS entidades
+                FROM pc_proveedores_contexto_dia c
+                LEFT JOIN pc_proveedores_catalogo k ON k.proveedor_norm=c.proveedor_norm
+                WHERE {where}
+                GROUP BY c.proveedor_norm
+                ORDER BY monto_ganado DESC, adjudicaciones DESC, participaciones DESC
+                LIMIT :pc_provider_limit
+            """
+            with self.engine.connect() as connection:
+                return pd.read_sql_query(text(query), connection, params=params)
         simple_period_filter = not any(
             (
                 filters.states,
@@ -621,7 +653,7 @@ class InteligenciaPCRepository:
                 filters.include_ambiguous,
             )
         )
-        if self.has_provider_daily and simple_period_filter:
+        if self.has_provider_daily and simple_period_filter and not detailed:
             clauses = ["1=1"]
             params: dict[str, Any] = {"pc_provider_limit": max(1, min(int(limit), 1000))}
             if filters.start_date:
@@ -650,7 +682,7 @@ class InteligenciaPCRepository:
             with self.engine.connect() as connection:
                 return pd.read_sql_query(text(query), connection, params=params)
         where, params = self._pc_where(filters, alias="a")
-        params["pc_provider_limit"] = max(1, min(int(limit), 1000))
+        params["pc_provider_limit"] = max(1, min(int(limit), 20_000 if detailed else 1000))
         query = f"""
             SELECT MIN(p.proveedor) AS proveedor,
                    p.proveedor_norm,
@@ -674,6 +706,246 @@ class InteligenciaPCRepository:
         """
         with self.engine.connect() as connection:
             return pd.read_sql_query(text(query), connection, params=params)
+
+    def entity_market_ranking(self, filters: PCFilters, *, limit: int = 500) -> pd.DataFrame:
+        """Resume entidades en SQL para identificar compradores recurrentes y accesibles."""
+
+        if not self.has_pc_layer:
+            acts = self.load_acts(filters)
+            if acts.empty:
+                return pd.DataFrame()
+            work = acts.copy()
+            work["num_participantes"] = pd.to_numeric(work.get("num_participantes", 0), errors="coerce").fillna(0)
+            work["mes"] = pd.to_datetime(work.get("fecha_analitica"), errors="coerce").dt.to_period("M").astype(str)
+            return work.groupby("entidad", dropna=False).agg(
+                actos=("acto_key", "nunique"),
+                monto_total=("monto_referencia", "sum"),
+                ticket_promedio=("monto_referencia", "mean"),
+                participantes_promedio=("num_participantes", "mean"),
+                familias=("familia", "nunique"),
+                meses_activos=("mes", "nunique"),
+            ).reset_index().sort_values(["monto_total", "actos"], ascending=False).head(limit)
+        where, params = self._pc_where(filters)
+        params["pc_entity_limit"] = max(1, min(int(limit), 2000))
+        participants = (
+            "NULLIF(regexp_replace(COALESCE(num_participantes,''),'[^0-9.]','','g'),'')::numeric"
+            if self.dialect == "postgresql"
+            else "CAST(NULLIF(num_participantes,'') AS REAL)"
+        )
+        query = f"""
+            SELECT entidad,
+                   COUNT(DISTINCT acto_key) AS actos,
+                   COALESCE(SUM(monto_referencia),0) AS monto_total,
+                   COALESCE(AVG(monto_referencia),0) AS ticket_promedio,
+                   COALESCE(AVG({participants}),0) AS participantes_promedio,
+                   COUNT(DISTINCT familia) AS familias,
+                   COUNT(DISTINCT SUBSTRING(fecha_analitica,1,7)) AS meses_activos
+            FROM pc_actos
+            WHERE {where} AND trim(COALESCE(entidad,'')) <> ''
+            GROUP BY entidad
+            ORDER BY monto_total DESC, actos DESC
+            LIMIT :pc_entity_limit
+        """
+        with self.engine.connect() as connection:
+            return pd.read_sql_query(text(query), connection, params=params)
+
+    def provider_entity_ranking(
+        self,
+        filters: PCFilters,
+        *,
+        provider: str = "",
+        limit: int = 500,
+    ) -> pd.DataFrame:
+        """Calcula relaciones proveedor-entidad sin descargar las propuestas crudas."""
+
+        if not self.has_pc_layer:
+            proposals = self.load_proposals(filters)
+            if proposals.empty:
+                return pd.DataFrame()
+            target = normalize_provider(provider)
+            if target:
+                proposals = proposals[proposals["proveedor_norm"].astype(str).eq(target)]
+            result = proposals.groupby(["proveedor_norm", "entidad"], dropna=False).agg(
+                proveedor=("proveedor", lambda values: values.value_counts().index[0]),
+                participaciones=("acto_key", "nunique"),
+                adjudicaciones=("ganado", "sum"),
+                monto_ganado=("monto_ganado", "sum"),
+            ).reset_index()
+            result["tasa_exito"] = result["adjudicaciones"] / result["participaciones"].clip(lower=1) * 100.0
+            return result.sort_values(["monto_ganado", "adjudicaciones"], ascending=False).head(limit)
+        if self._provider_context_compatible(filters):
+            where, params = self._provider_context_where(filters, alias="c")
+            params["pc_relation_limit"] = max(1, min(int(limit), 3000))
+            target = normalize_provider(provider)
+            if target:
+                where += " AND c.proveedor_norm=:pc_relation_provider"
+                params["pc_relation_provider"] = target
+            query = f"""
+                SELECT MIN(k.proveedor) AS proveedor,
+                       c.proveedor_norm,
+                       c.entidad,
+                       SUM(c.participaciones) AS participaciones,
+                       SUM(c.adjudicaciones) AS adjudicaciones,
+                       100.0 * SUM(c.adjudicaciones) / NULLIF(SUM(c.participaciones),0) AS tasa_exito,
+                       SUM(c.monto_ganado) AS monto_ganado
+                FROM pc_proveedores_contexto_dia c
+                LEFT JOIN pc_proveedores_catalogo k ON k.proveedor_norm=c.proveedor_norm
+                WHERE {where} AND trim(COALESCE(c.entidad,'')) <> ''
+                GROUP BY c.proveedor_norm,c.entidad
+                ORDER BY monto_ganado DESC,adjudicaciones DESC,participaciones DESC
+                LIMIT :pc_relation_limit
+            """
+            with self.engine.connect() as connection:
+                return pd.read_sql_query(text(query), connection, params=params)
+        where, params = self._pc_where(filters, alias="a")
+        params["pc_relation_limit"] = max(1, min(int(limit), 3000))
+        target = normalize_provider(provider)
+        provider_clause = ""
+        if target:
+            provider_clause = " AND p.proveedor_norm=:pc_relation_provider"
+            params["pc_relation_provider"] = target
+        query = f"""
+            SELECT MIN(p.proveedor) AS proveedor,
+                   p.proveedor_norm,
+                   a.entidad,
+                   COUNT(DISTINCT p.acto_key) AS participaciones,
+                   COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END) AS adjudicaciones,
+                   100.0 * COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END)
+                         / NULLIF(COUNT(DISTINCT p.acto_key),0) AS tasa_exito,
+                   COALESCE(SUM(p.monto_ganado),0) AS monto_ganado
+            FROM pc_propuestas p
+            JOIN pc_actos a ON a.acto_key=p.acto_key
+            WHERE {where}{provider_clause}
+              AND trim(COALESCE(p.proveedor_norm,'')) <> ''
+              AND trim(COALESCE(a.entidad,'')) <> ''
+            GROUP BY p.proveedor_norm, a.entidad
+            ORDER BY monto_ganado DESC, adjudicaciones DESC, participaciones DESC
+            LIMIT :pc_relation_limit
+        """
+        with self.engine.connect() as connection:
+            return pd.read_sql_query(text(query), connection, params=params)
+
+    def family_provider_ranking(self, filters: PCFilters, *, limit: int = 3000) -> pd.DataFrame:
+        """Devuelve concentración competitiva por familia para detectar mercados dominados."""
+
+        if not self.has_pc_layer:
+            proposals = self.load_proposals(filters)
+            if proposals.empty:
+                return pd.DataFrame()
+            return proposals.groupby(["familia", "proveedor_norm"], dropna=False).agg(
+                proveedor=("proveedor", lambda values: values.value_counts().index[0]),
+                participaciones=("acto_key", "nunique"),
+                adjudicaciones=("ganado", "sum"),
+                monto_ganado=("monto_ganado", "sum"),
+            ).reset_index().head(limit)
+        if self._provider_context_compatible(filters):
+            where, params = self._provider_context_where(filters, alias="c")
+            params["pc_family_provider_limit"] = max(1, min(int(limit), 50_000))
+            query = f"""
+                SELECT c.familia,
+                       MIN(k.proveedor) AS proveedor,
+                       c.proveedor_norm,
+                       SUM(c.participaciones) AS participaciones,
+                       SUM(c.adjudicaciones) AS adjudicaciones,
+                       SUM(c.monto_ganado) AS monto_ganado
+                FROM pc_proveedores_contexto_dia c
+                LEFT JOIN pc_proveedores_catalogo k ON k.proveedor_norm=c.proveedor_norm
+                WHERE {where}
+                GROUP BY c.familia,c.proveedor_norm
+                ORDER BY c.familia,adjudicaciones DESC,monto_ganado DESC
+                LIMIT :pc_family_provider_limit
+            """
+            with self.engine.connect() as connection:
+                return pd.read_sql_query(text(query), connection, params=params)
+        where, params = self._pc_where(filters, alias="a")
+        params["pc_family_provider_limit"] = max(1, min(int(limit), 50_000))
+        query = f"""
+            SELECT a.familia,
+                   MIN(p.proveedor) AS proveedor,
+                   p.proveedor_norm,
+                   COUNT(DISTINCT p.acto_key) AS participaciones,
+                   COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END) AS adjudicaciones,
+                   COALESCE(SUM(p.monto_ganado),0) AS monto_ganado
+            FROM pc_propuestas p
+            JOIN pc_actos a ON a.acto_key=p.acto_key
+            WHERE {where} AND trim(COALESCE(p.proveedor_norm,'')) <> ''
+            GROUP BY a.familia, p.proveedor_norm
+            ORDER BY a.familia, adjudicaciones DESC, monto_ganado DESC
+            LIMIT :pc_family_provider_limit
+        """
+        with self.engine.connect() as connection:
+            return pd.read_sql_query(text(query), connection, params=params)
+
+    def low_competition_projects(
+        self,
+        filters: PCFilters,
+        *,
+        maximum_participants: int = 3,
+        minimum_amount: float = 0.0,
+        limit: int = 300,
+    ) -> pd.DataFrame:
+        """Selecciona en SQL los proyectos valiosos con poca competencia observada."""
+
+        if not self.has_pc_layer:
+            acts = self.load_acts(filters)
+            if acts.empty:
+                return acts
+            acts = acts.copy()
+            acts["num_participantes"] = pd.to_numeric(acts.get("num_participantes", 0), errors="coerce").fillna(0)
+            return acts[
+                (acts["num_participantes"] <= int(maximum_participants))
+                & (acts["monto_referencia"] >= float(minimum_amount))
+            ].sort_values("monto_referencia", ascending=False).head(limit)
+        where, params = self._pc_where(filters)
+        params.update(
+            {
+                "pc_maximum_participants": max(0, int(maximum_participants)),
+                "pc_minimum_amount": max(0.0, float(minimum_amount)),
+                "pc_low_limit": max(1, min(int(limit), 1000)),
+            }
+        )
+        participants = (
+            "COALESCE(NULLIF(regexp_replace(COALESCE(num_participantes,''),'[^0-9.]','','g'),'')::numeric,0)"
+            if self.dialect == "postgresql"
+            else "COALESCE(CAST(NULLIF(num_participantes,'') AS REAL),0)"
+        )
+        query = f"""
+            SELECT fecha_analitica,titulo,familia,entidad,estado,monto_referencia,
+                   {participants} AS num_participantes,enlace,acto_key
+            FROM pc_actos
+            WHERE {where}
+              AND {participants} <= :pc_maximum_participants
+              AND monto_referencia >= :pc_minimum_amount
+            ORDER BY monto_referencia DESC, fecha_analitica DESC
+            LIMIT :pc_low_limit
+        """
+        with self.engine.connect() as connection:
+            frame = pd.read_sql_query(text(query), connection, params=params)
+        frame["fecha_analitica"] = pd.to_datetime(frame.get("fecha_analitica"), errors="coerce")
+        return frame
+
+    def proposals_for_act_keys(self, act_keys: Sequence[object]) -> pd.DataFrame:
+        """Recupera únicamente las propuestas necesarias para analizar brechas de precio."""
+
+        keys = [clean_text(value) for value in act_keys if clean_text(value)]
+        if not keys:
+            return pd.DataFrame()
+        if not self.has_pc_layer:
+            return self.proposals_for_acts(keys)
+        frames: list[pd.DataFrame] = []
+        with self.engine.connect() as connection:
+            for start in range(0, len(keys), 500):
+                chunk = keys[start : start + 500]
+                names = [f"pc_proposal_{start}_{index}" for index in range(len(chunk))]
+                params = dict(zip(names, chunk))
+                frames.append(
+                    pd.read_sql_query(
+                        text(f"SELECT * FROM pc_propuestas WHERE acto_key IN ({', '.join(':' + name for name in names)})"),
+                        connection,
+                        params=params,
+                    )
+                )
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def company_options(self, search: str, *, limit: int = 80) -> list[str]:
         term = clean_text(search)
@@ -805,6 +1077,41 @@ class InteligenciaPCRepository:
                 )
             operator = " AND " if filters.search_mode.upper() == "AND" else " OR "
             clauses.append("(" + operator.join(search_clauses) + ")")
+        return " AND ".join(clauses), params
+
+    def _provider_context_compatible(self, filters: PCFilters) -> bool:
+        return self.has_provider_context and not any(
+            (
+                filters.states,
+                filters.search_groups,
+                filters.min_amount > 0,
+                filters.max_amount > 0,
+                filters.include_ambiguous,
+            )
+        )
+
+    def _provider_context_where(self, filters: PCFilters, *, alias: str = "c") -> tuple[str, dict[str, Any]]:
+        prefix = f"{alias}." if alias else ""
+        clauses = ["1=1"]
+        params: dict[str, Any] = {}
+        if filters.start_date:
+            clauses.append(f"{prefix}fecha_analitica >= :context_start")
+            params["context_start"] = filters.start_date.isoformat()
+        if filters.end_date:
+            clauses.append(f"{prefix}fecha_analitica <= :context_end")
+            params["context_end"] = filters.end_date.isoformat()
+        for values, column, label in (
+            (filters.entities, "entidad", "context_entity"),
+            (filters.families, "familia", "context_family"),
+        ):
+            if not values:
+                continue
+            names = []
+            for index, value in enumerate(values):
+                key = f"{label}_{index}"
+                names.append(f":{key}")
+                params[key] = value
+            clauses.append(f'{prefix}"{column}" IN ({", ".join(names)})')
         return " AND ".join(clauses), params
 
     def _company_acts_pc_layer(self, company: str, filters: PCFilters) -> pd.DataFrame:
@@ -1173,6 +1480,194 @@ def score_family_opportunities(frame: pd.DataFrame, weights: Mapping[str, float]
     }
     work["score_oportunidad"] = sum(components[key] * max(0.0, float(selected.get(key, 0.0))) for key in components) / total
     return work.sort_values(["score_oportunidad", "monto_total"], ascending=False).reset_index(drop=True)
+
+
+def score_provider_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None = None) -> pd.DataFrame:
+    """Puntúa proveedores y respeta literalmente la proporción de pesos indicada."""
+
+    if frame.empty:
+        return frame.copy()
+    default = {
+        "adjudicaciones": 30.0,
+        "monto_ganado": 30.0,
+        "tasa_exito": 20.0,
+        "participaciones": 10.0,
+        "diversificacion": 10.0,
+    }
+    selected = {**default, **dict(weights or {})}
+    total = sum(max(0.0, float(value)) for value in selected.values()) or 1.0
+    work = frame.copy()
+    for column in ("adjudicaciones", "monto_ganado", "tasa_exito", "participaciones", "familias", "entidades"):
+        source = work[column] if column in work.columns else pd.Series(0.0, index=work.index)
+        work[column] = pd.to_numeric(source, errors="coerce").fillna(0)
+    diversity = (_minmax(work["familias"]) + _minmax(work["entidades"])) / 2.0
+    components = {
+        "adjudicaciones": _minmax(work["adjudicaciones"]),
+        "monto_ganado": _minmax(work["monto_ganado"]),
+        "tasa_exito": _minmax(work["tasa_exito"]),
+        "participaciones": _minmax(work["participaciones"]),
+        "diversificacion": diversity,
+    }
+    work["score_proveedor"] = sum(
+        components[key] * max(0.0, float(selected.get(key, 0.0))) for key in components
+    ) / total
+    work["confianza_muestra"] = (work["participaciones"] / 10.0 * 100.0).clip(upper=100.0)
+    work["nivel_confianza"] = pd.cut(
+        work["participaciones"],
+        bins=[-1, 2, 7, float("inf")],
+        labels=["Baja", "Media", "Alta"],
+    ).astype(str)
+    return work.sort_values(
+        ["score_proveedor", "monto_ganado", "adjudicaciones"],
+        ascending=False,
+    ).reset_index(drop=True)
+
+
+def score_entity_opportunities(frame: pd.DataFrame, weights: Mapping[str, float] | None = None) -> pd.DataFrame:
+    """Ordena compradores por volumen, recurrencia, accesibilidad y diversidad."""
+
+    if frame.empty:
+        return frame.copy()
+    default = {"actos": 25.0, "monto": 30.0, "recurrencia": 20.0, "competencia": 15.0, "diversificacion": 10.0}
+    selected = {**default, **dict(weights or {})}
+    total = sum(max(0.0, float(value)) for value in selected.values()) or 1.0
+    work = frame.copy()
+    for column in ("actos", "monto_total", "meses_activos", "participantes_promedio", "familias"):
+        source = work[column] if column in work.columns else pd.Series(0.0, index=work.index)
+        work[column] = pd.to_numeric(source, errors="coerce").fillna(0)
+    components = {
+        "actos": _minmax(work["actos"]),
+        "monto": _minmax(work["monto_total"]),
+        "recurrencia": _minmax(work["meses_activos"]),
+        "competencia": _minmax(work["participantes_promedio"], inverse=True),
+        "diversificacion": _minmax(work["familias"]),
+    }
+    work["score_entidad"] = sum(
+        components[key] * max(0.0, float(selected.get(key, 0.0))) for key in components
+    ) / total
+    return work.sort_values(["score_entidad", "monto_total", "actos"], ascending=False).reset_index(drop=True)
+
+
+def provider_growth_ranking(current: pd.DataFrame, previous: pd.DataFrame) -> pd.DataFrame:
+    """Compara periodos equivalentes y destaca proveedores emergentes con base suficiente."""
+
+    if current.empty:
+        return pd.DataFrame()
+    metrics = ["participaciones", "adjudicaciones", "monto_ganado"]
+    current_work = current.copy()
+    previous_work = previous.copy() if not previous.empty else pd.DataFrame(columns=["proveedor_norm", *metrics])
+    for frame in (current_work, previous_work):
+        for column in metrics:
+            frame[column] = pd.to_numeric(frame.get(column, 0), errors="coerce").fillna(0)
+    previous_metrics = previous_work[[column for column in ["proveedor_norm", *metrics] if column in previous_work.columns]].rename(
+        columns={metric: f"{metric}_anterior" for metric in metrics}
+    )
+    merged = current_work.merge(previous_metrics, on="proveedor_norm", how="left")
+    for metric in metrics:
+        prior = f"{metric}_anterior"
+        merged[prior] = pd.to_numeric(merged.get(prior, 0), errors="coerce").fillna(0)
+        merged[f"cambio_{metric}"] = merged[metric] - merged[prior]
+    merged["crecimiento_score"] = (
+        _minmax(merged["cambio_adjudicaciones"]) * 0.45
+        + _minmax(merged["cambio_monto_ganado"]) * 0.35
+        + _minmax(merged["cambio_participaciones"]) * 0.20
+    )
+    return merged.sort_values(
+        ["crecimiento_score", "cambio_adjudicaciones", "cambio_monto_ganado"],
+        ascending=False,
+    ).reset_index(drop=True)
+
+
+def family_market_concentration(frame: pd.DataFrame) -> pd.DataFrame:
+    """Resume el peso del principal ganador de cada familia y su concentración."""
+
+    if frame.empty:
+        return pd.DataFrame()
+    work = frame.copy()
+    for column in ("participaciones", "adjudicaciones", "monto_ganado"):
+        work[column] = pd.to_numeric(work.get(column, 0), errors="coerce").fillna(0)
+    rows: list[dict[str, Any]] = []
+    for family, group in work.groupby("familia", dropna=False):
+        ordered = group.sort_values(["adjudicaciones", "monto_ganado"], ascending=False)
+        top = ordered.iloc[0]
+        total_awards = float(ordered["adjudicaciones"].sum())
+        rows.append(
+            {
+                "familia": family,
+                "proveedor_dominante": top.get("proveedor", ""),
+                "adjudicaciones_dominante": int(top.get("adjudicaciones", 0)),
+                "adjudicaciones_observadas": int(total_awards),
+                "concentracion_top": float(top.get("adjudicaciones", 0)) / total_awards * 100.0 if total_awards else 0.0,
+                "proveedores_activos": int(ordered["proveedor_norm"].nunique()),
+                "monto_ganado_dominante": float(top.get("monto_ganado", 0)),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["concentracion_top", "adjudicaciones_observadas"], ascending=[True, False]).reset_index(drop=True)
+
+
+def comparable_providers(frame: pd.DataFrame, target: str, *, limit: int = 20) -> pd.DataFrame:
+    """Busca proveedores con escala y desempeño semejantes a la empresa objetivo."""
+
+    if frame.empty or not normalize_provider(target):
+        return pd.DataFrame()
+    work = frame.copy()
+    target_norm = normalize_provider(target)
+    exact = work[work.get("proveedor_norm", pd.Series("", index=work.index)).astype(str).eq(target_norm)]
+    if exact.empty:
+        exact = work[work.get("proveedor_norm", pd.Series("", index=work.index)).astype(str).map(lambda value: target_norm in value or value in target_norm)]
+    if exact.empty:
+        return pd.DataFrame()
+    metrics = ["participaciones", "adjudicaciones", "monto_ganado", "tasa_exito", "familias", "entidades"]
+    normalized = pd.DataFrame(index=work.index)
+    for metric in metrics:
+        normalized[metric] = _minmax(work.get(metric, 0))
+    target_index = exact.index[0]
+    work["distancia"] = ((normalized - normalized.loc[target_index]) ** 2).mean(axis=1).pow(0.5)
+    return work[work.index != target_index].sort_values("distancia").head(limit).reset_index(drop=True)
+
+
+def near_miss_opportunities(company_acts: pd.DataFrame, proposals: pd.DataFrame, company: str) -> pd.DataFrame:
+    """Identifica derrotas donde la oferta quedó cerca del precio ganador observado."""
+
+    if company_acts.empty or proposals.empty:
+        return pd.DataFrame()
+    target = normalize_provider(company)
+    context = company_acts.drop_duplicates("acto_key").set_index("acto_key").to_dict("index")
+    rows: list[dict[str, Any]] = []
+    for act_key, group in proposals.groupby("acto_key"):
+        company_rows = group[group["proveedor_norm"].astype(str).map(lambda value: bool(value) and (target in value or value in target))]
+        if company_rows.empty or bool(company_rows.get("ganado", False).fillna(False).astype(bool).any()):
+            continue
+        company_offer = float(pd.to_numeric(company_rows["monto_ofertado"], errors="coerce").fillna(0).sum())
+        winners = group[group.get("ganado", False).fillna(False).astype(bool)]
+        if winners.empty:
+            competitors = group[~group.index.isin(company_rows.index)]
+            positive = pd.to_numeric(competitors.get("monto_ofertado", 0), errors="coerce").fillna(0)
+            positive = positive[positive > 0]
+            winning_offer = float(positive.min()) if not positive.empty else 0.0
+            winner = clean_text(competitors.loc[positive.idxmin(), "proveedor"]) if winning_offer else ""
+        else:
+            winning_offer = float(pd.to_numeric(winners["monto_ofertado"], errors="coerce").fillna(0).sum())
+            winner = clean_text(winners.iloc[0].get("proveedor"))
+        if company_offer <= 0 or winning_offer <= 0:
+            continue
+        details = context.get(act_key, {})
+        gap = company_offer - winning_offer
+        rows.append(
+            {
+                "fecha": details.get("fecha_analitica"),
+                "titulo": details.get("titulo", ""),
+                "familia": details.get("familia", ""),
+                "entidad": details.get("entidad", ""),
+                "oferta_empresa": company_offer,
+                "oferta_ganadora": winning_offer,
+                "brecha": gap,
+                "brecha_porcentual": gap / winning_offer * 100.0,
+                "ganador": winner,
+                "enlace": details.get("enlace", ""),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["brecha_porcentual", "brecha"], ascending=True).reset_index(drop=True) if rows else pd.DataFrame()
 
 
 def monthly_trend(acts: pd.DataFrame) -> pd.DataFrame:

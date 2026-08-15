@@ -14,11 +14,16 @@ from services.inteligencia_pc import (
     classify_pc_market,
     classify_project_family,
     company_summary,
+    family_market_concentration,
     family_summary,
+    near_miss_opportunities,
     normalize_provider,
     parse_money,
+    provider_growth_ranking,
     provider_ranking,
+    score_entity_opportunities,
     score_family_opportunities,
+    score_provider_opportunities,
     unpivot_proposals,
 )
 from scripts.build_inteligencia_pc import build
@@ -102,6 +107,80 @@ def test_score_honors_one_hundred_percent_weight() -> None:
     )
     assert result.iloc[0]["familia"] == "A"
     assert result.iloc[0]["score_oportunidad"] == pytest.approx(100.0)
+
+
+def test_provider_score_honors_one_hundred_percent_weight() -> None:
+    frame = pd.DataFrame(
+        {
+            "proveedor": ["A", "B", "C"],
+            "proveedor_norm": ["a", "b", "c"],
+            "participaciones": [100, 5, 40],
+            "adjudicaciones": [90, 1, 20],
+            "monto_ganado": [100, 1_000_000, 500],
+            "tasa_exito": [90, 20, 50],
+            "familias": [10, 1, 5],
+            "entidades": [10, 1, 5],
+        }
+    )
+    result = score_provider_opportunities(
+        frame,
+        {"adjudicaciones": 0, "monto_ganado": 100, "tasa_exito": 0, "participaciones": 0, "diversificacion": 0},
+    )
+    assert result.iloc[0]["proveedor"] == "B"
+    assert result.iloc[0]["score_proveedor"] == pytest.approx(100.0)
+
+
+def test_entity_score_honors_one_hundred_percent_weight() -> None:
+    frame = pd.DataFrame(
+        {
+            "entidad": ["A", "B"], "actos": [3, 20], "monto_total": [1_000_000, 100],
+            "meses_activos": [2, 10], "participantes_promedio": [1, 5], "familias": [1, 5],
+        }
+    )
+    result = score_entity_opportunities(
+        frame,
+        {"actos": 100, "monto": 0, "recurrencia": 0, "competencia": 0, "diversificacion": 0},
+    )
+    assert result.iloc[0]["entidad"] == "B"
+    assert result.iloc[0]["score_entidad"] == pytest.approx(100.0)
+
+
+def test_growth_concentration_and_near_miss_helpers() -> None:
+    current = pd.DataFrame(
+        {
+            "proveedor": ["Nuevo", "Estable"], "proveedor_norm": ["nuevo", "estable"],
+            "participaciones": [8, 10], "adjudicaciones": [4, 3], "monto_ganado": [8000, 5000],
+        }
+    )
+    previous = pd.DataFrame(
+        {
+            "proveedor": ["Nuevo", "Estable"], "proveedor_norm": ["nuevo", "estable"],
+            "participaciones": [1, 10], "adjudicaciones": [0, 3], "monto_ganado": [0, 5000],
+        }
+    )
+    assert provider_growth_ranking(current, previous).iloc[0]["proveedor"] == "Nuevo"
+
+    concentration = family_market_concentration(pd.DataFrame(
+        {
+            "familia": ["HVAC", "HVAC"], "proveedor": ["A", "B"], "proveedor_norm": ["a", "b"],
+            "participaciones": [8, 4], "adjudicaciones": [6, 2], "monto_ganado": [6000, 2000],
+        }
+    ))
+    assert concentration.iloc[0]["proveedor_dominante"] == "A"
+    assert concentration.iloc[0]["concentracion_top"] == pytest.approx(75.0)
+
+    company_acts = pd.DataFrame(
+        [{"acto_key": "1", "fecha_analitica": "2026-01-01", "titulo": "Proyecto", "familia": "HVAC", "entidad": "Entidad", "enlace": "https://acto/1"}]
+    )
+    proposals = pd.DataFrame(
+        [
+            {"acto_key": "1", "proveedor": "RS Engineering", "proveedor_norm": "rs engineering", "monto_ofertado": 1050, "ganado": False},
+            {"acto_key": "1", "proveedor": "Competidor", "proveedor_norm": "competidor", "monto_ofertado": 1000, "ganado": True},
+        ]
+    )
+    near = near_miss_opportunities(company_acts, proposals, "RS Engineering")
+    assert near.iloc[0]["brecha"] == pytest.approx(50.0)
+    assert near.iloc[0]["brecha_porcentual"] == pytest.approx(5.0)
 
 
 def _create_test_database(path: Path) -> None:
@@ -192,12 +271,20 @@ def test_materialized_layer_supports_fast_views(tmp_path: Path, monkeypatch: pyt
     filters = PCFilters(start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
     assert repo.has_pc_layer
     assert repo.has_provider_daily
+    assert repo.has_provider_context
     assert repo.has_family_daily
     assert int(repo.family_market_summary(filters)["actos"].sum()) == 1
     assert int(repo.monthly_market_trend(filters)["actos"].sum()) == 1
     projects, total = repo.project_page(filters, sort_column="monto_referencia", limit=50)
     assert total == 1
     assert projects.iloc[0]["acto_key"] == "https://acto/1"
-    ranking = repo.provider_market_ranking(filters)
+    ranking = repo.provider_market_ranking(filters, detailed=True)
     assert ranking.iloc[0]["proveedor"] == "RS ENGINEERING"
+    assert int(ranking.iloc[0]["familias"]) == 1
+    assert repo.entity_market_ranking(filters).iloc[0]["entidad"] == "Entidad A"
+    assert repo.provider_entity_ranking(filters).iloc[0]["entidad"] == "Entidad A"
+    targeted_relations = repo.provider_entity_ranking(filters, provider="RS Engineering")
+    assert set(targeted_relations["proveedor_norm"].astype(str)) == {"rs engineering"}
+    assert repo.family_provider_ranking(filters).iloc[0]["familia"] == "Climatizacion, refrigeracion y HVAC"
+    assert repo.low_competition_projects(filters, maximum_participants=2, minimum_amount=5000).iloc[0]["acto_key"] == "https://acto/1"
     repo.close()

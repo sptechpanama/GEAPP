@@ -175,6 +175,26 @@ def _finish_database(connection: sqlite3.Connection, metadata: dict[str, str]) -
         GROUP BY a.fecha_analitica,p.proveedor_norm;
         CREATE INDEX ix_pc_provider_day_date ON pc_proveedores_dia(fecha_analitica);
         CREATE INDEX ix_pc_provider_day_provider ON pc_proveedores_dia(proveedor_norm);
+        CREATE TABLE pc_proveedores_contexto_dia AS
+        SELECT a.fecha_analitica,
+               p.proveedor_norm,
+               a.familia,
+               a.entidad,
+               COUNT(DISTINCT p.acto_key) AS participaciones,
+               COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END) AS adjudicaciones,
+               SUM(p.monto_ofertado) AS monto_ofertado,
+               SUM(p.monto_ganado) AS monto_ganado,
+               MIN(p.monto_ofertado) AS oferta_minima,
+               MAX(p.monto_ofertado) AS oferta_maxima,
+               COUNT(*) AS ofertas_validas
+        FROM pc_propuestas p
+        JOIN pc_actos a ON a.acto_key=p.acto_key
+        WHERE trim(COALESCE(p.proveedor_norm,'')) <> ''
+        GROUP BY a.fecha_analitica,p.proveedor_norm,a.familia,a.entidad;
+        CREATE INDEX ix_pc_provider_context_date ON pc_proveedores_contexto_dia(fecha_analitica);
+        CREATE INDEX ix_pc_provider_context_provider ON pc_proveedores_contexto_dia(proveedor_norm);
+        CREATE INDEX ix_pc_provider_context_family ON pc_proveedores_contexto_dia(familia);
+        CREATE INDEX ix_pc_provider_context_entity ON pc_proveedores_contexto_dia(entidad);
         CREATE TABLE pc_familias_dia_entidad AS
         SELECT fecha_analitica,
                familia,
@@ -243,7 +263,10 @@ def publish_postgres(database: Path, database_url: str, *, chunk_size: int = 10_
     if not database_url:
         raise RuntimeError("Falta SUPABASE_DB_URL/DATABASE_URL para publicar Inteligencia PC.")
     engine = create_engine(database_url, pool_pre_ping=True, pool_recycle=240, connect_args={"connect_timeout": 20})
-    tables = ("pc_actos", "pc_propuestas", "pc_proveedores_catalogo", "pc_proveedores_dia", "pc_familias_dia_entidad", "pc_build_metadata")
+    tables = (
+        "pc_actos", "pc_propuestas", "pc_proveedores_catalogo", "pc_proveedores_dia",
+        "pc_proveedores_contexto_dia", "pc_familias_dia_entidad", "pc_build_metadata",
+    )
     counts: dict[str, int] = {}
     source = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
     try:
@@ -274,6 +297,10 @@ def publish_postgres(database: Path, database_url: str, *, chunk_size: int = 10_
             connection.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ux_pc_provider_catalog_norm ON pc_proveedores_catalogo(proveedor_norm)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_day_date ON pc_proveedores_dia(fecha_analitica)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_day_provider ON pc_proveedores_dia(proveedor_norm)'))
+            connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_context_date ON pc_proveedores_contexto_dia(fecha_analitica)'))
+            connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_context_provider ON pc_proveedores_contexto_dia(proveedor_norm)'))
+            connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_context_family ON pc_proveedores_contexto_dia(familia)'))
+            connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_context_entity ON pc_proveedores_contexto_dia(entidad)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_family_day_date ON pc_familias_dia_entidad(fecha_analitica)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_family_day_family ON pc_familias_dia_entidad(familia)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_family_day_entity ON pc_familias_dia_entidad(entidad)'))
