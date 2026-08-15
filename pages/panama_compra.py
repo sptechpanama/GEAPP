@@ -41,6 +41,10 @@ get_drive_service_account = getattr(
 )
 from services.panama_compra_keywords import (
     DEFAULT_PANAMACOMPRA_KEYWORDS,
+    KeywordRegistryConflictError,
+    KeywordRegistryError,
+    KeywordRegistryStore,
+    apply_keyword_changes,
     match_keywords_in_text,
     normalize_keyword_term,
 )
@@ -2944,81 +2948,110 @@ def _parse_manual_keyword_terms(raw_value: object) -> list[str]:
     return terms
 
 
-def _load_panama_keyword_terms() -> list[str]:
-    default_terms = [normalize_keyword_term(term) for term in DEFAULT_PANAMACOMPRA_KEYWORDS]
-    default_rows = [["Palabra clave", "Actualizado por", "Actualizado"]]
-    default_rows.extend([[term, "sistema", "inicial"] for term in default_terms])
+PC_KEYWORDS_REGISTRY_SESSION_KEY = "__pc_keywords_registry_last_good__"
+PC_KEYWORDS_REGISTRY_TTL_SECONDS = 60.0
 
-    try:
-        sh = get_gc().open_by_key(SHEET_ID)
-    except Exception:
-        return default_terms
 
-    try:
-        ws = sh.worksheet(PC_KEYWORDS_WORKSHEET)
-    except Exception:
-        try:
-            ws = sh.add_worksheet(title=PC_KEYWORDS_WORKSHEET, rows=2000, cols=3)
-            ws.update(f"A1:C{len(default_rows)}", default_rows)
-            return default_terms
-        except Exception:
-            return default_terms
+@st.cache_resource(show_spinner=False)
+def _panama_keyword_process_cache() -> dict[str, object]:
+    """Conserva la ultima lista valida incluso entre sesiones/reruns."""
 
-    try:
-        values = ws.get_all_values()
-    except Exception:
-        return default_terms
+    return {"terms": [], "source": "", "warning": ""}
 
-    if not values:
-        return default_terms
 
-    seen: set[str] = set()
-    terms: list[str] = []
-    for row in values[1:]:
-        if not row:
-            continue
-        term = normalize_keyword_term(row[0])
-        if not term or term in seen:
-            continue
-        seen.add(term)
-        terms.append(term)
+def _panama_keyword_store() -> KeywordRegistryStore:
+    return KeywordRegistryStore(
+        get_gc,
+        sheet_id=SHEET_ID,
+        worksheet_name=PC_KEYWORDS_WORKSHEET,
+        defaults=DEFAULT_PANAMACOMPRA_KEYWORDS,
+    )
+
+
+def _load_panama_keyword_terms(*, force: bool = False) -> list[str]:
+    """Lee Sheets sin sustituir una lista valida por defaults ante una falla."""
+
+    cached = st.session_state.get(PC_KEYWORDS_REGISTRY_SESSION_KEY, {})
+    if (
+        not force
+        and isinstance(cached, dict)
+        and time.monotonic() - float(cached.get("loaded_at", 0.0) or 0.0)
+        < PC_KEYWORDS_REGISTRY_TTL_SECONDS
+    ):
+        return list(cached.get("terms", []))
+
+    process_cache = _panama_keyword_process_cache()
+    session_terms = cached.get("terms", []) if isinstance(cached, dict) else []
+    last_good = session_terms or process_cache.get("terms", [])
+    snapshot = _panama_keyword_store().load(last_good=last_good)
+    terms = list(snapshot.terms)
+
+    if snapshot.remote_ok:
+        process_cache.update(
+            {"terms": terms, "source": snapshot.source, "warning": ""}
+        )
+    st.session_state[PC_KEYWORDS_REGISTRY_SESSION_KEY] = {
+        "terms": terms,
+        "loaded_at": time.monotonic(),
+        "source": snapshot.source,
+        "warning": snapshot.warning,
+        "remote_ok": snapshot.remote_ok,
+    }
     return terms
 
 
-def _save_panama_keyword_terms(terms: list[str]) -> bool:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for term in terms:
-        clean_term = normalize_keyword_term(term)
-        if not clean_term or clean_term in seen:
-            continue
-        seen.add(clean_term)
-        normalized.append(clean_term)
+def _save_panama_keyword_terms(
+    terms: list[str],
+    *,
+    expected_current: list[str],
+) -> tuple[bool, str]:
+    """Guarda de forma atomica y verifica el contenido remoto completo."""
 
     try:
-        sh = get_gc().open_by_key(SHEET_ID)
-        try:
-            ws = sh.worksheet(PC_KEYWORDS_WORKSHEET)
-        except Exception:
-            ws = sh.add_worksheet(title=PC_KEYWORDS_WORKSHEET, rows=2000, cols=3)
-    except Exception:
-        return False
-
-    user_name = _current_user()
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = [["Palabra clave", "Actualizado por", "Actualizado"]]
-    rows.extend([[term, user_name, now_text] for term in normalized])
-    try:
-        ws.clear()
-        end_row = max(1, len(rows))
-        ws.update(f"A1:C{end_row}", rows)
-        return True
-    except Exception:
-        return False
+        verified = _panama_keyword_store().save(
+            terms,
+            updated_by=_current_user(),
+            expected_current=expected_current,
+        )
+        state = {
+            "terms": verified,
+            "loaded_at": time.monotonic(),
+            "source": "Google Sheets",
+            "warning": "",
+            "remote_ok": True,
+        }
+        st.session_state[PC_KEYWORDS_REGISTRY_SESSION_KEY] = state
+        _panama_keyword_process_cache().update(
+            {"terms": verified, "source": "Google Sheets", "warning": ""}
+        )
+        return True, ""
+    except KeywordRegistryConflictError as exc:
+        return False, str(exc)
+    except KeywordRegistryError as exc:
+        return False, f"No se pudo verificar la escritura en Google Sheets: {exc}"
+    except Exception as exc:
+        return False, f"No se pudo guardar la lista en Google Sheets: {exc}"
 
 
 def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[str]:
     current_terms = _load_panama_keyword_terms()
+    registry_state = st.session_state.get(PC_KEYWORDS_REGISTRY_SESSION_KEY, {})
+    registry_warning = (
+        str(registry_state.get("warning", "")).strip()
+        if isinstance(registry_state, dict)
+        else ""
+    )
+    if registry_warning:
+        st.warning(
+            "Google Sheets no respondio y se muestra la ultima lista valida. "
+            "Para proteger las palabras guardadas, agregar y quitar queda "
+            "bloqueado hasta recuperar la conexion."
+        )
+    else:
+        st.caption(
+            f"Persistencia confirmada en Google Sheets: {len(current_terms)} "
+            "palabra(s) sincronizada(s)."
+        )
     selected_options = current_terms if current_terms else [""]
 
     controls = st.columns([2.2, 2.2, 1.1, 1.1])
@@ -3047,19 +3080,37 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
         if not target_terms:
             st.warning("Ingresa una o mas palabras clave separadas por coma, o selecciona una ya configurada.")
         else:
-            current_set = set(current_terms)
-            if add_clicked:
-                updated = current_terms + [term for term in target_terms if term not in current_set]
-            else:
-                remove_set = set(target_terms)
-                updated = [term for term in current_terms if term not in remove_set]
+            # Relee justo antes de modificar para no sobrescribir cambios hechos
+            # por otra sesion o por el orquestador.
+            remote_current = _load_panama_keyword_terms(force=True)
+            fresh_state = st.session_state.get(PC_KEYWORDS_REGISTRY_SESSION_KEY, {})
+            fresh_warning = (
+                str(fresh_state.get("warning", "")).strip()
+                if isinstance(fresh_state, dict)
+                else ""
+            )
+            if fresh_warning:
+                st.error(
+                    "No se pudo confirmar la lista remota. El cambio no se "
+                    "aplico para evitar perder palabras configuradas."
+                )
+                return current_terms
 
-            if _save_panama_keyword_terms(updated):
+            updated = apply_keyword_changes(
+                remote_current,
+                add=target_terms if add_clicked else (),
+                remove=target_terms if remove_clicked else (),
+            )
+            saved, error = _save_panama_keyword_terms(
+                updated,
+                expected_current=remote_current,
+            )
+            if saved:
                 action = "agregaron" if add_clicked else "quitaron"
                 st.success(f"Lista de palabras clave actualizada: se {action} {len(target_terms)} palabra(s).")
                 st.rerun()
             else:
-                st.error("No se pudo guardar la lista de palabras clave en Google Sheets.")
+                st.error(error or "No se pudo guardar la lista de palabras clave.")
 
     with st.expander("Palabras clave incluidas", expanded=False):
         if not current_terms:
