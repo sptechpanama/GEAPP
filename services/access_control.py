@@ -19,6 +19,7 @@ USER_ALLOWED_PAGES: dict[str, set[str]] = {
     "jsilva": {
         "Inicio.py",
         "pages/finance.py",
+        "pages/pipeline_estrategico.py",
         "pages/panel_financiero_gerencial.py",
     },
 }
