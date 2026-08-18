@@ -21,7 +21,27 @@ from ui.theme import apply_global_theme
 # commit. Si la pagina nueva llega antes que el servicio actualizado, un
 # ``from ... import`` directo deja toda la pagina inutilizable. Comprobamos el
 # contrato y solo recargamos cuando detectamos ese estado transitorio.
+_REPOSITORY_CONTRACT = (
+    "filter_options",
+    "family_market_summary",
+    "monthly_market_trend",
+    "project_page",
+    "provider_market_ranking",
+    "entity_market_ranking",
+    "provider_entity_ranking",
+    "family_provider_ranking",
+    "low_competition_projects",
+    "proposals_for_act_keys",
+    "company_options",
+    "company_acts",
+    "save_study",
+    "list_studies",
+    "add_watch",
+    "list_watches",
+    "remove_watch",
+)
 _SERVICE_EXPORTS = (
+    "INTELIGENCIA_PC_SERVICE_VERSION",
     "FAMILY_RULES",
     "PCAnalyticsUnavailable",
     "PCFilters",
@@ -39,9 +59,22 @@ _SERVICE_EXPORTS = (
     "score_family_opportunities",
     "score_provider_opportunities",
 )
-if any(not hasattr(inteligencia_pc_service, name) for name in _SERVICE_EXPORTS):
+
+
+def _service_contract_is_incomplete(module: object) -> bool:
+    if any(not hasattr(module, name) for name in _SERVICE_EXPORTS):
+        return True
+    repository_class = getattr(module, "InteligenciaPCRepository", None)
+    return repository_class is None or any(
+        not callable(getattr(repository_class, method_name, None))
+        for method_name in _REPOSITORY_CONTRACT
+    )
+
+
+if _service_contract_is_incomplete(inteligencia_pc_service):
     inteligencia_pc_service = importlib.reload(inteligencia_pc_service)
 
+INTELIGENCIA_PC_SERVICE_VERSION = inteligencia_pc_service.INTELIGENCIA_PC_SERVICE_VERSION
 FAMILY_RULES = inteligencia_pc_service.FAMILY_RULES
 PCAnalyticsUnavailable = inteligencia_pc_service.PCAnalyticsUnavailable
 PCFilters = inteligencia_pc_service.PCFilters
@@ -104,8 +137,39 @@ def _config_value(key: str, default: str = "") -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def _repository(database_url: str) -> InteligenciaPCRepository:
+def _repository(database_url: str, service_version: str) -> InteligenciaPCRepository:
+    # ``service_version`` se usa deliberadamente como parte de la clave de
+    # cache. Evita reutilizar una instancia creada por un despliegue anterior.
+    del service_version
     return InteligenciaPCRepository.connect(database_url=database_url, local_candidates=LOCAL_DB_CANDIDATES)
+
+
+def _missing_repository_methods(repository: object) -> tuple[str, ...]:
+    return tuple(
+        method_name
+        for method_name in _REPOSITORY_CONTRACT
+        if not callable(getattr(repository, method_name, None))
+    )
+
+
+def _open_repository(database_url: str) -> InteligenciaPCRepository:
+    repository = _repository(database_url, INTELIGENCIA_PC_SERVICE_VERSION)
+    missing = _missing_repository_methods(repository)
+    if missing:
+        # Una sesion viva de Streamlit puede conservar recursos de un commit
+        # anterior. Limpiamos ambas capas una sola vez y reconstruimos con la
+        # clase actual antes de renderizar cualquier subseccion.
+        _repository.clear()
+        st.cache_data.clear()
+        repository = _repository(database_url, INTELIGENCIA_PC_SERVICE_VERSION)
+        missing = _missing_repository_methods(repository)
+    if missing:
+        missing_text = ", ".join(missing)
+        raise PCAnalyticsUnavailable(
+            "El servicio de Inteligencia PC no termino de actualizarse. "
+            f"Operaciones ausentes: {missing_text}."
+        )
+    return repository
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -604,7 +668,7 @@ def _render_tops(repo: InteligenciaPCRepository, filters: PCFilters) -> None:
 
 database_url = _config_value("SUPABASE_DB_URL") or _config_value("DATABASE_URL")
 try:
-    repo = _repository(database_url)
+    repo = _open_repository(database_url)
 except PCAnalyticsUnavailable as exc:
     st.error(f"No fue posible abrir Inteligencia PC: {exc}")
     st.stop()

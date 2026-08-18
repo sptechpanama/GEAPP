@@ -24,6 +24,11 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 
+# Esta version forma parte de la clave de cache de Streamlit. Debe cambiar
+# cuando el contrato publico del repositorio agrega o modifica operaciones.
+INTELIGENCIA_PC_SERVICE_VERSION = "2026-08-18-tops-v2"
+
+
 NO_FICHA_VALUES = {
     "",
     "no detectada",
