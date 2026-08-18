@@ -753,8 +753,10 @@ def _render_integrations(repository: PipelineRepository) -> None:
                 board = load_trello_export(uploaded.getvalue())
                 preview = preview_trello_export(board)
                 st.info(
-                    f"{preview.board_name}: {preview.eligible_cards} tarjetas listas para importar, "
-                    f"{preview.archived_cards} archivadas y {preview.skipped_cards} sin equivalencia."
+                    f"{preview.board_name}: {preview.eligible_cards} tarjetas con categoría, "
+                    "proveedor y marca válidos, "
+                    f"{preview.archived_cards} archivadas y {preview.skipped_cards} omitidas "
+                    "por lista o datos incompletos."
                 )
                 route_preview = pd.DataFrame(
                     [

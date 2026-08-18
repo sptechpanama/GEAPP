@@ -60,6 +60,18 @@ def test_dynamic_templates_have_expected_lengths_and_initial_steps() -> None:
         assert route.checklist[-1][0] == "entrega_recibido_conforme"
 
 
+def test_explicit_local_path_overrides_database_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://invalid.invalid/example")
+    repository = PipelineRepository.connect(local_path=tmp_path / "forced-local.db")
+    try:
+        assert repository.dialect == "sqlite"
+        assert repository.source_label.startswith("SQLite local")
+    finally:
+        repository.close()
+
+
 def test_card_identity_is_ficha_provider_brand_and_is_unique(repo: PipelineRepository) -> None:
     first = _create_card(repo)
     assert first["identity_key"] == "43358|foyomed|mflab"
@@ -338,6 +350,41 @@ def test_trello_import_rejects_html_and_imports_real_json_idempotently(
     assert len(repo.list_cards()) == 1
     assert len(repo.contacts(card["id"])) == 1
     assert len(repo.documents(card["id"])) == 1
+
+
+def test_trello_duplicate_identity_merges_progress_and_combined_provider_brand(
+    repo: PipelineRepository,
+) -> None:
+    board = _trello_board()
+    base = dict(board["cards"][0])
+    base["id"] = "trello-card-2"
+    base["name"] = "Misma oportunidad con mas avance"
+    board["cards"].append(base)
+    board["checklists"].append(
+        {
+            "id": "cl2",
+            "name": "Checklist avanzado",
+            "checkItems": [
+                {"name": label, "state": "complete" if index < 4 else "incomplete"}
+                for index, (_, label) in enumerate(ROUTES["fichas_viejas"].checklist)
+            ],
+        }
+    )
+    board["cards"][1]["idChecklists"] = ["cl2"]
+    # El campo simple queda viejo; la pareja combinada debe prevalecer.
+    for item in board["cards"][0]["customFieldItems"]:
+        if item["idCustomField"] == "f3":
+            item["value"] = {"text": "Proveedor viejo"}
+    preview = preview_trello_export(board)
+    assert preview.eligible_cards == 2
+    result = import_trello_board(repo, board, actor="rsanchez")
+    assert result["created"] == 1
+    assert result["existing"] == 1
+    cards = repo.list_cards()
+    assert len(cards) == 1
+    assert cards[0]["proveedor"] == "Foyomed"
+    assert cards[0]["marca"] == "MFLab"
+    assert cards[0]["progress"] == pytest.approx(40.0)
 
 
 class _FakeDriveRequest:

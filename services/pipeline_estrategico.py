@@ -337,9 +337,16 @@ class PipelineRepository:
         *,
         local_path: str | Path | None = None,
     ) -> "PipelineRepository":
+        if local_path is not None and not clean_text(database_url):
+            path = Path(local_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return cls(
+                create_engine(f"sqlite:///{path.as_posix()}", pool_pre_ping=True),
+                source_label=f"SQLite local ({path})",
+            )
         url = clean_text(
-            os.getenv("PIPELINE_DB_URL")
-            or database_url
+            database_url
+            or os.getenv("PIPELINE_DB_URL")
             or os.getenv("SUPABASE_DB_URL")
             or os.getenv("DATABASE_URL")
         )
@@ -700,6 +707,27 @@ class PipelineRepository:
                     WHERE source=:source AND source_external_id=:external LIMIT 1"""
                 ),
                 {"source": source_value, "external": external_value},
+            ).first()
+        return _row_dict(row)
+
+    def card_by_identity(
+        self,
+        *,
+        ficha: Any,
+        producto: Any,
+        proveedor: Any,
+        marca: Any,
+    ) -> dict[str, Any]:
+        key = identity_key(
+            ficha=ficha,
+            producto=producto,
+            proveedor=proveedor,
+            marca=marca,
+        )
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM pipeline_cards WHERE identity_key=:key LIMIT 1"),
+                {"key": key},
             ).first()
         return _row_dict(row)
 

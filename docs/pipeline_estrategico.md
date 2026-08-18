@@ -48,6 +48,10 @@ La replica crea cinco pestanas: `pipeline_cards`, `pipeline_checkpoints`,
 
 La página acepta una exportación JSON real de Trello, muestra una vista previa
 y luego importa de forma idempotente. Cargar dos veces el mismo JSON no duplica
-tarjetas. El archivo `undefined - -.json` recibido durante el desarrollo era
+tarjetas. Si varias tarjetas representan la misma combinación
+`ficha + proveedor + marca`, se consolidan y se conserva el mayor avance
+secuencial encontrado. Las plantillas sin proveedor o marca y las listas ajenas
+al pipeline se omiten de forma explícita. El archivo `undefined - -.json`
+recibido durante el desarrollo era
 HTML de la interfaz de Trello y no contenia listas, tarjetas, checklists ni
 campos personalizados; por eso no se uso para crear datos ficticios.

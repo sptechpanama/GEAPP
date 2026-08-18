@@ -113,6 +113,33 @@ def _field(values: Mapping[str, str], *aliases: str) -> str:
     return ""
 
 
+def _card_business_fields(
+    board: Mapping[str, Any], card: Mapping[str, Any]
+) -> dict[str, str]:
+    values = _custom_field_values(board, card)
+    combined = _field(values, "Proveedor/marca", "Proveedor marca", "Marca")
+    provider = _field(values, "Proveedor")
+    brand = combined
+    if "/" in combined:
+        combined_provider, combined_brand = [
+            clean_text(part) for part in combined.split("/", 1)
+        ]
+        # El campo combinado representa la pareja de negocio y prevalece si
+        # quedo un valor viejo o copiado en el campo simple Proveedor.
+        provider = combined_provider or provider
+        brand = combined_brand
+    return {
+        "ficha": _field(values, "Ficha Tecnica", "Ficha"),
+        "nombre_ficha": _field(values, "Nombre ficha", "Descripcion ficha"),
+        "producto": _field(values, "Producto") or clean_text(card.get("name")),
+        "proveedor": provider,
+        "marca": brand,
+        "descripcion": _field(values, "Descripcion") or clean_text(card.get("desc")),
+        "email": _field(values, "Correo Electronico", "Correo", "Email"),
+        "whatsapp": _field(values, "Whatsapp o Wechat", "Whatsapp", "Wechat"),
+    }
+
+
 def _checklist_lookup(board: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     return {
         clean_text(checklist.get("id")): checklist
@@ -173,6 +200,12 @@ def preview_trello_export(board: Mapping[str, Any]) -> TrelloPreview:
         if not route:
             warnings.append(f"Lista sin equivalencia: {lists.get(clean_text(card.get('idList')), 'desconocida')}")
             continue
+        fields = _card_business_fields(board, card)
+        if not fields["proveedor"] or not fields["marca"]:
+            warnings.append(
+                f"{clean_text(card.get('name'))}: falta proveedor o marca"
+            )
+            continue
         eligible += 1
         counts[route] += 1
     return TrelloPreview(
@@ -207,17 +240,11 @@ def import_trello_board(
         if not route_key:
             skipped.append(f"{clean_text(raw_card.get('name'))}: lista no reconocida")
             continue
-        values = _custom_field_values(board, raw_card)
-        ficha = _field(values, "Ficha Tecnica", "Ficha")
-        producto = _field(values, "Producto") or clean_text(raw_card.get("name"))
-        proveedor = _field(values, "Proveedor")
-        marca_compuesta = _field(values, "Proveedor/marca", "Proveedor marca", "Marca")
-        marca = marca_compuesta
-        if "/" in marca_compuesta:
-            first, second = [clean_text(part) for part in marca_compuesta.split("/", 1)]
-            if not proveedor:
-                proveedor = first
-            marca = second
+        fields = _card_business_fields(board, raw_card)
+        ficha = fields["ficha"]
+        producto = fields["producto"]
+        proveedor = fields["proveedor"]
+        marca = fields["marca"]
         if not proveedor or not marca:
             skipped.append(
                 f"{clean_text(raw_card.get('name'))}: falta proveedor o marca"
@@ -225,33 +252,43 @@ def import_trello_board(
             continue
         external_id = clean_text(raw_card.get("id"))
         existing_card = repository.card_by_source("trello", external_id)
-        try:
-            card = repository.create_card(
+        if not existing_card:
+            existing_card = repository.card_by_identity(
                 ficha=ficha,
-                nombre_ficha=_field(values, "Nombre ficha", "Descripcion ficha"),
                 producto=producto,
                 proveedor=proveedor,
                 marca=marca,
-                descripcion=_field(values, "Descripcion") or clean_text(raw_card.get("desc")),
-                route_key=route_key,
-                actor=actor,
-                responsable=clean_text(raw_card.get("idMembers", "")),
-                fecha_objetivo=clean_text(raw_card.get("due"))[:10],
-                source="trello",
-                source_external_id=external_id,
             )
-        except PipelineError as exc:
-            skipped.append(f"{clean_text(raw_card.get('name'))}: {exc}")
-            continue
         if existing_card:
+            card = existing_card
             existing += 1
         else:
-            created += 1
+            try:
+                card = repository.create_card(
+                    ficha=ficha,
+                    nombre_ficha=fields["nombre_ficha"],
+                    producto=producto,
+                    proveedor=proveedor,
+                    marca=marca,
+                    descripcion=fields["descripcion"],
+                    route_key=route_key,
+                    actor=actor,
+                    responsable=clean_text(raw_card.get("idMembers", "")),
+                    fecha_objetivo=clean_text(raw_card.get("due"))[:10],
+                    source="trello",
+                    source_external_id=external_id,
+                )
+                created += 1
+            except PipelineError as exc:
+                skipped.append(f"{clean_text(raw_card.get('name'))}: {exc}")
+                continue
         repository.apply_imported_checkpoints(
-            card["id"], _completed_keys(board, raw_card, route_key), actor=actor
+            card["id"],
+            _completed_keys(board, raw_card, card["route_key"]),
+            actor=actor,
         )
-        email = _field(values, "Correo Electronico", "Correo", "Email")
-        whatsapp = _field(values, "Whatsapp o Wechat", "Whatsapp", "Wechat")
+        email = fields["email"]
+        whatsapp = fields["whatsapp"]
         if (email or whatsapp) and not repository.contacts(card["id"]):
             repository.add_contact(
                 card["id"], actor=actor, email=email, whatsapp_wechat=whatsapp, es_principal=True
