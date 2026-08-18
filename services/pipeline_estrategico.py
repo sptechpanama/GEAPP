@@ -305,6 +305,16 @@ def identity_key(
     return "|".join((ficha_key, provider_key, brand_key))
 
 
+COPY_IDENTITY_MARKER = "|COPIA:"
+
+
+def _copy_identity_suffix(value: Any) -> str:
+    """Conserva la identidad interna de una copia al editar sus datos."""
+    raw = clean_text(value)
+    marker_position = raw.find(COPY_IDENTITY_MARKER)
+    return raw[marker_position:] if marker_position >= 0 else ""
+
+
 def _row_dict(row: Any) -> dict[str, Any]:
     if row is None:
         return {}
@@ -938,11 +948,17 @@ class PipelineRepository:
         merged["proveedor"] = clean_text(merged.get("proveedor"))
         merged["marca"] = clean_text(merged.get("marca"))
         merged["producto"] = clean_text(merged.get("producto"))
-        merged["identity_key"] = identity_key(
+        canonical_identity = identity_key(
             ficha=merged.get("ficha"),
             producto=merged.get("producto"),
             proveedor=merged.get("proveedor"),
             marca=merged.get("marca"),
+        )
+        # Una tarjeta duplicada puede mantener exactamente la misma ficha,
+        # proveedor y marca que la original. El sufijo es interno y no altera
+        # ninguno de los campos visibles para el usuario.
+        merged["identity_key"] = canonical_identity + _copy_identity_suffix(
+            old.get("identity_key")
         )
         merged["proveedor_norm"] = normalize_key(merged["proveedor"])
         merged["marca_norm"] = normalize_key(merged["marca"])
@@ -1029,6 +1045,185 @@ class PipelineRepository:
             raise
         return self.get_card(card_id)
 
+    def duplicate_card(self, card_id: str, *, actor: str) -> dict[str, Any]:
+        """Duplica una tarjeta completa sin duplicar fisicamente archivos de Drive.
+
+        Se copian datos, avance, contactos y referencias documentales. Cada fila
+        nueva recibe su propio id para mantener auditoria y sincronizacion
+        independientes. Los documentos apuntan al mismo archivo seguro en Drive.
+        """
+        original = self.get_card(card_id)
+        if _as_bool(original.get("archived")):
+            raise PipelineError("No se puede duplicar una tarjeta eliminada.")
+
+        now = utc_now()
+        duplicate_id = uuid.uuid4().hex
+        canonical_identity = identity_key(
+            ficha=original.get("ficha"),
+            producto=original.get("producto"),
+            proveedor=original.get("proveedor"),
+            marca=original.get("marca"),
+        )
+        duplicate = {
+            column: original.get(column, "")
+            for column in CARD_COLUMNS
+        }
+        duplicate.update(
+            {
+                "id": duplicate_id,
+                "identity_key": f"{canonical_identity}{COPY_IDENTITY_MARKER}{duplicate_id}",
+                "archived": 0,
+                "source": "duplicate",
+                "source_external_id": "",
+                "created_by": clean_text(actor),
+                "updated_by": clean_text(actor),
+                "created_at": now,
+                "updated_at": now,
+                "version": 1,
+            }
+        )
+
+        with self.engine.begin() as connection:
+            original_checkpoints = [
+                _row_dict(row)
+                for row in connection.execute(
+                    text(
+                        """SELECT * FROM pipeline_checkpoints
+                        WHERE card_id=:card ORDER BY position"""
+                    ),
+                    {"card": card_id},
+                )
+            ]
+            original_contacts = [
+                _row_dict(row)
+                for row in connection.execute(
+                    text(
+                        """SELECT * FROM pipeline_contacts
+                        WHERE card_id=:card AND archived=0 ORDER BY created_at"""
+                    ),
+                    {"card": card_id},
+                )
+            ]
+            original_documents = [
+                _row_dict(row)
+                for row in connection.execute(
+                    text(
+                        """SELECT * FROM pipeline_documents
+                        WHERE card_id=:card AND archived=0 ORDER BY uploaded_at"""
+                    ),
+                    {"card": card_id},
+                )
+            ]
+
+            columns = ",".join(CARD_COLUMNS)
+            values = ",".join(f":{column}" for column in CARD_COLUMNS)
+            connection.execute(
+                text(f"INSERT INTO pipeline_cards ({columns}) VALUES ({values})"),
+                duplicate,
+            )
+
+            for source_checkpoint in original_checkpoints:
+                checkpoint = {
+                    column: source_checkpoint.get(column, "")
+                    for column in CHECKPOINT_COLUMNS
+                }
+                checkpoint.update(
+                    {
+                        "id": uuid.uuid4().hex,
+                        "card_id": duplicate_id,
+                        "updated_at": now,
+                    }
+                )
+                cp_columns = ",".join(CHECKPOINT_COLUMNS)
+                cp_values = ",".join(f":{column}" for column in CHECKPOINT_COLUMNS)
+                connection.execute(
+                    text(
+                        f"INSERT INTO pipeline_checkpoints ({cp_columns}) VALUES ({cp_values})"
+                    ),
+                    checkpoint,
+                )
+                self._queue_outbox(
+                    connection, "checkpoint", checkpoint["id"], "upsert", checkpoint
+                )
+
+            for source_contact in original_contacts:
+                contact = {
+                    column: source_contact.get(column, "")
+                    for column in CONTACT_COLUMNS
+                }
+                contact.update(
+                    {
+                        "id": uuid.uuid4().hex,
+                        "card_id": duplicate_id,
+                        "archived": 0,
+                        "created_by": clean_text(actor),
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                contact_columns = ",".join(CONTACT_COLUMNS)
+                contact_values = ",".join(
+                    f":{column}" for column in CONTACT_COLUMNS
+                )
+                connection.execute(
+                    text(
+                        f"INSERT INTO pipeline_contacts ({contact_columns}) "
+                        f"VALUES ({contact_values})"
+                    ),
+                    contact,
+                )
+                self._queue_outbox(
+                    connection, "contact", contact["id"], "upsert", contact
+                )
+
+            for source_document in original_documents:
+                document = {
+                    column: source_document.get(column, "")
+                    for column in DOCUMENT_COLUMNS
+                }
+                document.update(
+                    {
+                        "id": uuid.uuid4().hex,
+                        "card_id": duplicate_id,
+                        "archived": 0,
+                        "uploaded_by": clean_text(actor),
+                        "uploaded_at": now,
+                    }
+                )
+                document_columns = ",".join(DOCUMENT_COLUMNS)
+                document_values = ",".join(
+                    f":{column}" for column in DOCUMENT_COLUMNS
+                )
+                connection.execute(
+                    text(
+                        f"INSERT INTO pipeline_documents ({document_columns}) "
+                        f"VALUES ({document_values})"
+                    ),
+                    document,
+                )
+                self._queue_outbox(
+                    connection, "document", document["id"], "upsert", document
+                )
+
+            self._queue_outbox(
+                connection, "card", duplicate_id, "upsert", duplicate
+            )
+            self._audit(
+                connection,
+                card_id=duplicate_id,
+                action="card_duplicated_from",
+                actor=actor,
+                new_value={"source_card_id": card_id},
+            )
+            self._audit(
+                connection,
+                card_id=card_id,
+                action="card_duplicated_to",
+                actor=actor,
+                new_value={"duplicate_card_id": duplicate_id},
+            )
+        return self.get_card(duplicate_id)
+
     def change_route(
         self,
         card_id: str,
@@ -1101,22 +1296,39 @@ class PipelineRepository:
             )
         return self.get_card(card_id)
 
-    def archive_card(self, card_id: str, *, actor: str, archived: bool = True) -> None:
+    def archive_card(
+        self,
+        card_id: str,
+        *,
+        actor: str,
+        archived: bool = True,
+        expected_version: int | None = None,
+    ) -> None:
         card = self.get_card(card_id)
+        current_version = int(card.get("version") or 1)
+        if expected_version is not None and int(expected_version) != current_version:
+            raise PipelineError(
+                "La tarjeta fue modificada por otro usuario. Recarga la pagina antes de eliminarla."
+            )
         now = utc_now()
         with self.engine.begin() as connection:
-            connection.execute(
+            result = connection.execute(
                 text(
                     """UPDATE pipeline_cards SET archived=:archived,updated_by=:actor,
-                    updated_at=:now,version=version+1 WHERE id=:id"""
+                    updated_at=:now,version=version+1 WHERE id=:id AND version=:expected_version"""
                 ),
                 {
                     "archived": 1 if archived else 0,
                     "actor": clean_text(actor),
                     "now": now,
                     "id": card_id,
+                    "expected_version": current_version,
                 },
             )
+            if result.rowcount != 1:
+                raise PipelineError(
+                    "La tarjeta fue modificada por otro usuario. Recarga la pagina antes de eliminarla."
+                )
             snapshot = _row_dict(
                 connection.execute(
                     text("SELECT * FROM pipeline_cards WHERE id=:id"), {"id": card_id}

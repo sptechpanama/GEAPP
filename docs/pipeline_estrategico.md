@@ -41,7 +41,13 @@ La replica crea cinco pestanas: `pipeline_cards`, `pipeline_checkpoints`,
   controles posteriores para evitar avances imposibles.
 - Cambiar de categoría con avances también requiere confirmación y reinicia la
   lista usando la plantilla correcta.
-- Archivar no elimina informacion ni archivos.
+- Duplicar crea una tarjeta independiente con los mismos datos, avance,
+  contactos y referencias documentales. Los archivos de Drive se reutilizan
+  mediante su enlace y no se copian físicamente.
+- Eliminar retira la tarjeta del tablero mediante archivado lógico; no destruye
+  su historial, contactos ni archivos y permite recuperación administrativa.
+- La eliminación valida la versión de la tarjeta para no borrar silenciosamente
+  cambios que otro usuario acaba de guardar.
 - Todos los cambios registran usuario, fecha, accion y valor anterior/nuevo.
 
 ## Migracion desde Trello

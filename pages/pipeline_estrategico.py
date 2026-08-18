@@ -321,6 +321,8 @@ def _render_card_summary(card: dict[str, Any], repository: PipelineRepository) -
     st.markdown(f"<div class='pipeline-card-id'>{ficha}</div>", unsafe_allow_html=True)
     st.markdown(f"**{title}**")
     st.caption(f"{clean_text(card.get('proveedor'))} · {clean_text(card.get('marca'))}")
+    if clean_text(card.get("source")) == "duplicate":
+        st.caption("Copia editable")
     st.progress(float(card.get("progress") or 0.0) / 100.0, text=f"{float(card.get('progress') or 0):.0f}%")
     meta = []
     if clean_text(card.get("responsable")):
@@ -459,10 +461,46 @@ def _render_card_data(card: dict[str, Any], repository: PipelineRepository) -> N
             except PipelineRuleError as exc:
                 st.error(str(exc))
     st.divider()
-    st.caption("Archivar oculta la tarjeta sin borrar su historial ni sus documentos.")
-    if st.button("Archivar tarjeta", key=f"archive_card_{card['id']}"):
-        repository.archive_card(card["id"], actor=username)
-        _after_write(repository, "Tarjeta archivada.")
+    st.markdown("##### Acciones de la tarjeta")
+    st.caption(
+        "Duplicar conserva datos, avance, contactos y enlaces documentales; "
+        "no crea copias físicas de los archivos de Drive."
+    )
+    if st.button(
+        "Duplicar tarjeta",
+        key=f"duplicate_card_{card['id']}",
+        use_container_width=True,
+    ):
+        try:
+            repository.duplicate_card(card["id"], actor=username)
+            _after_write(repository, "Tarjeta duplicada correctamente.")
+        except PipelineError as exc:
+            st.error(str(exc))
+
+    with st.expander("Eliminar tarjeta", expanded=False):
+        st.warning(
+            "La tarjeta desaparecerá del tablero, pero se conservarán su historial, "
+            "contactos y documentos para recuperación y auditoría."
+        )
+        delete_confirmed = st.checkbox(
+            "Confirmo que deseo eliminar esta tarjeta del tablero.",
+            key=f"delete_card_confirm_{card['id']}",
+        )
+        if st.button(
+            "Eliminar del tablero",
+            key=f"delete_card_{card['id']}",
+            disabled=not delete_confirmed,
+            use_container_width=True,
+        ):
+            try:
+                repository.archive_card(
+                    card["id"],
+                    actor=username,
+                    expected_version=int(card.get("version") or 1),
+                )
+                _after_write(repository, "Tarjeta eliminada del tablero.")
+            except PipelineError as exc:
+                st.error(str(exc))
 
 
 def _render_contacts(card: dict[str, Any], repository: PipelineRepository) -> None:

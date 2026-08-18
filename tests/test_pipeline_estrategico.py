@@ -222,6 +222,124 @@ def test_card_update_rejects_a_stale_version(repo: PipelineRepository) -> None:
         )
 
 
+def test_duplicate_card_copies_progress_contacts_and_document_references(
+    repo: PipelineRepository,
+) -> None:
+    original = _create_card(repo)
+    for checkpoint in repo.checkpoints(original["id"])[:3]:
+        repo.set_checkpoint(
+            card_id=original["id"],
+            checkpoint_key=checkpoint["checkpoint_key"],
+            completed=True,
+            actor="rsanchez",
+        )
+    original_contact = repo.add_contact(
+        original["id"],
+        actor="rsanchez",
+        nombre="Ana",
+        email="ana@example.com",
+        es_principal=True,
+    )
+    original_document = repo.add_document(
+        original["id"],
+        actor="rsanchez",
+        file_name="ficha.pdf",
+        file_url="https://drive.google.com/file/1",
+        drive_file_id="1",
+        mime_type="application/pdf",
+    )
+
+    duplicated = repo.duplicate_card(original["id"], actor="jsilva")
+
+    assert duplicated["id"] != original["id"]
+    assert duplicated["identity_key"].startswith(original["identity_key"] + "|COPIA:")
+    for field in (
+        "ficha",
+        "nombre_ficha",
+        "producto",
+        "proveedor",
+        "marca",
+        "descripcion",
+        "route_key",
+        "estado",
+        "responsable",
+        "prioridad",
+        "fecha_objetivo",
+    ):
+        assert duplicated[field] == original[field]
+    assert duplicated["source"] == "duplicate"
+    duplicate_view = next(
+        card for card in repo.list_cards() if card["id"] == duplicated["id"]
+    )
+    assert duplicate_view["progress"] == pytest.approx(30.0)
+    assert [bool(row["completed"]) for row in repo.checkpoints(duplicated["id"])[:4]] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    duplicate_contact = repo.contacts(duplicated["id"])[0]
+    assert duplicate_contact["id"] != original_contact["id"]
+    assert duplicate_contact["email"] == original_contact["email"]
+    duplicate_document = repo.documents(duplicated["id"])[0]
+    assert duplicate_document["id"] != original_document["id"]
+    assert duplicate_document["drive_file_id"] == original_document["drive_file_id"]
+    assert duplicate_document["file_url"] == original_document["file_url"]
+    assert {row["action"] for row in repo.activities(duplicated["id"])} >= {
+        "card_duplicated_from"
+    }
+    assert {row["action"] for row in repo.activities(original["id"])} >= {
+        "card_duplicated_to"
+    }
+
+    # Se pueden crear varias copias y editar una sin chocar con la identidad
+    # funcional de la tarjeta original.
+    second_duplicate = repo.duplicate_card(original["id"], actor="jsilva")
+    assert second_duplicate["identity_key"] != duplicated["identity_key"]
+    updated = repo.update_card(
+        duplicated["id"],
+        actor="jsilva",
+        expected_version=duplicated["version"],
+        descripcion="Copia ajustada",
+    )
+    assert updated["descripcion"] == "Copia ajustada"
+    assert "|COPIA:" in updated["identity_key"]
+    assert len(repo.list_cards()) == 3
+
+
+def test_delete_card_is_audited_recoverable_and_concurrency_safe(
+    repo: PipelineRepository,
+) -> None:
+    card = _create_card(repo)
+    changed = repo.update_card(
+        card["id"],
+        actor="usuario_a",
+        expected_version=card["version"],
+        descripcion="Actualizada por otro usuario",
+    )
+    with pytest.raises(PipelineError, match="modificada por otro usuario"):
+        repo.archive_card(
+            card["id"],
+            actor="usuario_b",
+            expected_version=card["version"],
+        )
+
+    repo.archive_card(
+        card["id"],
+        actor="usuario_b",
+        expected_version=changed["version"],
+    )
+    assert repo.list_cards() == []
+    archived = repo.list_cards(PipelineFilters(include_archived=True))
+    assert len(archived) == 1
+    assert bool(archived[0]["archived"])
+    assert "card_archived" in {row["action"] for row in repo.activities(card["id"])}
+
+    repo.archive_card(card["id"], actor="usuario_b", archived=False)
+    assert len(repo.list_cards()) == 1
+    assert "card_restored" in {row["action"] for row in repo.activities(card["id"])}
+
+
 def test_changing_primary_contact_is_mirrored_for_both_contacts(
     repo: PipelineRepository,
 ) -> None:
