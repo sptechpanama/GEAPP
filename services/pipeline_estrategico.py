@@ -21,6 +21,12 @@ from typing import Any, Iterable, Mapping, Sequence
 from sqlalchemy import Engine, create_engine, text
 
 
+# Cambiar este valor cuando se amplie el contrato publico de PipelineRepository.
+# La pagina lo usa como parte de la clave de st.cache_resource para impedir
+# que Streamlit reutilice instancias creadas con una version anterior de la clase.
+PIPELINE_REPOSITORY_API_VERSION = 2
+
+
 STANDARD_CHECKLIST: tuple[tuple[str, str], ...] = (
     ("proveedor_contactado", "Proveedor Contactado"),
     ("cotizacion_y_fichas", "Proveedor ya envió cotizaciones y fichas"),

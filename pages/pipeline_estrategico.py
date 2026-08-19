@@ -12,6 +12,7 @@ from services.access_control import current_username, require_page_access
 from services.auth_drive import get_drive_delegated
 from services.pipeline_drive import PipelineDriveStorage
 from services.pipeline_estrategico import (
+    PIPELINE_REPOSITORY_API_VERSION,
     PipelineError,
     PipelineFilters,
     PipelineRepository,
@@ -78,7 +79,14 @@ def _config_value(key: str, default: str = "") -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def _repository(database_url: str) -> PipelineRepository:
+def _repository(
+    database_url: str,
+    repository_api_version: str,
+) -> PipelineRepository:
+    # Este argumento forma parte deliberadamente de la clave de cache. Sin el,
+    # Streamlit puede conservar una instancia anterior de PipelineRepository
+    # despues de desplegar metodos nuevos como duplicate_card.
+    _ = repository_api_version
     return PipelineRepository.connect(database_url or None)
 
 
@@ -143,7 +151,7 @@ def _display_date(value: Any) -> str:
 
 database_url = _config_value("SUPABASE_DB_URL") or _config_value("DATABASE_URL")
 try:
-    repo = _repository(database_url)
+    repo = _repository(database_url, PIPELINE_REPOSITORY_API_VERSION)
 except Exception as exc:
     st.error(
         "No fue posible abrir la base del Pipeline Estratégico. Verifica SUPABASE_DB_URL "

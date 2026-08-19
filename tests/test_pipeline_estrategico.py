@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from services.pipeline_estrategico import (
+    PIPELINE_REPOSITORY_API_VERSION,
     PipelineError,
     PipelineFilters,
     PipelineRepository,
@@ -45,6 +47,36 @@ def _create_card(repo: PipelineRepository, **overrides):
     }
     values.update(overrides)
     return repo.create_card(**values)
+
+
+def test_pipeline_page_repository_contract_is_complete_and_cache_is_versioned() -> None:
+    page_path = Path(__file__).parents[1] / 'pages' / 'pipeline_estrategico.py'
+    tree = ast.parse(page_path.read_text(encoding='utf-8'))
+    called_methods = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in {'repo', 'repository'}
+    }
+    missing = sorted(
+        method
+        for method in called_methods
+        if not callable(getattr(PipelineRepository, method, None))
+    )
+    assert missing == []
+    assert PIPELINE_REPOSITORY_API_VERSION
+
+    repository_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == '_repository'
+    ]
+    assert repository_calls
+    assert all(len(call.args) == 2 for call in repository_calls)
 
 
 def test_dynamic_templates_have_expected_lengths_and_initial_steps() -> None:
