@@ -6388,8 +6388,15 @@ def _render_ctni_recent_demand() -> None:
     metadata = _ctni_ficha_metadata()
     enriched = enrich_ctni_new_fichas(source, metadata)
     events = latest_recent_ficha_events(enriched, as_of=date.today(), years=2)
+    # CTNI conserva el histórico completo, pero las vistas de oportunidad RIR
+    # se concentran permanentemente en dispositivos, materiales y equipos.
+    # La exclusión se aplica antes del cruce analítico para no mostrar ni
+    # consultar medicamentos en esta vista.
+    events = _filter_ctni_records_compat(events, exclude_medications=True)
     if events.empty:
-        st.info("No hay fichas con fecha CTNI válida dentro de los últimos dos años.")
+        st.info(
+            "No hay fichas CTNI no medicinales con fecha válida dentro de los últimos dos años."
+        )
         return
 
     try:
@@ -6482,7 +6489,8 @@ def _render_ctni_recent_demand() -> None:
 
     st.caption(
         "Una fila por ficha (última acción CTNI en los últimos 2 años). Los actos y el "
-        "monto se cuentan desde esa fecha; cada acto se suma una sola vez."
+        "monto se cuentan desde esa fecha; cada acto se suma una sola vez. "
+        "Los medicamentos están excluidos de esta vista."
     )
     st.caption(f"{len(filtered):,} de {len(result):,} fichas recientes.")
     display_columns = {
@@ -6528,6 +6536,12 @@ def _render_ctni_view(view_name: str) -> None:
             frame,
             _ctni_ficha_metadata(),
         )
+        # No se eliminan del catálogo ni del histórico CTNI: solo se excluyen
+        # de las vistas operativas de fichas para RIR Medical.
+        frame = _filter_ctni_records_compat(frame, exclude_medications=True)
+        if frame.empty:
+            st.info("No hay fichas CTNI no medicinales para mostrar en esta vista.")
+            return
 
     key_slug = re.sub(r"[^0-9a-z]+", "_", view_name.lower()).strip("_")
     filter_row = st.columns([2.2, 1.3, 1.3])
@@ -6592,9 +6606,8 @@ def _render_ctni_view(view_name: str) -> None:
         secondary_row[2].caption("Sin fechas válidas")
 
     classes: list[str] = []
-    exclude_medications = False
     if view_name == "Fichas nuevas":
-        ficha_filter_row = st.columns([2.1, 1.0, 2.0])
+        ficha_filter_row = st.columns([2.1, 3.0])
         class_options = ctni_available_values(frame, "clase_riesgo")
         classes = ficha_filter_row[0].multiselect(
             "Clase de riesgo",
@@ -6606,24 +6619,9 @@ def _render_ctni_view(view_name: str) -> None:
                 "Las fichas que todavía no la publican aparecen como 'Sin clase asignada'."
             ),
         )
-        exclude_medications = ficha_filter_row[1].checkbox(
-            "Excluir medicamentos",
-            value=True,
-            key=f"ctni_{key_slug}_exclude_medications",
-            help="Oculta solo fichas clasificadas como medicamentos/farmacéuticos. No borra ningún registro.",
-        )
-        medication_count = int(
-            frame.get("es_medicamento", pd.Series("No", index=frame.index))
-            .fillna("No")
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .isin({"si", "sí", "true", "1", "x"})
-            .sum()
-        )
-        ficha_filter_row[2].caption(
-            f"Medicamentos clasificados: {medication_count:,}. "
-            "El filtro afecta solo esta vista."
+        ficha_filter_row[1].caption(
+            "Medicamentos excluidos permanentemente de esta vista. El catálogo y el "
+            "histórico CTNI se conservan intactos."
         )
 
     filtered = _filter_ctni_records_compat(
@@ -6634,7 +6632,7 @@ def _render_ctni_view(view_name: str) -> None:
         conditions=conditions,
         actions=actions,
         classes=classes,
-        exclude_medications=exclude_medications,
+        exclude_medications=True,
         start_date=start_date,
         end_date=end_date,
     )
