@@ -5920,7 +5920,7 @@ def _render_ctni_health(health_df: pd.DataFrame) -> None:
         ("solicitudes", "Solicitudes"),
         ("homologaciones", "Homologaciones"),
         ("fichas", "Fichas nuevas y modificadas"),
-        ("google_sheets", "Datos visibles en la app"),
+        ("google_sheets", "Sincronización con la app"),
     )
     health_sources = (
         health_df["fuente"].fillna("").astype(str)
@@ -5947,7 +5947,7 @@ def _render_ctni_health(health_df: pd.DataFrame) -> None:
                 st.caption(f"Fecha: {_format_pc_datetime(timestamp)}")
 
     st.caption(
-        "'Datos visibles en la app' confirma que el monitor sincronizó sus resultados "
+        "'Sincronización con la app' confirma que el monitor sincronizó sus resultados "
         "con las hojas que consulta Streamlit."
     )
     with st.expander("Estado técnico del monitor", expanded=False):
