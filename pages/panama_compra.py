@@ -65,6 +65,7 @@ CTNI_VIEWS = _ctni_view.CTNI_VIEWS
 ctni_available_values = _ctni_view.available_values
 display_ctni_records = _ctni_view.display_ctni_records
 filter_ctni_records = _ctni_view.filter_ctni_records
+enrich_ctni_new_fichas = getattr(_ctni_view, "enrich_new_fichas", lambda frame, _metadata: frame.copy())
 
 
 def _legacy_ctni_date_series(
@@ -3208,6 +3209,152 @@ def _ct_rir_catalog_names(file_id: str) -> dict[str, str]:
     return lookup
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _ctni_ficha_catalog_metadata(file_id: str) -> dict[str, dict[str, str]]:
+    """Lee la metadata oficial del catálogo para enriquecer fichas CTNI.
+
+    La hoja CTNI de fichas trabajadas no expone clase ni taxonomía completa. Se
+    consulta el catálogo que la app ya utiliza, manteniendo CTNI como fuente de
+    novedades y el catálogo como fuente de clasificación.
+    """
+    if not file_id:
+        return {}
+    try:
+        catalog = load_drive_excel(file_id)
+    except Exception:
+        return {}
+    if catalog.empty:
+        return {}
+
+    columns = list(catalog.columns)
+    ficha_col = _resolve_column_by_alias(
+        columns,
+        ["ficha", "numero ficha", "numero_ficha", "ficha tecnica", "codigo ficha", "id ficha"],
+    )
+    if not ficha_col:
+        return {}
+
+    aliases = {
+        "clase": ["clase", "clase oficial", "clase riesgo", "clase de riesgo", "clasificacion"],
+        "area": ["area", "área"],
+        "grupo": ["grupo"],
+        "subgrupo": ["sub grupo", "subgrupo"],
+        "especialidad": ["especialidad"],
+        "categoria": ["categoria", "categoría", "tipo producto"],
+        "es_medicamento": ["es medicamento", "medicamento"],
+    }
+    resolved = {
+        field: _resolve_column_by_alias(columns, field_aliases)
+        for field, field_aliases in aliases.items()
+    }
+    metadata: dict[str, dict[str, str]] = {}
+    for _, row in catalog.iterrows():
+        ficha = _normalize_ficha_token(row.get(ficha_col))
+        if not ficha:
+            continue
+        values = {
+            field: _clean_text(row.get(column)) if column else ""
+            for field, column in resolved.items()
+        }
+        current = metadata.setdefault(ficha, {})
+        for field, value in values.items():
+            if value and not current.get(field):
+                current[field] = value
+    return metadata
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _ctni_ficha_database_metadata(
+    backend: str,
+    db_url: str,
+    db_path_str: str,
+    table_name: str,
+) -> dict[str, dict[str, str]]:
+    """Completa la clasificación desde la tabla de fichas de la base activa."""
+    if not table_name:
+        return {}
+    try:
+        columns = (
+            list_postgres_columns(db_url, table_name)
+            if backend == "postgres"
+            else list_sqlite_columns(db_path_str, table_name)
+        )
+    except Exception:
+        return {}
+
+    ficha_col = _resolve_column_by_alias(
+        columns,
+        ["ficha", "numero ficha", "numero_ficha", "ficha tecnica", "codigo ficha", "id ficha"],
+    )
+    if not ficha_col:
+        return {}
+    aliases = {
+        "clase": ["clase", "clase oficial", "clase riesgo", "clase de riesgo", "clase_riesgo", "clasificacion"],
+        "area": ["area", "área"],
+        "grupo": ["grupo"],
+        "subgrupo": ["sub grupo", "subgrupo"],
+        "especialidad": ["especialidad"],
+        "categoria": ["categoria", "categoría", "tipo producto"],
+        "es_medicamento": ["es medicamento", "medicamento"],
+    }
+    resolved = {
+        field: _resolve_column_by_alias(columns, field_aliases)
+        for field, field_aliases in aliases.items()
+    }
+    selected = tuple(dict.fromkeys([ficha_col, *[column for column in resolved.values() if column]]))
+    try:
+        frame = _load_table_subset(backend, db_url, db_path_str, table_name, selected, "")
+    except Exception:
+        return {}
+
+    metadata: dict[str, dict[str, str]] = {}
+    for _, row in frame.iterrows():
+        ficha = _normalize_ficha_token(row.get(ficha_col))
+        if not ficha:
+            continue
+        current = metadata.setdefault(ficha, {})
+        for field, column in resolved.items():
+            value = _clean_text(row.get(column)) if column else ""
+            if value and not current.get(field):
+                current[field] = value
+    return metadata
+
+
+def _ctni_ficha_metadata() -> dict[str, dict[str, str]]:
+    """Une catálogo y base activa; el catálogo prevalece si ambos aportan dato."""
+    metadata = _ctni_ficha_catalog_metadata(_ct_rir_catalog_file_id())
+    try:
+        source = _resolve_panamacompra_source()
+        backend = str(source.get("backend") or "sqlite")
+        db_url = str(source.get("db_url") or "") if backend == "postgres" else ""
+        db_path_obj = source.get("db_path")
+        db_path_str = str(db_path_obj) if backend == "sqlite" and db_path_obj else ""
+        try:
+            app_cfg = st.secrets.get("app", {})
+        except Exception:
+            app_cfg = {}
+        table_name = str((app_cfg.get("SUPABASE_FICHAS_TABLE") if hasattr(app_cfg, "get") else "") or "")
+        if not table_name:
+            table_name = _find_reference_table_name(
+                backend=backend,
+                db_url=db_url,
+                db_path_str=db_path_str,
+                candidates=["fichas_tecnicas", "fichas_ctni", "criterios_tecnicos"],
+            )
+        database_metadata = _ctni_ficha_database_metadata(
+            backend, db_url, db_path_str, table_name
+        )
+    except Exception:
+        database_metadata = {}
+
+    for ficha, values in database_metadata.items():
+        target = metadata.setdefault(ficha, {})
+        for field, value in values.items():
+            if value and not target.get(field):
+                target[field] = value
+    return metadata
+
+
 def _ct_rir_source_names(source_df: pd.DataFrame) -> dict[str, str]:
     if not isinstance(source_df, pd.DataFrame) or source_df.empty:
         return {}
@@ -5989,6 +6136,15 @@ def _render_ctni_view(view_name: str) -> None:
         st.info("Sin registros publicados en esta vista.")
         return
 
+    # CTNI publica las novedades de fichas, mientras el catálogo CTNI conserva
+    # la clase y la taxonomía. Se unen solo para la vista: no se modifica la
+    # hoja histórica ni se descarta información cuando aún no exista metadata.
+    if view_name == "Fichas nuevas":
+        frame = enrich_ctni_new_fichas(
+            frame,
+            _ctni_ficha_metadata(),
+        )
+
     key_slug = re.sub(r"[^0-9a-z]+", "_", view_name.lower()).strip("_")
     filter_row = st.columns([2.2, 1.3, 1.3])
     search = filter_row[0].text_input(
@@ -6051,6 +6207,38 @@ def _render_ctni_view(view_name: str) -> None:
     else:
         secondary_row[2].caption("Sin fechas válidas")
 
+    classes: list[str] = []
+    exclude_medications = False
+    if view_name == "Fichas nuevas":
+        ficha_filter_row = st.columns([2.1, 1.0, 2.0])
+        class_options = ctni_available_values(frame, "clase")
+        classes = ficha_filter_row[0].multiselect(
+            "Clase oficial",
+            class_options,
+            default=class_options,
+            key=f"ctni_{key_slug}_classes",
+            help="Desmarca una clase para ocultarla. Las fichas sin clasificación oficial se muestran por separado.",
+        )
+        exclude_medications = ficha_filter_row[1].checkbox(
+            "Excluir medicamentos",
+            value=True,
+            key=f"ctni_{key_slug}_exclude_medications",
+            help="Oculta solo fichas clasificadas como medicamentos/farmacéuticos. No borra ningún registro.",
+        )
+        medication_count = int(
+            frame.get("es_medicamento", pd.Series("No", index=frame.index))
+            .fillna("No")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"si", "sí", "true", "1", "x"})
+            .sum()
+        )
+        ficha_filter_row[2].caption(
+            f"Medicamentos clasificados: {medication_count:,}. "
+            "El filtro afecta solo esta vista."
+        )
+
     filtered = filter_ctni_records(
         frame,
         search=search,
@@ -6058,6 +6246,8 @@ def _render_ctni_view(view_name: str) -> None:
         subcommittees=subcommittees,
         conditions=conditions,
         actions=actions,
+        classes=classes,
+        exclude_medications=exclude_medications,
         start_date=start_date,
         end_date=end_date,
     )

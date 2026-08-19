@@ -83,6 +83,7 @@ CTNI_VIEWS = {
             ("fecha", "Fecha de creación/modificación"),
             ("producto", "Producto"),
             ("numero_ficha", "Ficha"),
+            ("clase", "Clase oficial"),
             ("accion", "Acción"),
             ("acta", "Acta"),
             ("subcomite", "Subcomité"),
@@ -115,6 +116,80 @@ def _plain_text(value: object) -> str:
         for char in unicodedata.normalize("NFKD", raw)
         if not unicodedata.combining(char)
     )
+
+
+def normalize_ficha_number(value: object) -> str:
+    """Normaliza un número de ficha sin alterar el resto del registro."""
+    digits = re.sub(r"\D+", "", _safe_text(value))
+    if not digits:
+        return ""
+    return digits.lstrip("0") or "0"
+
+
+def is_medication_record(row: pd.Series | dict[str, object]) -> bool:
+    """Identifica medicamentos con la taxonomía CTNI, no por texto ambiguo."""
+    values = [
+        row.get(column, "")
+        for column in (
+            "es_medicamento",
+            "area",
+            "grupo",
+            "subgrupo",
+            "especialidad",
+            "categoria",
+            "producto",
+        )
+    ]
+    normalized = " ".join(_plain_text(value) for value in values if _safe_text(value))
+    if not normalized:
+        return False
+    if _plain_text(row.get("es_medicamento", "")) in {"si", "true", "1", "x"}:
+        return True
+    return any(token in normalized for token in ("medicamento", "farmaceut"))
+
+
+def enrich_new_fichas(
+    frame: pd.DataFrame,
+    metadata_by_ficha: dict[str, dict[str, object]] | None = None,
+) -> pd.DataFrame:
+    """Completa clase y taxonomía CTNI sin modificar los datos publicados.
+
+    CTNI puede publicar una ficha trabajada antes de que tenga metadata oficial
+    completa. En ese caso la fila se conserva como ``Sin clase asignada``: no se
+    infiere una clase y el usuario puede verla o filtrarla explícitamente.
+    """
+    if frame.empty:
+        return frame.copy()
+
+    metadata_by_ficha = metadata_by_ficha or {}
+    output = frame.copy()
+    metadata_columns = ("area", "grupo", "subgrupo", "especialidad", "categoria")
+    classes: list[str] = []
+    medication_flags: list[str] = []
+    enriched_metadata: dict[str, list[str]] = {column: [] for column in metadata_columns}
+
+    for _, row in output.iterrows():
+        ficha = normalize_ficha_number(row.get("numero_ficha"))
+        metadata = metadata_by_ficha.get(ficha, {}) if ficha else {}
+        existing_class = _safe_text(row.get("clase"))
+        resolved_class = existing_class or _safe_text(metadata.get("clase"))
+        classes.append(resolved_class or "Sin clase asignada")
+
+        row_data = dict(row)
+        for column in metadata_columns:
+            value = _safe_text(row.get(column)) or _safe_text(metadata.get(column))
+            enriched_metadata[column].append(value)
+            row_data[column] = value
+        row_data["es_medicamento"] = _safe_text(row.get("es_medicamento")) or _safe_text(
+            metadata.get("es_medicamento")
+        )
+        medication_flags.append("Si" if is_medication_record(row_data) else "No")
+
+    output["clase"] = classes
+    output["es_medicamento"] = medication_flags
+    for column, values in enriched_metadata.items():
+        output[column] = values
+    return output
 
 
 def ctni_date_series(frame: pd.DataFrame, column: str = "fecha") -> pd.Series:
@@ -233,6 +308,8 @@ def filter_ctni_records(
     subcommittees: Iterable[str] = (),
     conditions: Iterable[str] = (),
     actions: Iterable[str] = (),
+    classes: Iterable[str] = (),
+    exclude_medications: bool = False,
     start_date: date | None = None,
     end_date: date | None = None,
 ) -> pd.DataFrame:
@@ -250,9 +327,14 @@ def filter_ctni_records(
         ("subcomite", list(subcommittees)),
         ("condicion", list(conditions)),
         ("accion", list(actions)),
+        ("clase", list(classes)),
     ):
         if selected and column in output.columns:
             output = output[output[column].fillna("").astype(str).isin(selected)]
+
+    if exclude_medications and "es_medicamento" in output.columns:
+        medication_labels = output["es_medicamento"].map(_plain_text)
+        output = output[~medication_labels.isin({"si", "true", "1", "x"})]
 
     if "fecha" in output.columns and (start_date or end_date):
         parsed = ctni_date_series(output)

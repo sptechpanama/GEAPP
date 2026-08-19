@@ -8,6 +8,7 @@ from services.ctni_view import (
     CTNI_VIEWS,
     ctni_date_series,
     display_ctni_records,
+    enrich_new_fichas,
     filter_ctni_records,
 )
 
@@ -116,6 +117,60 @@ def test_ficha_link_uses_official_internal_id_and_not_ficha_number():
         "https://ctni.minsa.gob.pa/Utilities/LoadFicha/"
         "?idficha=42593&idparam=0"
     )
+
+
+def test_new_fichas_show_official_class_from_catalog_metadata():
+    frame = pd.DataFrame(
+        [
+            {"numero_ficha": "043358", "producto": "Kit de circuito"},
+            {"numero_ficha": "90000", "producto": "Sin metadata"},
+        ]
+    )
+    enriched = enrich_new_fichas(
+        frame,
+        {
+            "43358": {"clase": "B", "area": "Equipos y mobiliario médico"},
+        },
+    )
+    assert enriched["clase"].tolist() == ["B", "Sin clase asignada"]
+    displayed = display_ctni_records(enriched, "Fichas nuevas")
+    assert "Clase oficial" in displayed.columns
+    assert displayed.loc[0, "Clase oficial"] == "B"
+
+
+def test_new_fichas_can_exclude_only_confirmed_medication_classification():
+    frame = pd.DataFrame(
+        [
+            {
+                "numero_ficha": "1",
+                "producto": "Amoxicilina",
+                "grupo": "Medicamentos y productos de nutrición",
+            },
+            {
+                "numero_ficha": "2",
+                "producto": "Dispositivo médico de laboratorio",
+                "grupo": "Materiales e insumos de laboratorio",
+            },
+        ]
+    )
+    enriched = enrich_new_fichas(frame)
+    assert enriched["es_medicamento"].tolist() == ["Si", "No"]
+    filtered = filter_ctni_records(enriched, exclude_medications=True)
+    assert filtered["numero_ficha"].tolist() == ["2"]
+
+
+def test_class_filter_keeps_selected_classes_and_unclassified_records_when_selected():
+    frame = enrich_new_fichas(
+        pd.DataFrame(
+            [
+                {"numero_ficha": "101", "producto": "Uno"},
+                {"numero_ficha": "102", "producto": "Dos"},
+            ]
+        ),
+        {"101": {"clase": "A"}},
+    )
+    result = filter_ctni_records(frame, classes=["Sin clase asignada"])
+    assert result["numero_ficha"].tolist() == ["102"]
 
 
 def test_ctni_page_loads_only_the_selected_dataset() -> None:
