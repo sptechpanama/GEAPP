@@ -13,6 +13,7 @@ from services.ctni_view import (
     latest_recent_ficha_events,
     merge_recent_ficha_demand,
     normalize_risk_class,
+    regulatory_requirement_label,
 )
 
 
@@ -139,6 +140,25 @@ def test_new_fichas_show_official_class_from_catalog_metadata():
     displayed = display_ctni_records(enriched, "Fichas nuevas")
     assert "Clase de riesgo" in displayed.columns
     assert displayed.loc[0, "Clase de riesgo"] == "B"
+
+
+def test_ficha_requirement_summary_uses_only_explicit_official_values():
+    assert regulatory_requirement_label("1", "Si", "No") == "Criterio técnico"
+    assert regulatory_requirement_label("2", "No", "Si") == "Registro sanitario"
+    assert regulatory_requirement_label("3", "Si", "Si") == "Ambos"
+    assert regulatory_requirement_label("4", "No", "No") == "Nada"
+    assert regulatory_requirement_label("5", "", "No") == "Pendiente de confirmar"
+    assert regulatory_requirement_label("", "No", "No") == "Sin ficha asociada"
+
+
+def test_new_fichas_display_regulatory_requirement_from_catalog_metadata():
+    frame = pd.DataFrame([{"numero_ficha": "43358", "producto": "Kit"}])
+    enriched = enrich_new_fichas(
+        frame,
+        {"43358": {"tiene_criterio_tecnico": "Si", "registro_sanitario": "No"}},
+    )
+    displayed = display_ctni_records(enriched, "Fichas nuevas")
+    assert displayed.loc[0, "Requisitos"] == "Criterio técnico"
 
 
 def test_risk_class_accepts_only_official_a_to_d_values():

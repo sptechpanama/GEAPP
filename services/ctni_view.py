@@ -48,6 +48,7 @@ CTNI_VIEWS = {
             ("numero_formulario", "N.º formulario"),
             ("tipo", "Tipo"),
             ("numero_ficha", "Ficha"),
+            ("requisitos_regulatorios", "Requisitos"),
             ("subcomite", "Subcomité"),
             ("institucion", "Institución"),
             ("estado", "Estado"),
@@ -66,6 +67,7 @@ CTNI_VIEWS = {
             ("producto", "Producto / aviso"),
             ("numero_formulario", "N.º formulario"),
             ("numero_ficha", "Ficha"),
+            ("requisitos_regulatorios", "Requisitos"),
             ("subcomite", "Subcomité"),
             ("tipo_evento", "Tipo de evento"),
             ("estado", "Estado"),
@@ -84,6 +86,7 @@ CTNI_VIEWS = {
             ("producto", "Producto"),
             ("numero_ficha", "Ficha"),
             ("clase_riesgo", "Clase de riesgo"),
+            ("requisitos_regulatorios", "Requisitos"),
             ("accion", "Acción"),
             ("acta", "Acta"),
             ("subcomite", "Subcomité"),
@@ -169,6 +172,47 @@ def is_medication_record(row: pd.Series | dict[str, object]) -> bool:
     return any(token in normalized for token in ("medicamento", "farmaceut"))
 
 
+def _first_value(row: pd.Series | dict[str, object], columns: Iterable[str]) -> str:
+    for column in columns:
+        value = _safe_text(row.get(column, ""))
+        if value:
+            return value
+    return ""
+
+
+def _requirement_flag(value: object) -> bool | None:
+    """Normaliza SI/NO oficial sin inferir requisitos desde texto libre."""
+    normalized = _plain_text(value)
+    if not normalized:
+        return None
+    if normalized in {"si", "true", "1", "x"} or normalized.startswith("si "):
+        return True
+    if normalized in {"no", "false", "0", "n/a", "no aplica"} or normalized.startswith("no "):
+        return False
+    return None
+
+
+def regulatory_requirement_label(
+    ficha: object,
+    criterio_tecnico: object,
+    registro_sanitario: object,
+) -> str:
+    """Resume los requisitos oficiales sin confundir ausencia con ``No``."""
+    if not normalize_ficha_number(ficha):
+        return "Sin ficha asociada"
+    has_ct = _requirement_flag(criterio_tecnico)
+    has_rs = _requirement_flag(registro_sanitario)
+    if has_ct is True and has_rs is True:
+        return "Ambos"
+    if has_ct is True:
+        return "Criterio técnico"
+    if has_rs is True:
+        return "Registro sanitario"
+    if has_ct is False and has_rs is False:
+        return "Nada"
+    return "Pendiente de confirmar"
+
+
 def enrich_new_fichas(
     frame: pd.DataFrame,
     metadata_by_ficha: dict[str, dict[str, object]] | None = None,
@@ -184,9 +228,18 @@ def enrich_new_fichas(
 
     metadata_by_ficha = metadata_by_ficha or {}
     output = frame.copy()
-    metadata_columns = ("area", "grupo", "subgrupo", "especialidad", "categoria")
+    metadata_columns = (
+        "area",
+        "grupo",
+        "subgrupo",
+        "especialidad",
+        "categoria",
+        "tiene_criterio_tecnico",
+        "registro_sanitario",
+    )
     classes: list[str] = []
     medication_flags: list[str] = []
+    requirement_labels: list[str] = []
     enriched_metadata: dict[str, list[str]] = {column: [] for column in metadata_columns}
 
     for _, row in output.iterrows():
@@ -210,12 +263,24 @@ def enrich_new_fichas(
             metadata.get("es_medicamento")
         )
         medication_flags.append("Si" if is_medication_record(row_data) else "No")
+        criterio_tecnico = _first_value(
+            row_data,
+            ("tiene_criterio_tecnico", "criterio_tecnico", "criterio", "tiene_ct", "ct"),
+        )
+        registro_sanitario = _first_value(
+            row_data,
+            ("registro_sanitario", "registro sanitario", "tiene_registro_sanitario", "rs"),
+        )
+        requirement_labels.append(
+            regulatory_requirement_label(ficha, criterio_tecnico, registro_sanitario)
+        )
 
     output["clase_riesgo"] = classes
     # Alias transitorio para sesiones de Streamlit que todavía tengan el
     # esquema anterior en memoria. La vista oficial utiliza clase_riesgo.
     output["clase"] = classes
     output["es_medicamento"] = medication_flags
+    output["requisitos_regulatorios"] = requirement_labels
     for column, values in enriched_metadata.items():
         output[column] = values
     return output

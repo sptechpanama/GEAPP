@@ -3333,6 +3333,15 @@ def _ctni_ficha_catalog_metadata(file_id: str) -> dict[str, dict[str, str]]:
         "especialidad": ["especialidad"],
         "categoria": ["categoria", "categoría", "tipo producto"],
         "es_medicamento": ["es medicamento", "medicamento"],
+        "tiene_criterio_tecnico": [
+            "tiene criterio tecnico",
+            "criterio tecnico",
+            "criterio",
+            "tiene ct",
+            "con ct",
+            "cct cvt",
+        ],
+        "registro_sanitario": ["registro sanitario", "registro_sanitario", "reg sanitario"],
         "enlace_ficha": ["enlace ficha tecnica", "enlace_ficha_tecnica", "enlace minsa"],
     }
     resolved = {
@@ -3393,6 +3402,15 @@ def _ctni_ficha_database_metadata(
         "especialidad": ["especialidad"],
         "categoria": ["categoria", "categoría", "tipo producto"],
         "es_medicamento": ["es medicamento", "medicamento"],
+        "tiene_criterio_tecnico": [
+            "tiene criterio tecnico",
+            "criterio tecnico",
+            "criterio",
+            "tiene ct",
+            "con ct",
+            "cct cvt",
+        ],
+        "registro_sanitario": ["registro sanitario", "registro_sanitario", "reg sanitario"],
     }
     resolved = {
         field: _resolve_column_by_alias(columns, field_aliases)
@@ -6499,6 +6517,7 @@ def _render_ctni_recent_demand() -> None:
         "fecha_ctni_iso": "Fecha CTNI",
         "accion": "Acción",
         "clase_riesgo": "Clase de riesgo",
+        "requisitos_regulatorios": "Requisitos",
         "actos_asociados": "Actos asociados",
         "monto_asociado": "Monto asociado",
         "enlace_visible": "Ficha oficial",
@@ -6528,14 +6547,15 @@ def _render_ctni_view(view_name: str) -> None:
         st.info("Sin registros publicados en esta vista.")
         return
 
-    # CTNI publica las novedades de fichas, mientras el catálogo CTNI conserva
-    # la clase y la taxonomía. Se unen solo para la vista: no se modifica la
+    # CTNI publica las novedades, mientras el catálogo CTNI conserva la
+    # clasificación oficial. Se unen solo para la vista: no se modifica la
     # hoja histórica ni se descarta información cuando aún no exista metadata.
-    if view_name == "Fichas nuevas":
+    if "numero_ficha" in frame.columns:
         frame = enrich_ctni_new_fichas(
             frame,
             _ctni_ficha_metadata(),
         )
+    if view_name == "Fichas nuevas":
         # No se eliminan del catálogo ni del histórico CTNI: solo se excluyen
         # de las vistas operativas de fichas para RIR Medical.
         frame = _filter_ctni_records_compat(frame, exclude_medications=True)
