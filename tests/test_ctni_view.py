@@ -10,6 +10,8 @@ from services.ctni_view import (
     display_ctni_records,
     enrich_new_fichas,
     filter_ctni_records,
+    latest_recent_ficha_events,
+    merge_recent_ficha_demand,
     normalize_risk_class,
 )
 
@@ -191,6 +193,56 @@ def test_class_filter_keeps_selected_classes_and_unclassified_records_when_selec
     )
     result = filter_ctni_records(frame, classes=["Sin clase asignada"])
     assert result["numero_ficha"].tolist() == ["102"]
+
+
+def test_recent_ficha_events_keep_latest_action_per_ficha_within_two_years():
+    frame = pd.DataFrame(
+        [
+            {"numero_ficha": "0100", "fecha": "2025-01-10", "accion": "Elaborada"},
+            {"numero_ficha": "100", "fecha": "2026-06-15", "accion": "Actualizada"},
+            {"numero_ficha": "200", "fecha": "2023-12-31", "accion": "Elaborada"},
+        ]
+    )
+    result = latest_recent_ficha_events(
+        frame,
+        as_of=date(2026, 8, 19),
+        years=2,
+    )
+    assert result["numero_ficha"].tolist() == ["100"]
+    assert result.loc[0, "accion"] == "Actualizada"
+    assert result.loc[0, "fecha_ctni_iso"] == "2026-06-15"
+
+
+def test_recent_ficha_demand_counts_each_act_once_and_only_after_ctni_date():
+    events = latest_recent_ficha_events(
+        pd.DataFrame(
+            [{"numero_ficha": "43358", "fecha": "2025-01-01", "accion": "Elaborada"}]
+        ),
+        as_of=date(2026, 8, 19),
+    )
+    acts = pd.DataFrame(
+        [
+            {"ficha": "43358", "acto_key": "A", "fecha_acto": "2025-02-01", "monto_contexto": 1000},
+            {"ficha": "43358", "acto_key": "A", "fecha_acto": "2025-02-01", "monto_contexto": 1000},
+            {"ficha": "43358", "acto_key": "B", "fecha_acto": "2026-01-01", "monto_contexto": 2500},
+            {"ficha": "43358", "acto_key": "ANTERIOR", "fecha_acto": "2024-12-31", "monto_contexto": 99999},
+        ]
+    )
+    result = merge_recent_ficha_demand(events, acts)
+    assert result.loc[0, "actos_asociados"] == 2
+    assert result.loc[0, "monto_asociado"] == 3500.0
+
+
+def test_recent_ficha_demand_preserves_fichas_without_detected_acts():
+    events = latest_recent_ficha_events(
+        pd.DataFrame(
+            [{"numero_ficha": "107135", "fecha": "2026-08-01", "accion": "Corregida"}]
+        ),
+        as_of=date(2026, 8, 19),
+    )
+    result = merge_recent_ficha_demand(events, pd.DataFrame())
+    assert result.loc[0, "actos_asociados"] == 0
+    assert result.loc[0, "monto_asociado"] == 0.0
 
 
 def test_ctni_page_loads_only_the_selected_dataset() -> None:

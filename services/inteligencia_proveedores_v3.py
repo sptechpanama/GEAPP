@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-08-14-direct-ficha-v4"
+ANALYTICS_SERVICE_VERSION = "2026-08-19-ctni-demand-v5"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -348,6 +348,64 @@ class AnalyticsRepository:
         """
         frame = pd.read_sql_query(text(query), self.engine)
         return frame.iloc[0].to_dict() if not frame.empty else {}
+
+    def demand_rows_for_fichas(
+        self,
+        fichas: Sequence[str],
+        *,
+        detection_threshold: float = PROFILE_THRESHOLDS["muy_flexible"],
+    ) -> pd.DataFrame:
+        """Devuelve actos candidatos para un grupo acotado de fichas CTNI.
+
+        No aplica la politica comercial de registro sanitario de la pagina de
+        inteligencia: esta consulta sirve para medir adopcion temprana de toda
+        ficha CTNI. La fecha propia de cada ficha se aplica despues mediante
+        ``merge_recent_ficha_demand``.
+        """
+        normalized = normalize_ficha_list(fichas, limit=100)
+        # ``normalize_ficha_list`` limita formularios interactivos a 100. El
+        # radar CTNI es un proceso interno y puede consultar miles de fichas;
+        # por ello normalizamos el resto de forma controlada aqui.
+        if len(fichas) > len(normalized):
+            normalized = tuple(
+                dict.fromkeys(
+                    match.group(1).lstrip("0") or "0"
+                    for value in fichas
+                    if (match := re.fullmatch(r"\*?(\d{1,12})\*?", clean_text(value)))
+                )
+            )
+        if not normalized:
+            return pd.DataFrame(
+                columns=["ficha", "acto_key", "enlace", "titulo", "fecha_acto", "monto_contexto"]
+            )
+
+        frames: list[pd.DataFrame] = []
+        amount_column = self._reference_context_column
+        # 400 parametros deja margen suficiente bajo el limite de SQLite y es
+        # igualmente eficiente en PostgreSQL/Supabase.
+        for offset in range(0, len(normalized), 400):
+            chunk = normalized[offset : offset + 400]
+            params: dict[str, Any] = {"score_min": float(detection_threshold)}
+            placeholders: list[str] = []
+            for index, ficha in enumerate(chunk):
+                key = f"ficha_{index}"
+                params[key] = ficha
+                placeholders.append(f":{key}")
+            query = f"""
+                SELECT f.ficha, f.acto_key, f.enlace, f.titulo,
+                       COALESCE(
+                           NULLIF(f.publication_date, ''),
+                           NULLIF(f.celebration_date, ''),
+                           NULLIF(f.award_date, ''),
+                           NULLIF(f.update_date, '')
+                       ) AS fecha_acto,
+                       f.{amount_column} AS monto_contexto
+                FROM intel_actos_fichas f
+                WHERE f.detection_score >= :score_min
+                  AND f.ficha IN ({", ".join(placeholders)})
+            """
+            frames.append(pd.read_sql_query(text(query), self.engine, params=params))
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def _filter_sql(self, filters: AnalyticsFilters, *, alias: str = "f") -> tuple[str, dict[str, Any]]:
         params: dict[str, Any] = {"score_min": filters.detection_threshold}

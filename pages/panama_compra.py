@@ -3,6 +3,7 @@
 # pages/visualizador.py
 import os
 import hashlib
+import importlib
 import math
 import json
 import re
@@ -26,7 +27,7 @@ from sqlalchemy import create_engine, text
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-from core.config import DB_PATH
+from core.config import APP_ROOT, DB_PATH
 from sheets import get_client, read_worksheet
 from services.access_control import require_page_access
 from services import auth_drive as _auth_drive
@@ -56,6 +57,7 @@ from services.ct_rir_registry import (
     registry_sheet_values,
 )
 from services import ctni_view as _ctni_view
+from services import inteligencia_proveedores_v3 as _analytics_v3
 
 # Importar el módulo completo evita que un hot-reload de Streamlit con una
 # versión anterior en memoria cierre toda Panamá Compra si todavía no expone
@@ -66,6 +68,33 @@ ctni_available_values = _ctni_view.available_values
 display_ctni_records = _ctni_view.display_ctni_records
 _ctni_filter_records = _ctni_view.filter_ctni_records
 enrich_ctni_new_fichas = getattr(_ctni_view, "enrich_new_fichas", lambda frame, _metadata: frame.copy())
+latest_recent_ficha_events = getattr(_ctni_view, "latest_recent_ficha_events", None)
+merge_recent_ficha_demand = getattr(_ctni_view, "merge_recent_ficha_demand", None)
+
+if (
+    latest_recent_ficha_events is None
+    or merge_recent_ficha_demand is None
+    or not hasattr(_analytics_v3.AnalyticsRepository, "demand_rows_for_fichas")
+):
+    # Evita que una sesion de Streamlit iniciada durante el despliegue conserve
+    # una version anterior de los servicios coordinados.
+    importlib.invalidate_caches()
+    _ctni_view = importlib.reload(_ctni_view)
+    _analytics_v3 = importlib.reload(_analytics_v3)
+    latest_recent_ficha_events = _ctni_view.latest_recent_ficha_events
+    merge_recent_ficha_demand = _ctni_view.merge_recent_ficha_demand
+
+AnalyticsRepository = _analytics_v3.AnalyticsRepository
+AnalyticsUnavailable = _analytics_v3.AnalyticsUnavailable
+CTNI_ANALYTICS_API_VERSION = _analytics_v3.ANALYTICS_SERVICE_VERSION
+CTNI_RECENT_DEMAND_VIEW = "Fichas recientes con demanda"
+CTNI_CURRENT_CATALOG_FILE_ID = "13R7Xd9gjz3xIdKGIeNq09oUR-1poOPCH"
+CTNI_ANALYTICS_CANDIDATES = (
+    APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
+    APP_ROOT / "data" / "inteligencia_proveedores.db",
+    APP_ROOT / "inteligencia_proveedores.db",
+    Path.home() / "scrapers_repo" / "data" / "db" / "inteligencia_proveedores.db",
+)
 
 
 def _legacy_ctni_date_series(
@@ -3215,6 +3244,30 @@ def _ct_rir_catalog_file_id() -> str:
     return ""
 
 
+def _ctni_metadata_catalog_file_ids() -> tuple[str, ...]:
+    """Fuentes de metadata CTNI en orden de autoridad."""
+    try:
+        cfg = st.secrets.get("app", {})
+    except Exception:
+        cfg = {}
+    candidates: list[str] = []
+    for key in (
+        "DRIVE_FICHAS_CTNI_CURRENT_FILE_ID",
+        "DRIVE_FICHAS_TECNICAS_FILE_ID",
+        "DRIVE_FICHAS_CTNI_FILE_ID",
+    ):
+        value = cfg.get(key) if hasattr(cfg, "get") else ""
+        if value and str(value).strip():
+            candidates.append(str(value).strip())
+    # Recurso estable ``fichas_ctni.xlsx``: el scraper lo actualiza en el
+    # mismo lugar de Drive. Es un identificador publico, no una credencial.
+    candidates.append(CTNI_CURRENT_CATALOG_FILE_ID)
+    legacy_link_id = _ct_rir_catalog_file_id()
+    if legacy_link_id:
+        candidates.append(legacy_link_id)
+    return tuple(dict.fromkeys(candidates))
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def _ct_rir_catalog_names(file_id: str) -> dict[str, str]:
     if not file_id:
@@ -3273,12 +3326,14 @@ def _ctni_ficha_catalog_metadata(file_id: str) -> dict[str, dict[str, str]]:
         return {}
 
     aliases = {
+        "nombre_generico": ["nombre generico", "nombre ficha", "nombre"],
         "area": ["area", "área"],
         "grupo": ["grupo"],
         "subgrupo": ["sub grupo", "subgrupo"],
         "especialidad": ["especialidad"],
         "categoria": ["categoria", "categoría", "tipo producto"],
         "es_medicamento": ["es medicamento", "medicamento"],
+        "enlace_ficha": ["enlace ficha tecnica", "enlace_ficha_tecnica", "enlace minsa"],
     }
     resolved = {
         field: _resolve_column_by_alias(columns, field_aliases)
@@ -3368,7 +3423,14 @@ def _ctni_ficha_database_metadata(
 
 def _ctni_ficha_metadata() -> dict[str, dict[str, str]]:
     """Une catálogo y base activa; el catálogo prevalece si ambos aportan dato."""
-    metadata = _ctni_ficha_catalog_metadata(_ct_rir_catalog_file_id())
+    metadata: dict[str, dict[str, str]] = {}
+    for file_id in _ctni_metadata_catalog_file_ids():
+        catalog_metadata = _ctni_ficha_catalog_metadata(file_id)
+        for ficha, values in catalog_metadata.items():
+            target = metadata.setdefault(ficha, {})
+            for field, value in values.items():
+                if value and not target.get(field):
+                    target[field] = value
     try:
         source = _resolve_panamacompra_source()
         backend = str(source.get("backend") or "sqlite")
@@ -6292,6 +6354,163 @@ def _ctni_link_text(view_name: str, column: str) -> str:
     return "Abrir portal"
 
 
+@st.cache_resource(show_spinner=False)
+def _ctni_analytics_repository(
+    database_url: str,
+    api_version: str,
+) -> AnalyticsRepository:
+    _ = api_version
+    return AnalyticsRepository.connect(
+        database_url=database_url,
+        local_candidates=CTNI_ANALYTICS_CANDIDATES,
+    )
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _ctni_recent_demand_rows(
+    fichas: tuple[str, ...],
+    api_version: str,
+    _repository: AnalyticsRepository,
+) -> pd.DataFrame:
+    _ = api_version
+    return _repository.demand_rows_for_fichas(fichas)
+
+
+def _render_ctni_recent_demand() -> None:
+    """Radar simple de adopcion para fichas CTNI de los ultimos dos anos."""
+    with st.spinner("Cruzando fichas recientes con actos públicos..."):
+        source = _load_ctni_df(CTNI_VIEWS["Fichas nuevas"].sheet)
+    _render_ctni_load_notice(CTNI_VIEWS["Fichas nuevas"].sheet)
+    if source.empty:
+        st.info("Sin fichas CTNI publicadas para construir este análisis.")
+        return
+
+    metadata = _ctni_ficha_metadata()
+    enriched = enrich_ctni_new_fichas(source, metadata)
+    events = latest_recent_ficha_events(enriched, as_of=date.today(), years=2)
+    if events.empty:
+        st.info("No hay fichas con fecha CTNI válida dentro de los últimos dos años.")
+        return
+
+    try:
+        repository = _ctni_analytics_repository(
+            _supabase_db_url(),
+            CTNI_ANALYTICS_API_VERSION,
+        )
+        act_rows = _ctni_recent_demand_rows(
+            tuple(events["numero_ficha"].astype(str)),
+            CTNI_ANALYTICS_API_VERSION,
+            repository,
+        )
+    except AnalyticsUnavailable as exc:
+        st.warning(
+            "Las fichas recientes están disponibles, pero la capa analítica de actos "
+            f"no pudo abrirse: {exc}"
+        )
+        act_rows = pd.DataFrame()
+    except Exception as exc:
+        st.warning(f"No se pudo completar el cruce de demanda: {exc}")
+        act_rows = pd.DataFrame()
+
+    result = merge_recent_ficha_demand(events, act_rows)
+    result["producto_visible"] = result.apply(
+        lambda row: (
+            _clean_text(row.get("producto"))
+            or _clean_text(metadata.get(str(row.get("numero_ficha")), {}).get("nombre_generico"))
+            or "Sin nombre publicado"
+        ),
+        axis=1,
+    )
+    result["enlace_visible"] = result.apply(
+        lambda row: (
+            _clean_text(row.get("enlace_oficial"))
+            or _clean_text(metadata.get(str(row.get("numero_ficha")), {}).get("enlace_ficha"))
+        ),
+        axis=1,
+    )
+
+    filter_row = st.columns([2.2, 1.3, 1.2, 1.0])
+    search = filter_row[0].text_input(
+        "Buscar ficha o producto",
+        key="ctni_recent_demand_search",
+        placeholder="Ej.: 107135 o humificador",
+    )
+    actions = filter_row[1].multiselect(
+        "Acción CTNI",
+        ctni_available_values(result, "accion"),
+        key="ctni_recent_demand_actions",
+        placeholder="Todas",
+    )
+    classes = filter_row[2].multiselect(
+        "Clase de riesgo",
+        ctni_available_values(result, "clase_riesgo"),
+        key="ctni_recent_demand_classes",
+        placeholder="Todas",
+    )
+    demand_only = filter_row[3].checkbox(
+        "Solo con actos",
+        value=False,
+        key="ctni_recent_demand_only",
+    )
+
+    filtered = result.copy()
+    terms = [
+        re.sub(r"\s+", " ", term).strip().lower()
+        for term in str(search or "").split(",")
+        if term.strip()
+    ]
+    if terms:
+        searchable = (
+            filtered[["numero_ficha", "producto_visible"]]
+            .fillna("")
+            .astype(str)
+            .agg(" ".join, axis=1)
+            .str.lower()
+        )
+        filtered = filtered[searchable.map(lambda text_value: any(term in text_value for term in terms))]
+    if actions:
+        filtered = filtered[filtered["accion"].fillna("").astype(str).isin(actions)]
+    if classes:
+        filtered = filtered[filtered["clase_riesgo"].fillna("").astype(str).isin(classes)]
+    if demand_only:
+        filtered = filtered[filtered["actos_asociados"] > 0]
+    filtered = filtered.sort_values(
+        ["monto_asociado", "actos_asociados", "fecha_ctni"],
+        ascending=[False, False, False],
+        kind="stable",
+    )
+
+    st.caption(
+        "Una fila por ficha (última acción CTNI en los últimos 2 años). Los actos y el "
+        "monto se cuentan desde esa fecha; cada acto se suma una sola vez."
+    )
+    st.caption(f"{len(filtered):,} de {len(result):,} fichas recientes.")
+    display_columns = {
+        "numero_ficha": "Ficha",
+        "producto_visible": "Producto",
+        "fecha_ctni_iso": "Fecha CTNI",
+        "accion": "Acción",
+        "clase_riesgo": "Clase de riesgo",
+        "actos_asociados": "Actos asociados",
+        "monto_asociado": "Monto asociado",
+        "enlace_visible": "Ficha oficial",
+    }
+    displayed = filtered[[column for column in display_columns if column in filtered.columns]].rename(
+        columns=display_columns
+    )
+    st.dataframe(
+        displayed,
+        use_container_width=True,
+        hide_index=True,
+        height=650,
+        column_config={
+            "Actos asociados": st.column_config.NumberColumn(format="%d"),
+            "Monto asociado": st.column_config.NumberColumn(format="$ %,.2f"),
+            "Ficha oficial": st.column_config.LinkColumn(display_text="Abrir ficha"),
+        },
+    )
+
+
 def _render_ctni_view(view_name: str) -> None:
     spec = CTNI_VIEWS[view_name]
     with st.spinner(f"Cargando {view_name.lower()}..."):
@@ -6477,14 +6696,18 @@ def _render_ctni_module() -> None:
     _render_ctni_load_notice("ctni_health")
     _render_ctni_health(health)
 
-    view_names = list(CTNI_VIEWS)
+    view_names = [*CTNI_VIEWS, CTNI_RECENT_DEMAND_VIEW]
     selected_view = st.segmented_control(
         "Vista CTNI",
         options=view_names,
         default=view_names[0],
         key="ctni_active_view",
     )
-    _render_ctni_view(selected_view or view_names[0])
+    active_view = selected_view or view_names[0]
+    if active_view == CTNI_RECENT_DEMAND_VIEW:
+        _render_ctni_recent_demand()
+    else:
+        _render_ctni_view(active_view)
 
 
 def render_df(

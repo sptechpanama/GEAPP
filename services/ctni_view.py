@@ -245,6 +245,114 @@ def ctni_date_series(frame: pd.DataFrame, column: str = "fecha") -> pd.Series:
     return parsed
 
 
+def latest_recent_ficha_events(
+    frame: pd.DataFrame,
+    *,
+    as_of: date | None = None,
+    years: int = 2,
+) -> pd.DataFrame:
+    """Consolida la novedad CTNI mas reciente de cada ficha.
+
+    La hoja ``ctni_fichas`` conserva el historial completo (elaboraciones,
+    actualizaciones, correcciones y cambios de habilitacion). Para el radar de
+    demanda necesitamos una sola fila vigente por ficha y una fecha inequívoca
+    desde la cual contar actos publicos posteriores.
+    """
+    if frame.empty or "numero_ficha" not in frame.columns:
+        return frame.iloc[0:0].copy()
+
+    reference_date = pd.Timestamp(as_of or date.today()).normalize()
+    cutoff = reference_date - pd.DateOffset(years=max(1, int(years)))
+    output = frame.copy()
+    output["numero_ficha"] = output["numero_ficha"].map(normalize_ficha_number)
+    output["fecha_ctni"] = ctni_date_series(output)
+    output = output[
+        output["numero_ficha"].ne("")
+        & output["fecha_ctni"].notna()
+        & output["fecha_ctni"].between(cutoff, reference_date, inclusive="both")
+    ].copy()
+    if output.empty:
+        return output.reset_index(drop=True)
+
+    tie_breakers = ["fecha_ctni"]
+    if "primera_deteccion" in output.columns:
+        output["__primera_deteccion"] = pd.to_datetime(
+            output["primera_deteccion"], errors="coerce", format="mixed"
+        )
+        tie_breakers.append("__primera_deteccion")
+    output = output.sort_values(
+        tie_breakers,
+        ascending=[False] * len(tie_breakers),
+        na_position="last",
+        kind="stable",
+    ).drop_duplicates("numero_ficha", keep="first")
+    output["fecha_ctni_iso"] = output["fecha_ctni"].dt.date.astype(str)
+    return output.drop(columns=["__primera_deteccion"], errors="ignore").reset_index(drop=True)
+
+
+def merge_recent_ficha_demand(
+    ficha_events: pd.DataFrame,
+    act_rows: pd.DataFrame,
+) -> pd.DataFrame:
+    """Agrega actos y montos posteriores a la fecha CTNI de cada ficha.
+
+    Cada acto se cuenta una sola vez por ficha aunque la ficha aparezca en
+    varios renglones. El monto utilizado es el precio de referencia completo
+    del acto (contexto), tambien sumado una sola vez.
+    """
+    output = ficha_events.copy()
+    if output.empty:
+        output["actos_asociados"] = pd.Series(dtype="int64")
+        output["monto_asociado"] = pd.Series(dtype="float64")
+        return output
+
+    output["numero_ficha"] = output["numero_ficha"].map(normalize_ficha_number)
+    output["fecha_ctni"] = pd.to_datetime(output.get("fecha_ctni"), errors="coerce")
+    if act_rows.empty:
+        output["actos_asociados"] = 0
+        output["monto_asociado"] = 0.0
+        return output
+
+    acts = act_rows.copy()
+    acts["ficha"] = acts.get("ficha", "").map(normalize_ficha_number)
+    acts["acto_key"] = acts.get("acto_key", "").fillna("").astype(str).str.strip()
+    acts["fecha_acto"] = pd.to_datetime(acts.get("fecha_acto"), errors="coerce")
+    acts["monto_contexto"] = pd.to_numeric(
+        acts.get("monto_contexto", 0.0), errors="coerce"
+    ).fillna(0.0)
+
+    event_dates = output.set_index("numero_ficha")["fecha_ctni"].to_dict()
+    acts["fecha_ctni"] = acts["ficha"].map(event_dates)
+    acts = acts[
+        acts["ficha"].ne("")
+        & acts["acto_key"].ne("")
+        & acts["fecha_acto"].notna()
+        & acts["fecha_ctni"].notna()
+        & (acts["fecha_acto"] >= acts["fecha_ctni"])
+    ].copy()
+    if acts.empty:
+        output["actos_asociados"] = 0
+        output["monto_asociado"] = 0.0
+        return output
+
+    # Cuando una fuente repite el mismo acto/renglon conservamos el mayor
+    # contexto monetario informado y nunca duplicamos el acto.
+    acts = acts.sort_values("monto_contexto", ascending=False, kind="stable")
+    acts = acts.drop_duplicates(["ficha", "acto_key"], keep="first")
+    totals = (
+        acts.groupby("ficha", as_index=False)
+        .agg(
+            actos_asociados=("acto_key", "nunique"),
+            monto_asociado=("monto_contexto", "sum"),
+        )
+        .rename(columns={"ficha": "numero_ficha"})
+    )
+    output = output.merge(totals, on="numero_ficha", how="left")
+    output["actos_asociados"] = output["actos_asociados"].fillna(0).astype(int)
+    output["monto_asociado"] = output["monto_asociado"].fillna(0.0).astype(float)
+    return output
+
+
 def _official_ctni_url(value: object) -> str:
     """Devuelve solo enlaces HTTP(S) oficiales y corrige valores relativos/formula."""
     raw = _safe_text(value)
