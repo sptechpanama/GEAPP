@@ -83,7 +83,7 @@ CTNI_VIEWS = {
             ("fecha", "Fecha de creación/modificación"),
             ("producto", "Producto"),
             ("numero_ficha", "Ficha"),
-            ("clase", "Clase oficial"),
+            ("clase_riesgo", "Clase de riesgo"),
             ("accion", "Acción"),
             ("acta", "Acta"),
             ("subcomite", "Subcomité"),
@@ -124,6 +124,27 @@ def normalize_ficha_number(value: object) -> str:
     if not digits:
         return ""
     return digits.lstrip("0") or "0"
+
+
+def normalize_risk_class(value: object) -> str:
+    """Devuelve exclusivamente la clase de riesgo oficial A, B, C o D.
+
+    No se reutilizan columnas de clase comercial, grupo o categoría. Esto evita
+    presentar como clase de riesgo una clasificación distinta a la publicada en
+    el detalle oficial de la ficha técnica de MINSA.
+    """
+    normalized = _plain_text(value).upper()
+    if normalized in {"A", "B", "C", "D"}:
+        return normalized
+    for pattern in (
+        r"\bCLASE\s+DE\s+RIESGO\s*[:\-]?\s*([ABCD])\b",
+        r"\bCLASE\s+RIESGO\s*[:\-]?\s*([ABCD])\b",
+        r"\bCLASE\s*[:\-]?\s*([ABCD])\b",
+    ):
+        match = re.search(pattern, normalized)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def is_medication_record(row: pd.Series | dict[str, object]) -> bool:
@@ -171,8 +192,13 @@ def enrich_new_fichas(
     for _, row in output.iterrows():
         ficha = normalize_ficha_number(row.get("numero_ficha"))
         metadata = metadata_by_ficha.get(ficha, {}) if ficha else {}
-        existing_class = _safe_text(row.get("clase"))
-        resolved_class = existing_class or _safe_text(metadata.get("clase"))
+        existing_class = normalize_risk_class(row.get("clase_riesgo"))
+        if not existing_class:
+            existing_class = normalize_risk_class(row.get("clase"))
+        metadata_class = normalize_risk_class(metadata.get("clase_riesgo"))
+        if not metadata_class:
+            metadata_class = normalize_risk_class(metadata.get("clase"))
+        resolved_class = existing_class or metadata_class
         classes.append(resolved_class or "Sin clase asignada")
 
         row_data = dict(row)
@@ -185,6 +211,9 @@ def enrich_new_fichas(
         )
         medication_flags.append("Si" if is_medication_record(row_data) else "No")
 
+    output["clase_riesgo"] = classes
+    # Alias transitorio para sesiones de Streamlit que todavía tengan el
+    # esquema anterior en memoria. La vista oficial utiliza clase_riesgo.
     output["clase"] = classes
     output["es_medicamento"] = medication_flags
     for column, values in enriched_metadata.items():
@@ -327,7 +356,7 @@ def filter_ctni_records(
         ("subcomite", list(subcommittees)),
         ("condicion", list(conditions)),
         ("accion", list(actions)),
-        ("clase", list(classes)),
+        ("clase_riesgo", list(classes or ())),
     ):
         if selected and column in output.columns:
             output = output[output[column].fillna("").astype(str).isin(selected)]

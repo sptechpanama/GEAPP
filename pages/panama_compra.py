@@ -64,7 +64,7 @@ from services import ctni_view as _ctni_view
 CTNI_VIEWS = _ctni_view.CTNI_VIEWS
 ctni_available_values = _ctni_view.available_values
 display_ctni_records = _ctni_view.display_ctni_records
-filter_ctni_records = _ctni_view.filter_ctni_records
+_ctni_filter_records = _ctni_view.filter_ctni_records
 enrich_ctni_new_fichas = getattr(_ctni_view, "enrich_new_fichas", lambda frame, _metadata: frame.copy())
 
 
@@ -92,6 +92,44 @@ ctni_date_series = getattr(
     "ctni_date_series",
     _legacy_ctni_date_series,
 )
+
+
+def _filter_ctni_records_compat(frame: pd.DataFrame, **filters) -> pd.DataFrame:
+    """Tolera un hot-reload con la versión anterior de ``ctni_view``.
+
+    Streamlit Cloud puede conservar brevemente el módulo importado anterior.
+    Si ese helper todavía no acepta los filtros de clase/medicamentos, se
+    ejecuta su firma anterior y se aplican localmente solo esos dos filtros.
+    Los TypeError no relacionados se vuelven a lanzar para no ocultar defectos.
+    """
+    try:
+        return _ctni_filter_records(frame, **filters)
+    except TypeError as exc:
+        message = str(exc)
+        compatibility_error = "unexpected keyword argument" in message and any(
+            name in message for name in ("classes", "exclude_medications")
+        )
+        if not compatibility_error:
+            raise
+
+    legacy_filters = {
+        key: value
+        for key, value in filters.items()
+        if key not in {"classes", "exclude_medications"}
+    }
+    output = _ctni_filter_records(frame, **legacy_filters)
+    selected_classes = list(filters.get("classes") or ())
+    class_column = "clase_riesgo" if "clase_riesgo" in output.columns else "clase"
+    if selected_classes and class_column in output.columns:
+        output = output[
+            output[class_column].fillna("").astype(str).isin(selected_classes)
+        ]
+    if filters.get("exclude_medications") and "es_medicamento" in output.columns:
+        medication = (
+            output["es_medicamento"].fillna("").astype(str).str.strip().str.lower()
+        )
+        output = output[~medication.isin({"si", "sí", "true", "1", "x"})]
+    return output.reset_index(drop=True)
 
 apply_global_theme()
 
@@ -3235,7 +3273,6 @@ def _ctni_ficha_catalog_metadata(file_id: str) -> dict[str, dict[str, str]]:
         return {}
 
     aliases = {
-        "clase": ["clase", "clase oficial", "clase riesgo", "clase de riesgo", "clasificacion"],
         "area": ["area", "área"],
         "grupo": ["grupo"],
         "subgrupo": ["sub grupo", "subgrupo"],
@@ -3247,6 +3284,12 @@ def _ctni_ficha_catalog_metadata(file_id: str) -> dict[str, dict[str, str]]:
         field: _resolve_column_by_alias(columns, field_aliases)
         for field, field_aliases in aliases.items()
     }
+    # La clase oficial es exclusivamente "Clase de Riesgo". Primero se busca
+    # por nombre exacto para no confundirla con clase comercial/categoría.
+    resolved["clase_riesgo"] = _resolve_column_exact(
+        columns,
+        ["Clase de Riesgo", "Clase Riesgo", "clase_riesgo"],
+    )
     metadata: dict[str, dict[str, str]] = {}
     for _, row in catalog.iterrows():
         ficha = _normalize_ficha_token(row.get(ficha_col))
@@ -3289,7 +3332,6 @@ def _ctni_ficha_database_metadata(
     if not ficha_col:
         return {}
     aliases = {
-        "clase": ["clase", "clase oficial", "clase riesgo", "clase de riesgo", "clase_riesgo", "clasificacion"],
         "area": ["area", "área"],
         "grupo": ["grupo"],
         "subgrupo": ["sub grupo", "subgrupo"],
@@ -3301,6 +3343,10 @@ def _ctni_ficha_database_metadata(
         field: _resolve_column_by_alias(columns, field_aliases)
         for field, field_aliases in aliases.items()
     }
+    resolved["clase_riesgo"] = _resolve_column_exact(
+        columns,
+        ["Clase de Riesgo", "Clase Riesgo", "clase_riesgo"],
+    )
     selected = tuple(dict.fromkeys([ficha_col, *[column for column in resolved.values() if column]]))
     try:
         frame = _load_table_subset(backend, db_url, db_path_str, table_name, selected, "")
@@ -5994,16 +6040,12 @@ def apply_checkbox_updates(sheet_name: str, updates):
 
 # --- reemplaza tu load_df y añade el helper _make_unique ---
 
-@st.cache_data(ttl=300)
-def load_df(sheet_name: str) -> pd.DataFrame:
-    try:
-        sh = get_gc().open_by_key(SHEET_ID)
-        ws = sh.worksheet(sheet_name)
-        raw_headers = ws.row_values(1)
-        values = ws.get_all_values()
-    except Exception as exc:
-        print(f"[panama_compra] No se pudo leer la hoja '{sheet_name}': {exc}")
-        return pd.DataFrame()
+def _read_sheet_df(sheet_name: str) -> pd.DataFrame:
+    """Lee una hoja sin caché; los errores se propagan al llamador."""
+    sh = get_gc().open_by_key(SHEET_ID)
+    ws = sh.worksheet(sheet_name)
+    raw_headers = ws.row_values(1)
+    values = ws.get_all_values()
 
     if not values:
         return pd.DataFrame()
@@ -6053,6 +6095,128 @@ def load_df(sheet_name: str) -> pd.DataFrame:
     df = _drop_blank_panamacompra_rows(df)
     df = df.reset_index(drop=True)
     return df
+
+
+@st.cache_data(ttl=300)
+def load_df(sheet_name: str) -> pd.DataFrame:
+    """Carga general conservando el comportamiento histórico de la página."""
+    try:
+        return _read_sheet_df(sheet_name)
+    except Exception as exc:
+        print(f"[panama_compra] No se pudo leer la hoja '{sheet_name}': {exc}")
+        return pd.DataFrame()
+
+
+_CTNI_SHEETS = {
+    "ctni_health",
+    "ctni_solicitudes",
+    "ctni_homologaciones",
+    "ctni_fichas",
+}
+_CTNI_CACHE_DIR = Path(tempfile.gettempdir()) / "geapp_ctni_last_good"
+
+
+def _ctni_cache_path(sheet_name: str) -> Path:
+    safe_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", sheet_name)
+    return _CTNI_CACHE_DIR / f"{safe_name}.json"
+
+
+def _save_ctni_last_good(sheet_name: str, frame: pd.DataFrame) -> None:
+    if sheet_name not in _CTNI_SHEETS or frame.empty:
+        return
+    try:
+        _CTNI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        target = _ctni_cache_path(sheet_name)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        frame.to_json(
+            temporary,
+            orient="table",
+            force_ascii=False,
+            date_format="iso",
+        )
+        os.replace(temporary, target)
+    except Exception as exc:
+        print(f"[CTNI] No se pudo guardar caché local de {sheet_name}: {exc}")
+
+
+def _read_ctni_last_good(sheet_name: str) -> pd.DataFrame:
+    session_key = f"__ctni_last_good_{sheet_name}"
+    session_frame = st.session_state.get(session_key)
+    if isinstance(session_frame, pd.DataFrame) and not session_frame.empty:
+        return session_frame.copy()
+    target = _ctni_cache_path(sheet_name)
+    if not target.exists():
+        return pd.DataFrame()
+    try:
+        cached = pd.read_json(target, orient="table")
+    except Exception as exc:
+        print(f"[CTNI] No se pudo recuperar caché local de {sheet_name}: {exc}")
+        return pd.DataFrame()
+    if not cached.empty:
+        st.session_state[session_key] = cached.copy()
+    return cached
+
+
+def _load_ctni_df(sheet_name: str, attempts: int = 3) -> pd.DataFrame:
+    """Carga CTNI con reintentos y conserva la última copia válida.
+
+    Una respuesta vacía o un error transitorio de Google nunca reemplaza la
+    última versión conocida. Sheets continúa siendo la fuente autoritativa;
+    la copia en sesión/disco solo evita que la interfaz "pierda" los datos.
+    """
+    if sheet_name not in _CTNI_SHEETS:
+        return load_df(sheet_name)
+
+    session_key = f"__ctni_last_good_{sheet_name}"
+    loaded_at_key = f"__ctni_loaded_at_{sheet_name}"
+    session_frame = st.session_state.get(session_key)
+    loaded_at = st.session_state.get(loaded_at_key)
+    if (
+        isinstance(session_frame, pd.DataFrame)
+        and not session_frame.empty
+        and isinstance(loaded_at, (int, float))
+        and time.monotonic() - float(loaded_at) < 120
+    ):
+        st.session_state[f"__ctni_load_status_{sheet_name}"] = "live"
+        return session_frame.copy()
+
+    last_error = ""
+    for attempt in range(max(1, attempts)):
+        try:
+            frame = _read_sheet_df(sheet_name)
+            if not frame.empty:
+                st.session_state[session_key] = frame.copy()
+                st.session_state[loaded_at_key] = time.monotonic()
+                st.session_state[f"__ctni_load_status_{sheet_name}"] = "live"
+                _save_ctni_last_good(sheet_name, frame)
+                return frame
+            last_error = "la hoja respondió sin registros"
+        except Exception as exc:
+            last_error = str(exc)
+        if attempt + 1 < max(1, attempts):
+            time.sleep((0.4, 0.9, 1.8)[min(attempt, 2)])
+
+    cached = _read_ctni_last_good(sheet_name)
+    if not cached.empty:
+        st.session_state[f"__ctni_load_status_{sheet_name}"] = "fallback"
+        print(
+            f"[CTNI] {sheet_name}: usando última copia válida; "
+            f"lectura actual falló ({last_error})"
+        )
+        return cached
+
+    st.session_state[f"__ctni_load_status_{sheet_name}"] = "unavailable"
+    print(f"[CTNI] {sheet_name}: sin fuente ni caché disponible ({last_error})")
+    return pd.DataFrame()
+
+
+def _render_ctni_load_notice(sheet_name: str) -> None:
+    status = st.session_state.get(f"__ctni_load_status_{sheet_name}")
+    if status == "fallback":
+        st.caption(
+            "⚠️ Google Sheets no respondió temporalmente; se muestra la última "
+            "copia válida disponible. Ningún registro fue eliminado."
+        )
 
 
 def _render_ctni_health(health_df: pd.DataFrame) -> None:
@@ -6131,7 +6295,8 @@ def _ctni_link_text(view_name: str, column: str) -> str:
 def _render_ctni_view(view_name: str) -> None:
     spec = CTNI_VIEWS[view_name]
     with st.spinner(f"Cargando {view_name.lower()}..."):
-        frame = load_df(spec.sheet)
+        frame = _load_ctni_df(spec.sheet)
+    _render_ctni_load_notice(spec.sheet)
     if frame.empty:
         st.info("Sin registros publicados en esta vista.")
         return
@@ -6211,13 +6376,16 @@ def _render_ctni_view(view_name: str) -> None:
     exclude_medications = False
     if view_name == "Fichas nuevas":
         ficha_filter_row = st.columns([2.1, 1.0, 2.0])
-        class_options = ctni_available_values(frame, "clase")
+        class_options = ctni_available_values(frame, "clase_riesgo")
         classes = ficha_filter_row[0].multiselect(
-            "Clase oficial",
+            "Clase de riesgo",
             class_options,
             default=class_options,
             key=f"ctni_{key_slug}_classes",
-            help="Desmarca una clase para ocultarla. Las fichas sin clasificación oficial se muestran por separado.",
+            help=(
+                "Clase A, B, C o D publicada en la ficha técnica oficial de MINSA. "
+                "Las fichas que todavía no la publican aparecen como 'Sin clase asignada'."
+            ),
         )
         exclude_medications = ficha_filter_row[1].checkbox(
             "Excluir medicamentos",
@@ -6239,7 +6407,7 @@ def _render_ctni_view(view_name: str) -> None:
             "El filtro afecta solo esta vista."
         )
 
-    filtered = filter_ctni_records(
+    filtered = _filter_ctni_records_compat(
         frame,
         search=search,
         states=states,
@@ -6305,7 +6473,9 @@ def _render_ctni_module() -> None:
         "Seguimiento oficial de solicitudes, homologaciones y fichas trabajadas por CTNI/MINSA. "
         "La primera corrida crea una línea base silenciosa; las novedades posteriores se notifican."
     )
-    _render_ctni_health(load_df("ctni_health"))
+    health = _load_ctni_df("ctni_health")
+    _render_ctni_load_notice("ctni_health")
+    _render_ctni_health(health)
 
     view_names = list(CTNI_VIEWS)
     selected_view = st.segmented_control(

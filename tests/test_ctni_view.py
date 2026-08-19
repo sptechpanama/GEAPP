@@ -10,6 +10,7 @@ from services.ctni_view import (
     display_ctni_records,
     enrich_new_fichas,
     filter_ctni_records,
+    normalize_risk_class,
 )
 
 
@@ -129,13 +130,32 @@ def test_new_fichas_show_official_class_from_catalog_metadata():
     enriched = enrich_new_fichas(
         frame,
         {
-            "43358": {"clase": "B", "area": "Equipos y mobiliario médico"},
+            "43358": {"clase_riesgo": "B", "area": "Equipos y mobiliario médico"},
         },
     )
-    assert enriched["clase"].tolist() == ["B", "Sin clase asignada"]
+    assert enriched["clase_riesgo"].tolist() == ["B", "Sin clase asignada"]
     displayed = display_ctni_records(enriched, "Fichas nuevas")
-    assert "Clase oficial" in displayed.columns
-    assert displayed.loc[0, "Clase oficial"] == "B"
+    assert "Clase de riesgo" in displayed.columns
+    assert displayed.loc[0, "Clase de riesgo"] == "B"
+
+
+def test_risk_class_accepts_only_official_a_to_d_values():
+    assert normalize_risk_class("B") == "B"
+    assert normalize_risk_class("Clase de Riesgo: c") == "C"
+    assert normalize_risk_class("Clase A") == "A"
+    assert normalize_risk_class("Materiales médico quirúrgicos") == ""
+    assert normalize_risk_class("Clase comercial premium") == ""
+
+
+def test_new_fichas_tolerate_nullable_previous_schema_class():
+    frame = pd.DataFrame(
+        [{"numero_ficha": "107135", "producto": "Humidificador", "clase": pd.NA}]
+    )
+    enriched = enrich_new_fichas(
+        frame,
+        {"107135": {"clase_riesgo": "Clase de Riesgo: B"}},
+    )
+    assert enriched.loc[0, "clase_riesgo"] == "B"
 
 
 def test_new_fichas_can_exclude_only_confirmed_medication_classification():
@@ -167,7 +187,7 @@ def test_class_filter_keeps_selected_classes_and_unclassified_records_when_selec
                 {"numero_ficha": "102", "producto": "Dos"},
             ]
         ),
-        {"101": {"clase": "A"}},
+        {"101": {"clase_riesgo": "A"}},
     )
     result = filter_ctni_records(frame, classes=["Sin clase asignada"])
     assert result["numero_ficha"].tolist() == ["102"]
@@ -202,6 +222,20 @@ def test_ctni_page_loads_only_the_selected_dataset() -> None:
     assert sum(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "load_df"
+        and node.func.id == "_load_ctni_df"
         for node in ast.walk(active_view)
     ) == 1
+
+
+def test_ctni_page_uses_resilient_loader_and_filter_compatibility() -> None:
+    page_path = Path(__file__).parents[1] / "pages" / "panama_compra.py"
+    source = page_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    assert "_load_ctni_df" in functions
+    assert "_filter_ctni_records_compat" in functions
+    assert "_read_ctni_last_good" in functions
+    assert "_save_ctni_last_good" in functions
+    assert "_ctni_filter_records(frame, **legacy_filters)" in source
