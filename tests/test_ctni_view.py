@@ -242,15 +242,16 @@ def test_recent_ficha_demand_counts_each_act_once_and_only_after_ctni_date():
     )
     acts = pd.DataFrame(
         [
-            {"ficha": "43358", "acto_key": "A", "fecha_acto": "2025-02-01", "monto_contexto": 1000},
-            {"ficha": "43358", "acto_key": "A", "fecha_acto": "2025-02-01", "monto_contexto": 1000},
-            {"ficha": "43358", "acto_key": "B", "fecha_acto": "2026-01-01", "monto_contexto": 2500},
-            {"ficha": "43358", "acto_key": "ANTERIOR", "fecha_acto": "2024-12-31", "monto_contexto": 99999},
+            {"ficha": "43358", "acto_key": "A", "enlace": "https://acto/a", "fecha_acto": "2025-02-01", "monto_contexto": 1000},
+            {"ficha": "43358", "acto_key": "A", "enlace": "https://acto/a-repetido", "fecha_acto": "2025-02-01", "monto_contexto": 1000},
+            {"ficha": "43358", "acto_key": "B", "enlace": "https://acto/b", "fecha_acto": "2026-01-01", "monto_contexto": 2500},
+            {"ficha": "43358", "acto_key": "ANTERIOR", "enlace": "https://acto/anterior", "fecha_acto": "2024-12-31", "monto_contexto": 99999},
         ]
     )
     result = merge_recent_ficha_demand(events, acts)
     assert result.loc[0, "actos_asociados"] == 2
     assert result.loc[0, "monto_asociado"] == 3500.0
+    assert result.loc[0, "actos_enlaces"] == "https://acto/b\nhttps://acto/a"
 
 
 def test_recent_ficha_demand_preserves_fichas_without_detected_acts():
@@ -263,6 +264,7 @@ def test_recent_ficha_demand_preserves_fichas_without_detected_acts():
     result = merge_recent_ficha_demand(events, pd.DataFrame())
     assert result.loc[0, "actos_asociados"] == 0
     assert result.loc[0, "monto_asociado"] == 0.0
+    assert result.loc[0, "actos_enlaces"] == ""
 
 
 def test_ctni_page_loads_only_the_selected_dataset() -> None:

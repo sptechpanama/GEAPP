@@ -369,6 +369,7 @@ def merge_recent_ficha_demand(
     if output.empty:
         output["actos_asociados"] = pd.Series(dtype="int64")
         output["monto_asociado"] = pd.Series(dtype="float64")
+        output["actos_enlaces"] = pd.Series(dtype="object")
         return output
 
     output["numero_ficha"] = output["numero_ficha"].map(normalize_ficha_number)
@@ -376,6 +377,7 @@ def merge_recent_ficha_demand(
     if act_rows.empty:
         output["actos_asociados"] = 0
         output["monto_asociado"] = 0.0
+        output["actos_enlaces"] = ""
         return output
 
     acts = act_rows.copy()
@@ -398,12 +400,21 @@ def merge_recent_ficha_demand(
     if acts.empty:
         output["actos_asociados"] = 0
         output["monto_asociado"] = 0.0
+        output["actos_enlaces"] = ""
         return output
 
     # Cuando una fuente repite el mismo acto/renglon conservamos el mayor
     # contexto monetario informado y nunca duplicamos el acto.
     acts = acts.sort_values("monto_contexto", ascending=False, kind="stable")
     acts = acts.drop_duplicates(["ficha", "acto_key"], keep="first")
+    # El orden de enlaces es parte del resultado: mayor monto primero y, en
+    # empates, una clave estable. Así el enlace 1 siempre es el acto de mayor
+    # relevancia monetaria para esa ficha.
+    acts = acts.sort_values(
+        ["ficha", "monto_contexto", "acto_key"],
+        ascending=[True, False, True],
+        kind="stable",
+    )
     totals = (
         acts.groupby("ficha", as_index=False)
         .agg(
@@ -412,9 +423,23 @@ def merge_recent_ficha_demand(
         )
         .rename(columns={"ficha": "numero_ficha"})
     )
-    output = output.merge(totals, on="numero_ficha", how="left")
+    acts["enlace"] = acts.get(
+        "enlace", pd.Series("", index=acts.index, dtype="object")
+    ).fillna("").astype(str).str.strip()
+    links = (
+        acts
+        .groupby("ficha", as_index=False)["enlace"]
+        .agg(lambda values: "\n".join(dict.fromkeys(url for url in values if url)))
+        .rename(columns={"ficha": "numero_ficha", "enlace": "actos_enlaces"})
+    )
+    output = output.merge(totals, on="numero_ficha", how="left").merge(
+        links,
+        on="numero_ficha",
+        how="left",
+    )
     output["actos_asociados"] = output["actos_asociados"].fillna(0).astype(int)
     output["monto_asociado"] = output["monto_asociado"].fillna(0.0).astype(float)
+    output["actos_enlaces"] = output["actos_enlaces"].fillna("").astype(str)
     return output
 
 

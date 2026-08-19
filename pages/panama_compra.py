@@ -2,6 +2,7 @@
 
 # pages/visualizador.py
 import os
+import html
 import hashlib
 import importlib
 import math
@@ -6394,6 +6395,97 @@ def _ctni_recent_demand_rows(
     return _repository.demand_rows_for_fichas(fichas)
 
 
+def _ctni_clickable_act_links(value: object) -> str:
+    """Genera enlaces numerados seguros para una sola celda HTML."""
+    urls: list[str] = []
+    for raw_url in str(value or "").splitlines():
+        url = raw_url.strip()
+        parsed = urlparse(url)
+        if (
+            url
+            and parsed.scheme in {"http", "https"}
+            and parsed.netloc
+            and url not in urls
+        ):
+            urls.append(url)
+    if not urls:
+        return "—"
+    return ", ".join(
+        (
+            f'<a href="{html.escape(url, quote=True)}" target="_blank" '
+            f'rel="noopener noreferrer">{index}</a>'
+        )
+        for index, url in enumerate(urls, start=1)
+    )
+
+
+def _render_ctni_recent_demand_table(frame: pd.DataFrame) -> None:
+    """Tabla ligera con múltiples enlaces de actos por ficha."""
+    if frame.empty:
+        st.info("No hay fichas que coincidan con los filtros.")
+        return
+
+    table_columns = (
+        ("numero_ficha", "Ficha"),
+        ("producto_visible", "Producto"),
+        ("fecha_ctni_iso", "Fecha CTNI"),
+        ("accion", "Acción"),
+        ("clase_riesgo", "Clase"),
+        ("requisitos_regulatorios", "Requisitos"),
+        ("actos_asociados", "Actos"),
+        ("monto_asociado", "Monto asociado"),
+        ("enlace_visible", "Ficha MINSA"),
+        ("actos_enlaces", "Actos relacionados"),
+    )
+
+    headers = "".join(f"<th>{html.escape(label)}</th>" for _column, label in table_columns)
+    rows: list[str] = []
+    for _, row in frame.iterrows():
+        cells: list[str] = []
+        for column, _label in table_columns:
+            value = row.get(column, "")
+            if column == "monto_asociado":
+                try:
+                    rendered = f"${float(value or 0):,.2f}"
+                except (TypeError, ValueError):
+                    rendered = "$0.00"
+            elif column == "actos_asociados":
+                try:
+                    rendered = f"{int(value or 0):,}"
+                except (TypeError, ValueError):
+                    rendered = "0"
+            elif column == "enlace_visible":
+                rendered = (
+                    f'<a href="{html.escape(str(value), quote=True)}" target="_blank" '
+                    'rel="noopener noreferrer">MINSA</a>'
+                    if urlparse(str(value or "")).scheme in {"http", "https"}
+                    else "—"
+                )
+            elif column == "actos_enlaces":
+                rendered = _ctni_clickable_act_links(value)
+            else:
+                rendered = html.escape(_clean_text(value) or "—")
+            cells.append(f"<td>{rendered}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    st.markdown(
+        """
+        <style>
+        .ctni-demand-table { overflow-x: auto; border: 1px solid #24334f; border-radius: 9px; }
+        .ctni-demand-table table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+        .ctni-demand-table th { background: #14223b; color: #dfeaff; text-align: left; white-space: nowrap; }
+        .ctni-demand-table th, .ctni-demand-table td { padding: .5rem .6rem; border-bottom: 1px solid #24334f; vertical-align: top; }
+        .ctni-demand-table tr:nth-child(even) { background: rgba(20, 34, 59, .32); }
+        .ctni-demand-table a { color: #22b7ff; text-decoration: none; font-weight: 600; }
+        .ctni-demand-table a:hover { text-decoration: underline; }
+        </style>
+        """
+        + f'<div class="ctni-demand-table"><table><thead><tr>{headers}</tr></thead>'
+        + f"<tbody>{''.join(rows)}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _render_ctni_recent_demand() -> None:
     """Radar simple de adopcion para fichas CTNI de los ultimos dos anos."""
     with st.spinner("Cruzando fichas recientes con actos públicos..."):
@@ -6511,31 +6603,25 @@ def _render_ctni_recent_demand() -> None:
         "Los medicamentos están excluidos de esta vista."
     )
     st.caption(f"{len(filtered):,} de {len(result):,} fichas recientes.")
-    display_columns = {
-        "numero_ficha": "Ficha",
-        "producto_visible": "Producto",
-        "fecha_ctni_iso": "Fecha CTNI",
-        "accion": "Acción",
-        "clase_riesgo": "Clase de riesgo",
-        "requisitos_regulatorios": "Requisitos",
-        "actos_asociados": "Actos asociados",
-        "monto_asociado": "Monto asociado",
-        "enlace_visible": "Ficha oficial",
-    }
-    displayed = filtered[[column for column in display_columns if column in filtered.columns]].rename(
-        columns=display_columns
+    pagination = st.columns([1.1, 1.0, 3.0])
+    page_size = pagination[0].selectbox(
+        "Filas por página",
+        options=[25, 50, 100],
+        index=1,
+        key="ctni_recent_demand_page_size",
     )
-    st.dataframe(
-        displayed,
-        use_container_width=True,
-        hide_index=True,
-        height=650,
-        column_config={
-            "Actos asociados": st.column_config.NumberColumn(format="%d"),
-            "Monto asociado": st.column_config.NumberColumn(format="$ %,.2f"),
-            "Ficha oficial": st.column_config.LinkColumn(display_text="Abrir ficha"),
-        },
+    total_pages = max(1, math.ceil(len(filtered) / int(page_size)))
+    page = pagination[1].number_input(
+        "Página",
+        min_value=1,
+        max_value=total_pages,
+        value=1,
+        step=1,
+        key="ctni_recent_demand_page",
     )
+    start = (int(page) - 1) * int(page_size)
+    _render_ctni_recent_demand_table(filtered.iloc[start : start + int(page_size)])
+    st.caption(f"Página {int(page)} de {total_pages}. Enlaces de actos ordenados por monto descendente.")
 
 
 def _render_ctni_view(view_name: str) -> None:
