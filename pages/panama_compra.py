@@ -55,12 +55,41 @@ from services.ct_rir_registry import (
     parse_registry_values,
     registry_sheet_values,
 )
-from services.ctni_view import (
-    CTNI_VIEWS,
-    available_values as ctni_available_values,
-    ctni_date_series,
-    display_ctni_records,
-    filter_ctni_records,
+from services import ctni_view as _ctni_view
+
+# Importar el módulo completo evita que un hot-reload de Streamlit con una
+# versión anterior en memoria cierre toda Panamá Compra si todavía no expone
+# el helper nuevo. Es una compatibilidad transitoria; el despliegue actual lo
+# trae desde services.ctni_view.
+CTNI_VIEWS = _ctni_view.CTNI_VIEWS
+ctni_available_values = _ctni_view.available_values
+display_ctni_records = _ctni_view.display_ctni_records
+filter_ctni_records = _ctni_view.filter_ctni_records
+
+
+def _legacy_ctni_date_series(
+    frame: pd.DataFrame,
+    column: str = "fecha",
+) -> pd.Series:
+    """Respaldo seguro durante un hot-reload parcial de Streamlit Cloud."""
+    if column not in frame.columns:
+        return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+    raw = frame[column].fillna("").astype(str).str.strip().str.lower()
+    months = {
+        "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
+        "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
+        "septiembre": "09", "setiembre": "09", "octubre": "10",
+        "noviembre": "11", "diciembre": "12",
+    }
+    for month, number in months.items():
+        raw = raw.str.replace(rf"\b{month}\b", number, regex=True)
+    return pd.to_datetime(raw, errors="coerce", format="mixed", dayfirst=True)
+
+
+ctni_date_series = getattr(
+    _ctni_view,
+    "ctni_date_series",
+    _legacy_ctni_date_series,
 )
 
 apply_global_theme()
