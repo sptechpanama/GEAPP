@@ -55,6 +55,12 @@ from services.ct_rir_registry import (
     parse_registry_values,
     registry_sheet_values,
 )
+from services.ctni_view import (
+    CTNI_VIEWS,
+    available_values as ctni_available_values,
+    display_ctni_records,
+    filter_ctni_records,
+)
 
 apply_global_theme()
 
@@ -5693,6 +5699,9 @@ SHEET_LABELS = {
     "ap_sin_ficha": "AP sin ficha",
     "ap_sin_requisitos": "AP sin requisitos",
     "ap_ct_rir": "AP CT_RIR",
+    "ctni_solicitudes": "Solicitudes de fichas",
+    "ctni_homologaciones": "Homologaciones",
+    "ctni_fichas": "Fichas nuevas",
 }
 
 SHEET_GROUPS = {
@@ -5727,6 +5736,11 @@ SHEET_GROUPS = {
         "ap_sin_ficha",
         "ap_sin_requisitos",
     ],
+    "CTNI": [
+        "ctni_solicitudes",
+        "ctni_homologaciones",
+        "ctni_fichas",
+    ],
     "Prioritarias": [
         "cl_prioritarios",
     ],
@@ -5754,6 +5768,7 @@ CATEGORY_ORDER = [
     "Licitaciones",
     "Criterios Tecnicos RIR",
     "Actos RS/SP",
+    "CTNI",
     "Prioritarias",
 ]
 
@@ -5861,6 +5876,186 @@ def load_df(sheet_name: str) -> pd.DataFrame:
     df = _drop_blank_panamacompra_rows(df)
     df = df.reset_index(drop=True)
     return df
+
+
+def _render_ctni_module() -> None:
+    st.caption(
+        "Seguimiento oficial de solicitudes, homologaciones y fichas trabajadas por CTNI/MINSA. "
+        "La primera corrida crea una línea base silenciosa; las novedades posteriores se notifican."
+    )
+
+    health_df = load_df("ctni_health")
+    if health_df.empty:
+        st.info(
+            "El monitor CTNI aún no ha publicado su primera línea base. "
+            "Los datos aparecerán después de la primera ejecución diaria del orquestador."
+        )
+    else:
+        expected_sources = (
+            ("solicitudes", "Solicitudes"),
+            ("homologaciones", "Homologaciones"),
+            ("fichas", "Fichas"),
+            ("google_sheets", "Publicación"),
+        )
+        status_columns = st.columns(len(expected_sources))
+        if "fuente" in health_df.columns:
+            health_sources = health_df["fuente"].fillna("").astype(str)
+        else:
+            health_sources = pd.Series("", index=health_df.index, dtype=str)
+        for column, (source, label) in zip(status_columns, expected_sources):
+            matches = health_df[health_sources == source]
+            if matches.empty:
+                column.metric(label, "Pendiente")
+                continue
+            health = matches.iloc[-1]
+            status = str(health.get("estado") or "Pendiente")
+            last_success = str(health.get("ultimo_exito") or "Sin ejecución")
+            column.metric(label, "Correcto" if status == "success" else "Error")
+            column.caption(f"Último éxito: {last_success}")
+        with st.expander("Estado técnico del monitor", expanded=False):
+            visible_health = [
+                column
+                for column in (
+                    "fuente",
+                    "estado",
+                    "ultimo_exito",
+                    "ultimo_error",
+                    "detalle_error",
+                    "registros",
+                    "duracion_segundos",
+                )
+                if column in health_df.columns
+            ]
+            st.dataframe(
+                health_df[visible_health],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    view_names = list(CTNI_VIEWS)
+    view_tabs = st.tabs(view_names)
+    for view_tab, view_name in zip(view_tabs, view_names):
+        with view_tab:
+            spec = CTNI_VIEWS[view_name]
+            frame = load_df(spec.sheet)
+            if frame.empty:
+                st.info("Sin registros publicados en esta vista.")
+                continue
+
+            key_slug = re.sub(r"[^0-9a-z]+", "_", view_name.lower()).strip("_")
+            filter_row = st.columns([2.2, 1.3, 1.3])
+            search = filter_row[0].text_input(
+                "Buscar",
+                key=f"ctni_{key_slug}_search",
+                placeholder="Producto, formulario, ficha o institución; separe alternativas con comas",
+            )
+            states = filter_row[1].multiselect(
+                "Estado",
+                ctni_available_values(frame, "estado"),
+                key=f"ctni_{key_slug}_states",
+                placeholder="Todos",
+            )
+            subcommittees = filter_row[2].multiselect(
+                "Subcomité",
+                ctni_available_values(frame, "subcomite"),
+                key=f"ctni_{key_slug}_subcommittees",
+                placeholder="Todos",
+            )
+
+            secondary_row = st.columns([1.2, 1.2, 1.0, 1.0])
+            conditions = secondary_row[0].multiselect(
+                "Condición",
+                ctni_available_values(frame, "condicion"),
+                key=f"ctni_{key_slug}_conditions",
+                placeholder="Todas",
+            )
+            actions = []
+            if "accion" in frame.columns:
+                actions = secondary_row[1].multiselect(
+                    "Acción",
+                    ctni_available_values(frame, "accion"),
+                    key=f"ctni_{key_slug}_actions",
+                    placeholder="Todas",
+                )
+            else:
+                secondary_row[1].caption("La acción aplica a fichas trabajadas.")
+
+            parsed_dates = (
+                pd.to_datetime(frame["fecha"], errors="coerce", format="mixed", dayfirst=True)
+                if "fecha" in frame.columns
+                else pd.Series(dtype="datetime64[ns]")
+            )
+            valid_dates = parsed_dates.dropna()
+            start_date = end_date = None
+            if not valid_dates.empty:
+                min_date = valid_dates.min().date()
+                max_date = valid_dates.max().date()
+                start_date = secondary_row[2].date_input(
+                    "Desde", min_date, min_value=min_date, max_value=max_date, key=f"ctni_{key_slug}_from"
+                )
+                end_date = secondary_row[3].date_input(
+                    "Hasta", max_date, min_value=min_date, max_value=max_date, key=f"ctni_{key_slug}_to"
+                )
+                if start_date > end_date:
+                    start_date, end_date = end_date, start_date
+            else:
+                secondary_row[2].caption("Sin fechas válidas")
+
+            filtered = filter_ctni_records(
+                frame,
+                search=search,
+                states=states,
+                subcommittees=subcommittees,
+                conditions=conditions,
+                actions=actions,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            st.caption(f"{len(filtered):,} de {len(frame):,} registros.")
+            if filtered.empty:
+                st.info("No hay registros que coincidan con los filtros.")
+                continue
+
+            page_row = st.columns([1, 1, 3])
+            page_size = page_row[0].selectbox(
+                "Filas por página",
+                [100, 250, 500],
+                index=1,
+                key=f"ctni_{key_slug}_page_size",
+            )
+            total_pages = max(1, math.ceil(len(filtered) / page_size))
+            page = page_row[1].number_input(
+                "Página",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                step=1,
+                key=f"ctni_{key_slug}_page",
+            )
+            start = (int(page) - 1) * page_size
+            displayed = display_ctni_records(filtered.iloc[start : start + page_size], view_name)
+            link_config = {
+                column: st.column_config.LinkColumn(
+                    column,
+                    display_text="Abrir documento" if column == "Documento" else "Abrir",
+                )
+                for column in spec.link_columns
+                if column in displayed.columns
+            }
+            st.dataframe(
+                displayed,
+                use_container_width=True,
+                hide_index=True,
+                height=620,
+                column_config=link_config,
+            )
+            st.caption(f"Página {int(page)} de {total_pages}.")
+
+            if view_name == "Fichas nuevas":
+                st.caption(
+                    "Las fichas elaboradas permanecen como 'Pendiente de revisión manual' y no se "
+                    "incorporan automáticamente a las fichas analizadas de la aplicación."
+                )
 
 
 def render_df(
@@ -6571,6 +6766,10 @@ for tab, category_name in zip(category_tabs, ordered_categories):
         selector_slug = re.sub(r"[^0-9a-z]+", "_", category_name.lower())
         selector_key = f"sheet_selector_{selector_slug.strip('_')}"
         tab_suffix = selector_slug.strip("_") or None
+
+        if category_name == "CTNI":
+            _render_ctni_module()
+            continue
 
         if category_name == "Criterios Tecnicos RIR":
             ficha_tokens = _load_ct_rir_tokens()
