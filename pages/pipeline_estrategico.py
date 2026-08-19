@@ -119,7 +119,12 @@ def _show_flash() -> None:
     )
 
 
-def _after_write(repo: PipelineRepository, message: str) -> None:
+def _after_write(
+    repo: PipelineRepository,
+    message: str,
+    *,
+    keep_dialog_open: bool = False,
+) -> None:
     try:
         result = _sync_sheets(repo)
         if result["errors"]:
@@ -136,7 +141,10 @@ def _after_write(repo: PipelineRepository, message: str) -> None:
             message
             + " El cambio quedo seguro en Supabase; la replica a Sheets queda pendiente para reintento.",
         )
-    st.rerun()
+    # Los dialogos de Streamlit son fragmentos. Un rerun global los cerraba
+    # despues de marcar un control o guardar un contacto. El rerun limitado
+    # refresca los datos/version de la tarjeta sin sacar al usuario del editor.
+    st.rerun(scope="fragment" if keep_dialog_open else "app")
 
 
 def _display_date(value: Any) -> str:
@@ -360,10 +368,14 @@ def _render_checklist(card: dict[str, Any], repository: PipelineRepository) -> N
                 reset_downstream=True,
             )
             st.session_state.pop("pipeline_pending_reset", None)
-            _after_write(repository, "Lista de comprobacion actualizada.")
+            _after_write(
+                repository,
+                "Lista de comprobacion actualizada.",
+                keep_dialog_open=True,
+            )
         if no.button("Cancelar", key=f"cancel_reset_{card['id']}", use_container_width=True):
             st.session_state.pop("pipeline_pending_reset", None)
-            st.rerun()
+            st.rerun(scope="fragment")
     prior_complete = True
     for checkpoint in checkpoints:
         current = bool(checkpoint.get("completed"))
@@ -383,7 +395,11 @@ def _render_checklist(card: dict[str, Any], repository: PipelineRepository) -> N
                     actor=username,
                 )
                 st.session_state.pop(widget_key, None)
-                _after_write(repository, "Lista de comprobacion actualizada.")
+                _after_write(
+                    repository,
+                    "Lista de comprobacion actualizada.",
+                    keep_dialog_open=True,
+                )
             except PipelineRuleError as exc:
                 st.session_state.pop(widget_key, None)
                 if exc.requires_confirmation:
@@ -391,7 +407,7 @@ def _render_checklist(card: dict[str, Any], repository: PipelineRepository) -> N
                         "card_id": card["id"],
                         "checkpoint_key": checkpoint["checkpoint_key"],
                     }
-                    st.rerun()
+                    st.rerun(scope="fragment")
                 st.error(str(exc))
         prior_complete = prior_complete and current
 
@@ -440,7 +456,11 @@ def _render_card_data(card: dict[str, Any], repository: PipelineRepository) -> N
                 prioridad=prioridad,
                 fecha_objetivo=fecha_objetivo,
             )
-            _after_write(repository, "Datos de la oportunidad actualizados.")
+            _after_write(
+                repository,
+                "Datos de la oportunidad actualizados.",
+                keep_dialog_open=True,
+            )
         except PipelineError as exc:
             st.error(str(exc))
 
@@ -465,7 +485,11 @@ def _render_card_data(card: dict[str, Any], repository: PipelineRepository) -> N
                     actor=username,
                     confirm_reset=confirm,
                 )
-                _after_write(repository, "Categoría actualizada.")
+                _after_write(
+                    repository,
+                    "Categoría actualizada.",
+                    keep_dialog_open=True,
+                )
             except PipelineRuleError as exc:
                 st.error(str(exc))
     st.divider()
@@ -481,7 +505,11 @@ def _render_card_data(card: dict[str, Any], repository: PipelineRepository) -> N
     ):
         try:
             repository.duplicate_card(card["id"], actor=username)
-            _after_write(repository, "Tarjeta duplicada correctamente.")
+            _after_write(
+                repository,
+                "Tarjeta duplicada correctamente.",
+                keep_dialog_open=True,
+            )
         except PipelineError as exc:
             st.error(str(exc))
 
@@ -532,7 +560,11 @@ def _render_contacts(card: dict[str, Any], repository: PipelineRepository) -> No
             with c2:
                 if st.button("Quitar", key=f"remove_contact_{contact['id']}"):
                     repository.archive_contact(contact["id"], actor=username)
-                    _after_write(repository, "Contacto retirado de la tarjeta.")
+                    _after_write(
+                        repository,
+                        "Contacto retirado de la tarjeta.",
+                        keep_dialog_open=True,
+                    )
     with st.form(f"pipeline_contact_{card['id']}", clear_on_submit=True):
         st.markdown("##### Agregar contacto")
         c1, c2 = st.columns(2)
@@ -563,7 +595,11 @@ def _render_contacts(card: dict[str, Any], repository: PipelineRepository) -> No
                 notas=notes,
                 es_principal=primary,
             )
-            _after_write(repository, "Contacto agregado.")
+            _after_write(
+                repository,
+                "Contacto agregado.",
+                keep_dialog_open=True,
+            )
         except PipelineError as exc:
             st.error(str(exc))
 
@@ -608,6 +644,7 @@ def _render_documents(card: dict[str, Any], repository: PipelineRepository) -> N
                     _after_write(
                         repository,
                         "Documento retirado de la tarjeta. El archivo permanece seguro en Drive.",
+                        keep_dialog_open=True,
                     )
     st.markdown("##### Adjuntar a Google Drive")
     uploaded = st.file_uploader(
@@ -650,7 +687,11 @@ def _render_documents(card: dict[str, Any], repository: PipelineRepository) -> N
                 descripcion=document_description,
                 storage_provider="drive",
             )
-            _after_write(repository, "Documento guardado en Google Drive.")
+            _after_write(
+                repository,
+                "Documento guardado en Google Drive.",
+                keep_dialog_open=True,
+            )
         except Exception as exc:
             st.error(f"No se pudo adjuntar el documento: {exc}")
 
@@ -686,6 +727,7 @@ def _card_dialog(card_id: str, repository: PipelineRepository) -> None:
     except PipelineError as exc:
         st.error(str(exc))
         return
+    _show_flash()
     route = ROUTES[card["route_key"]]
     st.caption(route.label)
     st.subheader(clean_text(card.get("producto")) or clean_text(card.get("nombre_ficha")) or "Oportunidad")

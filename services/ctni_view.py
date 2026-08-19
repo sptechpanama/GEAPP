@@ -7,8 +7,27 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterable
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
+
+
+CTNI_BASE_URL = "https://ctni.minsa.gob.pa"
+_SPANISH_MONTHS = {
+    "enero": "01",
+    "febrero": "02",
+    "marzo": "03",
+    "abril": "04",
+    "mayo": "05",
+    "junio": "06",
+    "julio": "07",
+    "agosto": "08",
+    "septiembre": "09",
+    "setiembre": "09",
+    "octubre": "10",
+    "noviembre": "11",
+    "diciembre": "12",
+}
 
 
 @dataclass(frozen=True)
@@ -24,7 +43,7 @@ CTNI_VIEWS = {
         title="Solicitudes de fichas",
         sheet="ctni_solicitudes",
         columns=(
-            ("fecha", "Fecha"),
+            ("fecha", "Fecha de solicitud"),
             ("producto", "Producto"),
             ("numero_formulario", "N.º formulario"),
             ("tipo", "Tipo"),
@@ -42,7 +61,7 @@ CTNI_VIEWS = {
         title="Homologaciones",
         sheet="ctni_homologaciones",
         columns=(
-            ("fecha", "Fecha"),
+            ("fecha", "Fecha de homologación"),
             ("hora", "Hora"),
             ("producto", "Producto / aviso"),
             ("numero_formulario", "N.º formulario"),
@@ -61,7 +80,7 @@ CTNI_VIEWS = {
         title="Fichas nuevas",
         sheet="ctni_fichas",
         columns=(
-            ("fecha", "Fecha"),
+            ("fecha", "Fecha de creación/modificación"),
             ("producto", "Producto"),
             ("numero_ficha", "Ficha"),
             ("accion", "Acción"),
@@ -78,13 +97,121 @@ CTNI_VIEWS = {
 }
 
 
+def _safe_text(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
 def _plain_text(value: object) -> str:
-    raw = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    raw = re.sub(r"\s+", " ", _safe_text(value)).strip().lower()
     return "".join(
         char
         for char in unicodedata.normalize("NFKD", raw)
         if not unicodedata.combining(char)
     )
+
+
+def ctni_date_series(frame: pd.DataFrame, column: str = "fecha") -> pd.Series:
+    """Convierte fechas CTNI, incluyendo meses escritos en español."""
+    if column not in frame.columns:
+        return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+
+    raw = frame[column].fillna("").astype(str).str.strip()
+    parsed = pd.to_datetime(raw, errors="coerce", format="mixed", dayfirst=True)
+    missing = parsed.isna() & raw.ne("")
+    if missing.any():
+        translated = raw.loc[missing].map(_plain_text)
+        for month, number in _SPANISH_MONTHS.items():
+            translated = translated.str.replace(
+                rf"\b{re.escape(month)}\b",
+                number,
+                regex=True,
+            )
+        parsed.loc[missing] = pd.to_datetime(
+            translated,
+            errors="coerce",
+            dayfirst=True,
+        )
+    return parsed
+
+
+def _official_ctni_url(value: object) -> str:
+    """Devuelve solo enlaces HTTP(S) oficiales y corrige valores relativos/formula."""
+    raw = _safe_text(value)
+    if not raw or raw.lower() in {"nan", "none", "<na>"}:
+        return ""
+    formula = re.match(r'^=HYPERLINK\(\s*"([^"]+)"', raw, flags=re.IGNORECASE)
+    if formula:
+        raw = formula.group(1)
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
+    elif raw.startswith("/"):
+        raw = urljoin(f"{CTNI_BASE_URL}/", raw.lstrip("/"))
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    if parsed.hostname and parsed.hostname.lower() != "ctni.minsa.gob.pa":
+        return ""
+    return raw
+
+
+def _official_id(value: object) -> str:
+    match = re.search(r"\d+", _safe_text(value))
+    return match.group(0) if match else ""
+
+
+def _request_type_id(value: object) -> str:
+    normalized = _plain_text(value)
+    if "actualizacion" in normalized:
+        return "1"
+    if "medicamento" in normalized:
+        return "3"
+    if "elaboracion" in normalized:
+        return "2"
+    return ""
+
+
+def _repair_official_links(frame: pd.DataFrame, view_name: str) -> pd.DataFrame:
+    """Transforma endpoints JSON/genéricos en destinos oficiales navegables."""
+    output = frame.copy()
+    if "enlace_oficial" not in output.columns:
+        output["enlace_oficial"] = ""
+
+    repaired: list[str] = []
+    for _index, row in output.iterrows():
+        current = _official_ctni_url(row.get("enlace_oficial"))
+        official_id = _official_id(row.get("id_oficial"))
+        if view_name == "Solicitudes de fichas":
+            form_type = _request_type_id(row.get("tipo"))
+            if official_id and form_type:
+                current = (
+                    f"{CTNI_BASE_URL}/Utilities/GenerateFormulario"
+                    f"?IdFormulario={official_id}&IdTipoFormulario={form_type}"
+                )
+            elif not current or "/FormularioInfo" in current:
+                current = f"{CTNI_BASE_URL}/Formularios/Estado"
+        elif view_name == "Fichas nuevas":
+            if official_id:
+                current = (
+                    f"{CTNI_BASE_URL}/Utilities/LoadFicha/"
+                    f"?idficha={official_id}&idparam=0"
+                )
+            elif not current:
+                current = f"{CTNI_BASE_URL}/Home/ConsultarFichas"
+        elif not current:
+            current = CTNI_BASE_URL
+        repaired.append(current)
+    output["enlace_oficial"] = repaired
+
+    if "enlace_adjunto" in output.columns:
+        output["enlace_adjunto"] = output["enlace_adjunto"].map(_official_ctni_url)
+    return output
 
 
 def available_values(frame: pd.DataFrame, column: str) -> list[str]:
@@ -128,7 +255,7 @@ def filter_ctni_records(
             output = output[output[column].fillna("").astype(str).isin(selected)]
 
     if "fecha" in output.columns and (start_date or end_date):
-        parsed = pd.to_datetime(output["fecha"], errors="coerce", format="mixed", dayfirst=True)
+        parsed = ctni_date_series(output)
         if start_date:
             output = output[parsed.dt.date >= start_date]
             parsed = parsed.loc[output.index]
@@ -136,9 +263,7 @@ def filter_ctni_records(
             output = output[parsed.dt.date <= end_date]
 
     if "fecha" in output.columns:
-        output["__ctni_date"] = pd.to_datetime(
-            output["fecha"], errors="coerce", format="mixed", dayfirst=True
-        )
+        output["__ctni_date"] = ctni_date_series(output)
         output = output.sort_values(
             ["__ctni_date", "primera_deteccion"]
             if "primera_deteccion" in output.columns
@@ -152,8 +277,9 @@ def filter_ctni_records(
 
 def display_ctni_records(frame: pd.DataFrame, view_name: str) -> pd.DataFrame:
     spec = CTNI_VIEWS[view_name]
-    available = [(source, label) for source, label in spec.columns if source in frame.columns]
+    repaired = _repair_official_links(frame, view_name)
+    available = [(source, label) for source, label in spec.columns if source in repaired.columns]
     if not available:
         return pd.DataFrame()
-    output = frame[[source for source, _label in available]].copy()
+    output = repaired[[source for source, _label in available]].copy()
     return output.rename(columns=dict(available))

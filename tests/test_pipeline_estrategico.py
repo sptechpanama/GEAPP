@@ -79,6 +79,54 @@ def test_pipeline_page_repository_contract_is_complete_and_cache_is_versioned() 
     assert all(len(call.args) == 2 for call in repository_calls)
 
 
+def test_pipeline_dialog_writes_refresh_only_the_dialog_fragment() -> None:
+    page_path = Path(__file__).parents[1] / "pages" / "pipeline_estrategico.py"
+    tree = ast.parse(page_path.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+
+    after_write = functions["_after_write"]
+    rerun_calls = [
+        node
+        for node in ast.walk(after_write)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "st"
+        and node.func.attr == "rerun"
+    ]
+    assert len(rerun_calls) == 1
+    assert any(keyword.arg == "scope" for keyword in rerun_calls[0].keywords)
+
+    checklist = functions["_render_checklist"]
+    checklist_writes = [
+        node
+        for node in ast.walk(checklist)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_after_write"
+    ]
+    assert checklist_writes
+    assert all(
+        any(
+            keyword.arg == "keep_dialog_open"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in call.keywords
+        )
+        for call in checklist_writes
+    )
+
+    card_dialog = functions["_card_dialog"]
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_show_flash"
+        for node in ast.walk(card_dialog)
+    )
+
+
 def test_dynamic_templates_have_expected_lengths_and_initial_steps() -> None:
     assert len(ROUTES["fichas_viejas"].checklist) == 10
     assert len(ROUTES["fichas_recien_creadas"].checklist) == 10
