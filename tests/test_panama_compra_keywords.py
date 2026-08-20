@@ -114,6 +114,30 @@ def test_normalization_and_phrase_matching_are_stable():
     ) == ["manejadora de aire"]
 
 
+def test_trailing_asterisk_matches_a_root_without_changing_exact_terms():
+    assert normalize_keyword_terms(
+        [" Fotovolta* ", "FOTOVOLTA*", "serpentín", "UMA"]
+    ) == ["fotovolta*", "serpentin", "uma"]
+
+    text = "Paneles fotovoltaicos y solución fotovoltaica para una UMA."
+    assert match_keywords_in_text(
+        text,
+        ["fotovolta*", "fotovolta", "uma"],
+    ) == ["fotovolta*", "uma"]
+
+    assert match_keywords_in_text("equipo prefotovoltaico", ["fotovolta*"]) == []
+    assert match_keywords_in_text("equipo UMAC", ["uma"]) == []
+
+
+def test_registry_round_trip_preserves_root_marker():
+    values = [
+        ["Palabra clave", "Actualizado por", "Actualizado"],
+        ["Fotovolta*", "ana", "hoy"],
+        ["Agua helada", "ana", "hoy"],
+    ]
+    assert parse_keyword_registry_values(values) == ["fotovolta*", "agua helada"]
+
+
 def test_registry_parser_accepts_header_and_deduplicates():
     values = [
         ["Palabra clave", "Actualizado por", "Actualizado"],

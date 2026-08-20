@@ -3172,11 +3172,16 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
     manual_raw = controls[1].text_input(
         "Palabras clave",
         key=f"{key_prefix}_manual_input",
-        placeholder="Ej: chiller, york, daikin, aire acondicionado",
+        placeholder="Ej: chiller, fotovolta*, aire acondicionado",
         label_visibility="collapsed",
     )
     add_clicked = controls[2].button("Agregar", key=f"{key_prefix}_add")
     remove_clicked = controls[3].button("Quitar", key=f"{key_prefix}_remove")
+
+    st.caption(
+        "Coincidencia exacta por defecto. Usa * solo al final para buscar por raíz; "
+        "por ejemplo, fotovolta* incluye fotovoltaico, fotovoltaica y sus plurales."
+    )
 
     if add_clicked or remove_clicked:
         manual_terms = _parse_manual_keyword_terms(manual_raw)

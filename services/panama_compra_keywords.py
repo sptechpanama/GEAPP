@@ -43,7 +43,12 @@ def _normalize_search_text(value: object) -> str:
 
 
 def normalize_keyword_term(value: object) -> str:
-    return _normalize_search_text(value)
+    raw = str(value or "").strip()
+    root_match = raw.endswith("*")
+    normalized = _normalize_search_text(raw[:-1] if root_match else raw)
+    if normalized and root_match:
+        return f"{normalized}*"
+    return normalized
 
 
 def normalize_keyword_terms(values: Iterable[object]) -> list[str]:
@@ -274,10 +279,15 @@ def _keyword_pattern(normalized_term: str) -> re.Pattern[str] | None:
     normalized_term = normalize_keyword_term(normalized_term)
     if not normalized_term:
         return None
-    tokens = [re.escape(token) for token in normalized_term.split() if token]
+    root_match = normalized_term.endswith("*")
+    term_body = normalized_term[:-1].strip() if root_match else normalized_term
+    tokens = [re.escape(token) for token in term_body.split() if token]
     if not tokens:
         return None
-    pattern = rf"(?<![0-9a-z]){r'\s+'.join(tokens)}(?![0-9a-z])"
+    token_pattern = r"\s+".join(tokens)
+    if root_match:
+        token_pattern += r"[0-9a-z]*"
+    pattern = rf"(?<![0-9a-z]){token_pattern}(?![0-9a-z])"
     return re.compile(pattern)
 
 
