@@ -361,6 +361,21 @@ def test_keyword_manager_uses_atomic_form_without_forced_remote_reload():
     assert "form" in attribute_calls
     assert "form_submit_button" in attribute_calls
 
+    form_keys = {
+        value.value
+        for node in ast.walk(manager)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "form"
+        for keyword in node.keywords
+        if keyword.arg == "key"
+        and isinstance(keyword.value, ast.JoinedStr)
+        for value in keyword.value.values
+        if isinstance(value, ast.Constant) and isinstance(value.value, str)
+    }
+    assert "_add_form" in form_keys
+    assert "_remove_form" in form_keys
+
     forced_loads = [
         node
         for node in ast.walk(manager)

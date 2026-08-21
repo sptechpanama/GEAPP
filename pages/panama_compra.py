@@ -3169,38 +3169,43 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
         )
     selected_options = current_terms if current_terms else [""]
 
-    with st.form(
-        key=f"{key_prefix}_form",
-        clear_on_submit=True,
-        border=False,
-    ):
-        controls = st.columns([2.2, 2.2, 1.1, 1.1])
-        manual_raw = controls[0].text_input(
-            "Palabras clave",
-            key=f"{key_prefix}_manual_input",
-            placeholder="Ej: chiller, fotovolta*, aire acondicionado",
-            label_visibility="collapsed",
-            disabled=bool(registry_warning),
-        )
-        with controls[1]:
+    add_column, remove_column = st.columns([1.35, 1.0])
+    with add_column:
+        with st.form(
+            key=f"{key_prefix}_add_form",
+            clear_on_submit=True,
+            border=False,
+        ):
+            manual_raw = st.text_input(
+                "Nueva palabra o frase",
+                key=f"{key_prefix}_manual_input",
+                placeholder="Ej: chiller, fotovolta*, aire acondicionado",
+                disabled=bool(registry_warning),
+            )
+            add_clicked = st.form_submit_button(
+                "Agregar",
+                use_container_width=True,
+                disabled=bool(registry_warning),
+            )
+
+    with remove_column:
+        with st.form(
+            key=f"{key_prefix}_remove_form",
+            clear_on_submit=False,
+            border=False,
+        ):
             selected = st.selectbox(
-                "Palabra configurada",
+                "Palabra configurada para quitar",
                 options=selected_options,
                 key=f"{key_prefix}_selector",
                 format_func=lambda value: value if value else "Sin palabras configuradas",
-                label_visibility="collapsed",
                 disabled=(selected_options == [""] or bool(registry_warning)),
             )
-        add_clicked = controls[2].form_submit_button(
-            "Agregar",
-            use_container_width=True,
-            disabled=bool(registry_warning),
-        )
-        remove_clicked = controls[3].form_submit_button(
-            "Quitar",
-            use_container_width=True,
-            disabled=bool(registry_warning),
-        )
+            remove_clicked = st.form_submit_button(
+                "Quitar seleccionada",
+                use_container_width=True,
+                disabled=(selected_options == [""] or bool(registry_warning)),
+            )
 
     st.caption(
         "Coincidencia exacta por defecto. Usa * solo al final para buscar por raíz; "
@@ -3210,7 +3215,11 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
     if add_clicked or remove_clicked:
         manual_terms = _parse_manual_keyword_terms(manual_raw)
         selected_term = normalize_keyword_term(selected)
-        target_terms = manual_terms if manual_terms else ([selected_term] if selected_term else [])
+        target_terms = (
+            manual_terms
+            if add_clicked
+            else ([selected_term] if selected_term else [])
+        )
         if not target_terms:
             st.warning("Ingresa una o mas palabras clave separadas por coma, o selecciona una ya configurada.")
         else:
@@ -3242,7 +3251,15 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
         if not current_terms:
             st.caption("Sin palabras clave configuradas.")
         else:
-            kw_df = pd.DataFrame({"Palabra clave": current_terms})
+            kw_df = pd.DataFrame(
+                {
+                    "Palabra clave": current_terms,
+                    "Coincidencia": [
+                        "Raíz (*)" if term.endswith("*") else "Exacta"
+                        for term in current_terms
+                    ],
+                }
+            )
             st.dataframe(kw_df, use_container_width=True, height=220, hide_index=True)
             st.caption(f"Total palabras clave: {len(current_terms)}")
 
