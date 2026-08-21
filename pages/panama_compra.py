@@ -43,10 +43,8 @@ get_drive_service_account = getattr(
 )
 from services.panama_compra_keywords import (
     DEFAULT_PANAMACOMPRA_KEYWORDS,
-    KeywordRegistryConflictError,
     KeywordRegistryError,
     KeywordRegistryStore,
-    apply_keyword_changes,
     match_keywords_in_text,
     normalize_keyword_term,
 )
@@ -3054,6 +3052,7 @@ def _parse_manual_keyword_terms(raw_value: object) -> list[str]:
 
 
 PC_KEYWORDS_REGISTRY_SESSION_KEY = "__pc_keywords_registry_last_good__"
+PC_KEYWORDS_REGISTRY_FLASH_KEY = "__pc_keywords_registry_flash__"
 PC_KEYWORDS_REGISTRY_TTL_SECONDS = 60.0
 
 
@@ -3064,9 +3063,17 @@ def _panama_keyword_process_cache() -> dict[str, object]:
     return {"terms": [], "source": "", "warning": ""}
 
 
+@st.cache_resource(show_spinner=False)
+def _panama_keyword_client():
+    """Reutiliza la sesión autenticada y evita reautorizar en cada clic."""
+
+    return get_gc()
+
+
+@st.cache_resource(show_spinner=False)
 def _panama_keyword_store() -> KeywordRegistryStore:
     return KeywordRegistryStore(
-        get_gc,
+        _panama_keyword_client,
         sheet_id=SHEET_ID,
         worksheet_name=PC_KEYWORDS_WORKSHEET,
         defaults=DEFAULT_PANAMACOMPRA_KEYWORDS,
@@ -3105,18 +3112,18 @@ def _load_panama_keyword_terms(*, force: bool = False) -> list[str]:
     return terms
 
 
-def _save_panama_keyword_terms(
-    terms: list[str],
+def _mutate_panama_keyword_terms(
     *,
-    expected_current: list[str],
-) -> tuple[bool, str]:
-    """Guarda de forma atomica y verifica el contenido remoto completo."""
+    add: list[str] | tuple[str, ...] = (),
+    remove: list[str] | tuple[str, ...] = (),
+) -> tuple[list[str] | None, bool, str]:
+    """Modifica la lista canónica con una lectura y verificación remotas."""
 
     try:
-        verified = _panama_keyword_store().save(
-            terms,
+        verified, changed = _panama_keyword_store().mutate(
+            add=add,
+            remove=remove,
             updated_by=_current_user(),
-            expected_current=expected_current,
         )
         state = {
             "terms": verified,
@@ -3129,17 +3136,20 @@ def _save_panama_keyword_terms(
         _panama_keyword_process_cache().update(
             {"terms": verified, "source": "Google Sheets", "warning": ""}
         )
-        return True, ""
-    except KeywordRegistryConflictError as exc:
-        return False, str(exc)
+        return verified, changed, ""
     except KeywordRegistryError as exc:
-        return False, f"No se pudo verificar la escritura en Google Sheets: {exc}"
+        return None, False, f"No se pudo verificar la escritura en Google Sheets: {exc}"
     except Exception as exc:
-        return False, f"No se pudo guardar la lista en Google Sheets: {exc}"
+        return None, False, f"No se pudo guardar la lista en Google Sheets: {exc}"
 
 
 def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[str]:
     current_terms = _load_panama_keyword_terms()
+    flash_message = str(
+        st.session_state.pop(PC_KEYWORDS_REGISTRY_FLASH_KEY, "") or ""
+    ).strip()
+    if flash_message:
+        st.success(flash_message)
     registry_state = st.session_state.get(PC_KEYWORDS_REGISTRY_SESSION_KEY, {})
     registry_warning = (
         str(registry_state.get("warning", "")).strip()
@@ -3159,24 +3169,38 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
         )
     selected_options = current_terms if current_terms else [""]
 
-    controls = st.columns([2.2, 2.2, 1.1, 1.1])
-    with controls[0]:
-        selected = st.selectbox(
-            "Palabra configurada",
-            options=selected_options,
-            key=f"{key_prefix}_selector",
-            format_func=lambda value: value if value else "Sin palabras configuradas",
+    with st.form(
+        key=f"{key_prefix}_form",
+        clear_on_submit=True,
+        border=False,
+    ):
+        controls = st.columns([2.2, 2.2, 1.1, 1.1])
+        manual_raw = controls[0].text_input(
+            "Palabras clave",
+            key=f"{key_prefix}_manual_input",
+            placeholder="Ej: chiller, fotovolta*, aire acondicionado",
             label_visibility="collapsed",
-            disabled=(selected_options == [""]),
+            disabled=bool(registry_warning),
         )
-    manual_raw = controls[1].text_input(
-        "Palabras clave",
-        key=f"{key_prefix}_manual_input",
-        placeholder="Ej: chiller, fotovolta*, aire acondicionado",
-        label_visibility="collapsed",
-    )
-    add_clicked = controls[2].button("Agregar", key=f"{key_prefix}_add")
-    remove_clicked = controls[3].button("Quitar", key=f"{key_prefix}_remove")
+        with controls[1]:
+            selected = st.selectbox(
+                "Palabra configurada",
+                options=selected_options,
+                key=f"{key_prefix}_selector",
+                format_func=lambda value: value if value else "Sin palabras configuradas",
+                label_visibility="collapsed",
+                disabled=(selected_options == [""] or bool(registry_warning)),
+            )
+        add_clicked = controls[2].form_submit_button(
+            "Agregar",
+            use_container_width=True,
+            disabled=bool(registry_warning),
+        )
+        remove_clicked = controls[3].form_submit_button(
+            "Quitar",
+            use_container_width=True,
+            disabled=bool(registry_warning),
+        )
 
     st.caption(
         "Coincidencia exacta por defecto. Usa * solo al final para buscar por raíz; "
@@ -3190,37 +3214,29 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
         if not target_terms:
             st.warning("Ingresa una o mas palabras clave separadas por coma, o selecciona una ya configurada.")
         else:
-            # Relee justo antes de modificar para no sobrescribir cambios hechos
-            # por otra sesion o por el orquestador.
-            remote_current = _load_panama_keyword_terms(force=True)
-            fresh_state = st.session_state.get(PC_KEYWORDS_REGISTRY_SESSION_KEY, {})
-            fresh_warning = (
-                str(fresh_state.get("warning", "")).strip()
-                if isinstance(fresh_state, dict)
-                else ""
-            )
-            if fresh_warning:
-                st.error(
-                    "No se pudo confirmar la lista remota. El cambio no se "
-                    "aplico para evitar perder palabras configuradas."
+            with st.spinner("Guardando y verificando..."):
+                verified, changed, error = _mutate_panama_keyword_terms(
+                    add=target_terms if add_clicked else (),
+                    remove=target_terms if remove_clicked else (),
                 )
-                return current_terms
-
-            updated = apply_keyword_changes(
-                remote_current,
-                add=target_terms if add_clicked else (),
-                remove=target_terms if remove_clicked else (),
-            )
-            saved, error = _save_panama_keyword_terms(
-                updated,
-                expected_current=remote_current,
-            )
-            if saved:
-                action = "agregaron" if add_clicked else "quitaron"
-                st.success(f"Lista de palabras clave actualizada: se {action} {len(target_terms)} palabra(s).")
+            if verified is not None:
+                if changed:
+                    action = "agregaron" if add_clicked else "quitaron"
+                    message = (
+                        f"Se {action} {len(target_terms)} palabra(s) y la lista "
+                        "quedó verificada en Google Sheets."
+                    )
+                elif add_clicked:
+                    message = "La palabra ya estaba configurada; no fue necesario reescribir la lista."
+                else:
+                    message = "La palabra no estaba configurada; la lista no cambió."
+                st.session_state[PC_KEYWORDS_REGISTRY_FLASH_KEY] = message
                 st.rerun()
             else:
-                st.error(error or "No se pudo guardar la lista de palabras clave.")
+                st.error(
+                    error
+                    or "No se pudo guardar y verificar la lista de palabras clave."
+                )
 
     with st.expander("Palabras clave incluidas", expanded=False):
         if not current_terms:

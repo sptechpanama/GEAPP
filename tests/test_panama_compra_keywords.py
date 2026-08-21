@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import re
+from pathlib import Path
 
 import pytest
 
@@ -274,3 +276,102 @@ def test_missing_worksheet_is_created_with_safe_defaults():
     assert snapshot.remote_ok is True
     assert spreadsheet.created is True
     assert list(snapshot.terms) == ["chiller", "york", "daikin"]
+
+
+def test_mutate_adds_root_term_from_latest_remote_state_and_verifies():
+    ws = FakeWorksheet(
+        [
+            ["Palabra clave", "Actualizado por", "Actualizado"],
+            ["chiller", "old", "old"],
+            ["solar", "other", "now"],
+        ]
+    )
+    store, _ = make_store(ws)
+
+    verified, changed = store.mutate(
+        add=[" Fotovolta* ", "solar"],
+        updated_by="rsanchez",
+    )
+
+    assert changed is True
+    assert verified == ["chiller", "solar", "fotovolta*"]
+    assert parse_keyword_registry_values(ws.values) == verified
+    assert ws.events.count("read") == 2
+    assert sum(event.startswith("update:") for event in ws.events) == 1
+
+
+def test_mutate_avoids_rewriting_when_term_is_already_configured():
+    ws = FakeWorksheet(
+        [
+            ["Palabra clave", "Actualizado por", "Actualizado"],
+            ["chiller", "old", "old"],
+            ["fotovolta*", "old", "old"],
+        ]
+    )
+    store, _ = make_store(ws)
+
+    verified, changed = store.mutate(
+        add=["fotovolta*"],
+        updated_by="rsanchez",
+    )
+
+    assert changed is False
+    assert verified == ["chiller", "fotovolta*"]
+    assert ws.events == ["read"]
+
+
+def test_mutate_removes_root_term_without_touching_other_terms():
+    ws = FakeWorksheet(
+        [
+            ["Palabra clave", "Actualizado por", "Actualizado"],
+            ["chiller", "old", "old"],
+            ["fotovolta*", "old", "old"],
+            ["agua helada", "old", "old"],
+        ]
+    )
+    store, _ = make_store(ws)
+
+    verified, changed = store.mutate(
+        remove=["fotovolta*"],
+        updated_by="rsanchez",
+    )
+
+    assert changed is True
+    assert verified == ["chiller", "agua helada"]
+    assert parse_keyword_registry_values(ws.values) == verified
+
+
+def test_keyword_manager_uses_atomic_form_without_forced_remote_reload():
+    """El texto y el boton deben enviarse juntos sin una segunda lectura previa."""
+
+    page_path = Path(__file__).resolve().parents[1] / "pages" / "panama_compra.py"
+    tree = ast.parse(page_path.read_text(encoding="utf-8"))
+    manager = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_render_keyword_watch_manager"
+    )
+
+    attribute_calls = {
+        node.func.attr
+        for node in ast.walk(manager)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "form" in attribute_calls
+    assert "form_submit_button" in attribute_calls
+
+    forced_loads = [
+        node
+        for node in ast.walk(manager)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_load_panama_keyword_terms"
+        and any(
+            keyword.arg == "force"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in node.keywords
+        )
+    ]
+    assert forced_loads == []

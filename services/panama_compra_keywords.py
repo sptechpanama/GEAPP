@@ -281,6 +281,50 @@ class KeywordRegistryStore:
         with _REGISTRY_LOCK:
             return list(self._retry(operation))
 
+    def mutate(
+        self,
+        *,
+        add: Iterable[object] = (),
+        remove: Iterable[object] = (),
+        updated_by: str,
+    ) -> tuple[list[str], bool]:
+        """Aplica altas y bajas sobre la lista remota en una sola operación.
+
+        La interfaz anterior releía la hoja antes de llamar a ``save`` y
+        ``save`` volvía a abrirla y leerla. Además de lento, ese recorrido
+        aumentaba la ventana de conflicto entre sesiones. Esta operación lee
+        la fuente canónica una sola vez, calcula el cambio sobre esa versión,
+        escribe y verifica. Si el término ya estaba en el estado solicitado,
+        evita una escritura innecesaria.
+        """
+
+        additions = normalize_keyword_terms(add)
+        removals = normalize_keyword_terms(remove)
+
+        def operation() -> tuple[list[str], bool]:
+            worksheet, _ = self._open_worksheet()
+            previous_values = worksheet.get_all_values()
+            remote_terms = parse_keyword_registry_values(previous_values)
+            updated = apply_keyword_changes(
+                remote_terms,
+                add=additions,
+                remove=removals,
+            )
+            if updated == remote_terms:
+                return remote_terms, False
+            verified = self._write_rows(
+                worksheet,
+                updated,
+                updated_by=updated_by,
+                previous_values=previous_values,
+            )
+            return verified, True
+
+        with _REGISTRY_LOCK:
+            result = self._retry(operation)
+        verified, changed = result
+        return list(verified), bool(changed)
+
 
 @lru_cache(maxsize=512)
 def _keyword_pattern(normalized_term: str) -> re.Pattern[str] | None:
