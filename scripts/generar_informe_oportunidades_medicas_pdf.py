@@ -3,7 +3,7 @@ from __future__ import annotations
 """Convierte el Top de oportunidades medicas en un informe PDF ejecutivo.
 
 El Excel sigue siendo la fuente tabular completa. El PDF prioriza legibilidad
-en una pantalla de iPad: formato A4 horizontal, Top 5 explicado y las veinte
+en una pantalla de iPad: formato A4 horizontal, Top 5 explicado y las cincuenta
 posiciones de cada categoria en tablas de diez filas.
 """
 
@@ -22,6 +22,9 @@ from openpyxl import load_workbook
 PAGE_W = 841.89
 PAGE_H = 595.28
 MARGIN = 28.0
+TOP_N = 50
+TOP_HIGHLIGHT = 5
+ROWS_PER_RANKING_PAGE = 10
 
 NAVY = (15 / 255, 39 / 255, 71 / 255)
 NAVY_2 = (24 / 255, 54 / 255, 93 / 255)
@@ -50,7 +53,8 @@ CATEGORY_INFO = {
         "short": "Nuevas",
         "purpose": (
             "Fichas creadas o trabajadas en los ultimos dos anos que ya muestran traccion, "
-            "monto y competencia abordable."
+            "monto y competencia abordable. Las posiciones inferiores pueden ser senales "
+            "iniciales y requieren validacion comercial antes de invertir."
         ),
     },
     "3_Barrera_Cero": {
@@ -66,7 +70,8 @@ CATEGORY_INFO = {
         "short": "Desiertos",
         "purpose": (
             "Niches donde la demanda no fue satisfecha. Se priorizan recurrencia y monto, "
-            "verificando que el desierto no se deba a un precio imposible o requisito inviable."
+            "verificando que el desierto no se deba a un precio imposible o requisito inviable; "
+            "las senales de un solo acto se presentan como exploratorias."
         ),
     },
 }
@@ -136,8 +141,10 @@ def load_excel(path: Path) -> dict[str, list[dict[str, Any]]]:
     if missing:
         raise ValueError(f"Faltan hojas requeridas: {sorted(missing)}")
     for sheet_name in CATEGORY_INFO:
-        if len(result[sheet_name]) != 20:
-            raise ValueError(f"{sheet_name} debe contener 20 registros, contiene {len(result[sheet_name])}")
+        if len(result[sheet_name]) != TOP_N:
+            raise ValueError(
+                f"{sheet_name} debe contener {TOP_N} registros, contiene {len(result[sheet_name])}"
+            )
     return result
 
 
@@ -271,8 +278,8 @@ def render_cover(doc: fitz.Document, source_label: str) -> None:
     draw_wrapped(
         page,
         fitz.Rect(60, 250, 730, 325),
-        "Cuatro Top 20 recalculados desde la fuente analitica completa, con control de requisitos, "
-        "presion competitiva de precio y viabilidad preliminar de margen.",
+        "Cuatro Top 50 recalculados desde la fuente analitica completa, con control de requisitos, "
+        "calidad de deteccion, presion competitiva de precio y viabilidad preliminar de margen.",
         size=13,
         color=(0.82, 0.90, 0.96),
         max_lines=4,
@@ -284,12 +291,13 @@ def render_cover(doc: fitz.Document, source_label: str) -> None:
         "Barrera cero: adicionalmente Criterio Tecnico = NO",
         "Excluye fichas ya revisadas y ciclo completo de peroxido",
         "Productos masivos: penalizados cuando el precio historico comprime el margen",
+        "Nombres genericos: solo cuentan con codigo o contexto tecnico verificable",
     )
     y = 388
     for bullet in bullets:
         page.draw_circle((76, y - 3), 3.4, fill=TEAL, color=TEAL)
         page.insert_text((89, y), bullet, fontsize=10, color=WHITE)
-        y += 20
+        y += 17
     page.insert_text((58, 523), f"Fecha del informe: {date.today().isoformat()}", fontsize=9, color=(0.74, 0.84, 0.91))
     page.insert_text((58, 543), source_label, fontsize=7.2, color=(0.62, 0.74, 0.84))
     page.insert_text((PAGE_W - 108, 548), "GEAPP", fontsize=19, fontname="hebo", color=TEAL)
@@ -318,7 +326,7 @@ def render_methodology(doc: fitz.Document, source_label: str) -> None:
         (
             "4. Productos masivos",
             "Guantes, canulas, agujas, jeringas, gasas y similares reciben una penalizacion cuando el precio unitario o la "
-            "relacion oferta/referencia evidencia guerra de precios. Por eso volumen alto no implica automaticamente Top 20.",
+            "relacion oferta/referencia evidencia guerra de precios. Por eso volumen alto no implica automaticamente Top 50.",
         ),
         (
             "5. Lectura correcta",
@@ -333,12 +341,13 @@ def render_methodology(doc: fitz.Document, source_label: str) -> None:
         page.insert_text((rect.x0 + 18, rect.y0 + 25), heading, fontsize=11, fontname="hebo", color=NAVY)
         draw_wrapped(page, fitz.Rect(rect.x0 + 18, rect.y0 + 37, rect.x1 - 14, rect.y1 - 10), body, size=8.2, color=INK, max_lines=7)
     page.draw_rect(fitz.Rect(421, 366, 793, 494), fill=GOLD_LIGHT, color=GOLD, radius=0.06)
-    page.insert_text((439, 391), "Regla conservadora de elegibilidad", fontsize=11, fontname="hebo", color=NAVY)
+    page.insert_text((439, 391), "Regla conservadora de deteccion", fontsize=11, fontname="hebo", color=NAVY)
     draw_wrapped(
         page,
         fitz.Rect(439, 404, 775, 482),
-        "Una ficha sin dato fiable de Registro Sanitario no se trata como NO. Queda fuera hasta confirmar el requisito. "
-        "Esto reduce falsos positivos y protege tiempo comercial.",
+        "Una ficha sin Registro Sanitario = NO confirmado queda fuera. Ademas, nombres genericos como CILINDRO o "
+        "CUÑAS solo conservan actos respaldados por codigo oficial o contexto tecnico secundario; si la evidencia "
+        "no alcanza el minimo comercial, la ficha no entra al ranking.",
         size=8.8,
         color=INK,
         max_lines=6,
@@ -527,8 +536,14 @@ def render_ranking_pages(
     info = CATEGORY_INFO[sheet]
     headers = ["#", "Ficha / descripcion", "Actos", "Unicos", "Monto total", "Ficha unica", "Competencia", "Requisitos", "Precio / margen", "Score"]
     widths = [28, 210, 44, 42, 65, 65, 78, 92, 108, 42]
-    for start in (0, 10):
-        page = new_page(doc, f"{info['title']} - ranking completo", f"Posiciones {start + 1}-{start + 10}", source_label)
+    for start in range(0, len(rows), ROWS_PER_RANKING_PAGE):
+        end = min(start + ROWS_PER_RANKING_PAGE, len(rows))
+        page = new_page(
+            doc,
+            f"{info['title']} - ranking completo",
+            f"Posiciones {start + 1}-{end}",
+            source_label,
+        )
         x = MARGIN
         y = 68
         for header, width in zip(headers, widths):
@@ -537,7 +552,7 @@ def render_ranking_pages(
             _table_cell(page, rect, header, size=6.5, bold=True, color=WHITE, max_lines=2)
             x += width
         y += 34
-        for idx, row in enumerate(rows[start : start + 10]):
+        for idx, row in enumerate(rows[start:end]):
             values = [
                 integer(row_value(row, "Ranking")),
                 f"{clean(row_value(row, 'Codigo de Ficha'))} | {clean(row_value(row, 'Descripcion Oficial'))}",
@@ -589,7 +604,7 @@ def render_action_plan(doc: fitz.Document, source_label: str) -> None:
         page.insert_text((rect.x0 + 66, rect.y0 + 29), title, fontsize=11, fontname="hebo", color=NAVY)
         draw_wrapped(page, fitz.Rect(rect.x0 + 66, rect.y0 + 40, rect.x1 - 14, rect.y1 - 12), body, size=8.1, color=INK, max_lines=5)
     page.draw_rect(fitz.Rect(MARGIN, 514, PAGE_W - MARGIN, 552), fill=GOLD_LIGHT, color=GOLD, radius=0.06)
-    page.insert_text((MARGIN + 15, 537), "Decision recomendada: usar el Top 20 como embudo; usar cotizaciones reales para autorizar capital.", fontsize=9, fontname="hebo", color=NAVY)
+    page.insert_text((MARGIN + 15, 537), "Decision recomendada: usar el Top 50 como embudo; usar cotizaciones reales para autorizar capital.", fontsize=9, fontname="hebo", color=NAVY)
 
 
 def render_glossary(doc: fitz.Document, source_label: str) -> None:
@@ -617,7 +632,10 @@ def render_glossary(doc: fitz.Document, source_label: str) -> None:
 def validate_pdf(path: Path, data: dict[str, list[dict[str, Any]]]) -> list[str]:
     doc = fitz.open(path)
     checks: list[str] = []
-    if doc.page_count < 20:
+    expected_min_pages = 6 + len(CATEGORY_INFO) * (
+        3 + ((TOP_N + ROWS_PER_RANKING_PAGE - 1) // ROWS_PER_RANKING_PAGE)
+    )
+    if doc.page_count < expected_min_pages:
         raise AssertionError(f"PDF demasiado corto: {doc.page_count} paginas")
     all_text = "\n".join(page.get_text("text") for page in doc)
     for page_index, page in enumerate(doc, start=1):
@@ -659,7 +677,7 @@ def generate_pdf(excel_path: Path, output_path: Path) -> list[str]:
         {
             "title": "Top de oportunidades medicas sin Registro Sanitario",
             "author": "GEAPP / Codex",
-            "subject": "Cuatro Top 20 recalculados y auditados",
+            "subject": "Cuatro Top 50 recalculados y auditados",
             "keywords": "Panama Compra, oportunidades medicas, fichas tecnicas, margen",
         }
     )
@@ -674,12 +692,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--excel",
         type=Path,
-        default=home / "Downloads" / f"Top_Oportunidades_Medicas_{date.today().isoformat()}_Sin_RS.xlsx",
+        default=(
+            home
+            / "Downloads"
+            / f"Top_Oportunidades_Medicas_{date.today().isoformat()}_Sin_RS_Top50.xlsx"
+        ),
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=home / "Downloads" / f"Informe_Oportunidades_Medicas_{date.today().isoformat()}_Sin_RS.pdf",
+        default=(
+            home
+            / "Downloads"
+            / f"Informe_Oportunidades_Medicas_{date.today().isoformat()}_Sin_RS_Top50.pdf"
+        ),
     )
     return parser.parse_args()
 

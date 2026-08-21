@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Genera un Top 20 estratégico de oportunidades médicas desde la capa analítica.
+"""Genera un Top 50 estratégico de oportunidades médicas desde la capa analítica.
 
 El informe usa la misma base analítica que consume Streamlit, recalcula la
 unicidad de ficha por acto con el perfil moderado (score >= 90), cruza los
@@ -27,6 +27,9 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 
 DETECTION_THRESHOLD = 90.0
+TOP_N = 50
+TOP_HIGHLIGHT = 5
+MIN_CONTEXT_ACTS_FOR_GENERIC_NAME = 3
 EXCLUDED_FICHAS = {
     "107135",
     "101792",
@@ -82,6 +85,84 @@ PEROXIDE_COMPLETE_MARKERS = (
     "peroxido",
 )
 
+# Palabras que no aportan especificidad al nombre oficial de una ficha. Cuando
+# el nombre queda reducido a un solo término útil (p. ej. CILINDRO, CUÑAS,
+# ELECTRODO), una coincidencia literal no basta para atribuir el acto.
+LOW_INFORMATION_STOPWORDS = {
+    "de",
+    "del",
+    "la",
+    "las",
+    "el",
+    "los",
+    "para",
+    "por",
+    "con",
+    "sin",
+    "en",
+    "al",
+    "y",
+    "o",
+    "tipo",
+}
+
+CONTEXT_STOPWORDS = LOW_INFORMATION_STOPWORDS | {
+    "una",
+    "uno",
+    "unos",
+    "unas",
+    "que",
+    "como",
+    "uso",
+    "general",
+    "medico",
+    "medica",
+    "medicos",
+    "quirurgico",
+    "quirurgica",
+    "material",
+    "materiales",
+    "insumo",
+    "insumos",
+    "equipo",
+    "equipos",
+    "dispositivo",
+    "dispositivos",
+    "instrumental",
+    "especialidad",
+}
+
+# Raíces que vuelven suficientemente específica una frase corta de dos
+# términos (por ejemplo, BOMBA DE INFUSIÓN). Una frase corta sin estas señales
+# se valida como nombre genérico para evitar colisiones fuera del ámbito médico.
+DISTINCTIVE_MEDICAL_PREFIXES = (
+    "anest",
+    "biolog",
+    "biops",
+    "bronco",
+    "cardiac",
+    "catet",
+    "dialisis",
+    "endosc",
+    "esteril",
+    "hemat",
+    "hemodial",
+    "hemost",
+    "infus",
+    "lapar",
+    "odontolog",
+    "oxigen",
+    "oxim",
+    "protes",
+    "quirurg",
+    "radiolog",
+    "sutura",
+    "terapeut",
+    "toracic",
+    "traque",
+    "ventil",
+)
+
 
 @dataclass(frozen=True)
 class InputPaths:
@@ -101,6 +182,85 @@ def normalize_text(value: object) -> str:
     text = unicodedata.normalize("NFKD", clean_text(value).lower())
     text = "".join(char for char in text if not unicodedata.combining(char))
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
+
+
+def _meaningful_name_tokens(value: object) -> tuple[str, ...]:
+    return tuple(
+        token
+        for token in normalize_text(value).split()
+        if len(token) >= 3 and token not in LOW_INFORMATION_STOPWORDS
+    )
+
+
+def _is_low_information_name(value: object) -> bool:
+    """Identifica nombres cuyo literal aislado tiene alto riesgo de colisión."""
+    tokens = _meaningful_name_tokens(value)
+    if len(tokens) <= 1:
+        return True
+    if len(tokens) == 2:
+        return not any(
+            token.startswith(prefix)
+            for token in tokens
+            for prefix in DISTINCTIVE_MEDICAL_PREFIXES
+        )
+    return False
+
+
+def _validation_context_tokens(row: pd.Series) -> tuple[str, ...]:
+    """Extrae términos técnicos secundarios para validar un alias genérico."""
+    official_name = clean_text(row.get("nombre_ficha")) or clean_text(
+        row.get("ctni_producto_oficial")
+    )
+    name_tokens = set(_meaningful_name_tokens(official_name))
+    raw_context = " ".join(
+        clean_text(row.get(column))
+        for column in (
+            "descripcion",
+            "tipo_producto",
+            "especialidad",
+            "area",
+            "ctni_subcomite",
+        )
+    )
+    tokens: list[str] = []
+    for token in normalize_text(raw_context).split():
+        if (
+            len(token) < 4
+            or token in CONTEXT_STOPWORDS
+            or token in name_tokens
+            or token in tokens
+        ):
+            continue
+        tokens.append(token)
+    return tuple(tokens[:24])
+
+
+def _context_hit_count(search_text: object, context_tokens: object) -> int:
+    words = set(normalize_text(search_text).split())
+    if not words or not isinstance(context_tokens, (tuple, list)):
+        return 0
+    hits = 0
+    for token in context_tokens:
+        normalized = normalize_text(token)
+        if not normalized:
+            continue
+        prefix = normalized[:6] if len(normalized) >= 6 else normalized
+        if any(word == normalized or word.startswith(prefix) for word in words):
+            hits += 1
+    return hits
+
+
+def _contains_explicit_ficha(row: pd.Series) -> bool:
+    method = normalize_text(row.get("detection_method"))
+    if "codigo" in method:
+        return True
+    ficha = normalize_ficha(row.get("ficha"))
+    if not ficha:
+        return False
+    evidence = normalize_text(
+        f"{clean_text(row.get('detection_evidence'))} {clean_text(row.get('search_text_norm'))}"
+    )
+    return bool(re.search(rf"(?<!\d){re.escape(ficha)}(?!\d)", evidence))
 
 
 def normalize_ficha(value: object) -> str:
@@ -396,6 +556,19 @@ def _derive_medical_scope(metadata: pd.DataFrame) -> pd.DataFrame:
         or f"Ficha {row.get('ficha', '')}",
         axis=1,
     )
+    result["nombre_validacion"] = result.apply(
+        lambda row: clean_text(row.get("nombre_ficha"))
+        or clean_text(row.get("ctni_producto_oficial"))
+        or clean_text(row.get("descripcion_oficial")),
+        axis=1,
+    )
+    result["alias_baja_informacion"] = result["nombre_validacion"].map(
+        _is_low_information_name
+    )
+    result["tokens_contexto_validacion"] = result.apply(
+        _validation_context_tokens,
+        axis=1,
+    )
     result["clasificacion_oficial"] = result.apply(
         lambda row: clean_text(row.get("ctni_subcomite"))
         or clean_text(row.get("area"))
@@ -466,6 +639,9 @@ def _prepare_facts(facts: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
                 "ctni_primera_fecha",
                 "ctni_ultima_fecha",
                 "ctni_ultima_accion",
+                "nombre_validacion",
+                "alias_baja_informacion",
+                "tokens_contexto_validacion",
             ]
         ],
         on="ficha",
@@ -478,12 +654,49 @@ def _prepare_facts(facts: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
     peroxide_complete = product_norm.map(
         lambda text: all(marker in text for marker in PEROXIDE_COMPLETE_MARKERS)
     )
-    return result[
+    scoped = result[
         result["es_universo_medico"].fillna(False)
         & ~result["ficha"].isin(EXCLUDED_FICHAS)
         & result["rs_norm"].eq("no")
         & ~peroxide_complete
     ].copy()
+    scoped["alias_baja_informacion"] = scoped["alias_baja_informacion"].fillna(False).astype(bool)
+    scoped["evidencia_codigo_explicito"] = scoped.apply(_contains_explicit_ficha, axis=1)
+    scoped["coincidencias_contexto"] = scoped.apply(
+        lambda row: _context_hit_count(
+            row.get("search_text_norm"), row.get("tokens_contexto_validacion")
+        ),
+        axis=1,
+    )
+    scoped["evidencia_contexto_reforzado"] = scoped["coincidencias_contexto"].ge(2)
+    scoped["relacion_validada"] = (
+        ~scoped["alias_baja_informacion"]
+        | scoped["evidencia_codigo_explicito"]
+        | scoped["evidencia_contexto_reforzado"]
+    )
+
+    raw_counts = scoped.groupby("ficha")["acto_key"].nunique()
+    validated = scoped[scoped["relacion_validada"]].copy()
+    validated_counts = validated.groupby("ficha")["acto_key"].nunique()
+    explicit_counts = validated.loc[
+        validated["evidencia_codigo_explicito"]
+    ].groupby("ficha")["acto_key"].nunique()
+    contextual_counts = validated.loc[
+        ~validated["evidencia_codigo_explicito"]
+        & validated["evidencia_contexto_reforzado"]
+    ].groupby("ficha")["acto_key"].nunique()
+    validated["actos_detectados_brutos"] = validated["ficha"].map(raw_counts).fillna(0).astype(int)
+    validated["actos_validados"] = validated["ficha"].map(validated_counts).fillna(0).astype(int)
+    validated["actos_codigo_explicito"] = validated["ficha"].map(explicit_counts).fillna(0).astype(int)
+    validated["actos_contexto_reforzado"] = validated["ficha"].map(contextual_counts).fillna(0).astype(int)
+    validated["actos_descartados_ambiguos"] = (
+        validated["actos_detectados_brutos"] - validated["actos_validados"]
+    ).clip(lower=0)
+    validated.attrs["quality_dropped_relations"] = int((~scoped["relacion_validada"]).sum())
+    validated.attrs["quality_dropped_acts"] = int(
+        scoped.loc[~scoped["relacion_validada"], "acto_key"].nunique()
+    )
+    return validated
 
 
 def _percentile(series: pd.Series, *, higher_is_better: bool = True) -> pd.Series:
@@ -569,9 +782,46 @@ def _aggregate(facts: pd.DataFrame) -> pd.DataFrame:
                 "ctni_ultima_fecha": first.get("ctni_ultima_fecha"),
                 "ctni_ultima_accion": clean_text(first.get("ctni_ultima_accion")),
                 "confianza_deteccion": float(group["detection_score"].mean()),
+                "alias_baja_informacion": bool(first.get("alias_baja_informacion")),
+                "actos_detectados_brutos": int(first.get("actos_detectados_brutos") or acts),
+                "actos_descartados_ambiguos": int(first.get("actos_descartados_ambiguos") or 0),
+                "actos_codigo_explicito": int(first.get("actos_codigo_explicito") or 0),
+                "actos_contexto_reforzado": int(first.get("actos_contexto_reforzado") or 0),
             }
         )
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    result["validacion_deteccion"] = result.apply(
+        lambda row: (
+            "Frase oficial específica"
+            if not bool(row.get("alias_baja_informacion"))
+            else (
+                f"Nombre genérico validado con código oficial en "
+                f"{int(row.get('actos_codigo_explicito') or 0)} acto(s)"
+                if int(row.get("actos_codigo_explicito") or 0) > 0
+                else (
+                    f"Nombre genérico validado por contexto técnico en "
+                    f"{int(row.get('actos_contexto_reforzado') or 0)} acto(s)"
+                )
+            )
+        ),
+        axis=1,
+    )
+    return result
+
+
+def _eligible_detection_quality(frame: pd.DataFrame) -> pd.DataFrame:
+    """Excluye alias genéricos sin evidencia suficiente para un ranking comercial."""
+    if frame.empty:
+        return frame.copy()
+    generic_supported = (
+        frame["actos_codigo_explicito"].gt(0)
+        | frame["actos_contexto_reforzado"].ge(MIN_CONTEXT_ACTS_FOR_GENERIC_NAME)
+    )
+    return frame[
+        ~frame["alias_baja_informacion"].fillna(False) | generic_supported
+    ].copy()
 
 
 def _enrich_price_viability(frame: pd.DataFrame, price_intelligence: pd.DataFrame) -> pd.DataFrame:
@@ -686,7 +936,7 @@ def _enrich_price_viability(frame: pd.DataFrame, price_intelligence: pd.DataFram
 
 
 def _score_historical(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
+    result = _eligible_detection_quality(frame)
     result["score"] = (
         _percentile(result["actos"]) * 0.25
         + _percentile(result["actos_ficha_unica"]) * 0.20
@@ -712,9 +962,13 @@ def _score_new(
         & facts["fecha_analisis"].notna()
         & (facts["fecha_analisis"] >= facts["ctni_primera_fecha"])
     ].copy()
-    result = _enrich_price_viability(_aggregate(eligible_facts), price_intelligence)
+    result = _eligible_detection_quality(
+        _enrich_price_viability(_aggregate(eligible_facts), price_intelligence)
+    )
     result = result[
-        (result["actos"] >= 3)
+        # Para ampliar de Top 20 a Top 50 conservamos al menos una señal real
+        # posterior a la creación y exigimos que sea un acto de ficha única.
+        (result["actos"] >= 1)
         & (result["actos_ficha_unica"] >= 1)
         & (result["monto_ficha_unica"] > 0)
     ].copy()
@@ -732,9 +986,10 @@ def _score_new(
 
 
 def _score_barrier_zero(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame[
-        frame["tiene_ct"].map(normalize_requirement).eq("no")
-        & frame["registro_sanitario"].map(normalize_requirement).eq("no")
+    eligible = _eligible_detection_quality(frame)
+    result = eligible[
+        eligible["tiene_ct"].map(normalize_requirement).eq("no")
+        & eligible["registro_sanitario"].map(normalize_requirement).eq("no")
     ].copy()
     result["score"] = (
         _percentile(result["actos"]) * 0.25
@@ -749,8 +1004,10 @@ def _score_barrier_zero(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _score_deserted(facts: pd.DataFrame, price_intelligence: pd.DataFrame) -> pd.DataFrame:
     deserted = facts[facts["es_desierto"]].copy()
-    result = _enrich_price_viability(_aggregate(deserted), price_intelligence)
-    result = result[result["actos"] >= 2].copy()
+    result = _eligible_detection_quality(
+        _enrich_price_viability(_aggregate(deserted), price_intelligence)
+    )
+    result = result[result["actos"] >= 1].copy()
     result["score"] = (
         _percentile(result["actos"]) * 0.40
         + _percentile(result["monto_total"]) * 0.25
@@ -787,10 +1044,12 @@ def _reason(row: pd.Series, category: str, rank: int) -> str:
     )
 
 
-def _to_export(frame: pd.DataFrame, category: str, top_n: int = 20) -> pd.DataFrame:
+def _to_export(frame: pd.DataFrame, category: str, top_n: int = TOP_N) -> pd.DataFrame:
     top = frame.head(top_n).copy().reset_index(drop=True)
     top.insert(0, "Ranking", range(1, len(top) + 1))
-    top["Prioridad"] = top["Ranking"].map(lambda value: "⭐ TOP 5" if value <= 5 else "Top 20")
+    top["Prioridad"] = top["Ranking"].map(
+        lambda value: f"⭐ TOP {TOP_HIGHLIGHT}" if value <= TOP_HIGHLIGHT else f"Top {TOP_N}"
+    )
     top["Por qué destaca"] = [
         _reason(row, category, int(row["Ranking"])) for _, row in top.iterrows()
     ]
@@ -813,6 +1072,8 @@ def _to_export(frame: pd.DataFrame, category: str, top_n: int = 20) -> pd.DataFr
         "Prioridad",
         "ficha",
         "descripcion_oficial",
+        "validacion_deteccion",
+        "actos_descartados_ambiguos",
     ]
     if category == "new":
         columns.extend(["Fecha publicación/creación", "Acción CTNI más reciente"])
@@ -848,6 +1109,8 @@ def _to_export(frame: pd.DataFrame, category: str, top_n: int = 20) -> pd.DataFr
         columns={
             "ficha": "Código de Ficha",
             "descripcion_oficial": "Descripción Oficial",
+            "validacion_deteccion": "Validación de Detección",
+            "actos_descartados_ambiguos": "Actos Descartados por Ambigüedad",
             "actos": "Cantidad de Actos",
             "actos_ficha_unica": "Actos de Ficha Única",
             "monto_total": "Monto Total Acumulado (USD)",
@@ -881,8 +1144,8 @@ def _validate_rankings(
 ) -> list[str]:
     checks: list[str] = []
     for sheet_name, frame in exports.items():
-        assert len(frame) == 20, f"{sheet_name}: se esperaban 20 filas y hay {len(frame)}"
-        assert frame["Código de Ficha"].nunique() == 20, f"{sheet_name}: fichas duplicadas"
+        assert len(frame) == TOP_N, f"{sheet_name}: se esperaban {TOP_N} filas y hay {len(frame)}"
+        assert frame["Código de Ficha"].nunique() == TOP_N, f"{sheet_name}: fichas duplicadas"
         assert not set(frame["Código de Ficha"]) & EXCLUDED_FICHAS, f"{sheet_name}: exclusión fallida"
         assert frame["Requisitos Exigidos"].str.contains(r"RS: No", regex=True).all(), (
             f"{sheet_name}: se encontró una ficha que exige RS o no tiene el requisito confirmado"
@@ -893,19 +1156,30 @@ def _validate_rankings(
         assert frame["Score Estratégico"].is_monotonic_decreasing, f"{sheet_name}: score desordenado"
         assert (frame["Monto Total Acumulado (USD)"] >= 0).all(), f"{sheet_name}: monto negativo"
         assert "Viabilidad Preliminar de Margen" in frame.columns
+        assert frame["Validación de Detección"].astype(str).str.strip().ne("").all()
         checks.append(
-            f"{sheet_name}: 20 fichas únicas, RS=No, exclusiones, precio y orden correctos"
+            f"{sheet_name}: {TOP_N} fichas únicas, RS=No, exclusiones, evidencia, precio y orden correctos"
         )
     barrier = exports["3_Barrera_Cero"]
     assert barrier["Requisitos Exigidos"].str.contains(r"CT: No \| RS: No", regex=True).all()
-    checks.append("3_Barrera_Cero: CT=No y RS=No confirmado en las 20 filas")
+    checks.append(f"3_Barrera_Cero: CT=No y RS=No confirmado en las {TOP_N} filas")
     new = exports["2_Nuevas_Potencial"]
     new_dates = pd.to_datetime(new["Fecha publicación/creación"], errors="coerce")
     assert new_dates.notna().all() and (new_dates >= new_cutoff).all()
-    checks.append(f"2_Nuevas_Potencial: las 20 fichas son posteriores a {new_cutoff.date()}")
+    checks.append(f"2_Nuevas_Potencial: las {TOP_N} fichas son posteriores a {new_cutoff.date()}")
     deserted = exports["4_Actos_Desiertos"]
     assert deserted["Estatus de Adjudicación"].str.contains("desiertos", case=False).all()
     checks.append("4_Actos_Desiertos: universo construido exclusivamente con actos desiertos")
+    ranked_codes = {
+        normalize_ficha(value)
+        for frame in exports.values()
+        for value in frame["Código de Ficha"]
+    }
+    assert "107110" not in ranked_codes, "CILINDRO no superó la validación contextual"
+    assert "107044" not in ranked_codes, "CUÑAS no superó la validación contextual"
+    checks.append(
+        "Control de falsos positivos: CILINDRO y CUÑAS quedaron fuera por falta de evidencia técnica suficiente"
+    )
     return checks
 
 
@@ -942,6 +1216,14 @@ def _style_excel(path: Path, built_at: str) -> None:
             "Estimación conservadora: precio unitario de referencia por la relación típica oferta/referencia, "
             "multiplicado por 75%. Es el costo máximo puesto en Panamá para aspirar a 25% de margen bruto, "
             "antes de gastos comerciales adicionales."
+        ),
+        "Validación de Detección": (
+            "Control de calidad aplicado antes del ranking. Los nombres oficiales genéricos solo conservan "
+            "actos que muestran el código de ficha o contexto técnico secundario coherente."
+        ),
+        "Actos Descartados por Ambigüedad": (
+            "Actos que el detector original relacionó por un nombre genérico, pero que no superaron la "
+            "validación de código o contexto técnico. No intervienen en montos ni puntajes."
         ),
     }
     for index, sheet_name in enumerate(SHEET_NAMES, start=1):
@@ -1001,13 +1283,17 @@ def _style_excel(path: Path, built_at: str) -> None:
                     cell.style = "Hyperlink"
         for column_cells in worksheet.columns:
             header = clean_text(column_cells[0].value)
-            values = [clean_text(cell.value) for cell in column_cells[: min(21, len(column_cells))]]
+            values = [
+                clean_text(cell.value)
+                for cell in column_cells[: min(TOP_N + 1, len(column_cells))]
+            ]
             width = min(max(max((len(value) for value in values), default=0) + 2, 11), 58)
             if header in {
                 "Descripción Oficial",
                 "Por qué destaca",
                 "Estatus de Adjudicación",
                 "Lectura Comercial de Precio",
+                "Validación de Detección",
             }:
                 width = 52
             elif header in {
@@ -1068,11 +1354,18 @@ def generate_report(paths: InputPaths, output_path: Path) -> tuple[dict[str, pd.
     assert workbook.sheetnames == list(SHEET_NAMES), "El libro debe contener exactamente cuatro hojas"
     for sheet_name in SHEET_NAMES:
         worksheet = workbook[sheet_name]
-        assert worksheet.max_row == 21, f"{sheet_name}: filas Excel inesperadas"
+        assert worksheet.max_row == TOP_N + 1, f"{sheet_name}: filas Excel inesperadas"
         assert len(worksheet.tables) == 1, f"{sheet_name}: falta la tabla con filtros"
         assert worksheet.freeze_panes == "A2", f"{sheet_name}: panel no congelado"
     workbook.close()
-    checks.append("Excel reabierto: 4 hojas, 20 filas por hoja, filtros y paneles congelados verificados")
+    checks.append(
+        f"Excel reabierto: 4 hojas, {TOP_N} filas por hoja, filtros y paneles congelados verificados"
+    )
+    checks.append(
+        "Auditoría de ambigüedad: "
+        f"{int(scoped_facts.attrs.get('quality_dropped_relations', 0)):,} relaciones y "
+        f"{int(scoped_facts.attrs.get('quality_dropped_acts', 0)):,} actos potencialmente ruidosos excluidos"
+    )
     checks.append(
         f"Cobertura fuente: {len(facts):,} relaciones moderadas; {len(scoped_facts):,} médicas elegibles; "
         f"corte analítico {build_metadata.get('built_at_utc', 'sin dato')}"
@@ -1085,7 +1378,11 @@ def generate_report(paths: InputPaths, output_path: Path) -> tuple[dict[str, pd.
 
 def parse_args() -> argparse.Namespace:
     home = Path.home()
-    default_output = home / "Downloads" / f"Top_Oportunidades_Medicas_{date.today().isoformat()}.xlsx"
+    default_output = (
+        home
+        / "Downloads"
+        / f"Top_Oportunidades_Medicas_{date.today().isoformat()}_Sin_RS_Top50.xlsx"
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--analytics-db",
