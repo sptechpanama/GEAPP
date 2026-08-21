@@ -32,9 +32,20 @@ class FakeWorksheet:
             raise ConnectionError("falla transitoria")
         return [list(row) for row in self.values]
 
-    def update(self, range_name, rows):
+    def update(
+        self,
+        values,
+        range_name=None,
+        *,
+        value_input_option=None,
+        **_kwargs,
+    ):
+        # Replica la firma de gspread 6.x para detectar argumentos invertidos.
+        assert isinstance(values, list)
+        assert isinstance(range_name, str)
+        assert value_input_option == "RAW"
         self.events.append(f"update:{range_name}")
-        rows = [list(row) for row in rows]
+        rows = [list(row) for row in values]
         if len(self.values) < len(rows):
             self.values.extend([[] for _ in range(len(rows) - len(self.values))])
         self.values[: len(rows)] = rows

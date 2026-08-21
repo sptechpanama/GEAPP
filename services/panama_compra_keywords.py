@@ -188,7 +188,15 @@ class KeywordRegistryStore:
             updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         self._ensure_columns(worksheet)
-        worksheet.update(f"A1:C{len(rows)}", rows)
+        # gspread 6.x recibe primero ``values`` y luego ``range_name``. Usamos
+        # argumentos nombrados para evitar que una actualizacion de la libreria
+        # vuelva a invertir silenciosamente ambos valores. RAW conserva el
+        # asterisco final de terminos por raiz como ``fotovolta*``.
+        worksheet.update(
+            values=rows,
+            range_name=f"A1:C{len(rows)}",
+            value_input_option="RAW",
+        )
         if len(previous_values) > len(rows):
             worksheet.batch_clear([f"A{len(rows) + 1}:C{len(previous_values)}"])
         verified = parse_keyword_registry_values(worksheet.get_all_values())
