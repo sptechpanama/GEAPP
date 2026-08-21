@@ -8,6 +8,7 @@ metadatos oficiales de MINSA/CTNI y produce exactamente cuatro hojas Excel.
 """
 
 import argparse
+from collections import defaultdict
 import json
 import math
 import re
@@ -36,6 +37,8 @@ EXCLUDED_FICHAS = {
     "22287",
     "103152",
     "107861",
+    # Ya revisada por el usuario; se excluye de todos los rankings futuros.
+    "103169",
 }
 SHEET_NAMES = (
     "1_Historicas",
@@ -62,11 +65,29 @@ PHARMA_MARKERS = (
     "nutricional",
 )
 
+MASS_MARKERS = (
+    "guante",
+    "canula intravenosa",
+    "aguja hipodermica",
+    "jeringa",
+    "gasa",
+    "algodon",
+    "mascarilla",
+    "panal desechable",
+    "papel termico",
+)
+
+PEROXIDE_COMPLETE_MARKERS = (
+    "ciclo completo",
+    "peroxido",
+)
+
 
 @dataclass(frozen=True)
 class InputPaths:
     analytics_db: Path
     ctni_db: Path
+    operational_db: Path
 
 
 def clean_text(value: object) -> str:
@@ -85,6 +106,45 @@ def normalize_text(value: object) -> str:
 def normalize_ficha(value: object) -> str:
     match = re.search(r"\d+", clean_text(value))
     return (match.group(0).lstrip("0") or "0") if match else ""
+
+
+def normalize_requirement(value: object) -> str:
+    """Devuelve ``si``, ``no`` o vacío sin inferir requisitos desconocidos."""
+    text = normalize_text(value)
+    if text in {"si", "s", "true", "1"}:
+        return "si"
+    if text in {"no", "n", "false", "0", "no aplica", "no aplica no"}:
+        return "no"
+    return ""
+
+
+def parse_number(value: object) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if math.isfinite(float(value)) else 0.0
+    text = clean_text(value).replace("$", "").replace(" ", "")
+    if not text:
+        return 0.0
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        tail = text.rsplit(",", 1)[-1]
+        text = text.replace(",", ".") if len(tail) <= 2 else text.replace(",", "")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    try:
+        parsed = float(text)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
+
+
+def _quantile(values: Iterable[float], q: float) -> float:
+    series = pd.Series([float(value) for value in values if float(value) > 0], dtype="float64")
+    return float(series.quantile(q)) if not series.empty else 0.0
 
 
 def parse_iso_date(value: object) -> pd.Timestamp:
@@ -175,6 +235,143 @@ def _load_source(paths: InputPaths) -> tuple[pd.DataFrame, pd.DataFrame, dict[st
     metadata = metadata.drop_duplicates("ficha", keep="last")
     metadata = metadata.merge(ctni, on="ficha", how="outer")
     return facts, metadata, build_metadata
+
+
+def _load_price_intelligence(paths: InputPaths, known_fichas: set[str]) -> pd.DataFrame:
+    """Resume presión de ofertas y precios unitarios observados por ficha.
+
+    Las ofertas se comparan únicamente en actos de ficha única para evitar
+    atribuir a una ficha el total de un acto mixto. Los precios unitarios se
+    extraen de ``items_json`` y se agrupan por la unidad de medida dominante;
+    no se mezclan cajas con unidades.
+    """
+    with sqlite3.connect(paths.analytics_db) as connection:
+        bids = pd.read_sql_query(
+            """
+            SELECT
+                f.ficha,
+                f.acto_key,
+                p.offered_amount,
+                p.is_winner,
+                f.reference_amount_context,
+                f.participant_count
+            FROM intel_actos_fichas AS f
+            JOIN intel_acto_proponentes AS p ON p.acto_key = f.acto_key
+            WHERE f.detection_score >= ?
+              AND f.is_unique_ficha = 1
+              AND p.offered_amount > 0
+              AND f.reference_amount_context > 0
+            """,
+            connection,
+            params=(DETECTION_THRESHOLD,),
+        )
+    bid_rows: list[dict[str, object]] = []
+    if not bids.empty:
+        bids["ficha"] = bids["ficha"].map(normalize_ficha)
+        bids["ratio"] = bids["offered_amount"] / bids["reference_amount_context"]
+        bids = bids[
+            bids["ficha"].isin(known_fichas)
+            & bids["ratio"].between(0.03, 3.0, inclusive="both")
+        ].copy()
+        for ficha, group in bids.groupby("ficha", sort=False):
+            winners = group[group["is_winner"].fillna(0).astype(int).eq(1)]
+            ratio_source = winners["ratio"] if not winners.empty else group["ratio"]
+            bid_rows.append(
+                {
+                    "ficha": ficha,
+                    "propuestas_observadas": int(len(group)),
+                    "actos_precio_observados": int(group["acto_key"].nunique()),
+                    "oferta_total_mediana": float(group["offered_amount"].median()),
+                    "oferta_total_p25": float(group["offered_amount"].quantile(0.25)),
+                    "oferta_total_p75": float(group["offered_amount"].quantile(0.75)),
+                    "ratio_oferta_referencia_mediana": float(ratio_source.median()),
+                    "ratio_oferta_referencia_p25": float(ratio_source.quantile(0.25)),
+                }
+            )
+
+    unit_values: dict[tuple[str, str], list[float]] = defaultdict(list)
+    with sqlite3.connect(paths.operational_db) as connection:
+        cursor = connection.execute(
+            """
+            SELECT ficha_detectada, fichas_detectadas_json, items_json
+            FROM actos_publicos
+            WHERE items_json IS NOT NULL AND TRIM(items_json) NOT IN ('', '[]', 'null')
+            """
+        )
+        for ficha_detectada, fichas_json, items_raw in cursor:
+            act_fichas = {
+                normalize_ficha(token)
+                for token in re.findall(r"(?<!\d)\d{3,8}(?!\d)", clean_text(ficha_detectada))
+            }
+            if fichas_json:
+                try:
+                    parsed_fichas = json.loads(fichas_json)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed_fichas = []
+                if isinstance(parsed_fichas, dict):
+                    parsed_fichas = list(parsed_fichas)
+                if isinstance(parsed_fichas, list):
+                    for value in parsed_fichas:
+                        raw_value = value.get("ficha") if isinstance(value, dict) else value
+                        normalized = normalize_ficha(raw_value)
+                        if normalized:
+                            act_fichas.add(normalized)
+            act_fichas &= known_fichas
+            if not act_fichas:
+                continue
+            try:
+                items = json.loads(items_raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                description = clean_text(item.get("descripcion"))
+                explicit = {
+                    ficha
+                    for ficha in act_fichas
+                    if re.search(rf"(?<!\d){re.escape(ficha)}(?!\d)", description)
+                }
+                if len(explicit) == 1:
+                    assigned = next(iter(explicit))
+                elif len(explicit) == 0 and len(act_fichas) == 1:
+                    assigned = next(iter(act_fichas))
+                else:
+                    continue
+                unit_price = parse_number(item.get("precio_referencia_unitario"))
+                if unit_price <= 0 or unit_price > 10_000_000:
+                    continue
+                unit = normalize_text(item.get("unidad")) or "sin unidad"
+                unit_values[(assigned, unit)].append(unit_price)
+
+    by_ficha_units: dict[str, list[tuple[str, list[float]]]] = defaultdict(list)
+    for (ficha, unit), values in unit_values.items():
+        by_ficha_units[ficha].append((unit, values))
+    unit_rows: list[dict[str, object]] = []
+    for ficha, groups in by_ficha_units.items():
+        unit, values = max(groups, key=lambda pair: (len(pair[1]), pair[0]))
+        unit_rows.append(
+            {
+                "ficha": ficha,
+                "unidad_precio_dominante": unit,
+                "precios_unitarios_observados": len(values),
+                "precio_unitario_ref_p25": _quantile(values, 0.25),
+                "precio_unitario_ref_mediana": _quantile(values, 0.50),
+                "precio_unitario_ref_p75": _quantile(values, 0.75),
+            }
+        )
+
+    bid_frame = pd.DataFrame(bid_rows)
+    unit_frame = pd.DataFrame(unit_rows)
+    if bid_frame.empty and unit_frame.empty:
+        return pd.DataFrame(columns=["ficha"])
+    if bid_frame.empty:
+        return unit_frame
+    if unit_frame.empty:
+        return bid_frame
+    return bid_frame.merge(unit_frame, on="ficha", how="outer")
 
 
 def _derive_medical_scope(metadata: pd.DataFrame) -> pd.DataFrame:
@@ -275,9 +472,17 @@ def _prepare_facts(facts: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
         how="left",
         validate="many_to_one",
     )
+    result["rs_norm"] = result["registro_sanitario"].map(normalize_requirement)
+    result["ct_norm"] = result["tiene_ct"].map(normalize_requirement)
+    product_norm = result["descripcion_oficial"].map(normalize_text)
+    peroxide_complete = product_norm.map(
+        lambda text: all(marker in text for marker in PEROXIDE_COMPLETE_MARKERS)
+    )
     return result[
         result["es_universo_medico"].fillna(False)
         & ~result["ficha"].isin(EXCLUDED_FICHAS)
+        & result["rs_norm"].eq("no")
+        & ~peroxide_complete
     ].copy()
 
 
@@ -369,19 +574,135 @@ def _aggregate(facts: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _enrich_price_viability(frame: pd.DataFrame, price_intelligence: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if not price_intelligence.empty:
+        result = result.merge(price_intelligence, on="ficha", how="left", validate="one_to_one")
+    numeric_columns = (
+        "propuestas_observadas",
+        "actos_precio_observados",
+        "oferta_total_mediana",
+        "oferta_total_p25",
+        "oferta_total_p75",
+        "ratio_oferta_referencia_mediana",
+        "ratio_oferta_referencia_p25",
+        "precios_unitarios_observados",
+        "precio_unitario_ref_p25",
+        "precio_unitario_ref_mediana",
+        "precio_unitario_ref_p75",
+    )
+    for column in numeric_columns:
+        if column not in result.columns:
+            result[column] = 0.0
+        result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0.0)
+    if "unidad_precio_dominante" not in result.columns:
+        result["unidad_precio_dominante"] = ""
+    result["unidad_precio_dominante"] = result["unidad_precio_dominante"].map(clean_text)
+    description_norm = result["descripcion_oficial"].map(normalize_text)
+    result["producto_masivo"] = description_norm.map(
+        lambda text: any(marker in text for marker in MASS_MARKERS)
+    )
+
+    def margin_score(row: pd.Series) -> float:
+        ratio = float(row.get("ratio_oferta_referencia_mediana") or 0.0)
+        if ratio > 0:
+            ratio_score = min(max((ratio - 0.45) / 0.55 * 100.0, 0.0), 100.0)
+        else:
+            ratio_score = 50.0
+        participants = float(row.get("participantes_mediana") or 0.0)
+        competition_score = 75.0 if participants <= 0 else max(10.0, 100.0 - (participants - 1.0) * 25.0)
+        score = ratio_score * 0.75 + competition_score * 0.25
+        unit_price = float(row.get("precio_unitario_ref_mediana") or 0.0)
+        if bool(row.get("producto_masivo")):
+            if 0 < unit_price <= 0.10:
+                score -= 30.0
+            elif unit_price <= 0.50:
+                score -= 18.0
+            elif unit_price <= 2.00:
+                score -= 8.0
+        return min(max(score, 0.0), 100.0)
+
+    result["score_margen"] = result.apply(margin_score, axis=1)
+
+    def pressure(row: pd.Series) -> str:
+        ratio = float(row.get("ratio_oferta_referencia_mediana") or 0.0)
+        unit = float(row.get("precio_unitario_ref_mediana") or 0.0)
+        mass = bool(row.get("producto_masivo"))
+        if ratio <= 0:
+            return "Sin muestra suficiente"
+        if ratio < 0.60 or (mass and 0 < unit <= 0.10):
+            return "Muy alta"
+        if ratio < 0.78 or (mass and 0 < unit <= 0.50):
+            return "Alta"
+        if ratio < 0.93:
+            return "Media"
+        return "Baja"
+
+    result["presion_precio"] = result.apply(pressure, axis=1)
+
+    def viability(row: pd.Series) -> str:
+        observations = int(row.get("propuestas_observadas") or 0)
+        score = float(row.get("score_margen") or 0.0)
+        if observations <= 0:
+            return "Por verificar: sin muestra comparable"
+        if score < 35:
+            return "Baja: no priorizar sin fabricante directo"
+        if score < 55:
+            return "Condicionada: validar costo puesto"
+        if score < 75:
+            return "Media: margen posible con compra directa"
+        return "Favorable preliminar"
+
+    result["viabilidad_margen"] = result.apply(viability, axis=1)
+    ratio_for_target = result["ratio_oferta_referencia_mediana"].where(
+        result["ratio_oferta_referencia_mediana"].gt(0), 0.85
+    ).clip(lower=0.30, upper=1.10)
+    result["costo_objetivo_unitario"] = (
+        result["precio_unitario_ref_mediana"] * ratio_for_target * 0.75
+    )
+
+    def commercial_note(row: pd.Series) -> str:
+        ratio = float(row.get("ratio_oferta_referencia_mediana") or 0.0)
+        proposals = int(row.get("propuestas_observadas") or 0)
+        unit = float(row.get("precio_unitario_ref_mediana") or 0.0)
+        unit_name = clean_text(row.get("unidad_precio_dominante")) or "unidad declarada"
+        pieces: list[str] = []
+        if proposals:
+            pieces.append(
+                f"{proposals} propuestas comparables; oferta ganadora/participación típica ≈ {ratio:.0%} de la referencia"
+            )
+        else:
+            pieces.append("sin suficientes propuestas comparables de ficha única")
+        if unit > 0:
+            pieces.append(
+                f"referencia mediana USD {unit:,.4f} por {unit_name}; costo puesto objetivo ≤ USD {float(row['costo_objetivo_unitario']):,.4f} para 25% bruto"
+            )
+        if bool(row.get("producto_masivo")):
+            pieces.append("producto masivo: exigir cotización directa de fábrica y validar empaque")
+        return "; ".join(pieces) + "."
+
+    result["nota_viabilidad_precio"] = result.apply(commercial_note, axis=1)
+    return result
+
+
 def _score_historical(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     result["score"] = (
-        _percentile(result["actos"]) * 0.30
+        _percentile(result["actos"]) * 0.25
         + _percentile(result["actos_ficha_unica"]) * 0.20
         + _percentile(result["monto_ficha_unica"]) * 0.25
-        + _percentile(result["monto_total"]) * 0.15
+        + _percentile(result["monto_total"]) * 0.10
         + _percentile(result["meses_activos"]) * 0.10
+        + result["score_margen"] * 0.10
     )
     return result.sort_values(["score", "monto_ficha_unica", "actos"], ascending=False)
 
 
-def _score_new(facts: pd.DataFrame, cutoff: pd.Timestamp) -> pd.DataFrame:
+def _score_new(
+    facts: pd.DataFrame,
+    cutoff: pd.Timestamp,
+    price_intelligence: pd.DataFrame,
+) -> pd.DataFrame:
     # Una ficha nueva no puede heredar actos anteriores a su creación. Las
     # coincidencias semánticas históricas son útiles para otros análisis, pero
     # aquí inflarían artificialmente la adopción real del código recién creado.
@@ -391,7 +712,7 @@ def _score_new(facts: pd.DataFrame, cutoff: pd.Timestamp) -> pd.DataFrame:
         & facts["fecha_analisis"].notna()
         & (facts["fecha_analisis"] >= facts["ctni_primera_fecha"])
     ].copy()
-    result = _aggregate(eligible_facts)
+    result = _enrich_price_viability(_aggregate(eligible_facts), price_intelligence)
     result = result[
         (result["actos"] >= 3)
         & (result["actos_ficha_unica"] >= 1)
@@ -400,39 +721,42 @@ def _score_new(facts: pd.DataFrame, cutoff: pd.Timestamp) -> pd.DataFrame:
     age_months = ((pd.Timestamp.today().normalize() - result["ctni_primera_fecha"]).dt.days / 30.44).clip(lower=1)
     result["dinamismo_mensual"] = result["actos"] / age_months
     result["score"] = (
-        _percentile(result["actos"]) * 0.25
-        + _percentile(result["monto_ficha_unica"]) * 0.25
-        + _percentile(result["monto_total"]) * 0.15
-        + _percentile(result["participantes_mediana"], higher_is_better=False) * 0.20
+        _percentile(result["actos"]) * 0.22
+        + _percentile(result["monto_ficha_unica"]) * 0.23
+        + _percentile(result["monto_total"]) * 0.10
+        + _percentile(result["participantes_mediana"], higher_is_better=False) * 0.15
         + _percentile(result["dinamismo_mensual"]) * 0.15
+        + result["score_margen"] * 0.15
     )
     return result.sort_values(["score", "monto_ficha_unica", "actos"], ascending=False)
 
 
 def _score_barrier_zero(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame[
-        frame["tiene_ct"].map(normalize_text).eq("no")
-        & frame["registro_sanitario"].map(normalize_text).eq("no")
+        frame["tiene_ct"].map(normalize_requirement).eq("no")
+        & frame["registro_sanitario"].map(normalize_requirement).eq("no")
     ].copy()
     result["score"] = (
-        _percentile(result["actos"]) * 0.30
+        _percentile(result["actos"]) * 0.25
         + _percentile(result["actos_ficha_unica"]) * 0.20
-        + _percentile(result["monto_ficha_unica"]) * 0.30
-        + _percentile(result["monto_total"]) * 0.10
-        + _percentile(result["participantes_mediana"], higher_is_better=False) * 0.10
+        + _percentile(result["monto_ficha_unica"]) * 0.25
+        + _percentile(result["monto_total"]) * 0.08
+        + _percentile(result["participantes_mediana"], higher_is_better=False) * 0.07
+        + result["score_margen"] * 0.15
     )
     return result.sort_values(["score", "monto_ficha_unica", "actos"], ascending=False)
 
 
-def _score_deserted(facts: pd.DataFrame) -> pd.DataFrame:
+def _score_deserted(facts: pd.DataFrame, price_intelligence: pd.DataFrame) -> pd.DataFrame:
     deserted = facts[facts["es_desierto"]].copy()
-    result = _aggregate(deserted)
+    result = _enrich_price_viability(_aggregate(deserted), price_intelligence)
     result = result[result["actos"] >= 2].copy()
     result["score"] = (
-        _percentile(result["actos"]) * 0.45
-        + _percentile(result["monto_total"]) * 0.35
+        _percentile(result["actos"]) * 0.40
+        + _percentile(result["monto_total"]) * 0.25
         + _percentile(result["actos_ficha_unica"]) * 0.10
         + _percentile(result["meses_activos"]) * 0.10
+        + result["score_margen"] * 0.15
     )
     return result.sort_values(["score", "monto_total", "actos"], ascending=False)
 
@@ -470,6 +794,15 @@ def _to_export(frame: pd.DataFrame, category: str, top_n: int = 20) -> pd.DataFr
     top["Por qué destaca"] = [
         _reason(row, category, int(row["Ranking"])) for _, row in top.iterrows()
     ]
+    top["Rango unitario de referencia"] = top.apply(
+        lambda row: (
+            f"USD {float(row.get('precio_unitario_ref_p25') or 0):,.4f} – "
+            f"USD {float(row.get('precio_unitario_ref_p75') or 0):,.4f}"
+            if float(row.get("precio_unitario_ref_mediana") or 0) > 0
+            else "Sin muestra suficiente"
+        ),
+        axis=1,
+    )
     if category == "new":
         top["Fecha publicación/creación"] = pd.to_datetime(
             top["ctni_primera_fecha"], errors="coerce"
@@ -497,6 +830,15 @@ def _to_export(frame: pd.DataFrame, category: str, top_n: int = 20) -> pd.DataFr
             "requisitos",
             "clasificacion_oficial",
             "clase_riesgo",
+            "presion_precio",
+            "viabilidad_margen",
+            "propuestas_observadas",
+            "ratio_oferta_referencia_mediana",
+            "unidad_precio_dominante",
+            "precio_unitario_ref_mediana",
+            "Rango unitario de referencia",
+            "costo_objetivo_unitario",
+            "nota_viabilidad_precio",
             "score",
             "Por qué destaca",
             "enlace_minsa",
@@ -518,6 +860,14 @@ def _to_export(frame: pd.DataFrame, category: str, top_n: int = 20) -> pd.DataFr
             "requisitos": "Requisitos Exigidos",
             "clasificacion_oficial": "Clasificación Oficial",
             "clase_riesgo": "Clase de Riesgo",
+            "presion_precio": "Presión Competitiva de Precio",
+            "viabilidad_margen": "Viabilidad Preliminar de Margen",
+            "propuestas_observadas": "Propuestas Comparables",
+            "ratio_oferta_referencia_mediana": "Oferta/Referencia Típica",
+            "unidad_precio_dominante": "Unidad de Precio Dominante",
+            "precio_unitario_ref_mediana": "Precio Unitario Ref. Mediana (USD)",
+            "costo_objetivo_unitario": "Costo Puesto Objetivo/Unidad (USD)",
+            "nota_viabilidad_precio": "Lectura Comercial de Precio",
             "score": "Score Estratégico",
             "enlace_minsa": "Enlace MINSA",
         }
@@ -534,9 +884,18 @@ def _validate_rankings(
         assert len(frame) == 20, f"{sheet_name}: se esperaban 20 filas y hay {len(frame)}"
         assert frame["Código de Ficha"].nunique() == 20, f"{sheet_name}: fichas duplicadas"
         assert not set(frame["Código de Ficha"]) & EXCLUDED_FICHAS, f"{sheet_name}: exclusión fallida"
+        assert frame["Requisitos Exigidos"].str.contains(r"RS: No", regex=True).all(), (
+            f"{sheet_name}: se encontró una ficha que exige RS o no tiene el requisito confirmado"
+        )
+        assert not frame["Descripción Oficial"].map(normalize_text).map(
+            lambda text: all(marker in text for marker in PEROXIDE_COMPLETE_MARKERS)
+        ).any(), f"{sheet_name}: se encontró ciclo completo de peróxido"
         assert frame["Score Estratégico"].is_monotonic_decreasing, f"{sheet_name}: score desordenado"
         assert (frame["Monto Total Acumulado (USD)"] >= 0).all(), f"{sheet_name}: monto negativo"
-        checks.append(f"{sheet_name}: 20 fichas únicas, orden y exclusiones correctos")
+        assert "Viabilidad Preliminar de Margen" in frame.columns
+        checks.append(
+            f"{sheet_name}: 20 fichas únicas, RS=No, exclusiones, precio y orden correctos"
+        )
     barrier = exports["3_Barrera_Cero"]
     assert barrier["Requisitos Exigidos"].str.contains(r"CT: No \| RS: No", regex=True).all()
     checks.append("3_Barrera_Cero: CT=No y RS=No confirmado en las 20 filas")
@@ -560,6 +919,8 @@ def _style_excel(path: Path, built_at: str) -> None:
         "Monto Total Acumulado (USD)",
         "Monto Ficha Única (USD)",
         "Promedio por Acto (USD)",
+        "Precio Unitario Ref. Mediana (USD)",
+        "Costo Puesto Objetivo/Unidad (USD)",
     }
     comments = {
         "Monto Total Acumulado (USD)": (
@@ -572,6 +933,15 @@ def _style_excel(path: Path, built_at: str) -> None:
         ),
         "Score Estratégico": (
             "Percentil ponderado específico de cada categoría. No es una garantía de adjudicación ni utilidad."
+        ),
+        "Oferta/Referencia Típica": (
+            "Mediana de la relación entre oferta observada y precio de referencia en actos de ficha única. "
+            "Un valor bajo indica fuerte descuento competitivo frente a la referencia."
+        ),
+        "Costo Puesto Objetivo/Unidad (USD)": (
+            "Estimación conservadora: precio unitario de referencia por la relación típica oferta/referencia, "
+            "multiplicado por 75%. Es el costo máximo puesto en Panamá para aspirar a 25% de margen bruto, "
+            "antes de gastos comerciales adicionales."
         ),
     }
     for index, sheet_name in enumerate(SHEET_NAMES, start=1):
@@ -603,7 +973,7 @@ def _style_excel(path: Path, built_at: str) -> None:
                 for cell in worksheet[row]:
                     cell.fill = top_fill
                 worksheet.cell(row, headers["Prioridad"]).font = top_font
-            worksheet.row_dimensions[row].height = 48
+            worksheet.row_dimensions[row].height = 64
             for cell in worksheet[row]:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
         for header in money_headers:
@@ -617,6 +987,9 @@ def _style_excel(path: Path, built_at: str) -> None:
         if "Score Estratégico" in headers:
             for row in range(2, worksheet.max_row + 1):
                 worksheet.cell(row, headers["Score Estratégico"]).number_format = '0.0'
+        if "Oferta/Referencia Típica" in headers:
+            for row in range(2, worksheet.max_row + 1):
+                worksheet.cell(row, headers["Oferta/Referencia Típica"]).number_format = '0.0%'
         if "Enlace MINSA" in headers:
             column = headers["Enlace MINSA"]
             for row in range(2, worksheet.max_row + 1):
@@ -630,9 +1003,20 @@ def _style_excel(path: Path, built_at: str) -> None:
             header = clean_text(column_cells[0].value)
             values = [clean_text(cell.value) for cell in column_cells[: min(21, len(column_cells))]]
             width = min(max(max((len(value) for value in values), default=0) + 2, 11), 58)
-            if header in {"Descripción Oficial", "Por qué destaca", "Estatus de Adjudicación"}:
+            if header in {
+                "Descripción Oficial",
+                "Por qué destaca",
+                "Estatus de Adjudicación",
+                "Lectura Comercial de Precio",
+            }:
                 width = 52
-            elif header in {"Nivel de Competencia", "Requisitos Exigidos", "Clasificación Oficial"}:
+            elif header in {
+                "Nivel de Competencia",
+                "Requisitos Exigidos",
+                "Clasificación Oficial",
+                "Viabilidad Preliminar de Margen",
+                "Rango unitario de referencia",
+            }:
                 width = 30
             worksheet.column_dimensions[column_cells[0].column_letter].width = width
         worksheet.oddFooter.center.text = f"Fuente analítica construida: {built_at} | Perfil de detección ≥ {DETECTION_THRESHOLD:.0f}"
@@ -650,15 +1034,19 @@ def _style_excel(path: Path, built_at: str) -> None:
 def generate_report(paths: InputPaths, output_path: Path) -> tuple[dict[str, pd.DataFrame], list[str]]:
     facts, metadata_raw, build_metadata = _load_source(paths)
     metadata = _derive_medical_scope(metadata_raw)
+    price_intelligence = _load_price_intelligence(
+        paths,
+        set(metadata["ficha"].dropna().map(normalize_ficha)),
+    )
     scoped_facts = _prepare_facts(facts, metadata)
-    aggregate = _aggregate(scoped_facts)
+    aggregate = _enrich_price_viability(_aggregate(scoped_facts), price_intelligence)
     cutoff = pd.Timestamp(date.today() - timedelta(days=730))
 
     rankings = {
         "1_Historicas": _score_historical(aggregate),
-        "2_Nuevas_Potencial": _score_new(scoped_facts, cutoff),
+        "2_Nuevas_Potencial": _score_new(scoped_facts, cutoff, price_intelligence),
         "3_Barrera_Cero": _score_barrier_zero(aggregate),
-        "4_Actos_Desiertos": _score_deserted(scoped_facts),
+        "4_Actos_Desiertos": _score_deserted(scoped_facts, price_intelligence),
     }
     categories = {
         "1_Historicas": "historical",
@@ -689,6 +1077,9 @@ def generate_report(paths: InputPaths, output_path: Path) -> tuple[dict[str, pd.
         f"Cobertura fuente: {len(facts):,} relaciones moderadas; {len(scoped_facts):,} médicas elegibles; "
         f"corte analítico {build_metadata.get('built_at_utc', 'sin dato')}"
     )
+    checks.append(
+        f"Inteligencia de precio: {len(price_intelligence):,} fichas con ofertas y/o precios unitarios observados"
+    )
     return exports, checks
 
 
@@ -706,14 +1097,23 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=home / "scrapers_repo" / "data" / "ctni" / "ctni_monitor.db",
     )
+    parser.add_argument(
+        "--operational-db",
+        type=Path,
+        default=home / "scrapers_repo" / "data" / "db" / "panamacompra.db",
+    )
     parser.add_argument("--output", type=Path, default=default_output)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    paths = InputPaths(args.analytics_db.resolve(), args.ctni_db.resolve())
-    for path in (paths.analytics_db, paths.ctni_db):
+    paths = InputPaths(
+        args.analytics_db.resolve(),
+        args.ctni_db.resolve(),
+        args.operational_db.resolve(),
+    )
+    for path in (paths.analytics_db, paths.ctni_db, paths.operational_db):
         if not path.exists():
             raise FileNotFoundError(f"No existe la fuente requerida: {path}")
     exports, checks = generate_report(paths, args.output.resolve())
