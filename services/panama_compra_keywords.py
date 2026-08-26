@@ -243,6 +243,52 @@ def parse_keyword_input(value: object) -> list[str]:
     return normalize_keyword_terms(re.split(r"[,;\n\r]+", raw))
 
 
+def keyword_table_column_order(columns: Iterable[object]) -> list[object]:
+    """Coloca el contexto de detección entre Descripción y los Item_n."""
+
+    original = list(columns)
+    desired_keys = (
+        "palabras clave detectadas",
+        "campos con coincidencia",
+        "tipo convocatoria",
+        "pestana origen",
+    )
+    by_key: dict[str, object] = {}
+    for column in original:
+        normalized = _normalize_search_text(column)
+        if normalized in desired_keys and normalized not in by_key:
+            by_key[normalized] = column
+
+    context_columns = [by_key[key] for key in desired_keys if key in by_key]
+    if not context_columns:
+        return original
+
+    context_set = set(context_columns)
+    remaining = [column for column in original if column not in context_set]
+    normalized_remaining = [_normalize_search_text(column) for column in remaining]
+
+    description_indexes = [
+        index
+        for index, normalized in enumerate(normalized_remaining)
+        if normalized == "descripcion"
+    ]
+    item_indexes = [
+        index
+        for index, normalized in enumerate(normalized_remaining)
+        if normalized.startswith("item")
+    ]
+    if description_indexes and (
+        not item_indexes or description_indexes[-1] < item_indexes[0]
+    ):
+        insert_at = description_indexes[-1] + 1
+    elif item_indexes:
+        insert_at = item_indexes[0]
+    else:
+        insert_at = len(remaining)
+
+    return remaining[:insert_at] + context_columns + remaining[insert_at:]
+
+
 def parse_keyword_registry_values(values: Sequence[Sequence[object]]) -> list[str]:
     """Extrae las palabras de una hoja, con o sin encabezado reconocido."""
 

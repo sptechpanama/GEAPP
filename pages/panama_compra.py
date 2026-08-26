@@ -76,6 +76,11 @@ parse_keyword_input = getattr(
         if term
     ],
 )
+keyword_table_column_order = getattr(
+    _keyword_registry,
+    "keyword_table_column_order",
+    lambda columns: list(columns),
+)
 
 
 def match_keywords_in_text(text, keywords, *, reference_amount=None):
@@ -7707,6 +7712,7 @@ for tab, category_name in zip(category_tabs, ordered_categories):
             if parts:
                 df = pd.concat(parts, ignore_index=True, sort=False)
                 df = _deduplicate_keyword_hits(df)
+                df = df.loc[:, keyword_table_column_order(df.columns)]
             else:
                 df = pd.DataFrame()
 

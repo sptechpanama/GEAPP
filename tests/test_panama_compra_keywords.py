@@ -11,6 +11,7 @@ from services.panama_compra_keywords import (
     KeywordRegistryConflictError,
     KeywordRegistryStore,
     apply_keyword_changes,
+    keyword_table_column_order,
     match_keywords_in_text,
     normalize_keyword_terms,
     parse_keyword_input,
@@ -187,6 +188,37 @@ def test_add_remove_text_boxes_parse_multiple_rules_and_deduplicate():
     assert parse_keyword_input(
         " fotovolta*, split>15k; VRF > 15000\nFotovolta* "
     ) == ["fotovolta*", "split>15k", "vrf>15k"]
+
+
+def test_rs_sp_detection_columns_are_between_description_and_items():
+    columns = [
+        "Enlace",
+        "Descripción",
+        "Item_1",
+        "Item_2",
+        "Entidad",
+        "Tipo convocatoria",
+        "Pestana origen",
+        "Palabras clave detectadas",
+        "Campos con coincidencia",
+    ]
+
+    assert keyword_table_column_order(columns) == [
+        "Enlace",
+        "Descripción",
+        "Palabras clave detectadas",
+        "Campos con coincidencia",
+        "Tipo convocatoria",
+        "Pestana origen",
+        "Item_1",
+        "Item_2",
+        "Entidad",
+    ]
+
+
+def test_column_order_is_unchanged_when_detection_context_is_absent():
+    columns = ["Enlace", "Descripción", "Item_1"]
+    assert keyword_table_column_order(columns) == columns
 
 
 def test_reference_amount_parser_accepts_common_panama_compra_formats():
