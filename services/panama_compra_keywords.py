@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 import threading
 import time
 import unicodedata
@@ -9,9 +10,58 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Callable, Iterable, Sequence
 
-DEFAULT_PANAMACOMPRA_KEYWORDS = ("chiller", "york", "daikin")
+HVAC_OVER_15K_KEYWORDS = (
+    "aire acondicion*>15k",
+    "aires acondicion*>15k",
+    "sistema de aire acondicionado>15k",
+    "aire acondicionado central>15k",
+    "split>15k",
+    "mini split>15k",
+    "minisplit>15k",
+    "multisplit>15k",
+    "aire acondicionado inverter>15k",
+    "expansion directa>15k",
+    "sistema dx>15k",
+    "vrf>15k",
+    "vrv>15k",
+    "flujo de refrigerante variable>15k",
+    "volumen de refrigerante variable>15k",
+    "unidad manejadora de aire>15k",
+    "unidad manejador de aire>15k",
+    "manejadora de aire>15k",
+    "manejador de aire>15k",
+    "uma>15k",
+    "unidad tipo paquete>15k",
+    "unidad paquete>15k",
+    "rooftop>15k",
+    "roof top>15k",
+    "fan coil>15k",
+    "fancoil>15k",
+    "agua helada>15k",
+    "enfriador de agua>15k",
+    "torre de enfriamiento>15k",
+    "chiller>15k",
+    "chiler>15k",
+    "shiller>15k",
+    "unidad condensadora>15k",
+    "unidad evaporadora>15k",
+    "cassette de aire acondicionado>15k",
+    "bomba de calor>15k",
+    "climatizacion*>15k",
+)
+DEFAULT_PANAMACOMPRA_KEYWORDS = (
+    "chiller",
+    "york",
+    "daikin",
+    *HVAC_OVER_15K_KEYWORDS,
+)
 KEYWORD_REGISTRY_HEADERS = ("Palabra clave", "Actualizado por", "Actualizado")
 _REGISTRY_LOCK = threading.RLock()
+_AMOUNT_SUFFIX_RE = re.compile(
+    r"^(?P<term>.*?)\s*>\s*(?:usd|us\$|b/?\.?|\$)?\s*"
+    r"(?P<amount>[0-9][0-9.,\s]*)\s*(?P<unit>[km]?)\s*$",
+    re.IGNORECASE,
+)
 
 
 class KeywordRegistryError(RuntimeError):
@@ -30,6 +80,24 @@ class KeywordRegistrySnapshot:
     warning: str = ""
 
 
+@dataclass(frozen=True)
+class KeywordRule:
+    """Regla normalizada de texto con un umbral monetario opcional."""
+
+    term: str
+    minimum_amount: float | None = None
+
+    @property
+    def is_root(self) -> bool:
+        return self.term.endswith("*")
+
+    @property
+    def canonical(self) -> str:
+        if self.minimum_amount is None:
+            return self.term
+        return f"{self.term}>{_format_rule_amount(self.minimum_amount)}"
+
+
 def _normalize_search_text(value: object) -> str:
     text = str(value or "").strip().lower()
     if not text:
@@ -42,13 +110,94 @@ def _normalize_search_text(value: object) -> str:
     return text
 
 
-def normalize_keyword_term(value: object) -> str:
+def _format_rule_amount(value: float) -> str:
+    amount = float(value)
+    if amount >= 1_000_000 and math.isclose(amount % 1_000_000, 0.0, abs_tol=1e-6):
+        return f"{amount / 1_000_000:g}m"
+    if amount >= 1_000 and math.isclose(amount % 1_000, 0.0, abs_tol=1e-6):
+        return f"{amount / 1_000:g}k"
+    return f"{amount:g}"
+
+
+def parse_reference_amount(value: object) -> float | None:
+    """Convierte montos de Sheets sin confundir miles con decimales."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        amount = float(value)
+        return amount if math.isfinite(amount) else None
+
     raw = str(value or "").strip()
+    if not raw:
+        return None
+    negative = raw.startswith("(") and raw.endswith(")")
+    raw = re.sub(r"(?i)(B/\.?|USD|US\$|PAB|\$)", "", raw)
+    raw = re.sub(r"[^0-9,\.\-]", "", raw)
+    if not raw or raw in {"-", ".", ","}:
+        return None
+
+    if "," in raw and "." in raw:
+        if raw.rfind(",") > raw.rfind("."):
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+    elif "," in raw:
+        parts = raw.split(",")
+        if len(parts) > 2:
+            raw = "".join(parts[:-1]) + (f".{parts[-1]}" if len(parts[-1]) <= 2 else parts[-1])
+        elif len(parts[-1]) <= 2:
+            raw = ".".join(parts)
+        else:
+            raw = "".join(parts)
+    elif "." in raw:
+        parts = raw.split(".")
+        if len(parts) > 2:
+            raw = "".join(parts[:-1]) + (f".{parts[-1]}" if len(parts[-1]) <= 2 else parts[-1])
+        elif len(parts[-1]) == 3:
+            raw = "".join(parts)
+
+    try:
+        amount = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if negative:
+        amount = -abs(amount)
+    return amount if math.isfinite(amount) else None
+
+
+def parse_keyword_rule(value: object) -> KeywordRule | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    minimum_amount: float | None = None
+    amount_match = _AMOUNT_SUFFIX_RE.fullmatch(raw)
+    if amount_match:
+        raw = amount_match.group("term").strip()
+        amount_text = amount_match.group("amount")
+        minimum_amount = parse_reference_amount(amount_text)
+        if minimum_amount is None:
+            return None
+        unit = amount_match.group("unit").lower()
+        if unit == "k":
+            minimum_amount *= 1_000
+        elif unit == "m":
+            minimum_amount *= 1_000_000
+    elif ">" in raw:
+        return None
+
     root_match = raw.endswith("*")
     normalized = _normalize_search_text(raw[:-1] if root_match else raw)
-    if normalized and root_match:
-        return f"{normalized}*"
-    return normalized
+    if not normalized:
+        return None
+    term = f"{normalized}*" if root_match else normalized
+    return KeywordRule(term=term, minimum_amount=minimum_amount)
+
+
+def normalize_keyword_term(value: object) -> str:
+    rule = parse_keyword_rule(value)
+    return rule.canonical if rule else ""
 
 
 def normalize_keyword_terms(values: Iterable[object]) -> list[str]:
@@ -328,9 +477,10 @@ class KeywordRegistryStore:
 
 @lru_cache(maxsize=512)
 def _keyword_pattern(normalized_term: str) -> re.Pattern[str] | None:
-    normalized_term = normalize_keyword_term(normalized_term)
-    if not normalized_term:
+    rule = parse_keyword_rule(normalized_term)
+    if rule is None:
         return None
+    normalized_term = rule.term
     root_match = normalized_term.endswith("*")
     term_body = normalized_term[:-1].strip() if root_match else normalized_term
     tokens = [re.escape(token) for token in term_body.split() if token]
@@ -343,19 +493,44 @@ def _keyword_pattern(normalized_term: str) -> re.Pattern[str] | None:
     return re.compile(pattern)
 
 
-def match_keywords_in_text(text: object, keywords: Iterable[object]) -> list[str]:
+def match_keywords_in_text(
+    text: object,
+    keywords: Iterable[object],
+    *,
+    reference_amount: object = None,
+) -> list[str]:
     normalized_text = _normalize_search_text(text)
     if not normalized_text:
         return []
 
+    parsed_amount = parse_reference_amount(reference_amount)
     matches: list[str] = []
-    seen: set[str] = set()
+    match_index: dict[str, int] = {}
+    matched_rules: dict[str, KeywordRule] = {}
     for raw_keyword in keywords:
-        keyword = normalize_keyword_term(raw_keyword)
-        if not keyword or keyword in seen:
+        rule = parse_keyword_rule(raw_keyword)
+        if rule is None:
             continue
-        seen.add(keyword)
-        pattern = _keyword_pattern(keyword)
-        if pattern and pattern.search(normalized_text):
-            matches.append(keyword)
+        if rule.minimum_amount is not None and (
+            parsed_amount is None or parsed_amount <= rule.minimum_amount
+        ):
+            continue
+        pattern = _keyword_pattern(rule.term)
+        if not pattern or not pattern.search(normalized_text):
+            continue
+
+        # Si coexisten ``chiller`` y ``chiller>15k``, en actos grandes se
+        # muestra la regla mas especifica; en actos menores permanece la regla
+        # historica sin umbral.
+        previous = matched_rules.get(rule.term)
+        if previous is None:
+            match_index[rule.term] = len(matches)
+            matched_rules[rule.term] = rule
+            matches.append(rule.canonical)
+            continue
+        previous_minimum = previous.minimum_amount or -math.inf
+        current_minimum = rule.minimum_amount or -math.inf
+        if current_minimum > previous_minimum:
+            matched_rules[rule.term] = rule
+            matches[match_index[rule.term]] = rule.canonical
     return matches

@@ -12,7 +12,9 @@ from services.panama_compra_keywords import (
     apply_keyword_changes,
     match_keywords_in_text,
     normalize_keyword_terms,
+    parse_keyword_rule,
     parse_keyword_registry_values,
+    parse_reference_amount,
 )
 
 
@@ -140,6 +142,55 @@ def test_trailing_asterisk_matches_a_root_without_changing_exact_terms():
 
     assert match_keywords_in_text("equipo prefotovoltaico", ["fotovolta*"]) == []
     assert match_keywords_in_text("equipo UMAC", ["uma"]) == []
+
+
+def test_amount_modifier_preserves_exact_or_root_matching():
+    assert normalize_keyword_terms(
+        [" Aire Acondicion*>15K ", "VRF > 15000", "split>$15,000.00"]
+    ) == ["aire acondicion*>15k", "vrf>15k", "split>15k"]
+
+    root_rule = parse_keyword_rule("aire acondicion*>15k")
+    assert root_rule is not None
+    assert root_rule.is_root is True
+    assert root_rule.minimum_amount == 15_000
+
+    text = "Suministro de aires acondicionados tipo split y sistema VRF"
+    assert match_keywords_in_text(
+        text,
+        ["aires acondicion*>15k", "split>15k", "vrf>15k"],
+        reference_amount="$14,999.99",
+    ) == []
+    assert match_keywords_in_text(
+        text,
+        ["aires acondicion*>15k", "split>15k", "vrf>15k"],
+        reference_amount="$15,000.00",
+    ) == []
+    assert match_keywords_in_text(
+        text,
+        ["aires acondicion*>15k", "split>15k", "vrf>15k"],
+        reference_amount="B/. 15.000,50",
+    ) == ["aires acondicion*>15k", "split>15k", "vrf>15k"]
+
+
+def test_reference_amount_parser_accepts_common_panama_compra_formats():
+    assert parse_reference_amount("$15,000.50") == 15_000.50
+    assert parse_reference_amount("B/. 15.000,50") == 15_000.50
+    assert parse_reference_amount("15000,50") == 15_000.50
+    assert parse_reference_amount(16_250) == 16_250
+    assert parse_reference_amount("") is None
+
+
+def test_specific_threshold_rule_wins_over_same_unrestricted_term():
+    assert match_keywords_in_text(
+        "Mantenimiento de chiller",
+        ["chiller", "chiller>15k"],
+        reference_amount=20_000,
+    ) == ["chiller>15k"]
+    assert match_keywords_in_text(
+        "Mantenimiento de chiller",
+        ["chiller", "chiller>15k"],
+        reference_amount=10_000,
+    ) == ["chiller"]
 
 
 def test_registry_round_trip_preserves_root_marker():
@@ -275,7 +326,9 @@ def test_missing_worksheet_is_created_with_safe_defaults():
     snapshot = store.load()
     assert snapshot.remote_ok is True
     assert spreadsheet.created is True
-    assert list(snapshot.terms) == ["chiller", "york", "daikin"]
+    assert list(snapshot.terms[:3]) == ["chiller", "york", "daikin"]
+    assert "aire acondicion*>15k" in snapshot.terms
+    assert "vrf>15k" in snapshot.terms
 
 
 def test_mutate_adds_root_term_from_latest_remote_state_and_verifies():

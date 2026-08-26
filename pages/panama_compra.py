@@ -47,6 +47,7 @@ from services.panama_compra_keywords import (
     KeywordRegistryStore,
     match_keywords_in_text,
     normalize_keyword_term,
+    parse_keyword_rule,
 )
 from services.ct_rir_registry import (
     REGISTRY_HEADERS as CT_RIR_REGISTRY_HEADERS,
@@ -3201,24 +3202,37 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
                 format_func=lambda value: value if value else "Sin palabras configuradas",
                 disabled=(selected_options == [""] or bool(registry_warning)),
             )
+            remove_raw = st.text_input(
+                "O escribe reglas para quitar",
+                key=f"{key_prefix}_remove_input",
+                placeholder="Ej: split>15k, vrf>15k",
+                disabled=bool(registry_warning),
+            )
             remove_clicked = st.form_submit_button(
-                "Quitar seleccionada",
+                "Quitar",
                 use_container_width=True,
-                disabled=(selected_options == [""] or bool(registry_warning)),
+                disabled=bool(registry_warning),
             )
 
     st.caption(
         "Coincidencia exacta por defecto. Usa * solo al final para buscar por raíz; "
-        "por ejemplo, fotovolta* incluye fotovoltaico, fotovoltaica y sus plurales."
+        "por ejemplo, fotovolta* incluye fotovoltaico, fotovoltaica y sus plurales. "
+        "Agrega >15k para exigir un precio de referencia mayor de $15,000; "
+        "por ejemplo, aire acondicion*>15k."
     )
 
     if add_clicked or remove_clicked:
         manual_terms = _parse_manual_keyword_terms(manual_raw)
         selected_term = normalize_keyword_term(selected)
+        removal_terms = _parse_manual_keyword_terms(remove_raw)
         target_terms = (
             manual_terms
             if add_clicked
-            else ([selected_term] if selected_term else [])
+            else (
+                removal_terms
+                if removal_terms
+                else ([selected_term] if selected_term else [])
+            )
         )
         if not target_terms:
             st.warning("Ingresa una o mas palabras clave separadas por coma, o selecciona una ya configurada.")
@@ -3251,12 +3265,19 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
         if not current_terms:
             st.caption("Sin palabras clave configuradas.")
         else:
+            parsed_rules = [parse_keyword_rule(term) for term in current_terms]
             kw_df = pd.DataFrame(
                 {
                     "Palabra clave": current_terms,
                     "Coincidencia": [
-                        "Raíz (*)" if term.endswith("*") else "Exacta"
-                        for term in current_terms
+                        "Raíz (*)" if rule and rule.is_root else "Exacta"
+                        for rule in parsed_rules
+                    ],
+                    "Monto mínimo": [
+                        f"> ${rule.minimum_amount:,.2f}"
+                        if rule and rule.minimum_amount is not None
+                        else "Sin mínimo"
+                        for rule in parsed_rules
                     ],
                 }
             )
@@ -3686,14 +3707,29 @@ def _keyword_match_columns(df: pd.DataFrame, keyword_terms: list[str]) -> pd.Dat
     text_columns = _keyword_source_columns(df)
     if not text_columns:
         return pd.DataFrame()
+    price_col = _resolve_column_by_alias(
+        df.columns.tolist(),
+        [
+            "precio_referencia",
+            "precio referencia",
+            "precio de referencia",
+            "monto_referencia",
+            "monto referencia",
+        ],
+    )
 
     matched_rows: list[dict[str, object]] = []
     for _, row in df.iterrows():
         row_payload = row.to_dict()
+        reference_amount = row_payload.get(price_col) if price_col else None
         matched_terms: list[str] = []
         matched_cols: list[str] = []
         for col in text_columns:
-            column_matches = match_keywords_in_text(row_payload.get(col, ""), keyword_terms)
+            column_matches = match_keywords_in_text(
+                row_payload.get(col, ""),
+                keyword_terms,
+                reference_amount=reference_amount,
+            )
             if not column_matches:
                 continue
             for term in column_matches:
