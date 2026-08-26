@@ -45,6 +45,10 @@ get_drive_service_account = getattr(
 # hot-reload. Importar el módulo completo y obtener el helper opcional evita
 # que una actualización parcial deje fuera de servicio toda Panamá Compra.
 from services import panama_compra_keywords as _keyword_registry
+from services.panama_compra_db_filters import (
+    append_date_range_condition,
+    date_filter_columns,
+)
 
 _KEYWORD_RULES_REQUIRED_VERSION = 3
 if getattr(_keyword_registry, "KEYWORD_RULES_VERSION", 0) < _KEYWORD_RULES_REQUIRED_VERSION:
@@ -7778,6 +7782,53 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         key="pc_db_combine_mode",
     )
 
+    date_filter = None
+    available_date_columns = date_filter_columns(table_columns)
+    if available_date_columns:
+        st.markdown("**Filtro de fechas**")
+        date_filter_enabled = st.toggle(
+            "Aplicar rango de fechas",
+            value=False,
+            key="pc_db_date_filter_enabled",
+            help=(
+                "El rango se aplica siempre junto con los demas filtros y antes de "
+                "traer resultados desde la base."
+            ),
+        )
+        if date_filter_enabled:
+            date_col_ui, start_col_ui, end_col_ui = st.columns([1.35, 1, 1])
+            date_column_state_key = "pc_db_date_filter_column"
+            if st.session_state.get(date_column_state_key) not in available_date_columns:
+                st.session_state[date_column_state_key] = available_date_columns[0]
+            date_column = date_col_ui.selectbox(
+                "Fecha a filtrar",
+                available_date_columns,
+                key=date_column_state_key,
+            )
+            today = date.today()
+            start_date = start_col_ui.date_input(
+                "Desde",
+                value=date(today.year, 1, 1),
+                key="pc_db_date_filter_start",
+            )
+            end_date = end_col_ui.date_input(
+                "Hasta",
+                value=today,
+                key="pc_db_date_filter_end",
+            )
+            if start_date > end_date:
+                st.error("La fecha inicial no puede ser posterior a la fecha final.")
+                return
+            date_filter = {
+                "column": date_column,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        else:
+            st.caption("Desactivado: se muestran todas las fechas disponibles.")
+    else:
+        st.caption("La tabla seleccionada no contiene columnas de fecha reconocibles.")
+
     rows_per_page = st.slider(
         "Filas por pagina",
         min_value=100,
@@ -7797,6 +7848,20 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         filters_mode=filters_mode,
         combine_mode=combine_mode,
     )
+    if date_filter:
+        try:
+            where_sql, query_params = append_date_range_condition(
+                backend=backend,
+                columns=table_columns,
+                where_sql=where_sql,
+                params=query_params,
+                column=str(date_filter["column"]),
+                start_date=date_filter["start_date"],
+                end_date=date_filter["end_date"],
+            )
+        except ValueError as exc:
+            st.error(f"No se pudo aplicar el rango de fechas: {exc}")
+            return
 
     try:
         if backend == "postgres":
@@ -7812,13 +7877,17 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         return
 
     total_pages = max(1, math.ceil(total_rows / max(1, rows_per_page)))
+    page_state_key = "pc_db_page_number"
+    current_page = int(st.session_state.get(page_state_key, 1) or 1)
+    if current_page < 1 or current_page > total_pages:
+        st.session_state[page_state_key] = 1
     page_number = st.number_input(
         "Pagina",
         min_value=1,
         max_value=total_pages,
         value=1,
         step=1,
-        key="pc_db_page_number",
+        key=page_state_key,
     )
     offset = (int(page_number) - 1) * int(rows_per_page)
 
