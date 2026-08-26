@@ -49,6 +49,7 @@ HVAC_OVER_15K_KEYWORDS = (
     "bomba de calor>15k",
     "climatizacion*>15k",
 )
+KEYWORD_RULES_VERSION = 2
 DEFAULT_PANAMACOMPRA_KEYWORDS = (
     "chiller",
     "york",
@@ -108,6 +109,22 @@ def _normalize_search_text(value: object) -> str:
     text = re.sub(r"[^0-9a-z]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+@lru_cache(maxsize=1)
+def _legacy_hvac_rule_aliases() -> dict[str, str]:
+    """Reconoce solamente las 37 reglas HVAC dañadas por el UI anterior.
+
+    Una versión antigua de Streamlit eliminaba ``>`` y el asterisco antes de
+    volver a guardar la hoja; por ejemplo, ``aire acondicion*>15k`` terminaba
+    como ``aire acondicion 15k``. La lista cerrada evita interpretar como
+    umbral cualquier frase legítima que casualmente termine en ``15k``.
+    """
+
+    return {
+        _normalize_search_text(rule.replace("*", "").replace(">", " ")): rule
+        for rule in HVAC_OVER_15K_KEYWORDS
+    }
 
 
 def _format_rule_amount(value: float) -> str:
@@ -171,6 +188,9 @@ def parse_keyword_rule(value: object) -> KeywordRule | None:
     if not raw:
         return None
 
+    if ">" not in raw:
+        raw = _legacy_hvac_rule_aliases().get(_normalize_search_text(raw), raw)
+
     minimum_amount: float | None = None
     amount_match = _AMOUNT_SUFFIX_RE.fullmatch(raw)
     if amount_match:
@@ -214,6 +234,15 @@ def normalize_keyword_terms(values: Iterable[object]) -> list[str]:
     return output
 
 
+def parse_keyword_input(value: object) -> list[str]:
+    """Interpreta el contenido de los cuadros Agregar/Quitar."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return normalize_keyword_terms(re.split(r"[,;\n\r]+", raw))
+
+
 def parse_keyword_registry_values(values: Sequence[Sequence[object]]) -> list[str]:
     """Extrae las palabras de una hoja, con o sin encabezado reconocido."""
 
@@ -226,6 +255,22 @@ def parse_keyword_registry_values(values: Sequence[Sequence[object]]) -> list[st
     return normalize_keyword_terms(
         row[0] for row in rows[start:] if row and str(row[0] or "").strip()
     )
+
+
+def _raw_keyword_registry_terms(values: Sequence[Sequence[object]]) -> list[str]:
+    """Devuelve la primera columna tal como está guardada, sin repararla."""
+
+    rows = list(values or [])
+    if not rows:
+        return []
+    first = _normalize_search_text(rows[0][0] if rows[0] else "")
+    header = _normalize_search_text(KEYWORD_REGISTRY_HEADERS[0])
+    start = 1 if first in {header, "palabra", "keyword", "termino"} else 0
+    return [
+        str(row[0] or "").strip()
+        for row in rows[start:]
+        if row and str(row[0] or "").strip()
+    ]
 
 
 def keyword_registry_sheet_values(
@@ -379,7 +424,15 @@ class KeywordRegistryStore:
                     updated_by="recuperacion automatica",
                     previous_values=values,
                 )
-            return parse_keyword_registry_values(values)
+            parsed = parse_keyword_registry_values(values)
+            if _raw_keyword_registry_terms(values) != parsed:
+                return self._write_rows(
+                    worksheet,
+                    parsed,
+                    updated_by="normalizacion automatica",
+                    previous_values=values,
+                )
+            return parsed
 
         try:
             with _REGISTRY_LOCK:
@@ -411,12 +464,22 @@ class KeywordRegistryStore:
             worksheet, _ = self._open_worksheet()
             previous_values = worksheet.get_all_values()
             remote_terms = parse_keyword_registry_values(previous_values)
+            needs_canonical_write = (
+                _raw_keyword_registry_terms(previous_values) != remote_terms
+            )
             if expected is not None and remote_terms != expected:
                 # Si el primer intento alcanzo a escribir pero fallo al leer la
                 # verificacion, el reintento encuentra exactamente el resultado
                 # pedido. Se considera exito idempotente, no conflicto.
                 if remote_terms == requested:
-                    return remote_terms
+                    if not needs_canonical_write:
+                        return remote_terms
+                    return self._write_rows(
+                        worksheet,
+                        requested,
+                        updated_by="normalizacion automatica",
+                        previous_values=previous_values,
+                    )
                 raise KeywordRegistryConflictError(
                     "La lista cambio en otra sesion. Recarga antes de volver a guardar."
                 )
@@ -454,12 +517,15 @@ class KeywordRegistryStore:
             worksheet, _ = self._open_worksheet()
             previous_values = worksheet.get_all_values()
             remote_terms = parse_keyword_registry_values(previous_values)
+            needs_canonical_write = (
+                _raw_keyword_registry_terms(previous_values) != remote_terms
+            )
             updated = apply_keyword_changes(
                 remote_terms,
                 add=additions,
                 remove=removals,
             )
-            if updated == remote_terms:
+            if updated == remote_terms and not needs_canonical_write:
                 return remote_terms, False
             verified = self._write_rows(
                 worksheet,

@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from services.panama_compra_keywords import (
+    HVAC_OVER_15K_KEYWORDS,
     KeywordRegistryConflictError,
     KeywordRegistryStore,
     apply_keyword_changes,
     match_keywords_in_text,
     normalize_keyword_terms,
+    parse_keyword_input,
     parse_keyword_rule,
     parse_keyword_registry_values,
     parse_reference_amount,
@@ -172,6 +174,21 @@ def test_amount_modifier_preserves_exact_or_root_matching():
     ) == ["aires acondicion*>15k", "split>15k", "vrf>15k"]
 
 
+def test_known_legacy_hvac_rows_are_recovered_without_guessing_other_text():
+    assert normalize_keyword_terms(
+        ["aire acondicion 15k", "split 15k", "climatizacion 15k"]
+    ) == ["aire acondicion*>15k", "split>15k", "climatizacion*>15k"]
+    assert normalize_keyword_terms(["proyecto especial 15k"]) == [
+        "proyecto especial 15k"
+    ]
+
+
+def test_add_remove_text_boxes_parse_multiple_rules_and_deduplicate():
+    assert parse_keyword_input(
+        " fotovolta*, split>15k; VRF > 15000\nFotovolta* "
+    ) == ["fotovolta*", "split>15k", "vrf>15k"]
+
+
 def test_reference_amount_parser_accepts_common_panama_compra_formats():
     assert parse_reference_amount("$15,000.50") == 15_000.50
     assert parse_reference_amount("B/. 15.000,50") == 15_000.50
@@ -236,6 +253,22 @@ def test_load_retries_and_returns_the_complete_remote_list():
     assert snapshot.remote_ok is True
     assert list(snapshot.terms) == ["chiller", "solar", "fotovoltaico", "manejadora"]
     assert ws.events.count("read") == 3
+
+
+def test_load_repairs_all_legacy_hvac_rows_in_the_persisted_sheet():
+    damaged = [rule.replace("*", "").replace(">", " ") for rule in HVAC_OVER_15K_KEYWORDS]
+    ws = FakeWorksheet(
+        [["Palabra clave", "Actualizado por", "Actualizado"]]
+        + [[term, "old", "old"] for term in damaged]
+    )
+    store, _ = make_store(ws)
+
+    snapshot = store.load()
+
+    assert snapshot.remote_ok is True
+    assert list(snapshot.terms) == list(HVAC_OVER_15K_KEYWORDS)
+    assert [row[0] for row in ws.values[1:]] == list(HVAC_OVER_15K_KEYWORDS)
+    assert sum(event.startswith("update:") for event in ws.events) == 1
 
 
 def test_load_failure_uses_last_good_instead_of_defaults():
@@ -371,6 +404,49 @@ def test_mutate_avoids_rewriting_when_term_is_already_configured():
     assert changed is False
     assert verified == ["chiller", "fotovolta*"]
     assert ws.events == ["read"]
+
+
+def test_mutate_repairs_legacy_rows_even_when_logical_change_is_empty():
+    ws = FakeWorksheet(
+        [
+            ["Palabra clave", "Actualizado por", "Actualizado"],
+            ["split 15k", "old", "old"],
+            ["fotovolta*", "old", "old"],
+        ]
+    )
+    store, _ = make_store(ws)
+
+    verified, changed = store.mutate(
+        add=["split>15k"],
+        updated_by="rsanchez",
+    )
+
+    assert changed is True
+    assert verified == ["split>15k", "fotovolta*"]
+    assert [row[0] for row in ws.values[1:]] == verified
+
+
+def test_mutate_add_then_remove_preserves_every_unrelated_rule():
+    original = ["chiller", "fotovolta*", "vrf>15k"]
+    ws = FakeWorksheet(
+        [["Palabra clave", "Actualizado por", "Actualizado"]]
+        + [[term, "old", "old"] for term in original]
+    )
+    store, _ = make_store(ws)
+
+    added, changed_add = store.mutate(
+        add=["prueba temporal*>15k"],
+        updated_by="prueba",
+    )
+    removed, changed_remove = store.mutate(
+        remove=["prueba temporal*>15k"],
+        updated_by="prueba",
+    )
+
+    assert changed_add is True
+    assert changed_remove is True
+    assert added == original + ["prueba temporal*>15k"]
+    assert removed == original
 
 
 def test_mutate_removes_root_term_without_touching_other_terms():

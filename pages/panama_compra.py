@@ -46,11 +46,36 @@ get_drive_service_account = getattr(
 # que una actualización parcial deje fuera de servicio toda Panamá Compra.
 from services import panama_compra_keywords as _keyword_registry
 
+_KEYWORD_RULES_REQUIRED_VERSION = 2
+if getattr(_keyword_registry, "KEYWORD_RULES_VERSION", 0) < _KEYWORD_RULES_REQUIRED_VERSION:
+    # En un hot-reload Streamlit puede conservar el módulo anterior aunque la
+    # página ya sea nueva. Forzamos una recarga antes de habilitar escrituras.
+    try:
+        _keyword_registry = importlib.reload(_keyword_registry)
+    except Exception:
+        pass
+_KEYWORD_RULES_READY = (
+    getattr(_keyword_registry, "KEYWORD_RULES_VERSION", 0)
+    >= _KEYWORD_RULES_REQUIRED_VERSION
+)
+
 DEFAULT_PANAMACOMPRA_KEYWORDS = _keyword_registry.DEFAULT_PANAMACOMPRA_KEYWORDS
 KeywordRegistryError = _keyword_registry.KeywordRegistryError
 KeywordRegistryStore = _keyword_registry.KeywordRegistryStore
 normalize_keyword_term = _keyword_registry.normalize_keyword_term
 parse_keyword_rule = getattr(_keyword_registry, "parse_keyword_rule", lambda _value: None)
+parse_keyword_input = getattr(
+    _keyword_registry,
+    "parse_keyword_input",
+    lambda value: [
+        term
+        for term in (
+            normalize_keyword_term(part)
+            for part in re.split(r"[,;\n\r]+", str(value or ""))
+        )
+        if term
+    ],
+)
 
 
 def match_keywords_in_text(text, keywords, *, reference_amount=None):
@@ -3053,19 +3078,7 @@ def _save_ct_rir_tokens(
 
 
 def _parse_manual_keyword_terms(raw_value: object) -> list[str]:
-    raw = _clean_text(raw_value)
-    if not raw:
-        return []
-    candidates = re.split(r"[,;\n\r]+", raw)
-    terms: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        normalized = normalize_keyword_term(candidate)
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        terms.append(normalized)
-    return terms
+    return parse_keyword_input(raw_value)
 
 
 PC_KEYWORDS_REGISTRY_SESSION_KEY = "__pc_keywords_registry_last_good__"
@@ -3161,6 +3174,13 @@ def _mutate_panama_keyword_terms(
 
 
 def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[str]:
+    if not _KEYWORD_RULES_READY:
+        st.warning(
+            "El gestor de palabras se está actualizando. Recarga la página en "
+            "unos segundos; agregar y quitar queda protegido mientras tanto."
+        )
+        return list(DEFAULT_PANAMACOMPRA_KEYWORDS)
+
     current_terms = _load_panama_keyword_terms()
     flash_message = str(
         st.session_state.pop(PC_KEYWORDS_REGISTRY_FLASH_KEY, "") or ""
