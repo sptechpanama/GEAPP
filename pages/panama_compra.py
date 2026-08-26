@@ -46,7 +46,7 @@ get_drive_service_account = getattr(
 # que una actualización parcial deje fuera de servicio toda Panamá Compra.
 from services import panama_compra_keywords as _keyword_registry
 
-_KEYWORD_RULES_REQUIRED_VERSION = 2
+_KEYWORD_RULES_REQUIRED_VERSION = 3
 if getattr(_keyword_registry, "KEYWORD_RULES_VERSION", 0) < _KEYWORD_RULES_REQUIRED_VERSION:
     # En un hot-reload Streamlit puede conservar el módulo anterior aunque la
     # página ya sea nueva. Forzamos una recarga antes de habilitar escrituras.
@@ -60,6 +60,18 @@ _KEYWORD_RULES_READY = (
 )
 
 DEFAULT_PANAMACOMPRA_KEYWORDS = _keyword_registry.DEFAULT_PANAMACOMPRA_KEYWORDS
+DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS = getattr(
+    _keyword_registry,
+    "DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS",
+    (
+        "automotriz",
+        "habitacion de hotel",
+        "bloqueador solar",
+        "protector solar",
+        "oracle solaris",
+        "correa del serpentin",
+    ),
+)
 KeywordRegistryError = _keyword_registry.KeywordRegistryError
 KeywordRegistryStore = _keyword_registry.KeywordRegistryStore
 normalize_keyword_term = _keyword_registry.normalize_keyword_term
@@ -80,6 +92,11 @@ keyword_table_column_order = getattr(
     _keyword_registry,
     "keyword_table_column_order",
     lambda columns: list(columns),
+)
+negative_keywords_in_matching_context = getattr(
+    _keyword_registry,
+    "negative_keywords_in_matching_context",
+    lambda **_kwargs: [],
 )
 
 
@@ -250,6 +267,7 @@ PC_MANUAL_SHEET_ID = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
 PC_MANUAL_WORKSHEET = "pc_manual"
 CT_RIR_LIST_WORKSHEET = "ct_rir_fichas"
 PC_KEYWORDS_WORKSHEET = "pc_palabras_clave"
+PC_NEGATIVE_KEYWORDS_WORKSHEET = "pc_palabras_negativas"
 JOB_NAME_LABELS = {
     "clrir": "Cotizaciones Programadas",
     "clv": "Cotizaciones Abiertas",
@@ -3089,12 +3107,19 @@ def _parse_manual_keyword_terms(raw_value: object) -> list[str]:
 PC_KEYWORDS_REGISTRY_SESSION_KEY = "__pc_keywords_registry_last_good__"
 PC_KEYWORDS_REGISTRY_FLASH_KEY = "__pc_keywords_registry_flash__"
 PC_KEYWORDS_REGISTRY_TTL_SECONDS = 60.0
+PC_NEGATIVE_REGISTRY_SESSION_KEY = "__pc_negative_registry_last_good__"
+PC_NEGATIVE_REGISTRY_FLASH_KEY = "__pc_negative_registry_flash__"
 
 
 @st.cache_resource(show_spinner=False)
 def _panama_keyword_process_cache() -> dict[str, object]:
     """Conserva la ultima lista valida incluso entre sesiones/reruns."""
 
+    return {"terms": [], "source": "", "warning": ""}
+
+
+@st.cache_resource(show_spinner=False)
+def _panama_negative_process_cache() -> dict[str, object]:
     return {"terms": [], "source": "", "warning": ""}
 
 
@@ -3112,6 +3137,16 @@ def _panama_keyword_store() -> KeywordRegistryStore:
         sheet_id=SHEET_ID,
         worksheet_name=PC_KEYWORDS_WORKSHEET,
         defaults=DEFAULT_PANAMACOMPRA_KEYWORDS,
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def _panama_negative_store() -> KeywordRegistryStore:
+    return KeywordRegistryStore(
+        _panama_keyword_client,
+        sheet_id=SHEET_ID,
+        worksheet_name=PC_NEGATIVE_KEYWORDS_WORKSHEET,
+        defaults=DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
     )
 
 
@@ -3169,6 +3204,64 @@ def _mutate_panama_keyword_terms(
         }
         st.session_state[PC_KEYWORDS_REGISTRY_SESSION_KEY] = state
         _panama_keyword_process_cache().update(
+            {"terms": verified, "source": "Google Sheets", "warning": ""}
+        )
+        return verified, changed, ""
+    except KeywordRegistryError as exc:
+        return None, False, f"No se pudo verificar la escritura en Google Sheets: {exc}"
+    except Exception as exc:
+        return None, False, f"No se pudo guardar la lista en Google Sheets: {exc}"
+
+
+def _load_panama_negative_terms(*, force: bool = False) -> list[str]:
+    cached = st.session_state.get(PC_NEGATIVE_REGISTRY_SESSION_KEY, {})
+    if (
+        not force
+        and isinstance(cached, dict)
+        and time.monotonic() - float(cached.get("loaded_at", 0.0) or 0.0)
+        < PC_KEYWORDS_REGISTRY_TTL_SECONDS
+    ):
+        return list(cached.get("terms", []))
+
+    process_cache = _panama_negative_process_cache()
+    session_terms = cached.get("terms", []) if isinstance(cached, dict) else []
+    last_good = session_terms or process_cache.get("terms", [])
+    snapshot = _panama_negative_store().load(last_good=last_good)
+    terms = list(snapshot.terms)
+    if snapshot.remote_ok:
+        process_cache.update(
+            {"terms": terms, "source": snapshot.source, "warning": ""}
+        )
+    st.session_state[PC_NEGATIVE_REGISTRY_SESSION_KEY] = {
+        "terms": terms,
+        "loaded_at": time.monotonic(),
+        "source": snapshot.source,
+        "warning": snapshot.warning,
+        "remote_ok": snapshot.remote_ok,
+    }
+    return terms
+
+
+def _mutate_panama_negative_terms(
+    *,
+    add: list[str] | tuple[str, ...] = (),
+    remove: list[str] | tuple[str, ...] = (),
+) -> tuple[list[str] | None, bool, str]:
+    try:
+        verified, changed = _panama_negative_store().mutate(
+            add=add,
+            remove=remove,
+            updated_by=_current_user(),
+        )
+        state = {
+            "terms": verified,
+            "loaded_at": time.monotonic(),
+            "source": "Google Sheets",
+            "warning": "",
+            "remote_ok": True,
+        }
+        st.session_state[PC_NEGATIVE_REGISTRY_SESSION_KEY] = state
+        _panama_negative_process_cache().update(
             {"terms": verified, "source": "Google Sheets", "warning": ""}
         )
         return verified, changed, ""
@@ -3324,6 +3417,143 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
             )
             st.dataframe(kw_df, use_container_width=True, height=220, hide_index=True)
             st.caption(f"Total palabras clave: {len(current_terms)}")
+
+    return current_terms
+
+
+def _render_negative_keyword_manager(
+    *, key_prefix: str = "pc_negative_keywords"
+) -> list[str]:
+    current_terms = _load_panama_negative_terms()
+    flash_message = str(
+        st.session_state.pop(PC_NEGATIVE_REGISTRY_FLASH_KEY, "") or ""
+    ).strip()
+    if flash_message:
+        st.success(flash_message)
+
+    registry_state = st.session_state.get(PC_NEGATIVE_REGISTRY_SESSION_KEY, {})
+    registry_warning = (
+        str(registry_state.get("warning", "")).strip()
+        if isinstance(registry_state, dict)
+        else ""
+    )
+    if registry_warning:
+        st.warning(
+            "Google Sheets no respondio. Se conserva la ultima lista valida y "
+            "los cambios quedan bloqueados hasta recuperar la conexion."
+        )
+    else:
+        st.caption(
+            f"Persistencia confirmada en Google Sheets: {len(current_terms)} "
+            "palabra(s) negativa(s)."
+        )
+
+    add_column, remove_column = st.columns([1.35, 1.0])
+    with add_column:
+        with st.form(
+            key=f"{key_prefix}_add_form",
+            clear_on_submit=True,
+            border=False,
+        ):
+            add_raw = st.text_input(
+                "Nueva palabra o frase negativa",
+                key=f"{key_prefix}_add_input",
+                placeholder="Ej: automotriz, protector solar",
+                disabled=bool(registry_warning),
+            )
+            add_clicked = st.form_submit_button(
+                "Agregar",
+                use_container_width=True,
+                disabled=bool(registry_warning),
+            )
+
+    selected_options = current_terms if current_terms else [""]
+    with remove_column:
+        with st.form(
+            key=f"{key_prefix}_remove_form",
+            clear_on_submit=False,
+            border=False,
+        ):
+            selected = st.selectbox(
+                "Palabra negativa para quitar",
+                options=selected_options,
+                key=f"{key_prefix}_selector",
+                format_func=lambda value: value if value else "Sin palabras configuradas",
+                disabled=(selected_options == [""] or bool(registry_warning)),
+            )
+            remove_raw = st.text_input(
+                "O escribe varias para quitar",
+                key=f"{key_prefix}_remove_input",
+                placeholder="Separadas por coma",
+                disabled=bool(registry_warning),
+            )
+            remove_clicked = st.form_submit_button(
+                "Quitar",
+                use_container_width=True,
+                disabled=bool(registry_warning),
+            )
+
+    st.caption(
+        "Se excluye un acto solo si la frase negativa aparece en el titulo o "
+        "en el mismo campo que activo una palabra positiva. Puedes ingresar "
+        "varias frases separadas por coma."
+    )
+
+    if add_clicked or remove_clicked:
+        add_terms = _parse_manual_keyword_terms(add_raw)
+        removal_terms = _parse_manual_keyword_terms(remove_raw)
+        selected_term = normalize_keyword_term(selected)
+        target_terms = (
+            add_terms
+            if add_clicked
+            else (
+                removal_terms
+                if removal_terms
+                else ([selected_term] if selected_term else [])
+            )
+        )
+        if not target_terms:
+            st.warning("Ingresa o selecciona al menos una frase negativa.")
+        else:
+            with st.spinner("Guardando y verificando..."):
+                verified, changed, error = _mutate_panama_negative_terms(
+                    add=target_terms if add_clicked else (),
+                    remove=target_terms if remove_clicked else (),
+                )
+            if verified is None:
+                st.error(error or "No se pudo guardar la lista negativa.")
+            else:
+                if changed:
+                    action = "agregaron" if add_clicked else "quitaron"
+                    message = (
+                        f"Se {action} {len(target_terms)} frase(s) y la lista "
+                        "quedo verificada en Google Sheets."
+                    )
+                elif add_clicked:
+                    message = "La frase ya estaba configurada; la lista no cambio."
+                else:
+                    message = "La frase no estaba configurada; la lista no cambio."
+                st.session_state[PC_NEGATIVE_REGISTRY_FLASH_KEY] = message
+                st.rerun()
+
+    if current_terms:
+        negative_df = pd.DataFrame(
+            {
+                "Palabra negativa": current_terms,
+                "Tipo": [
+                    "Raiz (*)" if term.endswith("*") else "Frase exacta"
+                    for term in current_terms
+                ],
+            }
+        )
+        st.dataframe(
+            negative_df,
+            use_container_width=True,
+            height=min(260, 38 + 35 * len(negative_df)),
+            hide_index=True,
+        )
+    else:
+        st.caption("Sin palabras negativas configuradas.")
 
     return current_terms
 
@@ -3741,7 +3971,11 @@ def _keyword_source_columns(df: pd.DataFrame) -> list[str]:
     return selected
 
 
-def _keyword_match_columns(df: pd.DataFrame, keyword_terms: list[str]) -> pd.DataFrame:
+def _keyword_match_columns(
+    df: pd.DataFrame,
+    keyword_terms: list[str],
+    negative_terms: list[str] | tuple[str, ...] = (),
+) -> pd.DataFrame:
     if df.empty or not keyword_terms:
         return pd.DataFrame()
 
@@ -3758,6 +3992,7 @@ def _keyword_match_columns(df: pd.DataFrame, keyword_terms: list[str]) -> pd.Dat
             "monto referencia",
         ],
     )
+    title_col = _resolve_column_by_alias(df.columns.tolist(), ["titulo", "titulo del acto"])
 
     matched_rows: list[dict[str, object]] = []
     for _, row in df.iterrows():
@@ -3779,6 +4014,13 @@ def _keyword_match_columns(df: pd.DataFrame, keyword_terms: list[str]) -> pd.Dat
             if col not in matched_cols:
                 matched_cols.append(col)
         if not matched_terms:
+            continue
+        negative_matches = negative_keywords_in_matching_context(
+            title=row_payload.get(title_col, "") if title_col else "",
+            matched_field_values=(row_payload.get(col, "") for col in matched_cols),
+            negative_keywords=negative_terms,
+        )
+        if negative_matches:
             continue
         row_payload["Palabras clave detectadas"] = ", ".join(matched_terms)
         row_payload["Campos con coincidencia"] = ", ".join(matched_cols)
@@ -7697,12 +7939,17 @@ for tab, category_name in zip(category_tabs, ordered_categories):
 
         if category_name == "Actos RS/SP":
             keyword_terms = _render_keyword_watch_manager(key_prefix=f"{selector_key}_keywords")
+            negative_terms = _load_panama_negative_terms()
             parts: list[pd.DataFrame] = []
             for source_sheet in sheets:
                 source_df = load_df(source_sheet)
                 if source_df.empty:
                     continue
-                matched_df = _keyword_match_columns(source_df, keyword_terms)
+                matched_df = _keyword_match_columns(
+                    source_df,
+                    keyword_terms,
+                    negative_terms,
+                )
                 if matched_df.empty:
                     continue
                 matched_df["Tipo convocatoria"] = _sheet_tipo_convocatoria(source_sheet)
@@ -7805,15 +8052,6 @@ fichas_table = _first_app_value(
     db_path_str=db_path_refs,
     candidates=["fichas_tecnicas", "fichas_ctni", "criterios_tecnicos"],
 )
-actos_table = _first_app_value(
-    _app_cfg,
-    ["SUPABASE_ACTOS_TABLE", "ACTOS_TABLE_NAME"],
-) or _find_reference_table_name(
-    backend=backend_refs,
-    db_url=db_url_refs,
-    db_path_str=db_path_refs,
-    candidates=["actos_publicos", "actos", "panamacompra_actos"],
-)
 catalogos_table = _first_app_value(
     _app_cfg,
     ["SUPABASE_CATALOGOS_TABLE", "CATALOGOS_TABLE_NAME"],
@@ -7825,19 +8063,11 @@ catalogos_table = _first_app_value(
 )
 
 st.divider()
+with st.expander("Palabras negativas RS/SP", expanded=False):
+    _render_negative_keyword_manager(key_prefix="pc_negative_keywords")
+
 with st.expander("Base de datos de actos publicos, fichas y oferentes", expanded=False):
     render_panamacompra_db_panel(show_header=False)
-
-with st.expander("Prospeccion RIR", expanded=False):
-    render_prospeccion_rir_panel(
-        backend=backend_refs,
-        db_url=db_url_refs,
-        db_path_str=db_path_refs,
-        actos_table=actos_table,
-        fichas_table=fichas_table,
-        fichas_drive_file_id=str(fichas_file_id or ""),
-        key_prefix="pc_prospeccion_rir",
-    )
 
 with st.expander("Fichas tecnicas", expanded=False):
     # Prioriza el documento de fichas con enlace (Drive) por encima de la tabla antigua.
@@ -7879,10 +8109,3 @@ with st.expander("Oferentes y catalogos", expanded=False):
             key_prefix="pc_catalogos",
             show_header=False,
         )
-
-render_panamacompra_ai_chat(
-    backend=backend_refs,
-    db_url=db_url_refs,
-    db_path=db_path_refs,
-    allowed_tables=[actos_table, fichas_table, catalogos_table],
-)

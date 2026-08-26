@@ -49,13 +49,38 @@ HVAC_OVER_15K_KEYWORDS = (
     "bomba de calor>15k",
     "climatizacion*>15k",
 )
-KEYWORD_RULES_VERSION = 2
+KEYWORD_RULES_VERSION = 3
 DEFAULT_PANAMACOMPRA_KEYWORDS = (
     "chiller",
     "york",
     "daikin",
     *HVAC_OVER_15K_KEYWORDS,
 )
+DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS = (
+    "automotriz",
+    "habitacion de hotel",
+    "bloqueador solar",
+    "protector solar",
+    "oracle solaris",
+    "correa del serpentin",
+)
+# Variantes gramaticales evidentes que representan exactamente el mismo
+# contexto negativo. La lista visible y persistente conserva un solo nombre
+# canonico por regla para mantener la administracion sencilla.
+_NEGATIVE_KEYWORD_ALIASES = {
+    "habitacion de hotel": (
+        "habitacion de hotel",
+        "habitaciones de hotel",
+        "habitacion hotel",
+        "habitaciones hotel",
+    ),
+    "correa del serpentin": (
+        "correa del serpentin",
+        "correas del serpentin",
+        "correa de serpentin",
+        "correas de serpentin",
+    ),
+}
 KEYWORD_REGISTRY_HEADERS = ("Palabra clave", "Actualizado por", "Actualizado")
 _REGISTRY_LOCK = threading.RLock()
 _AMOUNT_SUFFIX_RE = re.compile(
@@ -645,4 +670,59 @@ def match_keywords_in_text(
         if current_minimum > previous_minimum:
             matched_rules[rule.term] = rule
             matches[match_index[rule.term]] = rule.canonical
+    return matches
+
+
+def match_negative_keywords_in_text(
+    text: object,
+    negative_keywords: Iterable[object],
+) -> list[str]:
+    """Devuelve reglas negativas presentes, incluyendo variantes seguras."""
+
+    normalized_text = _normalize_search_text(text)
+    if not normalized_text:
+        return []
+
+    matches: list[str] = []
+    seen: set[str] = set()
+    for raw_keyword in negative_keywords:
+        rule = parse_keyword_rule(raw_keyword)
+        if rule is None:
+            continue
+        canonical = rule.canonical
+        variants = _NEGATIVE_KEYWORD_ALIASES.get(rule.term, (rule.term,))
+        if not any(
+            (pattern := _keyword_pattern(variant)) is not None
+            and pattern.search(normalized_text)
+            for variant in variants
+        ):
+            continue
+        if canonical not in seen:
+            seen.add(canonical)
+            matches.append(canonical)
+    return matches
+
+
+def negative_keywords_in_matching_context(
+    *,
+    title: object,
+    matched_field_values: Iterable[object],
+    negative_keywords: Iterable[object],
+) -> list[str]:
+    """Busca negativos solo en titulo y campos que activaron una alerta.
+
+    Este alcance evita descartar un acto valido porque una palabra negativa
+    aparezca en un renglon ajeno a la coincidencia positiva.
+    """
+
+    configured = normalize_keyword_terms(negative_keywords)
+    if not configured:
+        return []
+    matches: list[str] = []
+    seen: set[str] = set()
+    for context in (title, *tuple(matched_field_values)):
+        for term in match_negative_keywords_in_text(context, configured):
+            if term not in seen:
+                seen.add(term)
+                matches.append(term)
     return matches

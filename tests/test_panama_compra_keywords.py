@@ -7,12 +7,15 @@ from pathlib import Path
 import pytest
 
 from services.panama_compra_keywords import (
+    DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
     HVAC_OVER_15K_KEYWORDS,
     KeywordRegistryConflictError,
     KeywordRegistryStore,
     apply_keyword_changes,
     keyword_table_column_order,
     match_keywords_in_text,
+    match_negative_keywords_in_text,
+    negative_keywords_in_matching_context,
     normalize_keyword_terms,
     parse_keyword_input,
     parse_keyword_rule,
@@ -109,16 +112,18 @@ class FakeClient:
         return self.spreadsheet
 
 
-def make_store(worksheet=None, *, missing=False, attempts=3):
+def make_store(worksheet=None, *, missing=False, attempts=3, defaults=None):
     spreadsheet = FakeSpreadsheet(worksheet, missing=missing)
     client = FakeClient(spreadsheet)
-    store = KeywordRegistryStore(
-        lambda: client,
-        sheet_id="sheet-id",
-        worksheet_name="pc_palabras_clave",
-        attempts=attempts,
-        sleeper=lambda _seconds: None,
-    )
+    kwargs = {
+        "sheet_id": "sheet-id",
+        "worksheet_name": "pc_palabras_clave",
+        "attempts": attempts,
+        "sleeper": lambda _seconds: None,
+    }
+    if defaults is not None:
+        kwargs["defaults"] = defaults
+    store = KeywordRegistryStore(lambda: client, **kwargs)
     return store, spreadsheet
 
 
@@ -145,6 +150,62 @@ def test_trailing_asterisk_matches_a_root_without_changing_exact_terms():
 
     assert match_keywords_in_text("equipo prefotovoltaico", ["fotovolta*"]) == []
     assert match_keywords_in_text("equipo UMAC", ["uma"]) == []
+
+
+def test_default_negative_terms_are_minimal_and_canonical():
+    assert list(DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS) == [
+        "automotriz",
+        "habitacion de hotel",
+        "bloqueador solar",
+        "protector solar",
+        "oracle solaris",
+        "correa del serpentin",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Servicio automotriz preventivo", "automotriz"),
+        ("Alquiler de HABITACIONES (HOTEL)", "habitacion de hotel"),
+        ("Compra de protector solar", "protector solar"),
+        ("Licencias Oracle Solaris", "oracle solaris"),
+        ("Cambio de correas del serpentín", "correa del serpentin"),
+    ],
+)
+def test_negative_terms_match_only_the_configured_obvious_contexts(text, expected):
+    assert match_negative_keywords_in_text(
+        text,
+        DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
+    ) == [expected]
+
+
+def test_negative_context_does_not_expand_to_unrelated_terms():
+    assert match_negative_keywords_in_text(
+        "Mantenimiento de serpentín de aire acondicionado para un hotel",
+        DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
+    ) == []
+    assert match_negative_keywords_in_text(
+        "Panel solar fotovoltaico",
+        DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
+    ) == []
+
+
+def test_negative_filter_only_uses_title_and_positive_matching_fields():
+    matches = negative_keywords_in_matching_context(
+        title="Servicio general",
+        matched_field_values=["Aire acondicionado automotriz"],
+        negative_keywords=DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
+    )
+    assert matches == ["automotriz"]
+
+    # Un renglon no relacionado no se pasa como campo coincidente y, por lo
+    # tanto, no puede ocultar una oportunidad valida.
+    assert negative_keywords_in_matching_context(
+        title="Sistema fotovoltaico para edificio",
+        matched_field_values=["Paneles fotovoltaicos"],
+        negative_keywords=DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
+    ) == []
 
 
 def test_amount_modifier_preserves_exact_or_root_matching():
@@ -551,3 +612,55 @@ def test_keyword_manager_uses_atomic_form_without_forced_remote_reload():
         )
     ]
     assert forced_loads == []
+
+
+def test_missing_negative_worksheet_is_seeded_with_only_requested_defaults():
+    store, spreadsheet = make_store(
+        missing=True,
+        defaults=DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
+    )
+    snapshot = store.load()
+    assert snapshot.remote_ok is True
+    assert spreadsheet.created is True
+    assert list(snapshot.terms) == list(DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS)
+
+
+def test_negative_panel_precedes_database_and_unused_sections_are_not_rendered():
+    page_path = Path(__file__).resolve().parents[1] / "pages" / "panama_compra.py"
+    source = page_path.read_text(encoding="utf-8")
+    assert source.index('with st.expander("Palabras negativas RS/SP"') < source.index(
+        'with st.expander("Base de datos de actos publicos'
+    )
+
+    tree = ast.parse(source)
+    rendered_calls = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "render_prospeccion_rir_panel" not in rendered_calls
+    assert "render_panamacompra_ai_chat" not in rendered_calls
+
+
+def test_negative_manager_has_persistent_add_and_remove_forms():
+    page_path = Path(__file__).resolve().parents[1] / "pages" / "panama_compra.py"
+    tree = ast.parse(page_path.read_text(encoding="utf-8"))
+    manager = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_render_negative_keyword_manager"
+    )
+    form_suffixes = {
+        value.value
+        for node in ast.walk(manager)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "form"
+        for keyword in node.keywords
+        if keyword.arg == "key"
+        and isinstance(keyword.value, ast.JoinedStr)
+        for value in keyword.value.values
+        if isinstance(value, ast.Constant) and isinstance(value.value, str)
+    }
+    assert {"_add_form", "_remove_form"}.issubset(form_suffixes)
