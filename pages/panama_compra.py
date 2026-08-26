@@ -41,14 +41,30 @@ get_drive_service_account = getattr(
     "get_drive_service_account",
     get_drive_delegated,
 )
-from services.panama_compra_keywords import (
-    DEFAULT_PANAMACOMPRA_KEYWORDS,
-    KeywordRegistryError,
-    KeywordRegistryStore,
-    match_keywords_in_text,
-    normalize_keyword_term,
-    parse_keyword_rule,
-)
+# Streamlit puede conservar temporalmente un módulo anterior durante un
+# hot-reload. Importar el módulo completo y obtener el helper opcional evita
+# que una actualización parcial deje fuera de servicio toda Panamá Compra.
+from services import panama_compra_keywords as _keyword_registry
+
+DEFAULT_PANAMACOMPRA_KEYWORDS = _keyword_registry.DEFAULT_PANAMACOMPRA_KEYWORDS
+KeywordRegistryError = _keyword_registry.KeywordRegistryError
+KeywordRegistryStore = _keyword_registry.KeywordRegistryStore
+normalize_keyword_term = _keyword_registry.normalize_keyword_term
+parse_keyword_rule = getattr(_keyword_registry, "parse_keyword_rule", lambda _value: None)
+
+
+def match_keywords_in_text(text, keywords, *, reference_amount=None):
+    """Compatibilidad durante hot-reload entre matcher anterior y actual."""
+
+    matcher = _keyword_registry.match_keywords_in_text
+    try:
+        return matcher(text, keywords, reference_amount=reference_amount)
+    except TypeError as exc:
+        # La versión anterior no recibía el argumento ``reference_amount``.
+        # No se ocultan otros fallos de ejecución del matcher.
+        if "reference_amount" not in str(exc):
+            raise
+        return matcher(text, keywords)
 from services.ct_rir_registry import (
     REGISTRY_HEADERS as CT_RIR_REGISTRY_HEADERS,
     enrich_registry_names,
