@@ -4,6 +4,7 @@ set "ORQUESTADOR_SPREADSHEET_ID=1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
 set "ORQUESTADOR_CONFIG_SHEET=pc_config"
 set "ORQUESTADOR_STATE_SHEET=pc_state"
 set "ORQUESTADOR_MANUAL_SHEET=pc_manual"
+set "GEAPP_ROOT=C:\Users\rodri\GEAPP_deploy_main"
 if not defined SUPABASE_DB_URL (
     for /f "tokens=2,*" %%A in ('reg query HKCU\Environment /v SUPABASE_DB_URL 2^>nul') do set "SUPABASE_DB_URL=%%B"
 )
