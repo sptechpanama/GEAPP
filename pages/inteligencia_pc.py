@@ -272,6 +272,29 @@ def _company_acts(company: str, filters: PCFilters, _repo: InteligenciaPCReposit
     return _repo.company_acts(company, filters)
 
 
+def _load_company_acts(
+    company: str,
+    filters: PCFilters,
+    repository: InteligenciaPCRepository,
+) -> pd.DataFrame:
+    """Evita que un fallo puntual de base de datos derribe toda la pagina."""
+
+    try:
+        return _company_acts(company, filters, repository)
+    except Exception:
+        # Una conexion del pool puede quedar invalida durante una recarga de
+        # Supabase. Limpiamos solo esta consulta y hacemos un segundo intento.
+        _company_acts.clear()
+        try:
+            return _company_acts(company, filters, repository)
+        except Exception:
+            st.error(
+                "No fue posible consultar esta empresa en este momento. "
+                "La pagina sigue disponible; vuelve a intentar en unos segundos."
+            )
+            return pd.DataFrame()
+
+
 def _money(value: object) -> str:
     try:
         return f"${float(value or 0):,.2f}"
@@ -642,7 +665,7 @@ def _render_rs_intelligence(repo: InteligenciaPCRepository, filters: PCFilters) 
     if not clean_text(company):
         st.info("Indica una empresa.")
         return
-    company_frame = _company_acts(company, filters, repo)
+    company_frame = _load_company_acts(company, filters, repo)
     _render_company_kpis(company_frame)
     if company_frame.empty:
         st.info("No hay participaciones para la empresa y filtros seleccionados.")
@@ -807,7 +830,7 @@ elif section == "Empresas":
     company = _company_selector(repo, key_prefix="pc_company")
     if company:
         with st.spinner(f"Analizando {company}..."):
-            company_frame = _company_acts(company, filters, repo)
+            company_frame = _load_company_acts(company, filters, repo)
         company_frame = _filter_company_results(company_frame, key_prefix="pc_company")
         _render_company_kpis(company_frame)
         _company_table(company_frame)
@@ -868,7 +891,7 @@ elif section == "Competencia":
     st.subheader("Inteligencia competitiva")
     company = _company_selector(repo, key_prefix="pc_competition")
     if company:
-        company_frame = _company_acts(company, filters, repo)
+        company_frame = _load_company_acts(company, filters, repo)
         competitors = competitor_summary(company_frame)
         _render_company_kpis(company_frame)
         if competitors.empty:
@@ -909,7 +932,7 @@ elif section == "Estudio profundo":
     notes = st.text_area("Objetivo o notas", placeholder="Ej. identificar rubros adyacentes, competidores y bandas históricas de precio.")
     if company and st.button("Generar estudio", type="primary"):
         with st.spinner("Analizando historial, familias y competencia..."):
-            company_frame = _company_acts(company, filters, repo)
+            company_frame = _load_company_acts(company, filters, repo)
             competitors = competitor_summary(company_frame)
             report = build_deep_report(target=company, acts=company_frame, competitors=competitors, filters=filters)
             if notes.strip():

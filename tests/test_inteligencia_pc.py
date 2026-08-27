@@ -257,6 +257,30 @@ def test_repository_filters_medical_and_builds_company_profile(tmp_path: Path, m
     repo.close()
 
 
+def test_company_profile_falls_back_when_materialized_query_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    database = tmp_path / "pc_fallback.db"
+    _create_test_database(database)
+    repo = InteligenciaPCRepository.connect(local_candidates=[database])
+    repo.has_pc_layer = True
+
+    def fail_materialized(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        raise pd.errors.DatabaseError("fallo simulado de pc_propuestas")
+
+    monkeypatch.setattr(repo, "_company_acts_pc_layer", fail_materialized)
+    acts = repo.company_acts(
+        "RS Engineering",
+        PCFilters(start_date=date(2026, 7, 1), end_date=date(2026, 7, 31)),
+    )
+    assert company_summary(acts)["ganados"] == 1
+    assert "CAST(p.ganado AS TEXT)" in repo._proposal_result_select()
+    assert "COALESCE(p.ganado,0)=1" not in repo._proposal_result_select()
+    repo.close()
+
+
 def test_materialized_layer_supports_fast_views(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)

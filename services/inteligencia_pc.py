@@ -9,6 +9,7 @@ conectarse a Supabase.
 """
 
 import json
+import logging
 import math
 import os
 import re
@@ -22,11 +23,15 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 
 # Esta version forma parte de la clave de cache de Streamlit. Debe cambiar
 # cuando el contrato publico del repositorio agrega o modifica operaciones.
-INTELIGENCIA_PC_SERVICE_VERSION = "2026-08-26-participaciones-v3"
+INTELIGENCIA_PC_SERVICE_VERSION = "2026-08-27-company-query-v4"
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 COMPANY_RESULT_VALUES = (
@@ -728,8 +733,8 @@ class InteligenciaPCRepository:
             SELECT MIN(p.proveedor) AS proveedor,
                    p.proveedor_norm,
                    COUNT(DISTINCT p.acto_key) AS participaciones,
-                   COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END) AS adjudicaciones,
-                   100.0 * COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END)
+                   COUNT(DISTINCT CASE WHEN {self._truthy_sql('p.ganado')} THEN p.acto_key END) AS adjudicaciones,
+                   100.0 * COUNT(DISTINCT CASE WHEN {self._truthy_sql('p.ganado')} THEN p.acto_key END)
                          / NULLIF(COUNT(DISTINCT p.acto_key),0) AS tasa_exito,
                    COALESCE(SUM(p.monto_ofertado),0) AS monto_ofertado,
                    COALESCE(SUM(p.monto_ganado),0) AS monto_ganado,
@@ -850,8 +855,8 @@ class InteligenciaPCRepository:
                    p.proveedor_norm,
                    a.entidad,
                    COUNT(DISTINCT p.acto_key) AS participaciones,
-                   COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END) AS adjudicaciones,
-                   100.0 * COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END)
+                   COUNT(DISTINCT CASE WHEN {self._truthy_sql('p.ganado')} THEN p.acto_key END) AS adjudicaciones,
+                   100.0 * COUNT(DISTINCT CASE WHEN {self._truthy_sql('p.ganado')} THEN p.acto_key END)
                          / NULLIF(COUNT(DISTINCT p.acto_key),0) AS tasa_exito,
                    COALESCE(SUM(p.monto_ganado),0) AS monto_ganado
             FROM pc_propuestas p
@@ -905,7 +910,7 @@ class InteligenciaPCRepository:
                    MIN(p.proveedor) AS proveedor,
                    p.proveedor_norm,
                    COUNT(DISTINCT p.acto_key) AS participaciones,
-                   COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END) AS adjudicaciones,
+                   COUNT(DISTINCT CASE WHEN {self._truthy_sql('p.ganado')} THEN p.acto_key END) AS adjudicaciones,
                    COALESCE(SUM(p.monto_ganado),0) AS monto_ganado
             FROM pc_propuestas p
             JOIN pc_actos a ON a.acto_key=p.acto_key
@@ -1032,7 +1037,25 @@ class InteligenciaPCRepository:
 
     def company_acts(self, company: str, filters: PCFilters) -> pd.DataFrame:
         if self.has_pc_layer:
-            return self._company_acts_pc_layer(company, filters)
+            try:
+                return self._company_acts_pc_layer(company, filters)
+            except (pd.errors.DatabaseError, SQLAlchemyError) as exc:
+                # La capa analitica es la ruta rapida, pero no debe inutilizar
+                # el perfil empresarial si su esquema cambia durante una
+                # publicacion o si PostgreSQL cancela una consulta puntual.
+                if "actos_publicos" not in self.tables:
+                    raise PCAnalyticsUnavailable(
+                        "La consulta empresarial no estuvo disponible. Intenta nuevamente en unos segundos."
+                    ) from exc
+                LOGGER.warning(
+                    "Fallo la capa pc_propuestas; se usa actos_publicos como respaldo: %s",
+                    type(exc).__name__,
+                )
+        return self._company_acts_operational(company, filters)
+
+    def _company_acts_operational(self, company: str, filters: PCFilters) -> pd.DataFrame:
+        """Ruta compatible sobre la tabla operacional original."""
+
         where, params = self._sql_where(filters, provider_search=clean_text(company))
         provider_columns: list[str] = []
         for index in range(1, 15):
@@ -1157,12 +1180,57 @@ class InteligenciaPCRepository:
             )
         return (
             "CASE "
-            f"WHEN COALESCE({proposal_alias}.ganado,0)=1 THEN 'Adjudicado' "
+            f"WHEN {self._truthy_sql(f'{proposal_alias}.ganado')} THEN 'Adjudicado' "
             f"WHEN lower(COALESCE({act_alias}.estado,'')) LIKE '%desiert%' THEN 'Desierto' "
             f"WHEN trim(COALESCE({proposal_alias}.ganador,''))<>'' THEN 'No adjudicado' "
             "ELSE 'En evaluacion' END AS resultado_empresa, "
             "0 AS resultado_provisional_empresa, 'compatibilidad' AS fuente_resultado"
         )
+
+    @staticmethod
+    def _truthy_sql(expression: str) -> str:
+        """Expresion SQL portable para booleanos, enteros y texto."""
+
+        return (
+            f"lower(trim(COALESCE(CAST({expression} AS TEXT), ''))) "
+            "IN ('1','true','t','yes','y','si')"
+        )
+
+    def _company_candidate_norms(self, company: str) -> tuple[str, ...]:
+        """Resuelve variantes de empresa en el catalogo antes de tocar propuestas.
+
+        La consulta anterior aplicaba ``LIKE`` e incluso una comparacion inversa
+        a cada fila de ``pc_propuestas``. En bases grandes eso fuerza un barrido
+        completo y puede superar el limite de ejecucion de Streamlit/Supabase.
+        El catalogo es pequeno: primero obtenemos candidatos alli, validamos la
+        equivalencia con la misma normalizacion de la app y luego usamos un
+        ``IN`` acotado sobre propuestas.
+        """
+
+        target = normalize_provider(company)
+        if not target:
+            return ()
+        target_key = provider_match_key(company)
+        informative_tokens = [token for token in target_key.split() if len(token) >= 3]
+        broad_token = max(informative_tokens, key=len, default=target)
+        candidates = {target}
+        query = text(
+            "SELECT proveedor, proveedor_norm FROM pc_proveedores_catalogo "
+            "WHERE proveedor_norm=:target OR proveedor_norm LIKE :broad "
+            "ORDER BY participaciones DESC LIMIT 500"
+        )
+        with self.engine.connect() as connection:
+            frame = pd.read_sql_query(
+                query,
+                connection,
+                params={"target": target, "broad": f"%{broad_token}%"},
+            )
+        for row in frame.itertuples(index=False):
+            provider = clean_text(getattr(row, "proveedor", ""))
+            provider_norm = clean_text(getattr(row, "proveedor_norm", ""))
+            if provider_matches(provider, company) or provider_matches(provider_norm, company):
+                candidates.add(provider_norm)
+        return tuple(sorted(value for value in candidates if value))
 
     def _provider_context_compatible(self, filters: PCFilters) -> bool:
         return self.has_provider_context and not any(
@@ -1204,11 +1272,14 @@ class InteligenciaPCRepository:
         if not target:
             return pd.DataFrame()
         where, params = self._pc_where(filters, alias="a")
-        target_key = provider_match_key(company)
-        broad_token = next((token for token in target_key.split() if len(token) >= 3), target)
-        params["company"] = f"%{target}%"
-        params["company_target"] = target
-        params["company_broad"] = f"%{broad_token}%"
+        candidate_norms = self._company_candidate_norms(company)
+        if not candidate_norms:
+            return pd.DataFrame()
+        candidate_names: list[str] = []
+        for index, candidate in enumerate(candidate_norms):
+            key = f"company_norm_{index}"
+            candidate_names.append(f":{key}")
+            params[key] = candidate
         result_select = self._proposal_result_select()
         query = f"""
             SELECT a.*, p.proveedor AS empresa_consultada, p.monto_ofertado AS monto_participacion,
@@ -1216,8 +1287,7 @@ class InteligenciaPCRepository:
             FROM pc_propuestas p
             JOIN pc_actos a ON a.acto_key=p.acto_key
             WHERE {where}
-              AND (p.proveedor_norm LIKE :company OR :company_target LIKE ('%' || p.proveedor_norm || '%')
-                   OR p.proveedor_norm LIKE :company_broad)
+              AND p.proveedor_norm IN ({', '.join(candidate_names)})
         """
         with self.engine.connect() as connection:
             matched = pd.read_sql_query(text(query), connection, params=params)
