@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -24,7 +25,9 @@ from services.inteligencia_pc import (  # noqa: E402
     PCFilters,
     clean_text,
     normalize_provider,
+    parse_money,
     prepare_pc_acts,
+    provider_matches,
     unpivot_proposals,
 )
 
@@ -38,11 +41,110 @@ PC_ACT_COLUMNS = [
     "estado", "precio_referencia", "monto_referencia", "razon_social", "nombre_comercial",
     "num_participantes", "total_items_ofertados", "familia", "confianza_familia",
     "evidencia_familia", "mercado_pc", "evidencia_mercado", "source_tipo_proceso",
+    "numero_proceso", "source_layer", "resultado_provisional",
 ]
 PC_PROPOSAL_COLUMNS = [
     "acto_key", "ordinal", "proveedor", "proveedor_norm", "monto_ofertado", "ganador",
-    "ganador_norm", "ganado", "monto_ganado",
+    "ganador_norm", "ganado", "monto_ganado", "resultado_empresa", "fuente_resultado",
+    "resultado_provisional", "monto_ganado_fuente",
 ]
+
+PROCESS_NUMBER_RE = re.compile(
+    r"\b20\d{2}(?:-\d+){4}-(?:CL|CM|LP)-\d+\b",
+    flags=re.IGNORECASE,
+)
+FINAL_CL_STATES = {"cerrada_con_propuestas", "cerrada_sin_propuestas"}
+
+
+def _process_number(*values: object) -> str:
+    for value in values:
+        match = PROCESS_NUMBER_RE.search(clean_text(value))
+        if match:
+            return match.group(0).upper()
+    return ""
+
+
+def _deserted(value: object) -> bool:
+    return "desiert" in clean_text(value).lower()
+
+
+def _winner_amount(record: dict[str, object]) -> tuple[float, str]:
+    total = parse_money(record.get("total_items_ofertados"))
+    reference = parse_money(record.get("precio_referencia"))
+    # En fuentes historicas ``total_items_ofertados`` puede ser un conteo. No
+    # se acepta como dinero cuando es insignificante frente a la referencia.
+    if total > 0 and (reference <= 0 or total >= reference * 0.05):
+        return total, "total_items_ofertados"
+    if reference > 0:
+        return reference, "precio_referencia_estimado"
+    return 0.0, "sin_monto"
+
+
+def _official_proposals(acts: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    proposals = unpivot_proposals(acts)
+    proposals_by_act = {
+        str(key): group.to_dict("records")
+        for key, group in proposals.groupby("acto_key")
+    } if not proposals.empty else {}
+
+    for record in acts.to_dict("records"):
+        act_key = clean_text(record.get("acto_key"))
+        legal_winner = clean_text(record.get("razon_social"))
+        commercial_winner = clean_text(record.get("nombre_comercial"))
+        winner = commercial_winner or legal_winner
+        winner_candidates = [value for value in (commercial_winner, legal_winner) if value]
+        act_proposals = proposals_by_act.get(act_key, [])
+        winner_materialized = False
+        for proposal in act_proposals:
+            won = any(provider_matches(proposal.get("proveedor"), candidate) for candidate in winner_candidates)
+            winner_materialized = winner_materialized or won
+            if _deserted(record.get("estado")):
+                result = "Desierto"
+            elif won:
+                result = "Adjudicado"
+            elif winner:
+                result = "No adjudicado"
+            else:
+                result = "En evaluacion"
+            amount = float(proposal.get("monto_ofertado") or 0)
+            rows.append(
+                {
+                    **proposal,
+                    "ganador": winner,
+                    "ganador_norm": normalize_provider(winner),
+                    "ganado": bool(won),
+                    "monto_ganado": amount if won else 0.0,
+                    "resultado_empresa": result,
+                    "fuente_resultado": "resultado_oficial",
+                    "resultado_provisional": 0,
+                    "monto_ganado_fuente": "precio_proponente" if won else "",
+                }
+            )
+
+        # Algunos resultados historicos traen adjudicatario pero omiten la
+        # tabla de proponentes. Se materializa al ganador para que su historial
+        # no desaparezca; el origen del monto queda explicitamente auditado.
+        if winner and not winner_materialized and not _deserted(record.get("estado")):
+            amount, amount_source = _winner_amount(record)
+            rows.append(
+                {
+                    "acto_key": act_key,
+                    "ordinal": 99,
+                    "proveedor": winner,
+                    "proveedor_norm": normalize_provider(winner),
+                    "monto_ofertado": amount,
+                    "ganador": winner,
+                    "ganador_norm": normalize_provider(winner),
+                    "ganado": True,
+                    "monto_ganado": amount,
+                    "resultado_empresa": "Adjudicado",
+                    "fuente_resultado": "resultado_oficial_sintetico",
+                    "resultado_provisional": 0,
+                    "monto_ganado_fuente": amount_source,
+                }
+            )
+    return pd.DataFrame(rows, columns=PC_PROPOSAL_COLUMNS)
 
 
 def _qident(value: str) -> str:
@@ -58,36 +160,153 @@ def _source_columns(connection: sqlite3.Connection) -> list[str]:
 
 
 def _prepare_chunk(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    acts = prepare_pc_acts(raw, PCFilters(include_ambiguous=False))
+    # Se materializan tambien los ambiguos. La vista normal los excluye en SQL,
+    # pero el usuario puede recuperarlos con el selector correspondiente.
+    acts = prepare_pc_acts(raw, PCFilters(include_ambiguous=True))
     if acts.empty:
         return pd.DataFrame(columns=PC_ACT_COLUMNS), pd.DataFrame(columns=PC_PROPOSAL_COLUMNS)
     acts = acts.drop_duplicates("acto_key", keep="last").copy()
     acts["source_id"] = acts.get("id")
     acts["fecha_analitica"] = pd.to_datetime(acts["fecha_analitica"], errors="coerce").dt.strftime("%Y-%m-%d")
+    acts["numero_proceso"] = acts.apply(
+        lambda row: _process_number(row.get("enlace"), row.get("titulo")), axis=1
+    )
+    acts["source_layer"] = "resultado_oficial"
+    acts["resultado_provisional"] = 0
+    for column in PC_ACT_COLUMNS:
+        if column not in acts.columns:
+            acts[column] = ""
+    act_output = acts[PC_ACT_COLUMNS].copy()
+    return act_output, _official_proposals(acts)
+
+
+def _safe_json(value: object, fallback: object) -> object:
+    try:
+        decoded = json.loads(clean_text(value) or json.dumps(fallback))
+        return decoded
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
+
+
+def _lifecycle_items(payload: dict[str, object]) -> str:
+    pairs: list[tuple[int, str]] = []
+    for key, value in payload.items():
+        match = re.fullmatch(r"item_(\d+)", str(key))
+        text_value = clean_text(value)
+        if match and text_value:
+            pairs.append((int(match.group(1)), text_value))
+    return json.dumps([value for _, value in sorted(pairs)], ensure_ascii=False)
+
+
+def _prepare_lifecycle(
+    connection: sqlite3.Connection,
+    *,
+    official_processes: set[str],
+    official_keys: set[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, int]:
+    tables = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "cl_cotizaciones" not in tables:
+        return (
+            pd.DataFrame(columns=PC_ACT_COLUMNS),
+            pd.DataFrame(columns=PC_PROPOSAL_COLUMNS),
+            0,
+        )
+    connection.row_factory = sqlite3.Row
+    placeholders = ",".join("?" for _ in FINAL_CL_STATES)
+    records = [
+        dict(row)
+        for row in connection.execute(
+            f"SELECT * FROM cl_cotizaciones WHERE estado_derivado IN ({placeholders})",
+            tuple(sorted(FINAL_CL_STATES)),
+        )
+    ]
+    raw_rows: list[dict[str, object]] = []
+    proposal_map: dict[str, list[dict[str, object]]] = {}
+    for record in records:
+        process_number = _process_number(record.get("numero_cl"), record.get("enlace"))
+        act_key = clean_text(record.get("enlace")) or clean_text(record.get("cl_key")) or process_number
+        if not act_key or act_key in official_keys or (process_number and process_number in official_processes):
+            continue
+        payload = _safe_json(record.get("source_payload_json"), {})
+        payload = payload if isinstance(payload, dict) else {}
+        proponents = _safe_json(record.get("proponents_json"), [])
+        proponents = proponents if isinstance(proponents, list) else []
+        status = "Desierto" if clean_text(record.get("estado_derivado")) == "cerrada_sin_propuestas" else "En evaluacion"
+        payload_reference = parse_money(payload.get("precio_referencia"))
+        table_reference = parse_money(record.get("precio_referencia"))
+        reference = payload_reference or table_reference
+        ficha = clean_text(payload.get("ficha_detectada"))
+        raw_rows.append(
+            {
+                "id": "",
+                "publicacion": clean_text(record.get("fecha_publicacion")) or clean_text(payload.get("publicacion")),
+                "fecha": clean_text(record.get("fecha_cierre")) or clean_text(payload.get("fecha")),
+                "fecha_adjudicacion": "",
+                "fecha_actualizacion": clean_text(record.get("updated_at")) or clean_text(record.get("last_seen_at")),
+                "enlace": act_key,
+                "titulo": clean_text(record.get("titulo")) or clean_text(payload.get("titulo")),
+                "descripcion": clean_text(payload.get("descripcion")) or clean_text(record.get("titulo")),
+                "entidad": clean_text(record.get("entidad")) or clean_text(payload.get("entidad")),
+                "unidad_solic": clean_text(record.get("unidad_solicitante")) or clean_text(payload.get("unidad_solic")),
+                "estado": status,
+                "precio_referencia": reference,
+                "razon_social": "",
+                "nombre_comercial": "",
+                "num_participantes": len(proponents),
+                "total_items_ofertados": "",
+                "ficha_detectada": ficha or "No Detectada",
+                "fichas_detectadas_json": json.dumps(re.findall(r"\d{3,}", ficha), ensure_ascii=False),
+                "items_json": _lifecycle_items(payload),
+                "source_tipo_proceso": "CL",
+                "acto_key": act_key,
+                "numero_proceso": process_number,
+            }
+        )
+        proposal_map[act_key] = [item for item in proponents if isinstance(item, dict)]
+
+    if not raw_rows:
+        return pd.DataFrame(columns=PC_ACT_COLUMNS), pd.DataFrame(columns=PC_PROPOSAL_COLUMNS), len(records)
+    acts = prepare_pc_acts(pd.DataFrame(raw_rows), PCFilters(include_ambiguous=True))
+    if acts.empty:
+        return pd.DataFrame(columns=PC_ACT_COLUMNS), pd.DataFrame(columns=PC_PROPOSAL_COLUMNS), len(records)
+    acts = acts.drop_duplicates("acto_key", keep="last").copy()
+    acts["source_id"] = ""
+    acts["fecha_analitica"] = pd.to_datetime(acts["fecha_analitica"], errors="coerce").dt.strftime("%Y-%m-%d")
+    acts["numero_proceso"] = acts.apply(
+        lambda row: clean_text(row.get("numero_proceso")) or _process_number(row.get("enlace")), axis=1
+    )
+    acts["source_layer"] = "cotizacion_linea"
+    acts["resultado_provisional"] = 1
     for column in PC_ACT_COLUMNS:
         if column not in acts.columns:
             acts[column] = ""
     act_output = acts[PC_ACT_COLUMNS].copy()
 
-    proposals = unpivot_proposals(acts)
-    if proposals.empty:
-        return act_output, pd.DataFrame(columns=PC_PROPOSAL_COLUMNS)
-    winners = acts[["acto_key", "razon_social", "nombre_comercial"]].copy()
-    winners["ganador"] = winners["razon_social"].where(
-        winners["razon_social"].fillna("").astype(str).str.strip() != "",
-        winners["nombre_comercial"],
-    )
-    proposals = proposals.merge(winners[["acto_key", "ganador"]], on="acto_key", how="left")
-    proposals["ganador_norm"] = proposals["ganador"].map(normalize_provider)
-    proposals["ganado"] = (
-        proposals["proveedor_norm"].fillna("").ne("")
-        & proposals["proveedor_norm"].eq(proposals["ganador_norm"])
-    )
-    proposals["monto_ganado"] = proposals["monto_ofertado"].where(proposals["ganado"], 0.0)
-    for column in PC_PROPOSAL_COLUMNS:
-        if column not in proposals.columns:
-            proposals[column] = ""
-    return act_output, proposals[PC_PROPOSAL_COLUMNS].copy()
+    proposal_rows: list[dict[str, object]] = []
+    eligible_keys = set(act_output["acto_key"].astype(str))
+    for act_key in eligible_keys:
+        for ordinal, proposal in enumerate(proposal_map.get(act_key, []), start=1):
+            provider = clean_text(proposal.get("name") or proposal.get("proveedor"))
+            if not provider:
+                continue
+            proposal_rows.append(
+                {
+                    "acto_key": act_key,
+                    "ordinal": ordinal,
+                    "proveedor": provider,
+                    "proveedor_norm": normalize_provider(provider),
+                    "monto_ofertado": parse_money(proposal.get("total") or proposal.get("monto")),
+                    "ganador": "",
+                    "ganador_norm": "",
+                    "ganado": False,
+                    "monto_ganado": 0.0,
+                    "resultado_empresa": "En evaluacion",
+                    "fuente_resultado": "cotizacion_linea_cerrada",
+                    "resultado_provisional": 1,
+                    "monto_ganado_fuente": "",
+                }
+            )
+    return act_output, pd.DataFrame(proposal_rows, columns=PC_PROPOSAL_COLUMNS), len(records)
 
 
 def _initialize_database(connection: sqlite3.Connection) -> None:
@@ -118,7 +337,10 @@ def _initialize_database(connection: sqlite3.Connection) -> None:
             evidencia_familia TEXT,
             mercado_pc TEXT,
             evidencia_mercado TEXT,
-            source_tipo_proceso TEXT
+            source_tipo_proceso TEXT,
+            numero_proceso TEXT,
+            source_layer TEXT,
+            resultado_provisional INTEGER
         );
         CREATE TABLE pc_propuestas (
             acto_key TEXT NOT NULL,
@@ -130,6 +352,10 @@ def _initialize_database(connection: sqlite3.Connection) -> None:
             ganador_norm TEXT,
             ganado INTEGER,
             monto_ganado REAL,
+            resultado_empresa TEXT,
+            fuente_resultado TEXT,
+            resultado_provisional INTEGER,
+            monto_ganado_fuente TEXT,
             PRIMARY KEY (acto_key, ordinal)
         );
         CREATE TABLE pc_build_metadata (key TEXT PRIMARY KEY, value TEXT);
@@ -147,16 +373,19 @@ def _finish_database(connection: sqlite3.Connection, metadata: dict[str, str]) -
         CREATE INDEX idx_pc_propuestas_empresa ON pc_propuestas(proveedor_norm);
         CREATE INDEX idx_pc_propuestas_acto ON pc_propuestas(acto_key);
         CREATE INDEX idx_pc_propuestas_ganado ON pc_propuestas(ganado);
+        CREATE INDEX idx_pc_propuestas_resultado ON pc_propuestas(resultado_empresa);
+        CREATE INDEX idx_pc_actos_source_layer ON pc_actos(source_layer);
         CREATE TABLE pc_proveedores_catalogo AS
-        SELECT proveedor_norm,
-               MIN(proveedor) AS proveedor,
-               COUNT(DISTINCT acto_key) AS participaciones,
-               SUM(CASE WHEN ganado=1 THEN 1 ELSE 0 END) AS adjudicaciones,
-               SUM(monto_ofertado) AS monto_ofertado,
-               SUM(monto_ganado) AS monto_ganado
-        FROM pc_propuestas
-        WHERE trim(COALESCE(proveedor_norm,'')) <> ''
-        GROUP BY proveedor_norm;
+        SELECT p.proveedor_norm,
+               MIN(p.proveedor) AS proveedor,
+               COUNT(DISTINCT p.acto_key) AS participaciones,
+               COUNT(DISTINCT CASE WHEN p.ganado=1 THEN p.acto_key END) AS adjudicaciones,
+               SUM(p.monto_ofertado) AS monto_ofertado,
+               SUM(p.monto_ganado) AS monto_ganado
+        FROM pc_propuestas p
+        JOIN pc_actos a ON a.acto_key=p.acto_key
+        WHERE trim(COALESCE(p.proveedor_norm,'')) <> '' AND a.mercado_pc='no_medico'
+        GROUP BY p.proveedor_norm;
         CREATE UNIQUE INDEX ux_pc_provider_catalog_norm ON pc_proveedores_catalogo(proveedor_norm);
         CREATE TABLE pc_proveedores_dia AS
         SELECT a.fecha_analitica,
@@ -171,7 +400,7 @@ def _finish_database(connection: sqlite3.Connection, metadata: dict[str, str]) -
                COUNT(*) AS ofertas_validas
         FROM pc_propuestas p
         JOIN pc_actos a ON a.acto_key=p.acto_key
-        WHERE trim(COALESCE(p.proveedor_norm,'')) <> ''
+        WHERE trim(COALESCE(p.proveedor_norm,'')) <> '' AND a.mercado_pc='no_medico'
         GROUP BY a.fecha_analitica,p.proveedor_norm;
         CREATE INDEX ix_pc_provider_day_date ON pc_proveedores_dia(fecha_analitica);
         CREATE INDEX ix_pc_provider_day_provider ON pc_proveedores_dia(proveedor_norm);
@@ -189,7 +418,7 @@ def _finish_database(connection: sqlite3.Connection, metadata: dict[str, str]) -
                COUNT(*) AS ofertas_validas
         FROM pc_propuestas p
         JOIN pc_actos a ON a.acto_key=p.acto_key
-        WHERE trim(COALESCE(p.proveedor_norm,'')) <> ''
+        WHERE trim(COALESCE(p.proveedor_norm,'')) <> '' AND a.mercado_pc='no_medico'
         GROUP BY a.fecha_analitica,p.proveedor_norm,a.familia,a.entidad;
         CREATE INDEX ix_pc_provider_context_date ON pc_proveedores_contexto_dia(fecha_analitica);
         CREATE INDEX ix_pc_provider_context_provider ON pc_proveedores_contexto_dia(proveedor_norm);
@@ -204,6 +433,7 @@ def _finish_database(connection: sqlite3.Connection, metadata: dict[str, str]) -
                SUM(COALESCE(CAST(NULLIF(num_participantes,'') AS REAL),0)) AS participantes_suma,
                SUM(CASE WHEN trim(COALESCE(num_participantes,''))<>'' THEN 1 ELSE 0 END) AS participantes_con_dato
         FROM pc_actos
+        WHERE mercado_pc='no_medico'
         GROUP BY fecha_analitica,familia,entidad;
         CREATE INDEX ix_pc_family_day_date ON pc_familias_dia_entidad(fecha_analitica);
         CREATE INDEX ix_pc_family_day_family ON pc_familias_dia_entidad(familia);
@@ -232,24 +462,73 @@ def build(source: Path, output: Path, *, chunk_size: int = CHUNK_SIZE) -> dict[s
     source_rows = int(source_connection.execute("SELECT COUNT(*) FROM actos_publicos").fetchone()[0])
     act_rows = 0
     proposal_rows = 0
+    lifecycle_source_rows = 0
+    lifecycle_act_rows = 0
+    lifecycle_proposal_rows = 0
+    materialized_keys: set[str] = set()
+    official_processes: set[str] = set()
     try:
         for index, raw in enumerate(pd.read_sql_query(query, source_connection, chunksize=chunk_size), start=1):
             acts, proposals = _prepare_chunk(raw)
             if not acts.empty:
+                acts = acts[~acts["acto_key"].astype(str).isin(materialized_keys)].copy()
+                eligible_keys = set(acts["acto_key"].astype(str))
+                proposals = proposals[proposals["acto_key"].astype(str).isin(eligible_keys)].copy()
                 acts.to_sql("pc_actos", target, if_exists="append", index=False)
                 act_rows += len(acts)
+                materialized_keys.update(eligible_keys)
+                official_processes.update(
+                    value for value in acts["numero_proceso"].map(clean_text).tolist() if value
+                )
             if not proposals.empty:
                 proposals.to_sql("pc_propuestas", target, if_exists="append", index=False)
                 proposal_rows += len(proposals)
             if index % 5 == 0:
                 print(f"[PC] chunks={index} actos={act_rows:,} propuestas={proposal_rows:,}", flush=True)
+
+        lifecycle_acts, lifecycle_proposals, lifecycle_source_rows = _prepare_lifecycle(
+            source_connection,
+            official_processes=official_processes,
+            official_keys=materialized_keys,
+        )
+        if not lifecycle_acts.empty:
+            lifecycle_acts = lifecycle_acts[
+                ~lifecycle_acts["acto_key"].astype(str).isin(materialized_keys)
+            ].drop_duplicates("acto_key", keep="last")
+            lifecycle_keys = set(lifecycle_acts["acto_key"].astype(str))
+            lifecycle_proposals = lifecycle_proposals[
+                lifecycle_proposals["acto_key"].astype(str).isin(lifecycle_keys)
+            ].drop_duplicates(["acto_key", "ordinal"], keep="last")
+            lifecycle_acts.to_sql("pc_actos", target, if_exists="append", index=False)
+            lifecycle_act_rows = len(lifecycle_acts)
+            act_rows += lifecycle_act_rows
+            materialized_keys.update(lifecycle_keys)
+            if not lifecycle_proposals.empty:
+                lifecycle_proposals.to_sql("pc_propuestas", target, if_exists="append", index=False)
+                lifecycle_proposal_rows = len(lifecycle_proposals)
+                proposal_rows += lifecycle_proposal_rows
+        print(
+            f"[PC] ciclo CL fuente={lifecycle_source_rows:,} actos={lifecycle_act_rows:,} "
+            f"propuestas={lifecycle_proposal_rows:,}",
+            flush=True,
+        )
+
+        if source_rows > 0 and act_rows <= 0:
+            raise RuntimeError("Control de calidad: la fuente tiene datos pero Inteligencia PC quedo vacia.")
+        max_date_row = target.execute("SELECT MAX(fecha_analitica) FROM pc_actos").fetchone()
+        max_date = clean_text(max_date_row[0] if max_date_row else "")
         metadata = {
             "built_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "source_db": str(source),
             "source_rows": str(source_rows),
             "act_rows": str(act_rows),
             "proposal_rows": str(proposal_rows),
-            "classifier_version": "pc-market-1.0.0",
+            "lifecycle_source_rows": str(lifecycle_source_rows),
+            "lifecycle_act_rows": str(lifecycle_act_rows),
+            "lifecycle_proposal_rows": str(lifecycle_proposal_rows),
+            "max_analytic_date": max_date,
+            "classifier_version": "pc-market-1.1.0",
+            "participation_model_version": "pc-participations-2.0.0",
         }
         _finish_database(target, metadata)
     finally:
@@ -291,9 +570,12 @@ def publish_postgres(database: Path, database_url: str, *, chunk_size: int = 10_
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_actos_familia ON pc_actos(familia)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_actos_entidad ON pc_actos(entidad)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_actos_estado ON pc_actos(estado)'))
+            connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_actos_source_layer ON pc_actos(source_layer)'))
+            connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_actos_process ON pc_actos(numero_proceso)'))
             connection.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ux_pc_propuestas_key ON pc_propuestas(acto_key,ordinal)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_propuestas_empresa ON pc_propuestas(proveedor_norm)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_propuestas_acto ON pc_propuestas(acto_key)'))
+            connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_propuestas_resultado ON pc_propuestas(resultado_empresa)'))
             connection.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ux_pc_provider_catalog_norm ON pc_proveedores_catalogo(proveedor_norm)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_day_date ON pc_proveedores_dia(fecha_analitica)'))
             connection.execute(text('CREATE INDEX IF NOT EXISTS ix_pc_provider_day_provider ON pc_proveedores_dia(proveedor_norm)'))

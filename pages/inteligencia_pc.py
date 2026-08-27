@@ -42,6 +42,7 @@ _REPOSITORY_CONTRACT = (
 )
 _SERVICE_EXPORTS = (
     "INTELIGENCIA_PC_SERVICE_VERSION",
+    "COMPANY_RESULT_VALUES",
     "FAMILY_RULES",
     "PCAnalyticsUnavailable",
     "PCFilters",
@@ -75,6 +76,7 @@ if _service_contract_is_incomplete(inteligencia_pc_service):
     inteligencia_pc_service = importlib.reload(inteligencia_pc_service)
 
 INTELIGENCIA_PC_SERVICE_VERSION = inteligencia_pc_service.INTELIGENCIA_PC_SERVICE_VERSION
+COMPANY_RESULT_VALUES = inteligencia_pc_service.COMPANY_RESULT_VALUES
 FAMILY_RULES = inteligencia_pc_service.FAMILY_RULES
 PCAnalyticsUnavailable = inteligencia_pc_service.PCAnalyticsUnavailable
 PCFilters = inteligencia_pc_service.PCFilters
@@ -333,7 +335,35 @@ def _render_company_kpis(frame: pd.DataFrame) -> dict[str, float]:
     second[1].metric("Oferta promedio", _money(summary["oferta_promedio"]))
     second[2].metric("Oferta mediana", _money(summary["oferta_mediana"]))
     second[3].metric("Oferta máxima", _money(summary["oferta_maxima"]))
+    result_columns = st.columns(3)
+    result_columns[0].metric("No adjudicados", _number(summary.get("no_adjudicados", 0)))
+    result_columns[1].metric("En evaluación", _number(summary.get("en_evaluacion", 0)))
+    result_columns[2].metric("Desiertos", _number(summary.get("desiertos", 0)))
     return summary
+
+
+def _filter_company_results(frame: pd.DataFrame, *, key_prefix: str) -> pd.DataFrame:
+    if frame.empty or "resultado_empresa" not in frame.columns:
+        return frame
+    controls = st.columns([3, 1])
+    selected = controls[0].multiselect(
+        "Resultado para la empresa",
+        list(COMPANY_RESULT_VALUES),
+        default=list(COMPANY_RESULT_VALUES),
+        format_func=lambda value: "En evaluación" if value == "En evaluacion" else value,
+        key=f"{key_prefix}_company_results",
+        help=(
+            "Adjudicado: ganó. No adjudicado: participó y ganó otra empresa. "
+            "En evaluación: la cotización cerró, pero aún no hay adjudicación oficial."
+        ),
+    )
+    only_won = controls[1].checkbox(
+        "Solo adjudicados", value=False, key=f"{key_prefix}_only_won"
+    )
+    allowed = {"Adjudicado"} if only_won else set(selected)
+    if not allowed:
+        return frame.iloc[0:0].copy()
+    return frame[frame["resultado_empresa"].astype(str).isin(allowed)].copy()
 
 
 def _company_table(frame: pd.DataFrame) -> None:
@@ -341,16 +371,23 @@ def _company_table(frame: pd.DataFrame) -> None:
         st.info("No hay participaciones no médicas para esta empresa y filtros.")
         return
     display_columns = [
-        "fecha_analitica", "titulo", "familia", "entidad", "estado", "monto_referencia",
-        "monto_participacion", "cantidad_participantes_calculada", "ganado", "ganador", "enlace",
+        "fecha_analitica", "titulo", "familia", "entidad", "resultado_empresa", "estado",
+        "monto_referencia", "monto_participacion", "cantidad_participantes_calculada",
+        "ganador", "source_layer", "resultado_provisional", "enlace",
     ]
     display = frame[[column for column in display_columns if column in frame.columns]].copy()
+    if "resultado_empresa" in display.columns:
+        display["resultado_empresa"] = display["resultado_empresa"].replace(
+            {"En evaluacion": "En evaluación"}
+        )
     display = display.sort_values("fecha_analitica", ascending=False)
     config = _number_config(
         display,
         {
             "enlace": st.column_config.LinkColumn("Acto", display_text="Abrir"),
-            "ganado": st.column_config.CheckboxColumn("Ganado"),
+            "resultado_empresa": st.column_config.TextColumn("Resultado para la empresa"),
+            "source_layer": st.column_config.TextColumn("Fuente"),
+            "resultado_provisional": st.column_config.CheckboxColumn("Provisional"),
             "fecha_analitica": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
         },
     )
@@ -771,6 +808,7 @@ elif section == "Empresas":
     if company:
         with st.spinner(f"Analizando {company}..."):
             company_frame = _company_acts(company, filters, repo)
+        company_frame = _filter_company_results(company_frame, key_prefix="pc_company")
         _render_company_kpis(company_frame)
         _company_table(company_frame)
         trend = company_yearly_trend(company_frame)

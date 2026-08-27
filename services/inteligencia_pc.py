@@ -26,7 +26,15 @@ from sqlalchemy.engine import Engine
 
 # Esta version forma parte de la clave de cache de Streamlit. Debe cambiar
 # cuando el contrato publico del repositorio agrega o modifica operaciones.
-INTELIGENCIA_PC_SERVICE_VERSION = "2026-08-18-tops-v2"
+INTELIGENCIA_PC_SERVICE_VERSION = "2026-08-26-participaciones-v3"
+
+
+COMPANY_RESULT_VALUES = (
+    "Adjudicado",
+    "No adjudicado",
+    "Desierto",
+    "En evaluacion",
+)
 
 
 NO_FICHA_VALUES = {
@@ -147,6 +155,32 @@ def normalize_provider(value: object) -> str:
     while tokens and tokens[-1] in suffixes:
         tokens.pop()
     return " ".join(tokens) or value_norm
+
+
+def provider_match_key(value: object) -> str:
+    """Genera una llave tolerante a variantes societarias y pluralizacion.
+
+    Panama Compra mezcla razon social, nombre comercial y abreviaturas.  Esta
+    llave no intenta adivinar empresas distintas: solo normaliza sufijos y el
+    plural final de palabras suficientemente largas (``system/systems``).
+    """
+
+    tokens = normalize_provider(value).split()
+    singular = [token[:-1] if len(token) > 4 and token.endswith("s") else token for token in tokens]
+    return " ".join(singular)
+
+
+def provider_matches(left: object, right: object) -> bool:
+    left_key = provider_match_key(left)
+    right_key = provider_match_key(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+    # Conserva la busqueda parcial existente, pero evita coincidencias de una
+    # o dos letras que mezclen proveedores no relacionados.
+    shorter, longer = sorted((left_key, right_key), key=len)
+    return len(shorter) >= 4 and re.search(rf"(?:^| ){re.escape(shorter)}(?: |$)", longer) is not None
 
 
 def parse_money(value: object) -> float:
@@ -286,6 +320,8 @@ class InteligenciaPCRepository:
         if "actos_publicos" not in tables and not self.has_pc_layer:
             raise PCAnalyticsUnavailable("No existe actos_publicos ni la capa pc_actos.")
         self.columns = _existing_columns(engine, "actos_publicos") if "actos_publicos" in tables else set()
+        self.pc_act_columns = _existing_columns(engine, "pc_actos") if "pc_actos" in tables else set()
+        self.pc_proposal_columns = _existing_columns(engine, "pc_propuestas") if "pc_propuestas" in tables else set()
 
     @classmethod
     def connect(cls, *, database_url: str = "", local_candidates: Sequence[Path] = ()) -> "InteligenciaPCRepository":
@@ -957,13 +993,28 @@ class InteligenciaPCRepository:
         if len(normalize_text(term)) < 2:
             return []
         if self.has_pc_layer:
+            normalized = normalize_provider(term)
+            broad_token = next((token for token in provider_match_key(term).split() if len(token) >= 3), normalized)
             with self.engine.connect() as connection:
                 frame = pd.read_sql_query(
-                    text("SELECT proveedor FROM pc_proveedores_catalogo WHERE lower(proveedor) LIKE :pattern OR proveedor_norm LIKE :normalized ORDER BY participaciones DESC LIMIT :limit"),
+                    text(
+                        "SELECT proveedor FROM pc_proveedores_catalogo "
+                        "WHERE lower(proveedor) LIKE :pattern OR proveedor_norm LIKE :normalized "
+                        "OR proveedor_norm LIKE :broad "
+                        "ORDER BY participaciones DESC LIMIT :query_limit"
+                    ),
                     connection,
-                    params={"pattern": f"%{term.lower()}%", "normalized": f"%{normalize_provider(term)}%", "limit": int(limit)},
+                    params={
+                        "pattern": f"%{term.lower()}%",
+                        "normalized": f"%{normalized}%",
+                        "broad": f"%{broad_token}%",
+                        "query_limit": max(int(limit) * 8, 300),
+                    },
                 )
-            return [clean_text(value) for value in frame.get("proveedor", pd.Series(dtype=str)).tolist() if clean_text(value)]
+            candidates = [clean_text(value) for value in frame.get("proveedor", pd.Series(dtype=str)).tolist() if clean_text(value)]
+            preferred = [value for value in candidates if provider_matches(value, term)]
+            remaining = [value for value in candidates if value not in preferred and normalize_text(term) in normalize_text(value)]
+            return (preferred + remaining)[: int(limit)]
         selects: list[str] = []
         for index in range(1, 15):
             column = f"Proponente {index}"
@@ -1047,6 +1098,8 @@ class InteligenciaPCRepository:
         prefix = f"{alias}." if alias else ""
         clauses = ["1=1"]
         params: dict[str, Any] = {}
+        if not filters.include_ambiguous and "mercado_pc" in self.pc_act_columns:
+            clauses.append(f"{prefix}mercado_pc = 'no_medico'")
         if filters.start_date:
             clauses.append(f"{prefix}fecha_analitica >= :pc_start")
             params["pc_start"] = filters.start_date.isoformat()
@@ -1083,6 +1136,33 @@ class InteligenciaPCRepository:
             operator = " AND " if filters.search_mode.upper() == "AND" else " OR "
             clauses.append("(" + operator.join(search_clauses) + ")")
         return " AND ".join(clauses), params
+
+    def _proposal_result_select(self, *, proposal_alias: str = "p", act_alias: str = "a") -> str:
+        """Devuelve columnas compatibles con capas PC nuevas y anteriores."""
+
+        if "resultado_empresa" in self.pc_proposal_columns:
+            provisional = (
+                f"COALESCE({proposal_alias}.resultado_provisional, 0)"
+                if "resultado_provisional" in self.pc_proposal_columns
+                else "0"
+            )
+            source = (
+                f"COALESCE({proposal_alias}.fuente_resultado, '')"
+                if "fuente_resultado" in self.pc_proposal_columns
+                else "''"
+            )
+            return (
+                f"{proposal_alias}.resultado_empresa AS resultado_empresa, "
+                f"{provisional} AS resultado_provisional_empresa, {source} AS fuente_resultado"
+            )
+        return (
+            "CASE "
+            f"WHEN COALESCE({proposal_alias}.ganado,0)=1 THEN 'Adjudicado' "
+            f"WHEN lower(COALESCE({act_alias}.estado,'')) LIKE '%desiert%' THEN 'Desierto' "
+            f"WHEN trim(COALESCE({proposal_alias}.ganador,''))<>'' THEN 'No adjudicado' "
+            "ELSE 'En evaluacion' END AS resultado_empresa, "
+            "0 AS resultado_provisional_empresa, 'compatibilidad' AS fuente_resultado"
+        )
 
     def _provider_context_compatible(self, filters: PCFilters) -> bool:
         return self.has_provider_context and not any(
@@ -1124,22 +1204,41 @@ class InteligenciaPCRepository:
         if not target:
             return pd.DataFrame()
         where, params = self._pc_where(filters, alias="a")
+        target_key = provider_match_key(company)
+        broad_token = next((token for token in target_key.split() if len(token) >= 3), target)
         params["company"] = f"%{target}%"
         params["company_target"] = target
+        params["company_broad"] = f"%{broad_token}%"
+        result_select = self._proposal_result_select()
         query = f"""
             SELECT a.*, p.proveedor AS empresa_consultada, p.monto_ofertado AS monto_participacion,
-                   p.ganado, p.monto_ganado, p.ganador
+                   p.ganado, p.monto_ganado, p.ganador, {result_select}
             FROM pc_propuestas p
             JOIN pc_actos a ON a.acto_key=p.acto_key
             WHERE {where}
-              AND (p.proveedor_norm LIKE :company OR :company_target LIKE ('%' || p.proveedor_norm || '%'))
+              AND (p.proveedor_norm LIKE :company OR :company_target LIKE ('%' || p.proveedor_norm || '%')
+                   OR p.proveedor_norm LIKE :company_broad)
         """
         with self.engine.connect() as connection:
             matched = pd.read_sql_query(text(query), connection, params=params)
         if matched.empty:
             return matched
+        matched = matched[
+            matched["proveedor"].map(lambda value: provider_matches(value, company))
+            if "proveedor" in matched.columns
+            else matched["empresa_consultada"].map(lambda value: provider_matches(value, company))
+        ].copy()
+        if matched.empty:
+            return matched
         matched["fecha_analitica"] = pd.to_datetime(matched["fecha_analitica"], errors="coerce")
         matched["ganado"] = matched["ganado"].fillna(False).astype(bool)
+        matched["resultado_empresa"] = matched["resultado_empresa"].fillna("En evaluacion").astype(str)
+        proposal_provisional = (
+            matched.pop("resultado_provisional_empresa")
+            if "resultado_provisional_empresa" in matched.columns
+            else pd.Series(0, index=matched.index)
+        )
+        matched["resultado_provisional"] = proposal_provisional.fillna(0).astype(bool)
         keys = matched["acto_key"].dropna().astype(str).unique().tolist()
         competitor_frames: list[pd.DataFrame] = []
         with self.engine.connect() as connection:
@@ -1149,7 +1248,7 @@ class InteligenciaPCRepository:
                 key_params = dict(zip(key_names, chunk))
                 competitor_frames.append(
                     pd.read_sql_query(
-                        text(f"SELECT acto_key,proveedor,proveedor_norm FROM pc_propuestas WHERE acto_key IN ({', '.join(':' + key for key in key_names)})"),
+                        text(f"SELECT acto_key,proveedor,proveedor_norm,ganado FROM pc_propuestas WHERE acto_key IN ({', '.join(':' + key for key in key_names)})"),
                         connection,
                         params=key_params,
                     )
@@ -1358,21 +1457,39 @@ def build_company_acts(frame: pd.DataFrame, company: str) -> pd.DataFrame:
                 continue
             participants.append(provider)
             provider_norm = normalize_provider(provider)
-            if target and (target in provider_norm or provider_norm in target):
+            if target and provider_matches(provider, company):
                 matched.append((provider, parse_money(record.get(f"Precio Proponente {ordinal}"))))
-        winner = clean_text(record.get("razon_social") or record.get("nombre_comercial"))
-        winner_norm = normalize_provider(winner)
-        winner_match = bool(target and winner_norm and (target in winner_norm or winner_norm in target))
+        legal_winner = clean_text(record.get("razon_social"))
+        commercial_winner = clean_text(record.get("nombre_comercial"))
+        winner = commercial_winner or legal_winner
+        winner_match = bool(
+            target
+            and any(provider_matches(value, company) for value in (legal_winner, commercial_winner) if value)
+        )
         if not matched and not winner_match:
             continue
         output = dict(record)
         output["empresa_consultada"] = matched[0][0] if matched else company
-        output["monto_participacion"] = sum(amount for _, amount in matched)
+        offered_amount = sum(amount for _, amount in matched)
+        if winner_match and offered_amount <= 0:
+            offered_amount = parse_money(record.get("total_items_ofertados")) or parse_money(record.get("precio_referencia"))
+        output["monto_participacion"] = offered_amount
         output["ganado"] = winner_match
-        output["monto_ganado"] = output["monto_participacion"] if winner_match else 0.0
+        output["monto_ganado"] = offered_amount if winner_match else 0.0
         output["ganador"] = winner
+        state = normalize_text(record.get("estado"))
+        if "desiert" in state:
+            output["resultado_empresa"] = "Desierto"
+        elif winner_match:
+            output["resultado_empresa"] = "Adjudicado"
+        elif legal_winner or commercial_winner:
+            output["resultado_empresa"] = "No adjudicado"
+        else:
+            output["resultado_empresa"] = "En evaluacion"
+        output["resultado_provisional"] = False
+        output["fuente_resultado"] = "resultado_oficial"
         output["participantes_lista"] = participants
-        output["competidores"] = [name for name in participants if normalize_provider(name) != target]
+        output["competidores"] = [name for name in participants if not provider_matches(name, company)]
         output["cantidad_participantes_calculada"] = len({normalize_provider(name) for name in participants if normalize_provider(name)})
         rows.append(output)
     return pd.DataFrame(rows)
@@ -1382,16 +1499,21 @@ def company_summary(acts: pd.DataFrame) -> dict[str, float]:
     if acts.empty:
         return {
             "participaciones": 0, "ganados": 0, "tasa_exito": 0.0,
+            "no_adjudicados": 0, "desiertos": 0, "en_evaluacion": 0,
             "monto_participado": 0.0, "monto_ganado": 0.0,
             "oferta_minima": 0.0, "oferta_promedio": 0.0,
             "oferta_mediana": 0.0, "oferta_maxima": 0.0,
         }
     offered = pd.to_numeric(acts.get("monto_participacion", 0), errors="coerce").fillna(0)
     won = acts.get("ganado", pd.Series(False, index=acts.index)).fillna(False).astype(bool)
+    results = acts.get("resultado_empresa", pd.Series("", index=acts.index)).fillna("").astype(str)
     return {
         "participaciones": int(acts["acto_key"].nunique() if "acto_key" in acts else len(acts)),
         "ganados": int(won.sum()),
         "tasa_exito": float(won.mean() * 100.0),
+        "no_adjudicados": int((results == "No adjudicado").sum()),
+        "desiertos": int((results == "Desierto").sum()),
+        "en_evaluacion": int((results == "En evaluacion").sum()),
         "monto_participado": float(offered.sum()),
         "monto_ganado": float(pd.to_numeric(acts.get("monto_ganado", 0), errors="coerce").fillna(0).sum()),
         "oferta_minima": float(offered[offered > 0].min()) if (offered > 0).any() else 0.0,

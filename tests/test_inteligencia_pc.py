@@ -288,3 +288,131 @@ def test_materialized_layer_supports_fast_views(tmp_path: Path, monkeypatch: pyt
     assert repo.family_provider_ranking(filters).iloc[0]["familia"] == "Climatizacion, refrigeracion y HVAC"
     assert repo.low_competition_projects(filters, maximum_participants=2, minimum_amount=5000).iloc[0]["acto_key"] == "https://acto/1"
     repo.close()
+
+
+def test_company_results_distinguish_winner_loser_deserted_and_pending() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "acto_key": "won", "estado": "Adjudicado", "razon_social": "RS ENGINEERING",
+                "Proponente 1": "RS ENGINEERING", "Precio Proponente 1": "1000",
+            },
+            {
+                "acto_key": "lost", "estado": "Adjudicado", "razon_social": "OTRA EMPRESA",
+                "Proponente 1": "RS ENGINEERING", "Precio Proponente 1": "1100",
+            },
+            {
+                "acto_key": "deserted", "estado": "Desierto",
+                "Proponente 1": "RS ENGINEERING", "Precio Proponente 1": "1200",
+            },
+            {
+                "acto_key": "pending", "estado": "En evaluacion",
+                "Proponente 1": "RS ENGINEERING", "Precio Proponente 1": "1300",
+            },
+        ]
+    )
+    result = build_company_acts(frame, "RS Engineering")
+    assert dict(zip(result["acto_key"], result["resultado_empresa"])) == {
+        "won": "Adjudicado",
+        "lost": "No adjudicado",
+        "deserted": "Desierto",
+        "pending": "En evaluacion",
+    }
+
+
+def test_builder_materializes_synthetic_winner_and_rs_72k_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    source = tmp_path / "operational.db"
+    output = tmp_path / "inteligencia_pc.db"
+    _create_test_database(source)
+    connection = sqlite3.connect(source)
+    columns = [row[1] for row in connection.execute("PRAGMA table_info(actos_publicos)")]
+    row = {column: "" for column in columns}
+    row.update(
+        {
+            "id": 72,
+            "publicacion": "25-08-2026",
+            "fecha_adjudicacion": "26-08-2026",
+            "enlace": "https://www.panamacompra.gob.pa/Inicio/#/pliego-de-cargos/2026-1-10-01-02-CM-072000/token",
+            "titulo": "Adecuacion de climatizacion de policlinica",
+            "descripcion": "Sistema HVAC central",
+            "entidad": "Caja de Seguro Social - Policlinica",
+            "estado": "Adjudicado",
+            "precio_referencia": "72000",
+            "razon_social": "RS ENGINEERING, S.A.",
+            "nombre_comercial": "RS ENGINEERING",
+            "ficha_detectada": "No Detectada",
+            "fichas_detectadas_json": "[]",
+            "items_json": "[]",
+            "source_tipo_proceso": "CM",
+        }
+    )
+    placeholders = ",".join("?" for _ in columns)
+    connection.execute(
+        f"INSERT INTO actos_publicos ({','.join(chr(34) + col + chr(34) for col in columns)}) VALUES ({placeholders})",
+        [row[column] for column in columns],
+    )
+    connection.commit()
+    connection.close()
+
+    build(source, output, chunk_size=500)
+    repo = InteligenciaPCRepository.connect(local_candidates=[output])
+    acts = repo.company_acts(
+        "RS Engineering",
+        PCFilters(start_date=date(2026, 8, 1), end_date=date(2026, 8, 31)),
+    )
+    acceptance = acts[acts["titulo"].str.contains("policlinica", case=False, na=False)]
+    assert len(acceptance) == 1
+    assert acceptance.iloc[0]["resultado_empresa"] == "Adjudicado"
+    assert float(acceptance.iloc[0]["monto_participacion"]) == pytest.approx(72_000.0)
+    repo.close()
+
+
+def test_builder_adds_closed_online_quotes_without_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    source = tmp_path / "operational.db"
+    output = tmp_path / "inteligencia_pc.db"
+    _create_test_database(source)
+    connection = sqlite3.connect(source)
+    connection.execute(
+        """
+        CREATE TABLE cl_cotizaciones (
+            cl_key TEXT, numero_cl TEXT, enlace TEXT, titulo TEXT, entidad TEXT,
+            unidad_solicitante TEXT, precio_referencia REAL, fecha_publicacion TEXT,
+            fecha_cierre TEXT, estado_derivado TEXT, proponents_json TEXT,
+            source_payload_json TEXT, updated_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO cl_cotizaciones VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "cl-1", "2026-1-10-01-02-CL-099999", "https://acto/cl-1",
+            "Mantenimiento de sistema HVAC", "Policlinica A", "Compras", 75_000,
+            "26-08-2026", "2026-08-26T14:00:00-05:00", "cerrada_con_propuestas",
+            '[{"name":"RS ENGINEERING","total":72000},{"name":"COMPETIDOR","total":73000}]',
+            '{"descripcion":"Mantenimiento de aire acondicionado central","ficha_detectada":"No Detectada"}',
+            "2026-08-26T15:00:00-05:00",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    build(source, output, chunk_size=500)
+    repo = InteligenciaPCRepository.connect(local_candidates=[output])
+    acts = repo.company_acts(
+        "RS Engineering",
+        PCFilters(start_date=date(2026, 8, 1), end_date=date(2026, 8, 31)),
+    )
+    quote = acts[acts["acto_key"] == "https://acto/cl-1"]
+    assert len(quote) == 1
+    assert quote.iloc[0]["resultado_empresa"] == "En evaluacion"
+    assert bool(quote.iloc[0]["resultado_provisional"])
+    assert float(quote.iloc[0]["monto_participacion"]) == pytest.approx(72_000.0)
+    repo.close()
