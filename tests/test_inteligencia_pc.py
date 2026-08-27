@@ -343,6 +343,29 @@ def test_official_json_keeps_all_participants_and_multiple_winners() -> None:
     assert float(proposals["monto_ganado"].sum()) == pytest.approx(102000)
 
 
+def test_official_json_deduplication_keeps_unique_consecutive_ordinals() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "acto_key": "dedupe",
+                "estado": "Adjudicado",
+                "proponentes_json": (
+                    '[{"nombre":"EMPRESA A","monto":100},'
+                    '{"nombre":"EMPRESA A","monto":100},'
+                    '{"nombre":"EMPRESA B","monto":200}]'
+                ),
+                "ganadores_json": '[{"nombre":"EMPRESA B","monto":200}]',
+                "Proponente 1": "EMPRESA C",
+                "Precio Proponente 1": "300",
+            }
+        ]
+    )
+    proposals = _official_proposals(frame)
+    assert proposals["proveedor"].tolist() == ["EMPRESA A", "EMPRESA B", "EMPRESA C"]
+    assert proposals["ordinal"].tolist() == [1, 2, 3]
+    assert not proposals.duplicated(["acto_key", "ordinal"]).any()
+
+
 def test_deserted_act_never_keeps_stale_winner_or_won_amount() -> None:
     frame = pd.DataFrame(
         [

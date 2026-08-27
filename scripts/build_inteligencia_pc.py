@@ -139,10 +139,11 @@ def _official_proposals(acts: pd.DataFrame) -> pd.DataFrame:
         # Materializa cada adjudicatario oficial omitido en la tabla de
         # propuestas. Esto cubre adjudicaciones multiples sin inventar un
         # ganador en actos desiertos.
-        for winner_index, winner_entry in enumerate(
-            ([] if is_deserted else winners),
-            start=99,
-        ):
+        next_synthetic_ordinal = max(
+            (int(value.get("ordinal") or 0) for value in act_proposals),
+            default=0,
+        ) + 1
+        for winner_entry in ([] if is_deserted else winners):
             winner_name = clean_text(winner_entry.get("proveedor"))
             if not winner_name:
                 continue
@@ -155,7 +156,7 @@ def _official_proposals(acts: pd.DataFrame) -> pd.DataFrame:
             rows.append(
                 {
                     "acto_key": act_key,
-                    "ordinal": winner_index,
+                    "ordinal": next_synthetic_ordinal,
                     "proveedor": winner_name,
                     "proveedor_norm": normalize_provider(winner_name),
                     "monto_ofertado": amount,
@@ -169,6 +170,7 @@ def _official_proposals(acts: pd.DataFrame) -> pd.DataFrame:
                     "monto_ganado_fuente": amount_source,
                 }
             )
+            next_synthetic_ordinal += 1
     return pd.DataFrame(rows, columns=PC_PROPOSAL_COLUMNS)
 
 

@@ -1437,7 +1437,7 @@ def proposal_entries(record: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for ordinal, item in enumerate(_json_object_list(record.get("proponentes_json")), start=1):
+    for item in _json_object_list(record.get("proponentes_json")):
         provider = clean_text(item.get("nombre") or item.get("proveedor"))
         provider_norm = normalize_provider(provider)
         if not provider_norm or provider_norm in seen:
@@ -1448,7 +1448,11 @@ def proposal_entries(record: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "proveedor": provider,
                 "proveedor_norm": provider_norm,
                 "monto_ofertado": parse_money(item.get("monto") or item.get("total")),
-                "ordinal": ordinal,
+                # El ordinal es interno a la capa analitica y debe ser
+                # consecutivo despues de deduplicar. Conservar la posicion
+                # original dejaba huecos y podia colisionar con una columna
+                # legacy agregada posteriormente.
+                "ordinal": len(rows) + 1,
             }
         )
 
@@ -1463,7 +1467,7 @@ def proposal_entries(record: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "proveedor": provider,
                 "proveedor_norm": provider_norm,
                 "monto_ofertado": parse_money(record.get(f"Precio Proponente {ordinal}")),
-                "ordinal": ordinal if not rows else len(rows) + 1,
+                "ordinal": len(rows) + 1,
             }
         )
     return rows
