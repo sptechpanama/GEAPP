@@ -416,3 +416,13 @@ def test_builder_adds_closed_online_quotes_without_duplicates(
     assert bool(quote.iloc[0]["resultado_provisional"])
     assert float(quote.iloc[0]["monto_participacion"]) == pytest.approx(72_000.0)
     repo.close()
+
+    connection = sqlite3.connect(output)
+    try:
+        source_id_type = connection.execute(
+            "SELECT typeof(source_id) FROM pc_actos WHERE acto_key=?",
+            ("https://acto/cl-1",),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert source_id_type == "null"

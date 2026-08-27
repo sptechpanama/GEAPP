@@ -238,7 +238,7 @@ def _prepare_lifecycle(
         ficha = clean_text(payload.get("ficha_detectada"))
         raw_rows.append(
             {
-                "id": "",
+                "id": None,
                 "publicacion": clean_text(record.get("fecha_publicacion")) or clean_text(payload.get("publicacion")),
                 "fecha": clean_text(record.get("fecha_cierre")) or clean_text(payload.get("fecha")),
                 "fecha_adjudicacion": "",
@@ -270,7 +270,10 @@ def _prepare_lifecycle(
     if acts.empty:
         return pd.DataFrame(columns=PC_ACT_COLUMNS), pd.DataFrame(columns=PC_PROPOSAL_COLUMNS), len(records)
     acts = acts.drop_duplicates("acto_key", keep="last").copy()
-    acts["source_id"] = ""
+    # Las cotizaciones en linea no tienen el id numerico del API oficial.
+    # Debe conservarse como NULL para que PostgreSQL no intente insertar una
+    # cadena vacia en la columna BIGINT inferida de los actos oficiales.
+    acts["source_id"] = None
     acts["fecha_analitica"] = pd.to_datetime(acts["fecha_analitica"], errors="coerce").dt.strftime("%Y-%m-%d")
     acts["numero_proceso"] = acts.apply(
         lambda row: clean_text(row.get("numero_proceso")) or _process_number(row.get("enlace")), axis=1
@@ -555,6 +558,13 @@ def publish_postgres(database: Path, database_url: str, *, chunk_size: int = 10_
                 connection.execute(text(f'DROP TABLE IF EXISTS "{target}"'))
             first = True
             for frame in pd.read_sql_query(f'SELECT * FROM "{table}"', source, chunksize=chunk_size):
+                if table == "pc_actos" and "source_id" in frame.columns:
+                    numeric_ids = pd.to_numeric(frame["source_id"], errors="coerce")
+                    frame["source_id"] = pd.Series(
+                        [int(value) if pd.notna(value) else None for value in numeric_ids],
+                        index=frame.index,
+                        dtype=object,
+                    )
                 frame.to_sql(target, engine, if_exists="replace" if first else "append", index=False, chunksize=2000, method="multi")
                 first = False
             if first:
