@@ -297,7 +297,7 @@ CORE_COLUMNS = (
     "enlace", "titulo", "descripcion", "entidad", "unidad_solic", "estado",
     "precio_referencia", "razon_social", "nombre_comercial", "num_participantes",
     "total_items_ofertados", "ficha_detectada", "fichas_detectadas_json",
-    "items_json", "source_tipo_proceso",
+    "items_json", "source_tipo_proceso", "proponentes_json", "ganadores_json",
 )
 
 
@@ -1421,23 +1421,101 @@ def prepare_pc_acts(frame: pd.DataFrame, filters: PCFilters) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
+def _json_object_list(value: object) -> list[dict[str, Any]]:
+    raw = clean_text(value)
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
+
+
+def proposal_entries(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Lee primero la lista oficial completa y conserva compatibilidad legacy."""
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ordinal, item in enumerate(_json_object_list(record.get("proponentes_json")), start=1):
+        provider = clean_text(item.get("nombre") or item.get("proveedor"))
+        provider_norm = normalize_provider(provider)
+        if not provider_norm or provider_norm in seen:
+            continue
+        seen.add(provider_norm)
+        rows.append(
+            {
+                "proveedor": provider,
+                "proveedor_norm": provider_norm,
+                "monto_ofertado": parse_money(item.get("monto") or item.get("total")),
+                "ordinal": ordinal,
+            }
+        )
+
+    for ordinal in range(1, 15):
+        provider = clean_text(record.get(f"Proponente {ordinal}"))
+        provider_norm = normalize_provider(provider)
+        if not provider_norm or provider_norm in seen:
+            continue
+        seen.add(provider_norm)
+        rows.append(
+            {
+                "proveedor": provider,
+                "proveedor_norm": provider_norm,
+                "monto_ofertado": parse_money(record.get(f"Precio Proponente {ordinal}")),
+                "ordinal": ordinal if not rows else len(rows) + 1,
+            }
+        )
+    return rows
+
+
+def winner_entries(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in _json_object_list(record.get("ganadores_json")):
+        provider = clean_text(item.get("nombre") or item.get("proveedor"))
+        provider_norm = normalize_provider(provider)
+        if not provider_norm or provider_norm in seen:
+            continue
+        seen.add(provider_norm)
+        rows.append(
+            {
+                "proveedor": provider,
+                "proveedor_norm": provider_norm,
+                "monto_ganado": parse_money(item.get("monto") or item.get("total")),
+                "fuente": "ganadores_json",
+            }
+        )
+    if rows:
+        return rows
+
+    for value in (record.get("nombre_comercial"), record.get("razon_social")):
+        provider = clean_text(value)
+        provider_norm = normalize_provider(provider)
+        if provider_norm and provider_norm not in seen:
+            seen.add(provider_norm)
+            rows.append(
+                {
+                    "proveedor": provider,
+                    "proveedor_norm": provider_norm,
+                    "monto_ganado": 0.0,
+                    "fuente": "columnas_legacy",
+                }
+            )
+    return rows
+
+
 def unpivot_proposals(frame: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     if frame.empty:
         return pd.DataFrame(columns=["acto_key", "id", "proveedor", "proveedor_norm", "monto_ofertado", "ordinal"])
     for record in frame.to_dict("records"):
-        for ordinal in range(1, 15):
-            provider = clean_text(record.get(f"Proponente {ordinal}"))
-            if not provider:
-                continue
+        for proposal in proposal_entries(record):
             rows.append(
                 {
                     "acto_key": clean_text(record.get("acto_key")) or clean_text(record.get("enlace")) or clean_text(record.get("id")),
                     "id": record.get("id"),
-                    "proveedor": provider,
-                    "proveedor_norm": normalize_provider(provider),
-                    "monto_ofertado": parse_money(record.get(f"Precio Proponente {ordinal}")),
-                    "ordinal": ordinal,
+                    **proposal,
                 }
             )
     return pd.DataFrame(rows)
@@ -1451,20 +1529,17 @@ def build_company_acts(frame: pd.DataFrame, company: str) -> pd.DataFrame:
     for record in frame.to_dict("records"):
         matched: list[tuple[str, float]] = []
         participants: list[str] = []
-        for ordinal in range(1, 15):
-            provider = clean_text(record.get(f"Proponente {ordinal}"))
-            if not provider:
-                continue
+        for proposal in proposal_entries(record):
+            provider = clean_text(proposal.get("proveedor"))
             participants.append(provider)
-            provider_norm = normalize_provider(provider)
             if target and provider_matches(provider, company):
-                matched.append((provider, parse_money(record.get(f"Precio Proponente {ordinal}"))))
-        legal_winner = clean_text(record.get("razon_social"))
-        commercial_winner = clean_text(record.get("nombre_comercial"))
-        winner = commercial_winner or legal_winner
+                matched.append((provider, parse_money(proposal.get("monto_ofertado"))))
+        winners = winner_entries(record)
+        winner_names = [clean_text(value.get("proveedor")) for value in winners]
+        winner = ", ".join(value for value in winner_names if value)
         winner_match = bool(
             target
-            and any(provider_matches(value, company) for value in (legal_winner, commercial_winner) if value)
+            and any(provider_matches(value, company) for value in winner_names if value)
         )
         if not matched and not winner_match:
             continue
@@ -1474,15 +1549,26 @@ def build_company_acts(frame: pd.DataFrame, company: str) -> pd.DataFrame:
         if winner_match and offered_amount <= 0:
             offered_amount = parse_money(record.get("total_items_ofertados")) or parse_money(record.get("precio_referencia"))
         output["monto_participacion"] = offered_amount
+        is_deserted = "desiert" in normalize_text(record.get("estado"))
+        winner_match = winner_match and not is_deserted
         output["ganado"] = winner_match
-        output["monto_ganado"] = offered_amount if winner_match else 0.0
+        official_won_amount = sum(
+            parse_money(value.get("monto_ganado"))
+            for value in winners
+            if provider_matches(value.get("proveedor"), company)
+        )
+        output["monto_ganado"] = (
+            official_won_amount or offered_amount
+            if winner_match
+            else 0.0
+        )
         output["ganador"] = winner
         state = normalize_text(record.get("estado"))
         if "desiert" in state:
             output["resultado_empresa"] = "Desierto"
         elif winner_match:
             output["resultado_empresa"] = "Adjudicado"
-        elif legal_winner or commercial_winner:
+        elif winner_names:
             output["resultado_empresa"] = "No adjudicado"
         else:
             output["resultado_empresa"] = "En evaluacion"

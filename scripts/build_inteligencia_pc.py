@@ -29,6 +29,7 @@ from services.inteligencia_pc import (  # noqa: E402
     prepare_pc_acts,
     provider_matches,
     unpivot_proposals,
+    winner_entries,
 )
 
 
@@ -90,16 +91,25 @@ def _official_proposals(acts: pd.DataFrame) -> pd.DataFrame:
 
     for record in acts.to_dict("records"):
         act_key = clean_text(record.get("acto_key"))
-        legal_winner = clean_text(record.get("razon_social"))
-        commercial_winner = clean_text(record.get("nombre_comercial"))
-        winner = commercial_winner or legal_winner
-        winner_candidates = [value for value in (commercial_winner, legal_winner) if value]
+        winners = winner_entries(record)
+        winner_candidates = [clean_text(value.get("proveedor")) for value in winners]
+        winner = ", ".join(value for value in winner_candidates if value)
         act_proposals = proposals_by_act.get(act_key, [])
-        winner_materialized = False
+        materialized_winners: set[str] = set()
+        is_deserted = _deserted(record.get("estado"))
         for proposal in act_proposals:
-            won = any(provider_matches(proposal.get("proveedor"), candidate) for candidate in winner_candidates)
-            winner_materialized = winner_materialized or won
-            if _deserted(record.get("estado")):
+            matching_winner = next(
+                (
+                    value
+                    for value in winners
+                    if provider_matches(proposal.get("proveedor"), value.get("proveedor"))
+                ),
+                None,
+            )
+            won = bool(matching_winner) and not is_deserted
+            if won:
+                materialized_winners.add(normalize_provider(proposal.get("proveedor")))
+            if is_deserted:
                 result = "Desierto"
             elif won:
                 result = "Adjudicado"
@@ -118,21 +128,36 @@ def _official_proposals(acts: pd.DataFrame) -> pd.DataFrame:
                     "resultado_empresa": result,
                     "fuente_resultado": "resultado_oficial",
                     "resultado_provisional": 0,
-                    "monto_ganado_fuente": "precio_proponente" if won else "",
+                    "monto_ganado_fuente": (
+                        str(matching_winner.get("fuente") or "precio_proponente")
+                        if won and matching_winner
+                        else ""
+                    ),
                 }
             )
 
-        # Algunos resultados historicos traen adjudicatario pero omiten la
-        # tabla de proponentes. Se materializa al ganador para que su historial
-        # no desaparezca; el origen del monto queda explicitamente auditado.
-        if winner and not winner_materialized and not _deserted(record.get("estado")):
-            amount, amount_source = _winner_amount(record)
+        # Materializa cada adjudicatario oficial omitido en la tabla de
+        # propuestas. Esto cubre adjudicaciones multiples sin inventar un
+        # ganador en actos desiertos.
+        for winner_index, winner_entry in enumerate(
+            ([] if is_deserted else winners),
+            start=99,
+        ):
+            winner_name = clean_text(winner_entry.get("proveedor"))
+            if not winner_name:
+                continue
+            if normalize_provider(winner_name) in materialized_winners:
+                continue
+            amount = parse_money(winner_entry.get("monto_ganado"))
+            amount_source = clean_text(winner_entry.get("fuente"))
+            if amount <= 0:
+                amount, amount_source = _winner_amount(record)
             rows.append(
                 {
                     "acto_key": act_key,
-                    "ordinal": 99,
-                    "proveedor": winner,
-                    "proveedor_norm": normalize_provider(winner),
+                    "ordinal": winner_index,
+                    "proveedor": winner_name,
+                    "proveedor_norm": normalize_provider(winner_name),
                     "monto_ofertado": amount,
                     "ganador": winner,
                     "ganador_norm": normalize_provider(winner),

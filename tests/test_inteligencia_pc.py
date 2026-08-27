@@ -26,7 +26,7 @@ from services.inteligencia_pc import (
     score_provider_opportunities,
     unpivot_proposals,
 )
-from scripts.build_inteligencia_pc import build
+from scripts.build_inteligencia_pc import _official_proposals, build
 
 
 def test_market_classifier_excludes_valid_fichas_and_medical_terms() -> None:
@@ -318,6 +318,47 @@ def test_company_results_distinguish_winner_loser_deserted_and_pending() -> None
         "deserted": "Desierto",
         "pending": "En evaluacion",
     }
+
+
+def test_official_json_keeps_all_participants_and_multiple_winners() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "acto_key": "multi",
+                "estado": "Adjudicado",
+                "proponentes_json": (
+                    '[{"nombre":"RS ENGINEERING, S.A.","monto":72000},'
+                    '{"nombre":"OTRA EMPRESA","monto":30000}]'
+                ),
+                "ganadores_json": (
+                    '[{"nombre":"RS ENGINEERING, S.A.","monto":72000},'
+                    '{"nombre":"OTRA EMPRESA","monto":30000}]'
+                ),
+            }
+        ]
+    )
+    proposals = _official_proposals(frame)
+    assert set(proposals["proveedor"]) == {"RS ENGINEERING, S.A.", "OTRA EMPRESA"}
+    assert proposals["ganado"].all()
+    assert float(proposals["monto_ganado"].sum()) == pytest.approx(102000)
+
+
+def test_deserted_act_never_keeps_stale_winner_or_won_amount() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "acto_key": "deserted",
+                "estado": "Desierto",
+                "razon_social": "RS ENGINEERING",
+                "Proponente 1": "RS ENGINEERING",
+                "Precio Proponente 1": "72000",
+            }
+        ]
+    )
+    proposals = _official_proposals(frame)
+    assert proposals.iloc[0]["resultado_empresa"] == "Desierto"
+    assert not bool(proposals.iloc[0]["ganado"])
+    assert float(proposals.iloc[0]["monto_ganado"]) == 0.0
 
 
 def test_builder_materializes_synthetic_winner_and_rs_72k_acceptance(
