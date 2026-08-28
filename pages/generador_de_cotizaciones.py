@@ -20,10 +20,6 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from docx import Document
-from docx.enum.section import WD_ORIENTATION
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image
 from openpyxl.styles import Alignment, Border, Side
@@ -34,6 +30,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from sheets import get_client, read_worksheet, write_worksheet
 from entities import client_selector, _load_clients, WS_CLIENTES
 from services.access_control import require_page_access
+from services.lp_documents import SP_COMPANY_NAME, render_lp_document
 from ui.theme import apply_global_theme
 
 st.set_page_config(page_title="Generador de cotizaciones", page_icon="🧾", layout="wide")
@@ -399,7 +396,6 @@ COT_COLUMNS = [
     "presupuesto_drive_file_name",
     "presupuesto_drive_file_url",
 ]
-SP_COMPANY_NAME = "SP Tech Solutions S.A."
 COT_PREFIX = {
     "RS Engineering": "RS",
     "RIR Medical": "RIR",
@@ -411,10 +407,12 @@ LP_DOC_TIPO = "LP Doc Generator"
 LP_DRIVE_FILENAME_BY_EMPRESA = {
     "RS Engineering": "LP_Doc_Generator_RS.xlsx",
     "RIR Medical": "LP_Doc_Generator_RIR.xlsx",
+    SP_COMPANY_NAME: "LP_Doc_Generator_SP.xlsx",
 }
 LP_BUDGET_FILENAME_BY_EMPRESA = {
     "RS Engineering": "LP_Doc_Generator_RS_Presupuesto.html",
     "RIR Medical": "LP_Doc_Generator_RIR_Presupuesto.html",
+    SP_COMPANY_NAME: "LP_Doc_Generator_SP_Presupuesto.html",
 }
 DEFAULT_COT_DRIVE_FOLDER_ID = "0AOB-QlptrUHYUk9PVA"
 CLIENT_COLUMNS = [
@@ -514,22 +512,6 @@ LP_TEMPLATE_FALLBACKS = {
     # Fallback a la variante SF para no romper la generación.
     "template_no_incapacidad_para_contratar.docx": "template_no_incapacidad_para_contratar_sf.docx",
 }
-LP_STATIC_HIGHLIGHT_VALUES = (
-    "Rodrigo Jesús Sánchez Prado",
-    "Rodrigo Jesus Sanchez Prado",
-    "Rodrigo Sánchez Prado",
-    "Rodrigo Sanchez Prado",
-    "9-740-624",
-    "9-740-624/80",
-    "9-740-624-2017-549317",
-    "RS ENGINEERING",
-    "RIR MEDICAL",
-    "155750585-2-2024",
-    "DV:80",
-    "DV40",
-    "Aviso de Operación",
-    "Aviso de Operacion",
-)
 MESES_ES = {
     1: "enero",
     2: "febrero",
@@ -569,6 +551,20 @@ LP_DOC_SPECS = {
         ("template_nota_adicional_rir.docx", "nota_adicional.docx"),
         ("template_carta_de_adhesion_rir.docx", "carta_de_adhesion.docx"),
         ("template_carta_de_adhesion_sf_rir.docx", "carta_de_adhesion_sf.docx"),
+    ],
+    SP_COMPANY_NAME: [
+        # SP usa la familia jurídica base de RS; el perfil central sustituye
+        # exclusivamente la identidad legal, membrete y firma de la empresa.
+        ("template_medidas_de_retorsion.docx", "medidas_de_retorsion.docx"),
+        ("template_medidas_de_retorsion_sf.docx", "medidas_de_retorsion_sf.docx"),
+        ("template_no_incapacidad_para_contratar.docx", "no_incapacidad_para_contratar.docx"),
+        ("template_no_incapacidad_para_contratar_sf.docx", "no_incapacidad_para_contratar_sf.docx"),
+        ("template_pacto_de_integridad.docx", "pacto_de_integridad.docx"),
+        ("template_pacto_de_integridad_sf.docx", "pacto_de_integridad_sf.docx"),
+        ("template_desglose_de_precios.docx", "desglose_de_precios.docx"),
+        ("template_nota_adicional.docx", "nota_adicional.docx"),
+        ("template_carta_de_adhesion.docx", "carta_de_adhesion.docx"),
+        ("template_carta_de_adhesion_sf.docx", "carta_de_adhesion_sf.docx"),
     ],
 }
 
@@ -1416,216 +1412,20 @@ def _resolve_doc_gen_template(file_name: str) -> Path:
     )
 
 
-def _replace_text_tokens(text: str, replacements: dict[str, str]) -> str:
-    out = str(text or "")
-    for key, value in replacements.items():
-        out = out.replace(key, str(value or ""))
-    return out
-
-
-def _collect_lp_highlight_values(replacements: dict[str, str]) -> list[str]:
-    priority_keys = (
-        "[Representante_legal_de_la_Entidad_Licitante]",
-        "[cedula]",
-        "[numero_de_acto]",
-        "[entidad]",
-        "[titulo]",
-        "[lugar]",
-        "[entrega]",
-        "[fecha]",
+def _fill_docx_placeholders(
+    template_path: Path,
+    replacements: dict[str, str],
+    *,
+    empresa_full: str,
+    document_name: str,
+) -> bytes:
+    return render_lp_document(
+        template_path,
+        replacements,
+        company_name=empresa_full,
+        document_name=document_name,
+        assets_dir=REPO_COTIZACION_BASE_DIR,
     )
-    seen: set[str] = set()
-    values: list[str] = []
-    for key in priority_keys:
-        value = str(replacements.get(key, "") or "").strip()
-        if not value:
-            continue
-        lowered = value.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        values.append(value)
-    for value in LP_STATIC_HIGHLIGHT_VALUES:
-        token = str(value or "").strip()
-        if not token:
-            continue
-        lowered = token.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        values.append(token)
-    values.sort(key=len, reverse=True)
-    return values
-
-
-def _find_clause_heading_span(text: str) -> Optional[tuple[int, int]]:
-    source = str(text or "")
-    if not source:
-        return None
-    match = re.match(
-        r"^\s*(PRIMERA|SEGUNDA|TERCERA|CUARTA|QUINTA|SEXTA|S[ÉE]PTIMA|OCTAVA|NOVENA|D[ÉE]CIMA)\b",
-        source,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        return None
-    return match.span(1)
-
-
-def _find_highlight_spans(text: str, highlight_values: list[str]) -> list[tuple[int, int]]:
-    source = str(text or "")
-    if not source or not highlight_values:
-        return []
-
-    source_lower = source.lower()
-    spans: list[tuple[int, int]] = []
-    for value in highlight_values:
-        token = str(value or "").strip()
-        if not token:
-            continue
-        token_lower = token.lower()
-        start = 0
-        while True:
-            idx = source_lower.find(token_lower, start)
-            if idx < 0:
-                break
-            spans.append((idx, idx + len(token)))
-            start = idx + len(token)
-
-    if not spans:
-        return []
-
-    spans.sort(key=lambda pair: (pair[0], -(pair[1] - pair[0])))
-    merged: list[tuple[int, int]] = []
-    for start, end in spans:
-        if not merged or start >= merged[-1][1]:
-            merged.append((start, end))
-            continue
-        prev_start, prev_end = merged[-1]
-        merged[-1] = (prev_start, max(prev_end, end))
-    return merged
-
-
-def _span_overlaps(segment_start: int, segment_end: int, spans: list[tuple[int, int]]) -> bool:
-    for start, end in spans:
-        if segment_start < end and segment_end > start:
-            return True
-    return False
-
-
-def _apply_semantic_emphasis(paragraph, highlight_values: list[str]) -> None:
-    original_text = str(paragraph.text or "")
-    if not original_text:
-        return
-
-    spans = _find_highlight_spans(original_text, highlight_values)
-    clause_span = _find_clause_heading_span(original_text)
-
-    bold_spans = list(spans)
-    underline_spans: list[tuple[int, int]] = []
-    if clause_span:
-        bold_spans.append(clause_span)
-        underline_spans.append(clause_span)
-
-    if not bold_spans and not underline_spans:
-        return
-
-    points = {0, len(original_text)}
-    for start, end in bold_spans + underline_spans:
-        points.add(start)
-        points.add(end)
-    cuts = sorted(points)
-
-    paragraph.text = ""
-    for idx in range(len(cuts) - 1):
-        start = cuts[idx]
-        end = cuts[idx + 1]
-        if start >= end:
-            continue
-        run = paragraph.add_run(original_text[start:end])
-        if _span_overlaps(start, end, bold_spans):
-            run.bold = True
-        if _span_overlaps(start, end, underline_spans):
-            run.underline = True
-
-
-def _style_paragraph(paragraph, *, in_table: bool) -> None:
-    pf = paragraph.paragraph_format
-    pf.space_before = Pt(0)
-    pf.space_after = Pt(1 if in_table else 2)
-    pf.line_spacing = 1.0
-    text = str(paragraph.text or "").strip()
-    if text:
-        if in_table:
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        elif paragraph.alignment != WD_ALIGN_PARAGRAPH.CENTER:
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    for run in paragraph.runs:
-        run.font.name = "Calibri"
-        run.font.size = Pt(9.5 if in_table else 10.5)
-
-
-def _center_main_title(doc: Document) -> None:
-    for paragraph in doc.paragraphs:
-        text = str(paragraph.text or "").strip()
-        if not text:
-            continue
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        for run in paragraph.runs:
-            run.bold = True
-        break
-
-
-def _apply_doc_professional_style(doc: Document, *, highlight_values: Optional[list[str]] = None) -> None:
-    highlight_values = highlight_values or []
-    for section in doc.sections:
-        # Forzar tamaño legal 8.5" x 14" y márgenes compactos.
-        section.orientation = WD_ORIENTATION.PORTRAIT
-        section.page_width = Inches(8.5)
-        section.page_height = Inches(14)
-        section.top_margin = Inches(0.35)
-        section.bottom_margin = Inches(0.35)
-        section.left_margin = Inches(0.45)
-        section.right_margin = Inches(0.45)
-        section.header_distance = Inches(0.2)
-        section.footer_distance = Inches(0.2)
-
-    for paragraph in doc.paragraphs:
-        _apply_semantic_emphasis(paragraph, highlight_values)
-        _style_paragraph(paragraph, in_table=False)
-
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    _apply_semantic_emphasis(paragraph, highlight_values)
-                    _style_paragraph(paragraph, in_table=True)
-
-    _center_main_title(doc)
-
-
-def _fill_docx_placeholders(template_path: Path, replacements: dict[str, str]) -> bytes:
-    doc = Document(str(template_path))
-    highlight_values = _collect_lp_highlight_values(replacements)
-
-    for paragraph in doc.paragraphs:
-        new_text = _replace_text_tokens(paragraph.text, replacements)
-        if new_text != paragraph.text:
-            paragraph.text = new_text
-
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    new_text = _replace_text_tokens(paragraph.text, replacements)
-                    if new_text != paragraph.text:
-                        paragraph.text = new_text
-
-    _apply_doc_professional_style(doc, highlight_values=highlight_values)
-
-    out = BytesIO()
-    doc.save(out)
-    return out.getvalue()
 
 
 def _fecha_spanish_tokens(fecha_base: date) -> dict[str, str]:
@@ -1730,7 +1530,12 @@ def _build_lp_documents(
                 representante_legal_documentos or ""
             ).strip()
         template_path = _resolve_doc_gen_template(template_name)
-        file_bytes = _fill_docx_placeholders(template_path, replacements)
+        file_bytes = _fill_docx_placeholders(
+            template_path,
+            replacements,
+            empresa_full=empresa_full,
+            document_name=output_name,
+        )
         docs_out.append(
             {
                 "template": template_name,
@@ -4025,7 +3830,12 @@ if active_tab == LP_DOC_TAB_NAME:
     with col_lp1:
         enlace_lp = st.text_input("Enlace Panamá Compra", key="lp_doc_enlace")
     with col_lp2:
-        empresa_lp = st.selectbox("Empresa", ["RS", "RIR"], key="lp_doc_empresa")
+        empresa_lp = st.selectbox(
+            "Empresa",
+            ["RS", "RIR", "SP"],
+            key="lp_doc_empresa",
+            format_func=lambda value: "SP Tech Solutions" if value == "SP" else value,
+        )
     st.caption(
         "Al generar, el sistema ejecuta scraping automáticamente del enlace (versión 3), "
         "extrae datos del acto y crea los documentos LP."
