@@ -7937,28 +7937,29 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         f"Mostrando hasta {rows_per_page} filas por pagina."
     )
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def _otras_fuentes_bootstrap(db_url: str):
     engine = _pg_engine(db_url)
     ready, available = _otras_fuentes.schema_ready(engine)
     if not ready:
         return ready, sorted(available), pd.DataFrame(), {}, {}, {}
+    health, last_run, overview, options = _otras_fuentes.load_dashboard_snapshot(engine)
     return (
         True,
         sorted(available),
-        _otras_fuentes.load_source_health(engine),
-        _otras_fuentes.load_last_run(engine),
-        _otras_fuentes.load_overview(engine),
-        _otras_fuentes.load_filter_options(engine),
+        health,
+        last_run,
+        overview,
+        options,
     )
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _otras_fuentes_search(db_url: str, filters: _otras_fuentes.OpportunityFilters) -> pd.DataFrame:
     return _otras_fuentes.search_opportunities(_pg_engine(db_url), filters)
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def _otras_fuentes_documents(db_url: str, opportunity_id: str) -> pd.DataFrame:
     return _otras_fuentes.load_documents(_pg_engine(db_url), opportunity_id)
 
@@ -8020,39 +8021,77 @@ def _render_otras_fuentes_module() -> None:
                 hide_index=True,
             )
 
-    with st.expander("Filtros", expanded=True):
-        row1 = st.columns([2.1, 1.4, 1.4, 1.2])
-        search = row1[0].text_input(
-            "Buscar",
-            placeholder="Título, comprador, descripción o código",
-            key="otras_fuentes_search",
-        )
-        sources = row1[1].multiselect(
-            "Fuentes",
-            options=options.get("source", []),
-            format_func=lambda value: _otras_fuentes.SOURCE_LABELS.get(value, value),
-            key="otras_fuentes_sources",
-        )
-        companies = row1[2].multiselect(
-            "Empresa objetivo",
-            options=options.get("matched_company", []),
-            key="otras_fuentes_companies",
-        )
-        priorities = row1[3].multiselect(
-            "Prioridad",
-            options=options.get("priority", []),
-            key="otras_fuentes_priorities",
-        )
-        row2 = st.columns([1.5, 1.2, 1.2, 1, 1])
-        statuses = row2[0].multiselect(
-            "Estado",
-            options=options.get("status", []),
-            key="otras_fuentes_statuses",
-        )
-        use_dates = row2[1].checkbox("Filtrar por fecha", value=False, key="otras_fuentes_use_dates")
-        start_date = row2[2].date_input("Desde", value=date.today() - timedelta(days=365), key="otras_fuentes_start")
-        end_date = row2[3].date_input("Hasta", value=date.today(), key="otras_fuentes_end")
-        only_active = row2[4].checkbox("Solo activas", value=False, key="otras_fuentes_only_active")
+    sort_options = {
+        "Más recientemente publicadas": "published_desc",
+        "Más recientemente detectadas": "detected_desc",
+        "Fecha límite más próxima": "deadline_asc",
+        "Mayor monto": "amount_desc",
+        "Prioridad y score": "priority_score",
+    }
+    with st.expander("Filtros y orden", expanded=True):
+        # El formulario evita consultar Supabase en cada clic mientras el
+        # usuario todavía está armando sus filtros.
+        with st.form("otras_fuentes_filter_form", clear_on_submit=False):
+            row1 = st.columns([2.1, 1.4, 1.4, 1.2])
+            search = row1[0].text_input(
+                "Buscar",
+                placeholder="Título, comprador, descripción o código",
+                key="otras_fuentes_search",
+            )
+            sources = row1[1].multiselect(
+                "Fuentes",
+                options=options.get("source", []),
+                format_func=lambda value: _otras_fuentes.SOURCE_LABELS.get(value, value),
+                key="otras_fuentes_sources",
+            )
+            companies = row1[2].multiselect(
+                "Empresa objetivo",
+                options=options.get("matched_company", []),
+                key="otras_fuentes_companies",
+            )
+            priorities = row1[3].multiselect(
+                "Prioridad",
+                options=options.get("priority", []),
+                key="otras_fuentes_priorities",
+            )
+            row2 = st.columns([1.5, 1.1, 1.1, 1.1, 1])
+            statuses = row2[0].multiselect(
+                "Estado",
+                options=options.get("status", []),
+                key="otras_fuentes_statuses",
+            )
+            use_dates = row2[1].checkbox(
+                "Filtrar por fecha", value=False, key="otras_fuentes_use_dates"
+            )
+            start_date = row2[2].date_input(
+                "Desde", value=date.today() - timedelta(days=365), key="otras_fuentes_start"
+            )
+            end_date = row2[3].date_input(
+                "Hasta", value=date.today(), key="otras_fuentes_end"
+            )
+            only_active = row2[4].checkbox(
+                "Solo activas", value=False, key="otras_fuentes_only_active"
+            )
+            row3 = st.columns([2.2, 1, 3])
+            sort_label = row3[0].selectbox(
+                "Ordenar por",
+                options=list(sort_options),
+                index=0,
+                key="otras_fuentes_sort",
+            )
+            page_size = row3[1].selectbox(
+                "Filas por página",
+                options=[50, 100, 200],
+                index=0,
+                key="otras_fuentes_page_size",
+            )
+            submitted = row3[2].form_submit_button(
+                "Aplicar filtros y orden", use_container_width=False
+            )
+
+    if submitted:
+        st.session_state["otras_fuentes_page"] = 1
+    page = max(1, int(st.session_state.get("otras_fuentes_page", 1)))
 
     filters = _otras_fuentes.OpportunityFilters(
         search=search,
@@ -8063,13 +8102,38 @@ def _render_otras_fuentes_module() -> None:
         start_date=start_date.isoformat() if use_dates else "",
         end_date=end_date.isoformat() if use_dates else "",
         only_active=only_active,
-        limit=2000,
+        sort_by=sort_options[sort_label],
+        limit=int(page_size),
+        offset=(page - 1) * int(page_size),
     )
     try:
         frame = _otras_fuentes_search(db_url, filters)
     except Exception as exc:
         st.error(f"No se pudieron aplicar los filtros: {exc}")
         return
+
+    total_results = 0
+    if not frame.empty and "total_resultados" in frame.columns:
+        total_results = int(pd.to_numeric(frame["total_resultados"], errors="coerce").fillna(0).iloc[0])
+    total_pages = max(1, int(math.ceil(total_results / max(1, int(page_size)))))
+    if page > total_pages:
+        st.session_state["otras_fuentes_page"] = total_pages
+        st.rerun()
+
+    pager = st.columns([1, 2, 1, 5])
+    if pager[0].button(
+        "← Anterior", key="otras_fuentes_previous_page", disabled=page <= 1
+    ):
+        st.session_state["otras_fuentes_page"] = page - 1
+        st.rerun()
+    pager[1].caption(
+        f"Página {page:,} de {total_pages:,} · {total_results:,} oportunidades"
+    )
+    if pager[2].button(
+        "Siguiente →", key="otras_fuentes_next_page", disabled=page >= total_pages
+    ):
+        st.session_state["otras_fuentes_page"] = page + 1
+        st.rerun()
 
     if frame.empty:
         st.info("No hay oportunidades para los filtros seleccionados.")

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 import pandas as pd
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
@@ -36,12 +36,112 @@ class OpportunityFilters:
     start_date: str = ""
     end_date: str = ""
     only_active: bool = False
-    limit: int = 1000
+    sort_by: str = "published_desc"
+    limit: int = 100
+    offset: int = 0
+
+
+SORT_ORDERS = {
+    "published_desc": (
+        "CASE WHEN NULLIF(o.publication_date,'') IS NULL THEN 1 ELSE 0 END, "
+        "NULLIF(o.publication_date,'') DESC, "
+        "o.first_seen_at DESC"
+    ),
+    "detected_desc": "o.first_seen_at DESC",
+    "deadline_asc": (
+        "CASE WHEN NULLIF(o.deadline,'') IS NULL THEN 1 ELSE 0 END, "
+        "NULLIF(o.deadline,'') ASC, o.first_seen_at DESC"
+    ),
+    "amount_desc": "o.estimated_value DESC NULLS LAST, o.first_seen_at DESC",
+    "priority_score": (
+        "CASE o.priority WHEN 'Alta' THEN 1 WHEN 'Media' THEN 2 ELSE 3 END, "
+        "o.fit_score DESC, COALESCE(NULLIF(o.deadline,''), '9999-12-31'), "
+        "o.last_seen_at DESC"
+    ),
+}
 
 
 def schema_ready(engine: Engine) -> tuple[bool, set[str]]:
-    available = set(inspect(engine).get_table_names())
+    # Consultar solo las tablas del modulo evita cargar todo el catalogo de
+    # Supabase, que es sensiblemente mas lento en conexiones remotas.
+    names = ",".join(f"'{name}'" for name in sorted(REQUIRED_TABLES))
+    frame = pd.read_sql_query(
+        text(
+            "SELECT table_name FROM information_schema.tables "
+            f"WHERE table_schema = 'public' AND table_name IN ({names})"
+        ),
+        engine,
+    )
+    available = set(frame.get("table_name", pd.Series(dtype=str)).astype(str))
     return REQUIRED_TABLES.issubset(available), available
+
+
+def load_dashboard_snapshot(
+    engine: Engine,
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, int], dict[str, list[str]]]:
+    """Carga estado, metricas y opciones en un solo viaje a Supabase."""
+    query = text(
+        """
+        WITH last_run AS (
+            SELECT run_id, started_at, finished_at, status, source_count, success_count,
+                   error_count, total_records, new_records, changed_records, event_count,
+                   postgres_synced, error_json
+            FROM external_monitor_runs
+            ORDER BY started_at DESC
+            LIMIT 1
+        ),
+        overview AS (
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active,
+                   SUM(CASE WHEN matched_company <> '' THEN 1 ELSE 0 END) AS relevant,
+                   SUM(CASE WHEN priority = 'Alta' THEN 1 ELSE 0 END) AS high_priority,
+                   SUM(CASE WHEN NULLIF(first_seen_at, '')::timestamptz >= CURRENT_DATE - INTERVAL '7 days'
+                            THEN 1 ELSE 0 END) AS new_7d,
+                   SUM(CASE WHEN deadline >= CURRENT_DATE::text
+                             AND deadline <= (CURRENT_DATE + INTERVAL '14 days')::date::text
+                            THEN 1 ELSE 0 END) AS closing_14d
+            FROM external_opportunities
+        ),
+        filter_options AS (
+            SELECT jsonb_build_object(
+                'source', COALESCE(jsonb_agg(DISTINCT source)
+                    FILTER (WHERE NULLIF(BTRIM(source),'') IS NOT NULL), '[]'::jsonb),
+                'matched_company', COALESCE(jsonb_agg(DISTINCT matched_company)
+                    FILTER (WHERE NULLIF(BTRIM(matched_company),'') IS NOT NULL), '[]'::jsonb),
+                'status', COALESCE(jsonb_agg(DISTINCT status)
+                    FILTER (WHERE NULLIF(BTRIM(status),'') IS NOT NULL), '[]'::jsonb),
+                'priority', COALESCE(jsonb_agg(DISTINCT priority)
+                    FILTER (WHERE NULLIF(BTRIM(priority),'') IS NOT NULL), '[]'::jsonb)
+            ) AS values
+            FROM external_opportunities
+        )
+        SELECT
+            COALESCE((
+                SELECT jsonb_agg(to_jsonb(s) ORDER BY s.source)
+                FROM external_sources s
+            ), '[]'::jsonb) AS health,
+            COALESCE((SELECT to_jsonb(l) FROM last_run l), '{}'::jsonb) AS last_run,
+            COALESCE((SELECT to_jsonb(o) FROM overview o), '{}'::jsonb) AS overview,
+            COALESCE((SELECT values FROM filter_options), '{}'::jsonb) AS options
+        """
+    )
+    frame = pd.read_sql_query(query, engine)
+    if frame.empty:
+        return pd.DataFrame(), {}, {}, {}
+    row = frame.iloc[0]
+    health_payload = row.get("health") or []
+    last_run = dict(row.get("last_run") or {})
+    overview_payload = dict(row.get("overview") or {})
+    options_payload = dict(row.get("options") or {})
+    overview = {
+        key: 0 if value is None or pd.isna(value) else int(value)
+        for key, value in overview_payload.items()
+    }
+    options = {
+        key: sorted(str(value).strip() for value in (options_payload.get(key) or []) if str(value).strip())
+        for key in ("source", "matched_company", "status", "priority")
+    }
+    return pd.DataFrame(health_payload), last_run, overview, options
 
 
 def load_source_health(engine: Engine) -> pd.DataFrame:
@@ -123,7 +223,10 @@ def _add_in_filter(
 
 def build_search_query(filters: OpportunityFilters) -> tuple[str, dict[str, Any]]:
     clauses = ["1=1"]
-    params: dict[str, Any] = {"limit": max(1, min(int(filters.limit), 5000))}
+    params: dict[str, Any] = {
+        "limit": max(1, min(int(filters.limit), 500)),
+        "offset": max(0, int(filters.offset)),
+    }
     search = str(filters.search or "").strip()
     if search:
         params["search"] = f"%{search.lower()}%"
@@ -144,12 +247,15 @@ def build_search_query(filters: OpportunityFilters) -> tuple[str, dict[str, Any]
     if filters.only_active:
         clauses.append("o.is_active = 1")
 
+    order_by = SORT_ORDERS.get(filters.sort_by, SORT_ORDERS["published_desc"])
+    order_by = f"{order_by}, o.id ASC"
     query = f"""
         SELECT o.id, o.source, o.external_id, o.title, o.source_type, o.buyer,
                o.publication_date, o.deadline, o.status, o.estimated_value, o.currency,
                o.matched_company, o.priority, o.fit_score, o.source_url,
                o.first_seen_at, o.last_seen_at, o.cross_source_key,
-               COALESCE(d.duplicate_count, 1) AS fuentes_coincidentes
+               COALESCE(d.duplicate_count, 1) AS fuentes_coincidentes,
+               COUNT(*) OVER() AS total_resultados
         FROM external_opportunities o
         LEFT JOIN (
             SELECT cross_source_key, COUNT(*) AS duplicate_count
@@ -158,9 +264,8 @@ def build_search_query(filters: OpportunityFilters) -> tuple[str, dict[str, Any]
             GROUP BY cross_source_key
         ) d ON d.cross_source_key = o.cross_source_key
         WHERE {' AND '.join(clauses)}
-        ORDER BY CASE o.priority WHEN 'Alta' THEN 1 WHEN 'Media' THEN 2 ELSE 3 END,
-                 o.fit_score DESC, COALESCE(NULLIF(o.deadline,''), '9999-12-31'), o.last_seen_at DESC
-        LIMIT :limit
+        ORDER BY {order_by}
+        LIMIT :limit OFFSET :offset
     """
     return query, params
 
