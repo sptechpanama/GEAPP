@@ -7966,7 +7966,8 @@ def _otras_fuentes_documents(db_url: str, opportunity_id: str) -> pd.DataFrame:
 
 def _render_otras_fuentes_module() -> None:
     st.caption(
-        "Oportunidades normalizadas de ACP, ENSA, IDAAN, ENA, UNGM, Cruz Roja y Ciudad del Saber. "
+        "Oportunidades normalizadas de ACP, ENSA, IDAAN, ENA, UNGM Panamá, UNGM regional/global, "
+        "BID, Banco Mundial, UNICEF, Cruz Roja y Ciudad del Saber. "
         "La captura se ejecuta en el orquestador; esta vista solo consulta Supabase."
     )
     db_url = _supabase_db_url()
