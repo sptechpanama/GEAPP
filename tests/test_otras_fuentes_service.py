@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.otras_fuentes import OpportunityFilters, build_search_query
+from services.otras_fuentes import SOURCE_LABELS, OpportunityFilters, build_search_query
 
 
 def test_search_query_applies_every_filter_without_interpolating_values():
@@ -50,3 +50,10 @@ def test_sort_order_is_selected_from_safe_allowlist():
     assert "o.estimated_value DESC NULLS LAST" in amount_query
     assert "DROP TABLE" not in invalid_query
     assert "o.publication_date" in invalid_query
+
+
+def test_international_sources_have_clear_labels():
+    assert SOURCE_LABELS["idb"] == "BID"
+    assert SOURCE_LABELS["world_bank"] == "Banco Mundial"
+    assert SOURCE_LABELS["ungm_international"] == "UNGM regional/global"
+    assert SOURCE_LABELS["unicef"] == "UNICEF"

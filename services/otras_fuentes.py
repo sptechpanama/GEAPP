@@ -21,6 +21,10 @@ SOURCE_LABELS = {
     "idaan": "IDAAN",
     "ena": "ENA",
     "ungm": "UNGM",
+    "ungm_international": "UNGM regional/global",
+    "idb": "BID",
+    "world_bank": "Banco Mundial",
+    "unicef": "UNICEF",
     "cruz_roja": "Cruz Roja",
     "ciudad_saber": "Ciudad del Saber",
 }
