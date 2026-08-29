@@ -34,6 +34,15 @@ from services.access_control import require_page_access
 from services import auth_drive as _auth_drive
 from services import otras_fuentes as _otras_fuentes
 
+# Streamlit puede conservar la versión anterior del servicio durante un
+# despliegue en caliente. Recargarlo evita combinar una página nueva con una
+# interfaz antigua que todavía no incluía `load_dashboard_snapshot`.
+if not callable(getattr(_otras_fuentes, "load_dashboard_snapshot", None)):
+    try:
+        _otras_fuentes = importlib.reload(_otras_fuentes)
+    except Exception:
+        pass
+
 get_drive_delegated = _auth_drive.get_drive_delegated
 # Streamlit puede conservar temporalmente el módulo anterior durante un
 # hot-reload. `getattr` evita que una recarga parcial tumbe toda la página.
@@ -7943,7 +7952,17 @@ def _otras_fuentes_bootstrap(db_url: str):
     ready, available = _otras_fuentes.schema_ready(engine)
     if not ready:
         return ready, sorted(available), pd.DataFrame(), {}, {}, {}
-    health, last_run, overview, options = _otras_fuentes.load_dashboard_snapshot(engine)
+    snapshot_loader = getattr(_otras_fuentes, "load_dashboard_snapshot", None)
+    if callable(snapshot_loader):
+        health, last_run, overview, options = snapshot_loader(engine)
+    else:
+        # Compatibilidad defensiva con procesos Streamlit que mantengan el
+        # servicio anterior en memoria. La siguiente recarga usará el camino
+        # optimizado de una sola consulta.
+        health = _otras_fuentes.load_source_health(engine)
+        last_run = _otras_fuentes.load_last_run(engine)
+        overview = _otras_fuentes.load_overview(engine)
+        options = _otras_fuentes.load_filter_options(engine)
     return (
         True,
         sorted(available),
