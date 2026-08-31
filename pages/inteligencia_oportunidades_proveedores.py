@@ -480,6 +480,15 @@ def _apply_pending_saved_view() -> None:
     for name in MANUAL_SCORE_WEIGHTS:
         if name in migrated_weights:
             st.session_state[f"intel_v3_weight_{name}"] = float(migrated_weights[name] or 0)
+    # Una vista guardada representa una solicitud explicita de analisis.  Se
+    # habilita la carga avanzada solo cuando la vista realmente contiene
+    # valores que necesitan las listas remotas de opciones.
+    st.session_state["intel_v3_advanced_filters"] = bool(
+        assignments["intel_v3_states"]
+        or assignments["intel_v3_entities"]
+        or assignments["intel_v3_areas"]
+    )
+    st.session_state["intel_v3_analysis_ready"] = True
 
 
 def _render_saved_views(current_payload: dict[str, object]) -> None:
@@ -601,6 +610,8 @@ _ANALYSIS_FILTER_SESSION_KEYS = {
     "intel_v3_direction",
     "intel_v3_page",
     "intel_v3_page_size",
+    "intel_v3_advanced_filters",
+    "intel_v3_analysis_ready",
     *(f"intel_v3_risk_{value}" for value in ("a", "b", "c", "d", "other")),
     *(f"intel_v3_weight_{name}" for name in MANUAL_SCORE_WEIGHTS),
 }
@@ -783,12 +794,13 @@ def _study_result_cached(
 
 
 def _render_data_status(repository: AnalyticsRepository) -> None:
-    coverage = repository.coverage()
     metadata = repository.build_metadata()
     cols = st.columns([1.4, 1, 1, 1])
     cols[0].caption(f"Fuente: **{repository.source_label}**")
-    cols[1].caption(f"Actos normalizados: **{_safe_int(coverage.get('acts')):,}**")
-    cols[2].caption(f"Fichas: **{_safe_int(coverage.get('fichas')):,}**")
+    # Los conteos ya se guardan al construir la capa analitica. Consultarlos
+    # evita un COUNT(DISTINCT ...) completo cada vez que se abre la pagina.
+    cols[1].caption(f"Registros analíticos: **{_safe_int(metadata.get('fact_rows')):,}**")
+    cols[2].caption(f"Fichas catalogadas: **{_safe_int(metadata.get('metadata_rows')):,}**")
     built = str(metadata.get("built_at_utc", "") or "")[:19].replace("T", " ")
     cols[3].caption(f"Capa construida: **{built or 'sin dato'}**")
 
@@ -2069,7 +2081,6 @@ except AnalyticsUnavailable as exc:
     st.stop()
 
 _render_data_status(repo)
-options = _filter_options(repo)
 
 with st.sidebar:
     st.header("Filtros del estudio")
@@ -2082,6 +2093,37 @@ with st.sidebar:
         _reset_analysis_filters()
         _master_data.clear()
         st.rerun()
+    advanced_filters = st.toggle(
+        "Cargar filtros avanzados",
+        value=False,
+        key="intel_v3_advanced_filters",
+        help="Carga listas completas de estados, entidades y áreas solo cuando las necesites.",
+    )
+
+if advanced_filters:
+    with st.sidebar, st.spinner("Cargando listas avanzadas..."):
+        options = _filter_options(repo)
+else:
+    options = {"states": [], "entities": [], "areas": [], "product_types": []}
+
+
+def _options_with_current(option_name: str, session_key: str) -> list[str]:
+    """Conserva valores de una vista guardada aun sin cargar todo el catálogo."""
+    current = st.session_state.get(session_key, [])
+    if isinstance(current, str):
+        current = [current]
+    return list(
+        dict.fromkeys(
+            [
+                *(str(value) for value in options.get(option_name, []) if str(value).strip()),
+                *(str(value) for value in current if str(value).strip()),
+            ]
+        )
+    )
+
+
+with st.sidebar.form("intel_v3_filters_form", clear_on_submit=False):
+    st.caption("Los cambios se calculan juntos al pulsar **Aplicar filtros**.")
     start_date, end_date = _period_inputs()
     date_labels = {
         "Fecha de publicación": "publicacion",
@@ -2093,9 +2135,17 @@ with st.sidebar:
     profile_labels_reverse = {label: key for key, label in PROFILE_LABELS.items()}
     profile_label = st.selectbox("Perfil de confianza", list(profile_labels_reverse), index=1, key="intel_v3_profile")
     with st.expander("Filtros de mercado", expanded=True):
-        selected_states = tuple(st.multiselect("Estado del acto", options.get("states", []), key="intel_v3_states"))
-        selected_entities = tuple(st.multiselect("Entidades", options.get("entities", []), key="intel_v3_entities"))
-        selected_areas = tuple(st.multiselect("Areas", options.get("areas", []), key="intel_v3_areas"))
+        if not advanced_filters:
+            st.caption("Activa **Cargar filtros avanzados** para listar estados, entidades y áreas.")
+        selected_states = tuple(
+            st.multiselect("Estado del acto", _options_with_current("states", "intel_v3_states"), key="intel_v3_states")
+        )
+        selected_entities = tuple(
+            st.multiselect("Entidades", _options_with_current("entities", "intel_v3_entities"), key="intel_v3_entities")
+        )
+        selected_areas = tuple(
+            st.multiselect("Áreas", _options_with_current("areas", "intel_v3_areas"), key="intel_v3_areas")
+        )
         # La clase oficial sustituye el selector ambiguo de tipo de producto.
         # Todas quedan incluidas por defecto; desmarcar una la excluye en SQL.
         selected_product_types: tuple[str, ...] = ()
@@ -2129,23 +2179,72 @@ with st.sidebar:
             "Registro sanitario: solo fichas confirmadas como **No requiere**. "
             "Las fichas marcadas Sí o sin clasificación se excluyen del análisis."
         )
-        search_raw = st.text_input("Buscar grupos o frases (separar por coma)", key="intel_v3_search", placeholder="chiller, refrigeración, aire acondicionado")
+        search_raw = st.text_input(
+            "Buscar grupos o frases (separar por coma)",
+            key="intel_v3_search",
+            placeholder="chiller, refrigeración, aire acondicionado",
+        )
         search_mode = st.radio("Relación entre grupos", ["OR", "AND"], horizontal=True, key="intel_v3_search_mode")
         min_reference = float(st.number_input("Referencia atribuible mínima (experimental)", 0.0, value=0.0, step=100.0, key="intel_v3_min_ref"))
         max_reference = float(st.number_input("Referencia atribuible máxima experimental (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_ref"))
         min_award = float(st.number_input("Adjudicado atribuible mínimo (experimental)", 0.0, value=0.0, step=100.0, key="intel_v3_min_award"))
         max_award = float(st.number_input("Adjudicado atribuible máximo experimental (0 = sin límite)", 0.0, value=0.0, step=1_000.0, key="intel_v3_max_award"))
     with st.expander("Demanda, competencia y disponibilidad", expanded=False):
-        min_acts = int(st.number_input("Actos minimos", 0, value=1, step=1, key="intel_v3_min_acts"))
-        min_entities = int(st.number_input("Entidades minimas", 0, value=0, step=1, key="intel_v3_min_entities"))
-        min_active_months = int(st.number_input("Meses activos minimos", 0, value=0, step=1, key="intel_v3_min_active_months"))
-        max_participants = float(st.number_input("Participantes promedio max. (0 = libre)", 0.0, value=0.0, step=0.25, key="intel_v3_max_participants"))
+        min_acts = int(st.number_input("Actos mínimos", 0, value=1, step=1, key="intel_v3_min_acts"))
+        min_entities = int(st.number_input("Entidades mínimas", 0, value=0, step=1, key="intel_v3_min_entities"))
+        min_active_months = int(st.number_input("Meses activos mínimos", 0, value=0, step=1, key="intel_v3_min_active_months"))
+        max_participants = float(st.number_input("Participantes promedio máx. (0 = libre)", 0.0, value=0.0, step=0.25, key="intel_v3_max_participants"))
         availability_mode = st.selectbox(
             "Disponibilidad comercial",
             ["Todas", "Favoritos", "Catálogo Foyomed", "Proveedor en catálogo", "Proveedor contactable"],
             key="intel_v3_availability",
         )
     score_preset, weights = _score_weights()
+    apply_filters = st.form_submit_button(
+        "Aplicar filtros y cargar análisis",
+        type="primary",
+        width="stretch",
+    )
+
+if apply_filters:
+    st.session_state["intel_v3_analysis_ready"] = True
+
+view_names = [
+    "Oportunidades",
+    "Consulta por ficha",
+    "Varias fichas",
+    "Consulta por empresa",
+    "Tendencias",
+    "Competencia",
+    "Proveedores",
+    "Estudio profundo",
+]
+selected_view = st.radio(
+    "Vista de inteligencia",
+    view_names,
+    horizontal=True,
+    key="intel_v3_active_view",
+    label_visibility="collapsed",
+)
+
+# Las consultas directas no necesitan construir el mapa maestro. Esto permite
+# abrirlas y usarlas de inmediato, independientemente del costo del ranking.
+direct_views = {
+    "Consulta por ficha": _render_direct_ficha_lookup,
+    "Varias fichas": _render_multi_ficha_lookup,
+    "Consulta por empresa": _render_direct_provider_lookup,
+}
+if selected_view in direct_views:
+    direct_views[selected_view](repo)
+    st.stop()
+
+if not st.session_state.get("intel_v3_analysis_ready", False):
+    st.info(
+        "Configura el periodo y los filtros en la barra lateral y pulsa "
+        "**Aplicar filtros y cargar análisis**. La página ya no ejecuta el "
+        "ranking pesado automáticamente al abrirse."
+    )
+    st.stop()
 
 availability_fichas: tuple[str, ...] = ()
 availability_modified = ""
@@ -2258,25 +2357,13 @@ metric_cols[4].metric("Score promedio", f"{float(filtered_master.get('score_opor
 if filtered_master.empty:
     st.warning("Ninguna ficha cumple todos los filtros. Amplía el periodo o relaja las condiciones del ranking.")
 
-tab_master, tab_lookup, tab_multi_lookup, tab_provider_lookup, tab_trends, tab_competition, tab_providers, tab_study = st.tabs(
-    [
-        "Oportunidades", "Consulta por ficha", "Varias fichas", "Consulta por empresa",
-        "Tendencias", "Competencia", "Proveedores", "Estudio profundo",
-    ]
-)
-with tab_master:
+if selected_view == "Oportunidades":
     _render_master_table(filtered_master)
-with tab_lookup:
-    _render_direct_ficha_lookup(repo)
-with tab_multi_lookup:
-    _render_multi_ficha_lookup(repo)
-with tab_provider_lookup:
-    _render_direct_provider_lookup(repo)
-with tab_trends:
+elif selected_view == "Tendencias":
     _render_trends(filtered_master, filters, repo)
-with tab_competition:
+elif selected_view == "Competencia":
     _render_competition(filtered_master)
-with tab_providers:
+elif selected_view == "Proveedores":
     _render_provider_detail(filtered_master, filters, repo)
-with tab_study:
+elif selected_view == "Estudio profundo":
     _render_deep_study(filtered_master, filters, score_preset, repo)
