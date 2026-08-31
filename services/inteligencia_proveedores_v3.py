@@ -502,22 +502,35 @@ class AnalyticsRepository:
         if filters.search_groups:
             group_clauses: list[str] = []
             if self._has_normalized_search:
-                search_expr = (
-                    "(COALESCE(f.search_text_norm, '') || ' ' || "
-                    "COALESCE(m.search_text_norm, ''))"
-                )
+                # PostgreSQL puede combinar los índices GIN/trigram de ambas
+                # columnas cuando se consultan por separado. Concatenarlas
+                # obligaba a escanear toda la tabla aun teniendo índices.
+                if self.dialect == "postgresql":
+                    search_expressions = (
+                        "COALESCE(f.search_text_norm, '')",
+                        "COALESCE(m.search_text_norm, '')",
+                    )
+                else:
+                    search_expressions = (
+                        "(COALESCE(f.search_text_norm, '') || ' ' || "
+                        "COALESCE(m.search_text_norm, ''))",
+                    )
             else:
                 # Backward-compatible fallback for analytical schema 3.0.
-                search_expr = (
+                search_expressions = (
                     "LOWER(COALESCE(f.ficha, '') || ' ' || COALESCE(f.titulo, '') || ' ' || "
                     "COALESCE(f.entidad, '') || ' ' || COALESCE(m.nombre_ficha, '') || ' ' || "
                     "COALESCE(m.descripcion, '') || ' ' || COALESCE(m.area, '') || ' ' || "
-                    "COALESCE(m.tipo_producto, '') || ' ' || COALESCE(m.especialidad, ''))"
+                    "COALESCE(m.tipo_producto, '') || ' ' || COALESCE(m.especialidad, ''))",
                 )
             for index, group in enumerate(filters.search_groups):
                 key = f"search_{index}"
                 params[key] = f"%{group}%"
-                group_clauses.append(f"{search_expr} LIKE :{key}")
+                group_clauses.append(
+                    "(" + " OR ".join(
+                        f"{expression} LIKE :{key}" for expression in search_expressions
+                    ) + ")"
+                )
             connector = " AND " if filters.search_mode.upper() == "AND" else " OR "
             clauses.append("(" + connector.join(group_clauses) + ")")
         return " AND ".join(clauses), params
