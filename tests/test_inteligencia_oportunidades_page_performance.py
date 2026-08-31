@@ -12,9 +12,19 @@ def test_initial_page_does_not_run_full_coverage_or_master_query() -> None:
     assert "repository.coverage()" not in status_source
     assert "repository.build_metadata()" in status_source
 
-    ready_guard = source.index('if not st.session_state.get("intel_v3_analysis_ready", False):')
+    ready_guard = source.index("if not analysis_ready:")
     master_query = source.index("raw_master = _master_data(")
     assert ready_guard < master_query
+
+
+def test_initial_page_defers_repository_connection_until_requested() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    runtime_start = source.rindex("\n_apply_pending_saved_view()\n")
+    runtime_source = source[runtime_start:]
+    advanced_guard = runtime_source.index("if advanced_filters:")
+    first_connection = runtime_source.index("repo = _require_repository()")
+    direct_or_ready = runtime_source.index("if selected_view in direct_views or analysis_ready:")
+    assert advanced_guard < first_connection < direct_or_ready
 
 
 def test_page_renders_only_the_selected_intelligence_view() -> None:

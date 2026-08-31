@@ -184,6 +184,20 @@ def _repository(database_url: str, api_version: str) -> AnalyticsRepository:
     return AnalyticsRepository.connect(database_url=database_url, local_candidates=LOCAL_ANALYTICS_CANDIDATES)
 
 
+def _require_repository() -> AnalyticsRepository:
+    """Abre la capa analitica solo cuando una vista realmente la necesita."""
+    try:
+        return _repository(_database_url(), ANALYTICS_REPOSITORY_API_VERSION)
+    except AnalyticsUnavailable as exc:
+        st.error(
+            "No se encontro la capa analitica de Inteligencia. Ejecuta "
+            "`C:\\Users\\rodri\\scrapers_repo\\db\\actualizar_base_corregida.bat` "
+            f"para construirla y publicarla. Detalle: {exc}"
+        )
+        st.stop()
+        raise
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def _master_data(
     filters: AnalyticsFilters,
@@ -2070,17 +2084,11 @@ st.caption(
     "como contexto y no inflan el valor económico de la ficha."
 )
 
-try:
-    repo = _repository(_database_url(), ANALYTICS_REPOSITORY_API_VERSION)
-except AnalyticsUnavailable as exc:
-    st.error(
-        "No se encontró la capa analítica de Inteligencia. Ejecuta "
-        "`C:\\Users\\rodri\\scrapers_repo\\db\\actualizar_base_corregida.bat` para construirla y publicarla. "
-        f"Detalle: {exc}"
-    )
-    st.stop()
-
-_render_data_status(repo)
+repo: AnalyticsRepository | None = None
+st.caption(
+    "Fuente configurada: **Supabase (capa analítica)**. "
+    "La conexión se abre únicamente al realizar una consulta."
+)
 
 with st.sidebar:
     st.header("Filtros del estudio")
@@ -2103,6 +2111,7 @@ with st.sidebar:
 if advanced_filters:
     try:
         with st.sidebar, st.spinner("Cargando listas avanzadas..."):
+            repo = _require_repository()
             options = _filter_options(repo)
     except Exception:
         logging.exception("No se pudieron cargar los filtros avanzados de inteligencia")
@@ -2242,17 +2251,25 @@ direct_views = {
     "Varias fichas": _render_multi_ficha_lookup,
     "Consulta por empresa": _render_direct_provider_lookup,
 }
+analysis_ready = bool(st.session_state.get("intel_v3_analysis_ready", False))
+if selected_view in direct_views or analysis_ready:
+    repo = repo or _require_repository()
+    _render_data_status(repo)
+
 if selected_view in direct_views:
+    assert repo is not None
     direct_views[selected_view](repo)
     st.stop()
 
-if not st.session_state.get("intel_v3_analysis_ready", False):
+if not analysis_ready:
     st.info(
         "Configura el periodo y los filtros en la barra lateral y pulsa "
         "**Aplicar filtros y cargar análisis**. La página ya no ejecuta el "
         "ranking pesado automáticamente al abrirse."
     )
     st.stop()
+
+assert repo is not None
 
 availability_fichas: tuple[str, ...] = ()
 availability_modified = ""

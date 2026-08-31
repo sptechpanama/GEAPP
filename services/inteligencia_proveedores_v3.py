@@ -588,37 +588,40 @@ class AnalyticsRepository:
         return " AND ".join(clauses), params
 
     def filter_options(self) -> dict[str, list[str]]:
-        # Una sola ida a Supabase. En el pooler remoto cuatro consultas
-        # independientes multiplicaban el tiempo de red y el ``pre_ping``.
-        query = """
-            SELECT 'states' AS category, estado AS value
-            FROM intel_actos_fichas
-            WHERE COALESCE(estado, '') <> ''
-            GROUP BY estado
-            UNION ALL
-            SELECT 'entities', entidad
-            FROM intel_actos_fichas
-            WHERE COALESCE(entidad, '') <> ''
-            GROUP BY entidad
-            UNION ALL
-            SELECT 'areas', area
-            FROM intel_ficha_metadata
-            WHERE COALESCE(area, '') <> ''
-            GROUP BY area
-            UNION ALL
-            SELECT 'product_types', tipo_producto
-            FROM intel_ficha_metadata
-            WHERE COALESCE(tipo_producto, '') <> ''
-            GROUP BY tipo_producto
-            ORDER BY category, value
-        """
-        frame = pd.read_sql_query(text(query), self.engine)
-        output = {"states": [], "entities": [], "areas": [], "product_types": []}
-        if frame.empty:
-            return output
-        for category, group in frame.groupby("category", sort=False):
-            if category in output:
-                output[category] = group["value"].fillna("").astype(str).tolist()
+        # Reutiliza una sola conexión remota, pero mantiene consultas pequeñas
+        # e indexables. El UNION global obligaba a Supabase a ordenar ambas
+        # tablas completas y podía alcanzar el timeout del plan gratuito.
+        queries = {
+            "states": """
+                SELECT DISTINCT estado AS value
+                FROM intel_actos_fichas
+                WHERE estado IS NOT NULL AND estado <> ''
+                ORDER BY value
+            """,
+            "entities": """
+                SELECT DISTINCT entidad AS value
+                FROM intel_actos_fichas
+                WHERE entidad IS NOT NULL AND entidad <> ''
+                ORDER BY value
+            """,
+            "areas": """
+                SELECT DISTINCT area AS value
+                FROM intel_ficha_metadata
+                WHERE area IS NOT NULL AND area <> ''
+                ORDER BY value
+            """,
+            "product_types": """
+                SELECT DISTINCT tipo_producto AS value
+                FROM intel_ficha_metadata
+                WHERE tipo_producto IS NOT NULL AND tipo_producto <> ''
+                ORDER BY value
+            """,
+        }
+        output: dict[str, list[str]] = {}
+        with self.engine.connect() as connection:
+            for category, query in queries.items():
+                frame = pd.read_sql_query(text(query), connection)
+                output[category] = frame["value"].fillna("").astype(str).tolist()
         return output
 
     def _master_metrics_fast(self, filters: AnalyticsFilters) -> pd.DataFrame:
