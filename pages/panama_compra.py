@@ -59,6 +59,15 @@ from services.panama_compra_db_filters import (
     append_date_range_condition,
     date_filter_columns,
 )
+from services.panama_compra_no_requirements import (
+    NO_REQUIREMENTS_ALL,
+    NO_REQUIREMENTS_MIXED,
+    NO_REQUIREMENTS_ONLY,
+    NO_REQUIREMENTS_SCOPE_COLUMN,
+    NO_REQUIREMENTS_SHEETS,
+    filter_no_requirements_scope,
+    find_scope_column,
+)
 
 _KEYWORD_RULES_REQUIRED_VERSION = 3
 if getattr(_keyword_registry, "KEYWORD_RULES_VERSION", 0) < _KEYWORD_RULES_REQUIRED_VERSION:
@@ -7302,6 +7311,33 @@ def render_df(
             sel = st.multiselect("Estado", opciones, key=keyp+"estado")
             if sel:
                 df = df[df["Estado"].isin(sel)]
+
+        if sheet_name in NO_REQUIREMENTS_SHEETS:
+            scope_selection = st.selectbox(
+                "Tipo de acto sin requisitos",
+                options=[
+                    NO_REQUIREMENTS_ALL,
+                    NO_REQUIREMENTS_ONLY,
+                    NO_REQUIREMENTS_MIXED,
+                ],
+                key=keyp + "no_requirements_scope",
+                help=(
+                    "Solo fichas sin requisitos: todas las fichas detectadas carecen de CT y "
+                    "registro sanitario. Acto mixto: contiene al menos una ficha sin requisitos "
+                    "y también otra ficha con CT, registro sanitario o clasificación pendiente."
+                ),
+            )
+            scope_column = find_scope_column(df.columns)
+            df = filter_no_requirements_scope(
+                df,
+                sheet_name=sheet_name,
+                selection=scope_selection,
+            )
+            if scope_selection != NO_REQUIREMENTS_ALL and scope_column is None:
+                st.warning(
+                    f"La columna '{NO_REQUIREMENTS_SCOPE_COLUMN}' aún no fue sincronizada "
+                    "en esta hoja."
+                )
 
         date_filter_series = None
         if filter_date_col:
