@@ -2101,8 +2101,16 @@ with st.sidebar:
     )
 
 if advanced_filters:
-    with st.sidebar, st.spinner("Cargando listas avanzadas..."):
-        options = _filter_options(repo)
+    try:
+        with st.sidebar, st.spinner("Cargando listas avanzadas..."):
+            options = _filter_options(repo)
+    except Exception:
+        logging.exception("No se pudieron cargar los filtros avanzados de inteligencia")
+        st.sidebar.warning(
+            "Las listas avanzadas no respondieron. Puedes continuar con el "
+            "periodo, búsqueda, clase y demás filtros disponibles."
+        )
+        options = {"states": [], "entities": [], "areas": [], "product_types": []}
 else:
     options = {"states": [], "entities": [], "areas": [], "product_types": []}
 
@@ -2292,28 +2300,37 @@ filters = AnalyticsFilters(
     contactable_only=contactable_only,
 )
 
-with st.spinner("Calculando métricas globales del periodo..."):
-    raw_master = _master_data(filters, MASTER_QUERY_CACHE_VERSION, repo)
-    required_amount_columns = {"monto_total_actos", "monto_ficha_unica"}
-    if not required_amount_columns.issubset(raw_master.columns):
-        # Protección adicional para despliegues en caliente: si Streamlit
-        # conservara un resultado viejo pese a la versión de cache, se fuerza
-        # una consulta directa antes de permitir que la tabla oculte columnas.
-        _master_data.clear()
-        raw_master = repo.master_metrics(filters)
-    missing_amount_columns = required_amount_columns - set(raw_master.columns)
-    if missing_amount_columns:
-        st.error(
-            "La capa analítica no devolvió las columnas monetarias requeridas: "
-            + ", ".join(sorted(missing_amount_columns))
-            + ". Reinicia la aplicación para cargar la versión actual del servicio."
+try:
+    with st.spinner("Calculando métricas globales del periodo..."):
+        raw_master = _master_data(filters, MASTER_QUERY_CACHE_VERSION, repo)
+        required_amount_columns = {"monto_total_actos", "monto_ficha_unica"}
+        if not required_amount_columns.issubset(raw_master.columns):
+            # Protección adicional para despliegues en caliente: si Streamlit
+            # conservara un resultado viejo pese a la versión de cache, se fuerza
+            # una consulta directa antes de permitir que la tabla oculte columnas.
+            _master_data.clear()
+            raw_master = repo.master_metrics(filters)
+        missing_amount_columns = required_amount_columns - set(raw_master.columns)
+        if missing_amount_columns:
+            st.error(
+                "La capa analítica no devolvió las columnas monetarias requeridas: "
+                + ", ".join(sorted(missing_amount_columns))
+                + ". Reinicia la aplicación para cargar la versión actual del servicio."
+            )
+            st.stop()
+        master = score_opportunities(
+            raw_master,
+            weights,
+            strict_manual=score_preset == "personalizado",
         )
-        st.stop()
-    master = score_opportunities(
-        raw_master,
-        weights,
-        strict_manual=score_preset == "personalizado",
+except Exception:
+    logging.exception("Falló el cálculo del mapa maestro de inteligencia")
+    st.error(
+        "No fue posible completar el análisis en esta ejecución. Los datos no "
+        "se modificaron. Prueba un periodo más corto o vuelve a pulsar "
+        "**Aplicar filtros y cargar análisis**."
     )
+    st.stop()
 
 with st.expander("Decisión final", expanded=False):
     c1, c2 = st.columns(2)
