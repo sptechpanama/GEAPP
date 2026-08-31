@@ -308,6 +308,22 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertEqual(str(row["top_1_ganador"]), "BTS")
         self.assertEqual(int(row["proveedores_catalogo"]), 1)
 
+    def test_fast_master_preserves_core_metrics_without_expensive_rankings(self) -> None:
+        result = self.repo.master_metrics(
+            AnalyticsFilters(
+                detection_profile="muy_flexible",
+            ),
+            include_expensive=False,
+        )
+        row = result[result.ficha.eq("43358")].iloc[0]
+        self.assertEqual(int(row["actos"]), 2)
+        self.assertEqual(int(row["actos_ficha_unica"]), 1)
+        self.assertEqual(float(row["monto_total_actos"]), 15000.0)
+        self.assertEqual(float(row["monto_ficha_unica"]), 5000.0)
+        self.assertEqual(int(row["proveedores_catalogo"]), 1)
+        self.assertNotIn("top_1_ganador", result.columns)
+        self.assertNotIn("participantes_mediana", result.columns)
+
     def test_global_policy_excludes_rs_required_and_unclassified(self) -> None:
         result = self.repo.master_metrics(AnalyticsFilters(detection_profile="muy_flexible"))
         self.assertEqual(set(result["ficha"]), {"43358", "103169"})

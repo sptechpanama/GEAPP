@@ -123,7 +123,7 @@ upsert_tracking_ficha = _orchestrator_v3.upsert_tracking_ficha
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
 ANALYTICS_REPOSITORY_API_VERSION = ANALYTICS_SERVICE_VERSION
-MASTER_QUERY_CACHE_VERSION = "2026-08-01-profile-unique-v3"
+MASTER_QUERY_CACHE_VERSION = "2026-08-30-fast-master-v1"
 LOCAL_ANALYTICS_CANDIDATES = (
     APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
     APP_ROOT / "data" / "inteligencia_proveedores.db",
@@ -194,7 +194,7 @@ def _master_data(
     # Así una consulta agregada nueva no puede reutilizar un DataFrame antiguo
     # que todavía no contenga sus columnas.
     _ = cache_version
-    return _repo.master_metrics(filters)
+    return _repo.master_metrics(filters, include_expensive=False)
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -2309,7 +2309,7 @@ try:
             # conservara un resultado viejo pese a la versión de cache, se fuerza
             # una consulta directa antes de permitir que la tabla oculte columnas.
             _master_data.clear()
-            raw_master = repo.master_metrics(filters)
+            raw_master = repo.master_metrics(filters, include_expensive=False)
         missing_amount_columns = required_amount_columns - set(raw_master.columns)
         if missing_amount_columns:
             st.error(

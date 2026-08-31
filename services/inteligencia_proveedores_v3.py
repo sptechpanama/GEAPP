@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-08-19-ctni-demand-v5"
+ANALYTICS_SERVICE_VERSION = "2026-08-30-fast-master-v6"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -262,8 +262,8 @@ class AnalyticsRepository:
             try:
                 engine = create_engine(url, pool_pre_ping=True, pool_recycle=240, connect_args={"connect_timeout": 12})
                 repository = cls(engine, source_label="Supabase (capa analítica)")
-                with engine.connect() as connection:
-                    connection.execute(text("SELECT 1"))
+                # ``_assert_schema`` ya abrio y valido la conexion. Un SELECT
+                # adicional duplicaba un viaje al pooler en cada arranque frio.
                 return repository
             except Exception as exc:
                 errors.append(f"Supabase: {exc}")
@@ -285,15 +285,39 @@ class AnalyticsRepository:
             self.engine.dispose()
 
     def _assert_schema(self) -> None:
-        inspector = inspect(self.engine)
         required = {"intel_actos_fichas", "intel_acto_proponentes", "intel_ficha_metadata", "intel_ficha_catalogo"}
-        tables = set(inspector.get_table_names())
+        if self.dialect == "postgresql":
+            # Una sola consulta de catalogo sustituye get_table_names + dos
+            # get_columns, que en Supabase implicaban tres viajes remotos.
+            schema = pd.read_sql_query(
+                text(
+                    """
+                    SELECT table_name, column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name IN (
+                          'intel_actos_fichas', 'intel_acto_proponentes',
+                          'intel_ficha_metadata', 'intel_ficha_catalogo'
+                      )
+                    """
+                ),
+                self.engine,
+            )
+            tables = set(schema["table_name"].astype(str)) if not schema.empty else set()
+            fact_columns = set(
+                schema.loc[schema["table_name"].eq("intel_actos_fichas"), "column_name"].astype(str)
+            )
+            metadata_columns = set(
+                schema.loc[schema["table_name"].eq("intel_ficha_metadata"), "column_name"].astype(str)
+            )
+        else:
+            inspector = inspect(self.engine)
+            tables = set(inspector.get_table_names())
+            fact_columns = {column["name"] for column in inspector.get_columns("intel_actos_fichas")}
+            metadata_columns = {column["name"] for column in inspector.get_columns("intel_ficha_metadata")}
         missing = sorted(required - tables)
         if missing:
             raise AnalyticsUnavailable("Faltan tablas analíticas: " + ", ".join(missing))
-
-        fact_columns = {column["name"] for column in inspector.get_columns("intel_actos_fichas")}
-        metadata_columns = {column["name"] for column in inspector.get_columns("intel_ficha_metadata")}
         amount_columns = {
             "reference_amount_context",
             "reference_amount_attributed",
@@ -497,40 +521,30 @@ class AnalyticsRepository:
         # La exclusión ocurre dentro del SQL antes de agregar, puntuar u ordenar.
         # De esta manera una ficha que requiere registro sanitario no influye en
         # métricas, rankings, exportaciones ni estudios detallados.
-        clauses.append("LOWER(TRIM(COALESCE(m.registro_sanitario, ''))) = :eligible_rs_status")
-        params["eligible_rs_status"] = ELIGIBLE_RS_STATUS.lower()
+        # La capa analitica normaliza este campo a ``Si``/``No`` al publicarse.
+        # La igualdad directa permite usar el indice (registro_sanitario,
+        # ficha); aplicar LOWER/TRIM sobre cada fila anulaba ese indice.
+        clauses.append("m.registro_sanitario = :eligible_rs_status")
+        params["eligible_rs_status"] = ELIGIBLE_RS_STATUS
         if filters.search_groups:
             group_clauses: list[str] = []
             if self._has_normalized_search:
-                # PostgreSQL puede combinar los índices GIN/trigram de ambas
-                # columnas cuando se consultan por separado. Concatenarlas
-                # obligaba a escanear toda la tabla aun teniendo índices.
-                if self.dialect == "postgresql":
-                    search_expressions = (
-                        "COALESCE(f.search_text_norm, '')",
-                        "COALESCE(m.search_text_norm, '')",
-                    )
-                else:
-                    search_expressions = (
-                        "(COALESCE(f.search_text_norm, '') || ' ' || "
-                        "COALESCE(m.search_text_norm, ''))",
-                    )
+                search_expr = (
+                    "(COALESCE(f.search_text_norm, '') || ' ' || "
+                    "COALESCE(m.search_text_norm, ''))"
+                )
             else:
                 # Backward-compatible fallback for analytical schema 3.0.
-                search_expressions = (
+                search_expr = (
                     "LOWER(COALESCE(f.ficha, '') || ' ' || COALESCE(f.titulo, '') || ' ' || "
                     "COALESCE(f.entidad, '') || ' ' || COALESCE(m.nombre_ficha, '') || ' ' || "
                     "COALESCE(m.descripcion, '') || ' ' || COALESCE(m.area, '') || ' ' || "
-                    "COALESCE(m.tipo_producto, '') || ' ' || COALESCE(m.especialidad, ''))",
+                    "COALESCE(m.tipo_producto, '') || ' ' || COALESCE(m.especialidad, ''))"
                 )
             for index, group in enumerate(filters.search_groups):
                 key = f"search_{index}"
                 params[key] = f"%{group}%"
-                group_clauses.append(
-                    "(" + " OR ".join(
-                        f"{expression} LIKE :{key}" for expression in search_expressions
-                    ) + ")"
-                )
+                group_clauses.append(f"{search_expr} LIKE :{key}")
             connector = " AND " if filters.search_mode.upper() == "AND" else " OR "
             clauses.append("(" + connector.join(group_clauses) + ")")
         return " AND ".join(clauses), params
@@ -574,18 +588,175 @@ class AnalyticsRepository:
         return " AND ".join(clauses), params
 
     def filter_options(self) -> dict[str, list[str]]:
-        states = pd.read_sql_query(text("SELECT DISTINCT estado FROM intel_actos_fichas WHERE COALESCE(estado, '') <> '' ORDER BY estado"), self.engine)
-        entities = pd.read_sql_query(text("SELECT DISTINCT entidad FROM intel_actos_fichas WHERE COALESCE(entidad, '') <> '' ORDER BY entidad"), self.engine)
-        areas = pd.read_sql_query(text("SELECT DISTINCT area FROM intel_ficha_metadata WHERE COALESCE(area, '') <> '' ORDER BY area"), self.engine)
-        product_types = pd.read_sql_query(text("SELECT DISTINCT tipo_producto FROM intel_ficha_metadata WHERE COALESCE(tipo_producto, '') <> '' ORDER BY tipo_producto"), self.engine)
-        return {
-            "states": states.iloc[:, 0].astype(str).tolist() if not states.empty else [],
-            "entities": entities.iloc[:, 0].astype(str).tolist() if not entities.empty else [],
-            "areas": areas.iloc[:, 0].astype(str).tolist() if not areas.empty else [],
-            "product_types": product_types.iloc[:, 0].astype(str).tolist() if not product_types.empty else [],
-        }
+        # Una sola ida a Supabase. En el pooler remoto cuatro consultas
+        # independientes multiplicaban el tiempo de red y el ``pre_ping``.
+        query = """
+            SELECT 'states' AS category, estado AS value
+            FROM intel_actos_fichas
+            WHERE COALESCE(estado, '') <> ''
+            GROUP BY estado
+            UNION ALL
+            SELECT 'entities', entidad
+            FROM intel_actos_fichas
+            WHERE COALESCE(entidad, '') <> ''
+            GROUP BY entidad
+            UNION ALL
+            SELECT 'areas', area
+            FROM intel_ficha_metadata
+            WHERE COALESCE(area, '') <> ''
+            GROUP BY area
+            UNION ALL
+            SELECT 'product_types', tipo_producto
+            FROM intel_ficha_metadata
+            WHERE COALESCE(tipo_producto, '') <> ''
+            GROUP BY tipo_producto
+            ORDER BY category, value
+        """
+        frame = pd.read_sql_query(text(query), self.engine)
+        output = {"states": [], "entities": [], "areas": [], "product_types": []}
+        if frame.empty:
+            return output
+        for category, group in frame.groupby("category", sort=False):
+            if category in output:
+                output[category] = group["value"].fillna("").astype(str).tolist()
+        return output
 
-    def master_metrics(self, filters: AnalyticsFilters) -> pd.DataFrame:
+    def _master_metrics_fast(self, filters: AnalyticsFilters) -> pd.DataFrame:
+        """Calcula el mapa maestro sin agregaciones competitivas secundarias.
+
+        Mantiene exactos los conteos, la unicidad por perfil, los montos, la
+        metadata regulatoria, participantes promedio y disponibilidad de
+        catálogo. Las medianas, HHI y Top 3 se reservan para consultas de
+        detalle; materializarlas para todas las fichas era el principal cuello
+        de botella en Supabase.
+        """
+        where_sql, params = self._filter_sql(filters)
+        profile_scope_sql, profile_params = self._profile_act_scope_sql(filters)
+        params.update(profile_params)
+        end = filters.end_date or date.today()
+        params.update(
+            {
+                "recent_start": (end - timedelta(days=182)).isoformat(),
+                "previous_start": (end - timedelta(days=365)).isoformat(),
+                "previous_end": (end - timedelta(days=183)).isoformat(),
+            }
+        )
+        date_column = filters.date_column
+        having: list[str] = []
+        if filters.min_acts > 0:
+            having.append("COUNT(DISTINCT f.acto_key) >= :min_acts")
+            params["min_acts"] = int(filters.min_acts)
+        if filters.min_entities > 0:
+            having.append("COUNT(DISTINCT f.entidad) >= :min_entities")
+            params["min_entities"] = int(filters.min_entities)
+        if filters.min_active_months > 0:
+            having.append(
+                f"COUNT(DISTINCT SUBSTR(f.{date_column}, 1, 7)) >= :min_active_months"
+            )
+            params["min_active_months"] = int(filters.min_active_months)
+        if filters.max_average_participants > 0:
+            having.append("AVG(f.participant_count) <= :max_average_participants")
+            params["max_average_participants"] = float(filters.max_average_participants)
+        having_sql = " HAVING " + " AND ".join(having) if having else ""
+        if filters.contactable_only:
+            catalog_filter_sql = "WHERE COALESCE(c.proveedores_contactables, 0) > 0"
+        elif filters.catalog_only:
+            catalog_filter_sql = "WHERE COALESCE(c.proveedores_catalogo, 0) > 0"
+        else:
+            catalog_filter_sql = ""
+
+        reference_metric = self._reference_metric_column
+        award_metric = self._award_metric_column
+        reference_context = self._reference_context_column
+        award_context = self._award_context_column
+        reference_reliable = (
+            "f.reference_amount_reliable = 1"
+            if self._has_attributed_amounts
+            else "f.reference_amount > 0"
+        )
+        award_reliable = (
+            "f.award_amount_reliable = 1"
+            if self._has_attributed_amounts
+            else "f.award_amount > 0"
+        )
+        risk_class_select = (
+            "MAX(COALESCE(m.clase_riesgo, '')) AS clase_riesgo"
+            if self._has_risk_class
+            else "'' AS clase_riesgo"
+        )
+        query = f"""
+            WITH profile_act_counts AS (
+                SELECT pf.acto_key, COUNT(DISTINCT pf.ficha) AS profile_ficha_count
+                FROM intel_actos_fichas pf
+                WHERE {profile_scope_sql}
+                GROUP BY pf.acto_key
+            ),
+            agg AS (
+                SELECT f.ficha,
+                       MAX(COALESCE(m.nombre_ficha, '')) AS nombre_ficha,
+                       MAX(COALESCE(m.area, '')) AS area,
+                       MAX(COALESCE(m.tipo_producto, '')) AS tipo_producto,
+                       MAX(COALESCE(m.especialidad, '')) AS especialidad,
+                       MAX(COALESCE(m.tiene_ct, '')) AS tiene_ct,
+                       MAX(COALESCE(m.registro_sanitario, '')) AS registro_sanitario,
+                       {risk_class_select},
+                       MAX(COALESCE(m.enlace_minsa, '')) AS enlace_minsa,
+                       COUNT(DISTINCT f.acto_key) AS actos,
+                       COUNT(DISTINCT CASE WHEN pc.profile_ficha_count = 1 THEN f.acto_key END) AS actos_ficha_unica,
+                       COUNT(DISTINCT f.entidad) AS entidades,
+                       COUNT(DISTINCT SUBSTR(f.{date_column}, 1, 7)) AS meses_activos,
+                       SUM(f.{reference_metric}) AS monto_referencia,
+                       AVG(CASE WHEN f.{reference_metric} > 0 THEN f.{reference_metric} END) AS ticket_promedio,
+                       MAX(f.{reference_metric}) AS ticket_maximo,
+                       SUM(f.{award_metric}) AS monto_adjudicado,
+                       SUM(f.{reference_context}) AS monto_total_actos,
+                       SUM(CASE WHEN pc.profile_ficha_count = 1 THEN f.{reference_context} ELSE 0 END) AS monto_ficha_unica,
+                       SUM(CASE WHEN pc.profile_ficha_count = 1 THEN f.{award_context} ELSE 0 END) AS monto_adjudicado_ficha_unica,
+                       SUM(f.{reference_context}) AS monto_referencia_contexto,
+                       SUM(f.{award_context}) AS monto_adjudicado_contexto,
+                       COUNT(DISTINCT CASE WHEN {award_reliable} THEN f.acto_key END) AS actos_monto_adjudicado,
+                       COUNT(DISTINCT CASE WHEN {reference_reliable} THEN f.acto_key END) AS actos_monto_referencia,
+                       COUNT(DISTINCT CASE WHEN COALESCE(f.winner, '') <> '' OR COALESCE(f.winner_short, '') <> '' THEN f.acto_key END) AS actos_con_ganador,
+                       COUNT(DISTINCT CASE WHEN f.participant_count > 0 THEN f.acto_key END) AS actos_con_participantes,
+                       AVG(f.participant_count) AS participantes_promedio,
+                       AVG(CASE WHEN f.participant_count <= 1 THEN 1.0 ELSE 0.0 END) AS proporcion_unico_proponente,
+                       AVG(f.detection_score) AS confianza_deteccion,
+                       MIN(f.{date_column}) AS primera_fecha,
+                       MAX(f.{date_column}) AS ultima_fecha,
+                       COUNT(DISTINCT CASE WHEN f.{date_column} >= :recent_start THEN f.acto_key END) AS actos_ultimos_6m,
+                       COUNT(DISTINCT CASE WHEN f.{date_column} BETWEEN :previous_start AND :previous_end THEN f.acto_key END) AS actos_6m_previos
+                FROM intel_actos_fichas f
+                INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key
+                INNER JOIN intel_ficha_metadata m ON m.ficha = f.ficha
+                WHERE {where_sql}
+                GROUP BY f.ficha
+                {having_sql}
+            ),
+            catalog_agg AS (
+                SELECT ficha,
+                       COUNT(DISTINCT CASE WHEN COALESCE(oferente, '') <> '' THEN LOWER(oferente) END) AS proveedores_catalogo,
+                       COUNT(DISTINCT CASE WHEN COALESCE(contacto, '') <> '' OR COALESCE(telefono, '') <> '' OR COALESCE(correo, '') <> '' THEN LOWER(oferente) END) AS proveedores_contactables
+                FROM intel_ficha_catalogo
+                GROUP BY ficha
+            )
+            SELECT a.*,
+                   COALESCE(c.proveedores_catalogo, 0) AS proveedores_catalogo,
+                   COALESCE(c.proveedores_contactables, 0) AS proveedores_contactables
+            FROM agg a
+            LEFT JOIN catalog_agg c ON c.ficha = a.ficha
+            {catalog_filter_sql}
+        """
+        frame = pd.read_sql_query(text(query), self.engine, params=params)
+        return self._finalize_master_metrics(frame)
+
+    def master_metrics(
+        self,
+        filters: AnalyticsFilters,
+        *,
+        include_expensive: bool = True,
+    ) -> pd.DataFrame:
+        if not include_expensive:
+            return self._master_metrics_fast(filters)
         where_sql, params = self._filter_sql(filters)
         profile_scope_sql, profile_params = self._profile_act_scope_sql(filters)
         params.update(profile_params)
@@ -827,6 +998,10 @@ class AnalyticsRepository:
             {catalog_filter_sql}
         """
         frame = pd.read_sql_query(text(query), self.engine, params=params)
+        return self._finalize_master_metrics(frame)
+
+    @staticmethod
+    def _finalize_master_metrics(frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:
             return frame
 
@@ -1444,6 +1619,7 @@ def score_opportunities(
     if frame.empty:
         return frame.copy()
     result = frame.copy()
+    available_columns = set(result.columns)
     numeric_columns = [
         "actos", "actos_ficha_unica", "entidades", "meses_activos", "monto_referencia", "monto_adjudicado",
         "monto_total_actos", "monto_ficha_unica", "monto_adjudicado_ficha_unica",
@@ -1480,15 +1656,34 @@ def score_opportunities(
     # Los montos totales de actos se mantienen visibles y ordenables, pero no
     # contaminan el peso económico del score.
     result["score_economia"] = _percentile(result["monto_ficha_unica"])
-    result["score_competencia"] = _weighted_mean(
-        [
-            (_percentile(result["participantes_promedio"], higher_is_better=False), 0.38),
-            (_percentile(result["participantes_mediana"], higher_is_better=False), 0.14),
-            (_percentile(result["proponentes_distintos"] / result["actos"].replace(0, 1), higher_is_better=False), 0.20),
-            (_percentile(result["concentracion_hhi"], higher_is_better=False), 0.13),
-            (_percentile(result["proporcion_unico_proponente"]), 0.15),
-        ]
-    )
+    competition_parts: list[tuple[pd.Series, float]] = [
+        (_percentile(result["participantes_promedio"], higher_is_better=False), 0.38),
+        (_percentile(result["proporcion_unico_proponente"]), 0.15),
+    ]
+    # El mapa rapido no materializa medianas, proponentes distintos ni HHI
+    # para todas las fichas. Cuando esas columnas existen (consulta completa o
+    # pruebas locales) se conserva exactamente la formula historica; cuando no
+    # existen, los dos indicadores exactos disponibles se renormalizan sin
+    # convertir ausencias artificialmente en competencia favorable.
+    if "participantes_mediana" in available_columns:
+        competition_parts.append(
+            (_percentile(result["participantes_mediana"], higher_is_better=False), 0.14)
+        )
+    if "proponentes_distintos" in available_columns:
+        competition_parts.append(
+            (
+                _percentile(
+                    result["proponentes_distintos"] / result["actos"].replace(0, 1),
+                    higher_is_better=False,
+                ),
+                0.20,
+            )
+        )
+    if "concentracion_hhi" in available_columns:
+        competition_parts.append(
+            (_percentile(result["concentracion_hhi"], higher_is_better=False), 0.13)
+        )
+    result["score_competencia"] = _weighted_mean(competition_parts)
     result["score_viabilidad"] = _weighted_mean(
         [
             (_percentile(result["proveedores_catalogo"]), 0.38),
