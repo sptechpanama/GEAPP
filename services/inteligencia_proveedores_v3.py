@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-08-30-fast-master-v6"
+ANALYTICS_SERVICE_VERSION = "2026-08-31-profile-counts-v7"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -297,7 +297,8 @@ class AnalyticsRepository:
                     WHERE table_schema = current_schema()
                       AND table_name IN (
                           'intel_actos_fichas', 'intel_acto_proponentes',
-                          'intel_ficha_metadata', 'intel_ficha_catalogo'
+                          'intel_ficha_metadata', 'intel_ficha_catalogo',
+                          'intel_acto_profile_counts'
                       )
                     """
                 ),
@@ -310,11 +311,19 @@ class AnalyticsRepository:
             metadata_columns = set(
                 schema.loc[schema["table_name"].eq("intel_ficha_metadata"), "column_name"].astype(str)
             )
+            profile_count_columns = set(
+                schema.loc[schema["table_name"].eq("intel_acto_profile_counts"), "column_name"].astype(str)
+            )
         else:
             inspector = inspect(self.engine)
             tables = set(inspector.get_table_names())
             fact_columns = {column["name"] for column in inspector.get_columns("intel_actos_fichas")}
             metadata_columns = {column["name"] for column in inspector.get_columns("intel_ficha_metadata")}
+            profile_count_columns = (
+                {column["name"] for column in inspector.get_columns("intel_acto_profile_counts")}
+                if "intel_acto_profile_counts" in tables
+                else set()
+            )
         missing = sorted(required - tables)
         if missing:
             raise AnalyticsUnavailable("Faltan tablas analíticas: " + ", ".join(missing))
@@ -351,6 +360,13 @@ class AnalyticsRepository:
             "search_text_norm" in fact_columns and "search_text_norm" in metadata_columns
         )
         self._has_risk_class = "clase_riesgo" in metadata_columns
+        self._has_profile_counts = {
+            "acto_key",
+            "muy_flexible_count",
+            "flexible_count",
+            "moderado_count",
+            "estricto_count",
+        }.issubset(profile_count_columns)
 
     def build_metadata(self) -> dict[str, str]:
         try:
@@ -634,8 +650,29 @@ class AnalyticsRepository:
         de botella en Supabase.
         """
         where_sql, params = self._filter_sql(filters)
-        profile_scope_sql, profile_params = self._profile_act_scope_sql(filters)
-        params.update(profile_params)
+        if self._has_profile_counts:
+            profile_column = {
+                "muy_flexible": "muy_flexible_count",
+                "flexible": "flexible_count",
+                "moderado": "moderado_count",
+                "estricto": "estricto_count",
+            }.get(filters.detection_profile, "moderado_count")
+            profile_cte_sql = ""
+            profile_join_sql = "INNER JOIN intel_acto_profile_counts pc ON pc.acto_key = f.acto_key"
+            unique_condition = f"pc.{profile_column} = 1"
+        else:
+            profile_scope_sql, profile_params = self._profile_act_scope_sql(filters)
+            params.update(profile_params)
+            profile_cte_sql = f"""
+                profile_act_counts AS (
+                    SELECT pf.acto_key, COUNT(DISTINCT pf.ficha) AS profile_ficha_count
+                    FROM intel_actos_fichas pf
+                    WHERE {profile_scope_sql}
+                    GROUP BY pf.acto_key
+                ),
+            """
+            profile_join_sql = "INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key"
+            unique_condition = "pc.profile_ficha_count = 1"
         end = filters.end_date or date.today()
         params.update(
             {
@@ -688,12 +725,7 @@ class AnalyticsRepository:
             else "'' AS clase_riesgo"
         )
         query = f"""
-            WITH profile_act_counts AS (
-                SELECT pf.acto_key, COUNT(DISTINCT pf.ficha) AS profile_ficha_count
-                FROM intel_actos_fichas pf
-                WHERE {profile_scope_sql}
-                GROUP BY pf.acto_key
-            ),
+            WITH {profile_cte_sql}
             agg AS (
                 SELECT f.ficha,
                        MAX(COALESCE(m.nombre_ficha, '')) AS nombre_ficha,
@@ -705,7 +737,7 @@ class AnalyticsRepository:
                        {risk_class_select},
                        MAX(COALESCE(m.enlace_minsa, '')) AS enlace_minsa,
                        COUNT(DISTINCT f.acto_key) AS actos,
-                       COUNT(DISTINCT CASE WHEN pc.profile_ficha_count = 1 THEN f.acto_key END) AS actos_ficha_unica,
+                       COUNT(DISTINCT CASE WHEN {unique_condition} THEN f.acto_key END) AS actos_ficha_unica,
                        COUNT(DISTINCT f.entidad) AS entidades,
                        COUNT(DISTINCT SUBSTR(f.{date_column}, 1, 7)) AS meses_activos,
                        SUM(f.{reference_metric}) AS monto_referencia,
@@ -713,8 +745,8 @@ class AnalyticsRepository:
                        MAX(f.{reference_metric}) AS ticket_maximo,
                        SUM(f.{award_metric}) AS monto_adjudicado,
                        SUM(f.{reference_context}) AS monto_total_actos,
-                       SUM(CASE WHEN pc.profile_ficha_count = 1 THEN f.{reference_context} ELSE 0 END) AS monto_ficha_unica,
-                       SUM(CASE WHEN pc.profile_ficha_count = 1 THEN f.{award_context} ELSE 0 END) AS monto_adjudicado_ficha_unica,
+                       SUM(CASE WHEN {unique_condition} THEN f.{reference_context} ELSE 0 END) AS monto_ficha_unica,
+                       SUM(CASE WHEN {unique_condition} THEN f.{award_context} ELSE 0 END) AS monto_adjudicado_ficha_unica,
                        SUM(f.{reference_context}) AS monto_referencia_contexto,
                        SUM(f.{award_context}) AS monto_adjudicado_contexto,
                        COUNT(DISTINCT CASE WHEN {award_reliable} THEN f.acto_key END) AS actos_monto_adjudicado,
@@ -729,7 +761,7 @@ class AnalyticsRepository:
                        COUNT(DISTINCT CASE WHEN f.{date_column} >= :recent_start THEN f.acto_key END) AS actos_ultimos_6m,
                        COUNT(DISTINCT CASE WHEN f.{date_column} BETWEEN :previous_start AND :previous_end THEN f.acto_key END) AS actos_6m_previos
                 FROM intel_actos_fichas f
-                INNER JOIN profile_act_counts pc ON pc.acto_key = f.acto_key
+                {profile_join_sql}
                 INNER JOIN intel_ficha_metadata m ON m.ficha = f.ficha
                 WHERE {where_sql}
                 GROUP BY f.ficha

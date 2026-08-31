@@ -250,6 +250,11 @@ class RepositoryIntegrationTests(unittest.TestCase):
                 acto_key TEXT, source_id TEXT, ordinal INTEGER, proveedor TEXT,
                 proveedor_norm TEXT, offered_amount REAL, is_winner INTEGER
             );
+            CREATE TABLE intel_acto_profile_counts (
+                acto_key TEXT PRIMARY KEY, muy_flexible_count INTEGER,
+                flexible_count INTEGER, moderado_count INTEGER,
+                estricto_count INTEGER
+            );
             CREATE TABLE intel_ficha_metadata (
                 ficha TEXT, nombre_ficha TEXT, descripcion TEXT, area TEXT,
                 tipo_producto TEXT, especialidad TEXT, tiene_ct TEXT,
@@ -273,6 +278,16 @@ class RepositoryIntegrationTests(unittest.TestCase):
             ("a5", "5", "88888", 1, 1, 100, "codigo_contextual", "descripcion", "ficha", "3.1", "cat", "https://acto/5", "PRODUCTO SIN CLASIFICAR", "CSS", "Compras", "Adjudicado", "2026-04-10", "2026-04-15", "2026-04-15", "2026-04-20", "2026-04-21", 60000, 55000, "ganador", "SIN CLASIFICAR", "SIN CLASIFICAR", 1, "producto sin clasificar"),
         ]
         connection.executemany("INSERT INTO intel_actos_fichas VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", facts)
+        connection.executemany(
+            "INSERT INTO intel_acto_profile_counts VALUES (?,?,?,?,?)",
+            [
+                ("a1", 2, 1, 1, 1),
+                ("a2", 1, 1, 1, 1),
+                ("a3", 1, 1, 1, 1),
+                ("a4", 1, 1, 1, 1),
+                ("a5", 1, 1, 1, 1),
+            ],
+        )
         connection.executemany(
             "INSERT INTO intel_acto_proponentes VALUES (?,?,?,?,?,?,?)",
             [("a1", "1", 1, "BTS", "bts", 9000, 1), ("a2", "2", 1, "OTRO", "otro", 4500, 1), ("a3", "3", 1, "MEDICAL", "medical", 18000, 1), ("a4", "4", 1, "RS GANADOR", "rs ganador", 45000, 1), ("a5", "5", 1, "SIN CLASIFICAR", "sin clasificar", 55000, 1)],
@@ -569,6 +584,11 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
                 acto_key TEXT, source_id TEXT, ordinal INTEGER, proveedor TEXT,
                 proveedor_norm TEXT, offered_amount REAL, is_winner INTEGER
             );
+            CREATE TABLE intel_acto_profile_counts (
+                acto_key TEXT PRIMARY KEY, muy_flexible_count INTEGER,
+                flexible_count INTEGER, moderado_count INTEGER,
+                estricto_count INTEGER
+            );
             CREATE TABLE intel_ficha_metadata (
                 ficha TEXT, nombre_ficha TEXT, descripcion TEXT, area TEXT,
                 tipo_producto TEXT, especialidad TEXT, tiene_ct TEXT,
@@ -634,6 +654,10 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
             ],
         )
         connection.executemany(
+            "INSERT INTO intel_acto_profile_counts VALUES (?,?,?,?,?)",
+            [("a1", 2, 1, 1, 1), ("a2", 1, 1, 1, 1)],
+        )
+        connection.executemany(
             "INSERT INTO intel_acto_proponentes VALUES (?,?,?,?,?,?,?)",
             [
                 ("a1", "1", 1, "BTS", "bts", 190000, 1),
@@ -697,10 +721,12 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
 
     def test_unique_ficha_respects_the_selected_detection_profile(self) -> None:
         moderate = self.repo.master_metrics(
-            AnalyticsFilters(detection_profile="moderado")
+            AnalyticsFilters(detection_profile="moderado"),
+            include_expensive=False,
         ).iloc[0]
         flexible = self.repo.master_metrics(
-            AnalyticsFilters(detection_profile="muy_flexible")
+            AnalyticsFilters(detection_profile="muy_flexible"),
+            include_expensive=False,
         ).iloc[0]
         self.assertEqual(int(moderate["actos_ficha_unica"]), 2)
         self.assertEqual(int(flexible["actos_ficha_unica"]), 1)
