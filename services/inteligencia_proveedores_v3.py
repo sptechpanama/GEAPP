@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-08-31-profile-counts-v7"
+ANALYTICS_SERVICE_VERSION = "2026-09-01-deep-study-catalog-v8"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -138,6 +138,164 @@ def normalize_ficha_list(value: object, *, limit: int = 100) -> tuple[str, ...]:
         if len(normalized) >= max_items:
             break
     return tuple(normalized)
+
+
+DEEP_STUDY_CATALOG_COLUMNS = (
+    "ficha",
+    "nombre_ficha",
+    "clase_riesgo",
+    "enlace_minsa",
+    "score_oportunidad",
+    "recomendacion",
+    "actos",
+    "actos_ficha_unica",
+    "monto_referencia",
+    "participantes_promedio",
+    "proponentes_distintos",
+    "tiene_estudio",
+    "en_seguimiento",
+    "ultima_ejecucion",
+)
+
+
+def build_deep_study_catalog(
+    options: pd.DataFrame | None,
+    tracking_records: Sequence[Mapping[str, object]] = (),
+    study_runs: Sequence[Mapping[str, object]] = (),
+) -> pd.DataFrame:
+    """Combina el catalogo actual con seguimiento y estudios historicos.
+
+    El selector de Estudio profundo no debe depender del mapa maestro ni de
+    sus filtros temporales. Una ficha que ya fue estudiada o agregada al
+    seguimiento tiene que seguir visible aunque hoy quede fuera del ranking
+    (por fecha, perfil de deteccion o una regla regulatoria posterior).
+    """
+
+    records: dict[str, dict[str, object]] = {}
+
+    def ficha_code(value: object) -> str:
+        normalized = normalize_ficha_list(value, limit=1)
+        return normalized[0] if normalized else ""
+
+    def ensure(value: object) -> dict[str, object] | None:
+        ficha = ficha_code(value)
+        if not ficha:
+            return None
+        if ficha not in records:
+            records[ficha] = {
+                "ficha": ficha,
+                "nombre_ficha": "",
+                "clase_riesgo": "",
+                "enlace_minsa": "",
+                "score_oportunidad": 0.0,
+                "recomendacion": "",
+                "actos": 0,
+                "actos_ficha_unica": 0,
+                "monto_referencia": 0.0,
+                "participantes_promedio": 0.0,
+                "proponentes_distintos": 0,
+                "tiene_estudio": False,
+                "en_seguimiento": False,
+                "ultima_ejecucion": "",
+            }
+        return records[ficha]
+
+    def copy_if_present(
+        target: dict[str, object],
+        source: Mapping[str, object],
+        target_key: str,
+        *source_keys: str,
+        overwrite: bool = False,
+    ) -> None:
+        for source_key in source_keys:
+            value = source.get(source_key)
+            if value is None or clean_text(value) == "":
+                continue
+            current = target.get(target_key)
+            if overwrite or current is None or clean_text(current) == "" or current == 0:
+                target[target_key] = value
+            return
+
+    if options is not None and not options.empty:
+        for source in options.to_dict(orient="records"):
+            target = ensure(source.get("ficha"))
+            if target is None:
+                continue
+            for column in DEEP_STUDY_CATALOG_COLUMNS:
+                if column in source and source.get(column) is not None:
+                    target[column] = source[column]
+            target["ficha"] = ficha_code(source.get("ficha"))
+
+    # ``list_study_runs`` ya devuelve el mas reciente primero. Se conserva la
+    # fecha mayor por seguridad si el origen entrega registros desordenados.
+    for source in study_runs:
+        target = ensure(source.get("ficha"))
+        if target is None:
+            continue
+        target["tiene_estudio"] = True
+        copy_if_present(target, source, "nombre_ficha", "nombre_ficha")
+        run_date = max(
+            clean_text(source.get("fecha_fin")),
+            clean_text(source.get("updated_at")),
+            clean_text(source.get("fecha_inicio")),
+        )
+        if run_date > clean_text(target.get("ultima_ejecucion")):
+            target["ultima_ejecucion"] = run_date
+
+    for source in tracking_records:
+        target = ensure(source.get("ficha"))
+        if target is None:
+            continue
+        target["en_seguimiento"] = True
+        copy_if_present(target, source, "nombre_ficha", "nombre_ficha")
+        copy_if_present(target, source, "clase_riesgo", "clase_riesgo")
+        copy_if_present(target, source, "enlace_minsa", "enlace_minsa")
+        copy_if_present(target, source, "score_oportunidad", "score_inicial")
+        copy_if_present(target, source, "recomendacion", "clasificacion")
+        copy_if_present(target, source, "actos", "actos")
+        copy_if_present(
+            target, source, "actos_ficha_unica", "actos_solo_ficha"
+        )
+        copy_if_present(target, source, "monto_referencia", "monto_historico")
+        copy_if_present(
+            target,
+            source,
+            "participantes_promedio",
+            "proponentes_promedio",
+        )
+
+    if not records:
+        return pd.DataFrame(columns=DEEP_STUDY_CATALOG_COLUMNS)
+
+    result = pd.DataFrame(records.values())
+    for column in (
+        "score_oportunidad",
+        "actos",
+        "actos_ficha_unica",
+        "monto_referencia",
+        "participantes_promedio",
+        "proponentes_distintos",
+    ):
+        result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0)
+    for column in ("tiene_estudio", "en_seguimiento"):
+        result[column] = result[column].fillna(False).astype(bool)
+    result["nombre_ficha"] = result["nombre_ficha"].fillna("").astype(str)
+    result.loc[
+        result["nombre_ficha"].str.strip().eq(""), "nombre_ficha"
+    ] = "Ficha " + result["ficha"].astype(str)
+    result["_ficha_orden"] = pd.to_numeric(result["ficha"], errors="coerce")
+    result = result.sort_values(
+        [
+            "tiene_estudio",
+            "en_seguimiento",
+            "ultima_ejecucion",
+            "score_oportunidad",
+            "_ficha_orden",
+        ],
+        ascending=[False, False, False, False, True],
+        kind="stable",
+    ).drop(columns="_ficha_orden")
+    return result.loc[:, list(DEEP_STUDY_CATALOG_COLUMNS)].reset_index(drop=True)
 
 
 def split_search_groups(value: object) -> tuple[str, ...]:
@@ -1292,7 +1450,9 @@ class AnalyticsRepository:
                 ),
                 metadata_names AS (
                     SELECT ficha,
-                           MAX(COALESCE(NULLIF(TRIM(nombre_ficha), ''), '')) AS metadata_name
+                           MAX(COALESCE(NULLIF(TRIM(nombre_ficha), ''), '')) AS metadata_name,
+                           MAX(COALESCE(NULLIF(TRIM(clase_riesgo), ''), '')) AS clase_riesgo,
+                           MAX(COALESCE(NULLIF(TRIM(enlace_minsa), ''), '')) AS enlace_minsa
                     FROM intel_ficha_metadata
                     GROUP BY ficha
                 )
@@ -1306,7 +1466,9 @@ class AnalyticsRepository:
                                 )
                                THEN c.catalog_name
                            ELSE COALESCE(n.metadata_name, '')
-                       END AS nombre_ficha
+                       END AS nombre_ficha,
+                       COALESCE(n.clase_riesgo, '') AS clase_riesgo,
+                       COALESCE(n.enlace_minsa, '') AS enlace_minsa
                 FROM eligible_fichas e
                 LEFT JOIN metadata_names n ON n.ficha = e.ficha
                 {catalog_join}

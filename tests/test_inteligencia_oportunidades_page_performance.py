@@ -37,6 +37,19 @@ def test_page_renders_only_the_selected_intelligence_view() -> None:
     assert 'if selected_view == "Oportunidades":' in runtime_source
 
 
+def test_deep_study_history_does_not_depend_on_master_ranking() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    runtime_start = source.rindex("\n_apply_pending_saved_view()\n")
+    runtime_source = source[runtime_start:]
+    deep_catalog = runtime_source.index(
+        "study_catalog, catalog_warnings = _deep_study_catalog_data(repo)"
+    )
+    master_query = runtime_source.index("raw_master = _master_data(")
+    assert deep_catalog < master_query
+    assert 'elif selected_view == "Estudio profundo":' in runtime_source
+    assert "_render_deep_study(study_catalog" in runtime_source
+
+
 def test_expensive_filter_catalog_is_opt_in_and_filters_are_batched() -> None:
     source = PAGE.read_text(encoding="utf-8")
     runtime_start = source.rindex("\n_apply_pending_saved_view()\n")

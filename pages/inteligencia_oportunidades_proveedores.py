@@ -41,6 +41,7 @@ _ANALYTICS_EXPORTS = (
     "RISK_CLASS_OTHER",
     "SCORE_PRESETS",
     "apply_master_filters",
+    "build_deep_study_catalog",
     "dataframe_to_csv_bytes",
     "intelligence_view_frame",
     "normalize_ficha_list",
@@ -75,6 +76,7 @@ RISK_CLASS_NONE = _analytics_v3.RISK_CLASS_NONE
 RISK_CLASS_OTHER = _analytics_v3.RISK_CLASS_OTHER
 SCORE_PRESETS = _analytics_v3.SCORE_PRESETS
 apply_master_filters = _analytics_v3.apply_master_filters
+build_deep_study_catalog = _analytics_v3.build_deep_study_catalog
 dataframe_to_csv_bytes = _analytics_v3.dataframe_to_csv_bytes
 intelligence_view_frame = _analytics_v3.intelligence_view_frame
 normalize_ficha_list = _analytics_v3.normalize_ficha_list
@@ -91,6 +93,7 @@ _ORCHESTRATOR_EXPORTS = (
     "delete_saved_view",
     "get_request_status",
     "get_study_result",
+    "list_study_runs",
     "list_tracking_fichas",
     "list_saved_views",
     "queue_study",
@@ -113,6 +116,7 @@ if _missing_orchestrator_exports:
 delete_saved_view = _orchestrator_v3.delete_saved_view
 get_request_status = _orchestrator_v3.get_request_status
 get_study_result = _orchestrator_v3.get_study_result
+list_study_runs = _orchestrator_v3.list_study_runs
 list_tracking_fichas = _orchestrator_v3.list_tracking_fichas
 list_saved_views = _orchestrator_v3.list_saved_views
 queue_study = _orchestrator_v3.queue_study
@@ -123,7 +127,7 @@ upsert_tracking_ficha = _orchestrator_v3.upsert_tracking_ficha
 
 PAGE_PATH = "pages/inteligencia_oportunidades_proveedores.py"
 ANALYTICS_REPOSITORY_API_VERSION = ANALYTICS_SERVICE_VERSION
-MASTER_QUERY_CACHE_VERSION = "2026-08-30-fast-master-v1"
+MASTER_QUERY_CACHE_VERSION = "2026-09-01-deep-study-decoupled-v2"
 LOCAL_ANALYTICS_CANDIDATES = (
     APP_ROOT / "data" / "db" / "inteligencia_proveedores.db",
     APP_ROOT / "data" / "inteligencia_proveedores.db",
@@ -754,11 +758,33 @@ def _score_weights() -> tuple[str, dict[str, float]]:
 def _selected_ficha(frame: pd.DataFrame, key: str) -> str:
     if frame.empty:
         return ""
-    labels = {
-        str(row["ficha"]): f"{row['ficha']} | {str(row['nombre_ficha'])[:110]}"
-        for _, row in frame.sort_values("score_oportunidad", ascending=False).iterrows()
-    }
+    ordered = frame.copy()
+    sort_columns: list[str] = []
+    ascending: list[bool] = []
+    for column in ("tiene_estudio", "en_seguimiento", "score_oportunidad"):
+        if column in ordered:
+            sort_columns.append(column)
+            ascending.append(False)
+    if sort_columns:
+        ordered = ordered.sort_values(
+            sort_columns, ascending=ascending, kind="stable"
+        )
+    labels: dict[str, str] = {}
+    for _, row in ordered.iterrows():
+        ficha = str(row.get("ficha", "") or "").strip()
+        if not ficha:
+            continue
+        markers: list[str] = []
+        if bool(row.get("tiene_estudio", False)):
+            markers.append("estudio guardado")
+        if bool(row.get("en_seguimiento", False)):
+            markers.append("en seguimiento")
+        marker = f" · {', '.join(markers)}" if markers else ""
+        nombre = str(row.get("nombre_ficha", "") or f"Ficha {ficha}").strip()
+        labels[ficha] = f"{ficha} | {nombre[:110]}{marker}"
     codes = list(labels)
+    if not codes:
+        return ""
     selected = st.selectbox("Ficha para análisis detallado", codes, format_func=lambda value: labels[value], key=key)
     return str(selected)
 
@@ -804,6 +830,55 @@ def _study_result_cached(
         sheet_id=sheet_ids,
         ficha=ficha,
         request_id=request_id,
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def _study_runs_cached(
+    sheet_ids: tuple[str, ...],
+) -> list[dict[str, str]]:
+    from sheets import get_client
+
+    client, _ = get_client()
+    return list_study_runs(client, sheet_id=sheet_ids)
+
+
+def _deep_study_catalog_data(
+    repository: AnalyticsRepository,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Carga un selector independiente del ranking y tolerante a fallos."""
+
+    warnings: list[str] = []
+    options = pd.DataFrame(columns=["ficha", "nombre_ficha"])
+    tracking_records: list[dict[str, str]] = []
+    study_runs: list[dict[str, str]] = []
+    try:
+        options = _ficha_search_options(
+            ANALYTICS_REPOSITORY_API_VERSION, repository
+        )
+    except Exception:
+        logging.exception("No se pudo cargar el catálogo actual de fichas")
+        warnings.append("catálogo actual")
+
+    tracking_sheet_ids = _sheet_id_candidates("tracking")
+    if tracking_sheet_ids:
+        try:
+            tracking_records = _tracking_records_cached(tracking_sheet_ids)
+        except Exception:
+            logging.exception("No se pudo cargar el seguimiento de fichas")
+            warnings.append("seguimiento")
+
+    result_sheet_ids = _sheet_id_candidates("intel")
+    if result_sheet_ids:
+        try:
+            study_runs = _study_runs_cached(result_sheet_ids)
+        except Exception:
+            logging.exception("No se pudo cargar el historial de estudios")
+            warnings.append("historial de estudios")
+
+    return (
+        build_deep_study_catalog(options, tracking_records, study_runs),
+        warnings,
     )
 
 
@@ -2255,6 +2330,11 @@ analysis_ready = bool(st.session_state.get("intel_v3_analysis_ready", False))
 if selected_view in direct_views or analysis_ready:
     repo = repo or _require_repository()
     _render_data_status(repo)
+elif selected_view == "Estudio profundo":
+    # El historial de estudios es una vista ligera e independiente: no debe
+    # quedar bloqueado por el cálculo del ranking maestro.
+    repo = repo or _require_repository()
+    _render_data_status(repo)
 
 if selected_view in direct_views:
     assert repo is not None
@@ -2262,12 +2342,13 @@ if selected_view in direct_views:
     st.stop()
 
 if not analysis_ready:
-    st.info(
-        "Configura el periodo y los filtros en la barra lateral y pulsa "
-        "**Aplicar filtros y cargar análisis**. La página ya no ejecuta el "
-        "ranking pesado automáticamente al abrirse."
-    )
-    st.stop()
+    if selected_view != "Estudio profundo":
+        st.info(
+            "Configura el periodo y los filtros en la barra lateral y pulsa "
+            "**Aplicar filtros y cargar análisis**. La página ya no ejecuta el "
+            "ranking pesado automáticamente al abrirse."
+        )
+        st.stop()
 
 assert repo is not None
 
@@ -2317,9 +2398,41 @@ filters = AnalyticsFilters(
     contactable_only=contactable_only,
 )
 
+if selected_view == "Estudio profundo":
+    with st.spinner("Cargando fichas estudiadas y en seguimiento..."):
+        study_catalog, catalog_warnings = _deep_study_catalog_data(repo)
+    if catalog_warnings:
+        st.warning(
+            "La vista se cargó con información parcial porque no respondió: "
+            + ", ".join(catalog_warnings)
+            + ". Los datos disponibles no fueron modificados."
+        )
+    if not study_catalog.empty:
+        saved_count = int(study_catalog["tiene_estudio"].sum())
+        tracked_count = int(study_catalog["en_seguimiento"].sum())
+        st.caption(
+            f"Disponibles: {len(study_catalog):,} fichas · "
+            f"{saved_count:,} con estudio guardado · "
+            f"{tracked_count:,} en seguimiento."
+        )
+    _render_deep_study(study_catalog, filters, score_preset, repo)
+    st.stop()
+
 try:
     with st.spinner("Calculando métricas globales del periodo..."):
-        raw_master = _master_data(filters, MASTER_QUERY_CACHE_VERSION, repo)
+        try:
+            raw_master = _master_data(filters, MASTER_QUERY_CACHE_VERSION, repo)
+        except Exception:
+            # Supabase o la conexión del pool pueden fallar de forma transitoria.
+            # Se invalida únicamente esta caché y se reintenta una vez mediante
+            # una conexión nueva, sin modificar ni reemplazar datos persistidos.
+            logging.warning(
+                "Falló la consulta maestra almacenada; reintentando sin caché",
+                exc_info=True,
+            )
+            _master_data.clear()
+            repo.engine.dispose()
+            raw_master = repo.master_metrics(filters, include_expensive=False)
         required_amount_columns = {"monto_total_actos", "monto_ficha_unica"}
         if not required_amount_columns.issubset(raw_master.columns):
             # Protección adicional para despliegues en caliente: si Streamlit
@@ -2399,5 +2512,3 @@ elif selected_view == "Competencia":
     _render_competition(filtered_master)
 elif selected_view == "Proveedores":
     _render_provider_detail(filtered_master, filters, repo)
-elif selected_view == "Estudio profundo":
-    _render_deep_study(filtered_master, filters, score_preset, repo)
