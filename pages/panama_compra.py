@@ -7324,7 +7324,8 @@ def render_df(
                 help=(
                     "Solo fichas sin requisitos: todas las fichas detectadas carecen de CT y "
                     "registro sanitario. Acto mixto: contiene al menos una ficha sin requisitos "
-                    "y también otra ficha con CT, registro sanitario o clasificación pendiente."
+                    "y también otra ficha con CT, registro sanitario o clasificación pendiente; "
+                    "solo se muestra cuando PanamáCompra confirma adjudicación por renglón."
                 ),
             )
             scope_column = find_scope_column(df.columns)
