@@ -96,11 +96,11 @@ def filter_eligible_no_requirements(
     *,
     sheet_name: str,
 ) -> pd.DataFrame:
-    """Oculta mezclas globales o sin modalidad confirmada en las vistas SR.
+    """Admite solo actos puros o mixtos adjudicables por renglón.
 
-    Durante una transición de esquema conserva la vista anterior si todavía no
-    existe alguna de las dos columnas necesarias. En cuanto el scraper publica
-    ambas, solo admite actos puros y mezclas oficiales por renglón.
+    La validación es cerrada: si falta la clasificación o la modalidad oficial,
+    la fila tampoco se muestra. Así un acto mixto global nunca puede filtrarse
+    accidentalmente como una oportunidad sin requisitos.
     """
 
     normalized_frame = normalize_no_requirements_metadata(
@@ -112,12 +112,15 @@ def filter_eligible_no_requirements(
     scope_column = find_scope_column(normalized_frame.columns)
     adjudication_column = find_adjudication_column(normalized_frame.columns)
     if scope_column is None or adjudication_column is None:
-        return normalized_frame
+        # Sin ambas evidencias no es seguro presentar el acto como elegible.
+        return normalized_frame.iloc[0:0].copy()
 
     scopes = normalized_frame[scope_column].map(_normalized)
+    only_no_requirements = scopes.eq(_normalized(NO_REQUIREMENTS_ONLY))
     mixed = scopes.eq(_normalized(NO_REQUIREMENTS_MIXED))
     by_line = normalized_frame[adjudication_column].map(is_line_adjudication)
-    return normalized_frame.loc[~mixed | by_line].copy()
+    eligible = only_no_requirements | (mixed & by_line)
+    return normalized_frame.loc[eligible].copy()
 
 
 def filter_no_requirements_scope(

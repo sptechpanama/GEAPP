@@ -95,14 +95,36 @@ def test_column_matching_is_accent_and_case_tolerant() -> None:
     assert find_adjudication_column(["TIPO DE ADJUDICACION"]) == "TIPO DE ADJUDICACION"
 
 
-def test_transition_without_adjudication_column_preserves_all_view() -> None:
+def test_missing_adjudication_column_fails_closed_even_in_all_view() -> None:
     frame = _sample().drop(columns=[ADJUDICATION_TYPE_COLUMN])
     result = filter_no_requirements_scope(
         frame,
         sheet_name="cl_prog_sin_requisitos",
         selection=NO_REQUIREMENTS_ALL,
     )
-    assert result["acto"].tolist() == ["A", "B", "C", "D"]
+    assert result.empty
+
+
+def test_unknown_scope_never_leaks_a_global_act_into_no_requirements() -> None:
+    frame = pd.DataFrame(
+        {
+            "acto": ["pure", "mixed-row", "mixed-global", "unclassified"],
+            "Tipo de acto sin requisitos": [
+                NO_REQUIREMENTS_ONLY,
+                NO_REQUIREMENTS_MIXED,
+                NO_REQUIREMENTS_MIXED,
+                "",
+            ],
+            ADJUDICATION_TYPE_COLUMN: ["Global", "Renglón", "Global", "Global"],
+        }
+    )
+
+    result = filter_eligible_no_requirements(
+        frame,
+        sheet_name="cl_abiertas_rir_sin_requisitos",
+    )
+
+    assert result["acto"].tolist() == ["pure", "mixed-row"]
 
 
 def test_line_adjudication_variants_are_tolerated() -> None:
