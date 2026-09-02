@@ -15,6 +15,11 @@ NO_REQUIREMENTS_MIXED = "Acto mixto"
 NO_REQUIREMENTS_ALL = "Todos los actos sin requisitos"
 ADJUDICATION_TYPE_COLUMN = "Tipo de adjudicación"
 ADJUDICATION_BY_LINE = "Renglón"
+NO_REQUIREMENTS_FICHAS_COLUMN = "Fichas sin requisitos"
+REQUIREMENTS_FICHAS_COLUMN = "Fichas con requisitos"
+UNCLASSIFIED_FICHAS_COLUMN = "Fichas por verificar"
+EMPTY_FICHAS_VALUE = "Ninguna"
+UNKNOWN_ADJUDICATION_VALUE = "No identificado"
 NO_REQUIREMENTS_SHEETS = frozenset(
     {
         "cl_abiertas_rir_sin_requisitos",
@@ -49,6 +54,43 @@ def find_adjudication_column(columns: Iterable[object]) -> str | None:
     return next((str(column) for column in columns if _normalized(column) == expected), None)
 
 
+def _find_column(columns: Iterable[object], expected_name: str) -> str | None:
+    expected = _normalized(expected_name)
+    return next((str(column) for column in columns if _normalized(column) == expected), None)
+
+
+def normalize_no_requirements_metadata(
+    frame: pd.DataFrame,
+    *,
+    sheet_name: str,
+) -> pd.DataFrame:
+    """Evita valores nulos visibles durante migraciones o lecturas parciales.
+
+    La clasificación verdadera se escribe en Google Sheets por los scrapers.
+    Esta capa solo presenta un valor explícito cuando una celda antigua llega
+    vacía, sin inventar una ficha ni una modalidad.
+    """
+
+    result = frame.copy()
+    if sheet_name not in NO_REQUIREMENTS_SHEETS:
+        return result
+
+    fallbacks = {
+        NO_REQUIREMENTS_FICHAS_COLUMN: EMPTY_FICHAS_VALUE,
+        REQUIREMENTS_FICHAS_COLUMN: EMPTY_FICHAS_VALUE,
+        UNCLASSIFIED_FICHAS_COLUMN: EMPTY_FICHAS_VALUE,
+        ADJUDICATION_TYPE_COLUMN: UNKNOWN_ADJUDICATION_VALUE,
+    }
+    for expected_name, fallback in fallbacks.items():
+        column = _find_column(result.columns, expected_name)
+        if column is None:
+            continue
+        values = result[column]
+        empty = values.isna() | values.astype(str).str.strip().eq("")
+        result.loc[empty, column] = fallback
+    return result
+
+
 def filter_eligible_no_requirements(
     frame: pd.DataFrame,
     *,
@@ -61,17 +103,21 @@ def filter_eligible_no_requirements(
     ambas, solo admite actos puros y mezclas oficiales por renglón.
     """
 
+    normalized_frame = normalize_no_requirements_metadata(
+        frame,
+        sheet_name=sheet_name,
+    )
     if sheet_name not in NO_REQUIREMENTS_SHEETS:
-        return frame.copy()
-    scope_column = find_scope_column(frame.columns)
-    adjudication_column = find_adjudication_column(frame.columns)
+        return normalized_frame
+    scope_column = find_scope_column(normalized_frame.columns)
+    adjudication_column = find_adjudication_column(normalized_frame.columns)
     if scope_column is None or adjudication_column is None:
-        return frame.copy()
+        return normalized_frame
 
-    scopes = frame[scope_column].map(_normalized)
+    scopes = normalized_frame[scope_column].map(_normalized)
     mixed = scopes.eq(_normalized(NO_REQUIREMENTS_MIXED))
-    by_line = frame[adjudication_column].map(is_line_adjudication)
-    return frame.loc[~mixed | by_line].copy()
+    by_line = normalized_frame[adjudication_column].map(is_line_adjudication)
+    return normalized_frame.loc[~mixed | by_line].copy()
 
 
 def filter_no_requirements_scope(
