@@ -59,6 +59,26 @@ def test_global_and_unknown_mixed_acts_are_hidden_even_in_all_view() -> None:
     assert result["acto"].tolist() == ["A", "B"]
 
 
+def test_real_rs_and_no_requirements_global_case_is_hidden() -> None:
+    frame = pd.DataFrame(
+        {
+            "ficha_detectada": ["* 21860, * 107110"],
+            NO_REQUIREMENTS_FICHAS_COLUMN: ["107110"],
+            REQUIREMENTS_FICHAS_COLUMN: ["21860 (RS)"],
+            UNCLASSIFIED_FICHAS_COLUMN: [EMPTY_FICHAS_VALUE],
+            "Tipo de acto sin requisitos": [NO_REQUIREMENTS_MIXED],
+            ADJUDICATION_TYPE_COLUMN: ["Global"],
+        }
+    )
+
+    result = filter_eligible_no_requirements(
+        frame,
+        sheet_name="cl_abiertas_rir_sin_requisitos",
+    )
+
+    assert result.empty
+
+
 def test_all_option_and_unrelated_sheet_do_not_filter() -> None:
     frame = _sample()
     assert len(

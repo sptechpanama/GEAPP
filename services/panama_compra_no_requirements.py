@@ -9,6 +9,7 @@ from collections.abc import Iterable
 import pandas as pd
 
 
+NO_REQUIREMENTS_RULES_VERSION = 2
 NO_REQUIREMENTS_SCOPE_COLUMN = "Tipo de acto sin requisitos"
 NO_REQUIREMENTS_ONLY = "Solo fichas sin requisitos"
 NO_REQUIREMENTS_MIXED = "Acto mixto"

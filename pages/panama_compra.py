@@ -59,12 +59,25 @@ from services.panama_compra_db_filters import (
     append_date_range_condition,
     date_filter_columns,
 )
+from services import panama_compra_no_requirements as _no_requirements_rules
+
+_NO_REQUIREMENTS_RULES_REQUIRED_VERSION = 2
+if (
+    getattr(_no_requirements_rules, "NO_REQUIREMENTS_RULES_VERSION", 0)
+    < _NO_REQUIREMENTS_RULES_REQUIRED_VERSION
+):
+    try:
+        _no_requirements_rules = importlib.reload(_no_requirements_rules)
+    except Exception:
+        pass
+
 from services.panama_compra_no_requirements import (
     NO_REQUIREMENTS_ALL,
     NO_REQUIREMENTS_MIXED,
     NO_REQUIREMENTS_ONLY,
     NO_REQUIREMENTS_SCOPE_COLUMN,
     NO_REQUIREMENTS_SHEETS,
+    filter_eligible_no_requirements,
     filter_no_requirements_scope,
     find_scope_column,
 )
@@ -7215,6 +7228,10 @@ def render_df(
             st.success(f"Se guardaron {count} cambio(s) en la hoja.")
 
     df = df.copy()
+    # Defensa en la entrada de la vista: no depende del estado del selector.
+    # Un acto mixto global nunca debe llegar a la tabla RIR sin requisitos.
+    if sheet_name in NO_REQUIREMENTS_SHEETS:
+        df = filter_eligible_no_requirements(df, sheet_name=sheet_name)
     displayable_columns = [c for c in df.columns if c != ROW_ID_COL]
 
     def _normalize_label(value: str) -> str:
