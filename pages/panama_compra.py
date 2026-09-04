@@ -6400,6 +6400,7 @@ SHEET_LABELS = {
     "ctni_solicitudes": "Solicitudes de fichas",
     "ctni_homologaciones": "Homologaciones",
     "ctni_fichas": "Fichas nuevas",
+    "RIR_INVESTIGACION_PROVEEDORES": "Investigación de proveedores RIR",
 }
 
 SHEET_GROUPS = {
@@ -6422,6 +6423,9 @@ SHEET_GROUPS = {
         "cl_abiertas_ct_rir",
         "cl_prog_ct_rir",
         "ap_ct_rir",
+    ],
+    "Investigación RIR sin requisitos": [
+        "RIR_INVESTIGACION_PROVEEDORES",
     ],
     "Actos RS/SP": [
         "cl_abiertas_rir_sin_requisitos",
@@ -6468,6 +6472,7 @@ CATEGORY_ORDER = [
     "Cotizaciones Programadas",
     "Licitaciones",
     "Criterios Tecnicos RIR",
+    "Investigación RIR sin requisitos",
     "Actos RS/SP",
     "Otras fuentes",
     "CTNI",
@@ -7212,6 +7217,219 @@ def _render_ctni_module() -> None:
         _render_ctni_view(active_view)
 
 
+RIR_PRICE_COLUMNS = (
+    "Ficha precio histórico",
+    "Precio de referencia típico",
+    "Precio de participación típico",
+    "Precio competitivo histórico",
+    "Cantidad de muestras",
+    "Confianza del precio",
+)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _rir_price_benchmarks(
+    fichas: tuple[str, ...],
+    api_version: str,
+    _repository: AnalyticsRepository,
+) -> pd.DataFrame:
+    _ = api_version
+    method = getattr(_repository, "price_benchmarks_for_fichas", None)
+    if not callable(method):
+        return pd.DataFrame()
+    return method(fichas)
+
+
+def _no_requirement_ficha_column(frame: pd.DataFrame) -> str | None:
+    preferred = {
+        "fichas sin requisitos",
+        "ficha sin requisitos",
+        "fichas_sin_requisitos",
+        "ficha_sin_requisitos",
+    }
+    for column in frame.columns:
+        if _normalize_column_key(column) in preferred:
+            return str(column)
+    for column in frame.columns:
+        if _normalize_column_key(column) in {"ficha detectada", "ficha_detectada"}:
+            return str(column)
+    return None
+
+
+def _enrich_no_requirement_prices(frame: pd.DataFrame) -> pd.DataFrame:
+    """Añade referencias históricas sin mezclar fichas o unidades distintas."""
+
+    result = frame.copy()
+    ficha_column = _no_requirement_ficha_column(result)
+    if not ficha_column or result.empty:
+        return result
+    row_fichas = result[ficha_column].map(_extract_ficha_tokens)
+    requested = tuple(dict.fromkeys(code for codes in row_fichas for code in codes))
+    if not requested:
+        return result
+    try:
+        repository = _ctni_analytics_repository(
+            _supabase_db_url(),
+            CTNI_ANALYTICS_API_VERSION,
+        )
+        benchmarks = _rir_price_benchmarks(
+            requested,
+            CTNI_ANALYTICS_API_VERSION,
+            repository,
+        )
+    except Exception as exc:
+        print(f"[RIR precios] No se pudo cargar la referencia histórica: {exc}")
+        return result
+    if benchmarks.empty or "ficha" not in benchmarks.columns:
+        return result
+    indexed = benchmarks.copy()
+    indexed["ficha"] = indexed["ficha"].fillna("").astype(str).map(_normalize_ficha_token)
+    indexed = indexed.drop_duplicates("ficha", keep="last").set_index("ficha")
+
+    output_rows: list[dict[str, object]] = []
+    for codes in row_fichas:
+        available = [code for code in codes if code in indexed.index]
+        if len(codes) != 1:
+            output_rows.append(
+                {
+                    "Ficha precio histórico": ", ".join(codes),
+                    "Precio de referencia típico": None,
+                    "Precio de participación típico": None,
+                    "Precio competitivo histórico": None,
+                    "Cantidad de muestras": 0,
+                    "Confianza del precio": (
+                        "Varias fichas sin requisitos; consultar cada ficha por separado "
+                        "para no mezclar unidades ni presentaciones."
+                    ),
+                }
+            )
+            continue
+        if not available:
+            output_rows.append(
+                {
+                    "Ficha precio histórico": codes[0] if codes else "",
+                    "Precio de referencia típico": None,
+                    "Precio de participación típico": None,
+                    "Precio competitivo histórico": None,
+                    "Cantidad de muestras": 0,
+                    "Confianza del precio": "Sin muestra histórica comparable",
+                }
+            )
+            continue
+        benchmark = indexed.loc[available[0]]
+        sample_count = pd.to_numeric(
+            benchmark.get("muestras_participacion"), errors="coerce"
+        )
+        output_rows.append(
+            {
+                "Ficha precio histórico": available[0],
+                "Precio de referencia típico": benchmark.get("precio_referencia_tipico"),
+                "Precio de participación típico": benchmark.get("precio_participacion_tipico"),
+                "Precio competitivo histórico": benchmark.get("precio_competitivo_historico"),
+                "Cantidad de muestras": int(sample_count) if pd.notna(sample_count) else 0,
+                "Confianza del precio": _clean_text(benchmark.get("confianza_precio"))
+                or "Sin muestra histórica comparable",
+            }
+        )
+    additions = pd.DataFrame(output_rows, index=result.index)
+    item_positions = [
+        index
+        for index, column in enumerate(result.columns)
+        if re.match(r"^item(?:[_\s-]*\d+)?\b", _normalize_column_key(column))
+    ]
+    insertion = min(item_positions) if item_positions else len(result.columns)
+    for column in RIR_PRICE_COLUMNS:
+        if column in result.columns:
+            result = result.drop(columns=[column])
+        result.insert(insertion, column, additions.get(column))
+        insertion += 1
+    return result
+
+
+def _render_price_method_legend() -> None:
+    st.caption(
+        "Precios históricos por unidad: **referencia típico** = mediana de precios "
+        "referenciales válidos; **participación típico** = mediana de ofertas unitarias "
+        "válidas; **competitivo histórico** = percentil 25 de esas ofertas. "
+        "La confianza indica entre paréntesis la cantidad de actos y ofertas, la cobertura "
+        "de vínculos ficha-renglón, la consistencia de unidad y la última muestra. "
+        "Son referencias de mercado, no costos de proveedor ni garantías de adjudicación."
+    )
+
+
+def _render_rir_supplier_research() -> None:
+    st.caption(
+        "Investigación externa para actos RIR sin requisitos. ChatGPT Pro puede completar "
+        "esta hoja independiente usando el acto, la ficha, el renglón y las referencias "
+        "históricas; Streamlit solo presenta los resultados validados."
+    )
+    frame = load_df("RIR_INVESTIGACION_PROVEEDORES")
+    if frame.empty:
+        st.info(
+            "La hoja de investigación está lista pero aún no contiene resultados. "
+            "Su encabezado permanece disponible para que ChatGPT Pro agregue investigaciones."
+        )
+        return
+
+    visible = frame.drop(columns=[ROW_ID_COL], errors="ignore").copy()
+    filter_cols = st.columns([2.2, 1.2, 1.2])
+    search = filter_cols[0].text_input(
+        "Buscar acto, ficha, producto o proveedor",
+        key="rir_supplier_research_search",
+    )
+    status_column = next(
+        (column for column in visible if _normalize_column_key(column) == "estado investigacion"),
+        None,
+    )
+    mode_column = next(
+        (column for column in visible if _normalize_column_key(column) == "medio recomendado"),
+        None,
+    )
+    if status_column:
+        options = sorted(visible[status_column].dropna().astype(str).unique())
+        selected = filter_cols[1].multiselect(
+            "Estado", options, key="rir_supplier_research_status"
+        )
+        if selected:
+            visible = visible[visible[status_column].astype(str).isin(selected)]
+    if mode_column:
+        options = sorted(visible[mode_column].dropna().astype(str).unique())
+        selected = filter_cols[2].multiselect(
+            "Transporte", options, key="rir_supplier_research_transport"
+        )
+        if selected:
+            visible = visible[visible[mode_column].astype(str).isin(selected)]
+    if search:
+        normalized = _normalize_search_value(search, strip_accents=True)
+        mask = visible.fillna("").astype(str).apply(
+            lambda column: column.map(
+                lambda value: normalized
+                in _normalize_search_value(value, strip_accents=True)
+            )
+        ).any(axis=1)
+        visible = visible.loc[mask]
+
+    column_config: dict[str, object] = {}
+    for column in visible.columns:
+        normalized = _normalize_column_key(column)
+        if "precio" in normalized:
+            values = _coerce_money_series(visible[column])
+            if values.notna().any():
+                visible[column] = values
+                column_config[column] = st.column_config.NumberColumn(column, format="$ %.2f")
+        if "enlace" in normalized or "url" in normalized:
+            column_config[column] = st.column_config.LinkColumn(column, display_text="Abrir")
+    st.dataframe(
+        visible,
+        use_container_width=True,
+        hide_index=True,
+        height=760,
+        column_config=column_config,
+    )
+    st.caption(f"{len(visible):,} investigaciones visibles.")
+    _render_price_method_legend()
+
+
 def render_df(
     df: pd.DataFrame,
     sheet_name: str,
@@ -7232,6 +7450,7 @@ def render_df(
     # Un acto mixto global nunca debe llegar a la tabla RIR sin requisitos.
     if sheet_name in NO_REQUIREMENTS_SHEETS:
         df = filter_eligible_no_requirements(df, sheet_name=sheet_name)
+        df = _enrich_no_requirement_prices(df)
     displayable_columns = [c for c in df.columns if c != ROW_ID_COL]
 
     def _normalize_label(value: str) -> str:
@@ -7652,6 +7871,9 @@ def render_df(
         )
 
     st.caption(f"Mostrando {len(df)} filas")
+
+    if sheet_name in NO_REQUIREMENTS_SHEETS:
+        _render_price_method_legend()
 
     render_pc_state_cards(pc_state_df, pc_config_df, suffix=suffix)
 
@@ -8296,6 +8518,10 @@ for tab, category_name in zip(category_tabs, ordered_categories):
 
         if category_name == "CTNI":
             _render_ctni_module()
+            continue
+
+        if category_name == "Investigación RIR sin requisitos":
+            _render_rir_supplier_research()
             continue
 
         if category_name == "Criterios Tecnicos RIR":

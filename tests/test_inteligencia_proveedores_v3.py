@@ -266,6 +266,20 @@ class RepositoryIntegrationTests(unittest.TestCase):
                 catalogo TEXT, producto TEXT, fabricante TEXT, marca TEXT,
                 modelo_web TEXT, estado_catalogo TEXT
             );
+            CREATE TABLE intel_ficha_price_benchmarks (
+                ficha TEXT, nombre_ficha TEXT, unidad_comparable TEXT,
+                precio_referencia_tipico REAL,
+                precio_participacion_tipico REAL,
+                precio_competitivo_historico REAL,
+                actos_con_muestra INTEGER,
+                muestras_referencia INTEGER,
+                muestras_participacion INTEGER,
+                muestras_ganadoras INTEGER,
+                ultima_muestra TEXT,
+                nivel_confianza TEXT,
+                confianza_precio TEXT,
+                updated_at TEXT
+            );
             CREATE TABLE intel_build_metadata (key TEXT, value TEXT);
             """
         )
@@ -300,6 +314,15 @@ class RepositoryIntegrationTests(unittest.TestCase):
         connection.execute("UPDATE intel_ficha_metadata SET clase_riesgo = 'A' WHERE ficha = '43358'")
         connection.execute("UPDATE intel_ficha_metadata SET clase_riesgo = 'C' WHERE ficha = '103169'")
         connection.execute("INSERT INTO intel_ficha_catalogo VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("43358", "PROVEEDOR C", "Ana", "123", "a@test", "C1", "KIT", "LAB", "M", "X", "Activo"))
+        connection.execute(
+            "INSERT INTO intel_ficha_price_benchmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "43358", "KIT CIRCUITO PACIENTE", "Unidad", 125.0, 110.0,
+                95.0, 4, 4, 8, 2, "2026-01-20", "Alta",
+                "Alta (4 actos, 8 ofertas, 100% ficha-renglón explícito)",
+                "2026-09-04 10:00:00",
+            ),
+        )
         connection.commit()
         connection.close()
         self.repo = AnalyticsRepository(create_engine(f"sqlite:///{self.db_path.as_posix()}"), source_label="test")
@@ -384,6 +407,15 @@ class RepositoryIntegrationTests(unittest.TestCase):
         acts = self.repo.acts_for_ficha("43358", filters)
         self.assertEqual(providers.iloc[0]["proveedor"], "BTS")
         self.assertEqual(len(acts), 1)
+
+    def test_price_benchmarks_are_optional_and_filterable_by_ficha(self) -> None:
+        result = self.repo.price_benchmarks_for_fichas(("43358", "103169"))
+        self.assertEqual(result["ficha"].tolist(), ["43358"])
+        row = result.iloc[0]
+        self.assertEqual(float(row["precio_referencia_tipico"]), 125.0)
+        self.assertEqual(float(row["precio_participacion_tipico"]), 110.0)
+        self.assertEqual(float(row["precio_competitivo_historico"]), 95.0)
+        self.assertIn("4 actos", str(row["confianza_precio"]))
 
     def test_direct_ficha_lookup_returns_full_history_and_keeps_rs_policy(self) -> None:
         acts = self.repo.all_acts_for_ficha("43358")

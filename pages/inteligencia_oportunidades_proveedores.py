@@ -320,6 +320,127 @@ def _catalog_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.catalog_for_ficha(ficha)
 
 
+@st.cache_data(show_spinner=False, ttl=600)
+def _price_benchmark_data(
+    fichas: tuple[str, ...],
+    api_version: str,
+    _repo: AnalyticsRepository,
+) -> pd.DataFrame:
+    """Carga referencias unitarias sin romper un despliegue escalonado."""
+
+    _ = api_version
+    method = getattr(_repo, "price_benchmarks_for_fichas", None)
+    if not callable(method):
+        return pd.DataFrame()
+    return method(fichas)
+
+
+PRICE_BENCHMARK_VALUE_COLUMNS = (
+    "unidad_comparable",
+    "precio_referencia_tipico",
+    "precio_participacion_tipico",
+    "precio_competitivo_historico",
+    "muestras_participacion",
+    "confianza_precio",
+)
+
+
+def _price_benchmark_for_fichas(
+    fichas: object,
+    repository: AnalyticsRepository,
+) -> pd.DataFrame:
+    selected = normalize_ficha_list(fichas)
+    if not selected:
+        return pd.DataFrame()
+    try:
+        return _price_benchmark_data(
+            selected,
+            ANALYTICS_REPOSITORY_API_VERSION,
+            repository,
+        )
+    except Exception:
+        logging.exception("No se pudieron cargar las referencias históricas de precios")
+        return pd.DataFrame()
+
+
+def _enrich_acts_with_price_benchmark(
+    frame: pd.DataFrame,
+    ficha: str,
+    repository: AnalyticsRepository,
+) -> pd.DataFrame:
+    """Repite la referencia de una sola ficha en sus actos para facilitar comparación."""
+
+    result = frame.copy()
+    benchmark = _price_benchmark_for_fichas((ficha,), repository)
+    if benchmark.empty:
+        return result
+    row = benchmark.iloc[0]
+    for column in PRICE_BENCHMARK_VALUE_COLUMNS:
+        result[column] = row.get(column)
+    return result
+
+
+def _price_benchmark_column_config() -> dict[str, object]:
+    return {
+        "unidad_comparable": st.column_config.TextColumn("Unidad comparable"),
+        "precio_referencia_tipico": st.column_config.NumberColumn(
+            "Precio de referencia típico", format="$ %.2f"
+        ),
+        "precio_participacion_tipico": st.column_config.NumberColumn(
+            "Precio de participación típico", format="$ %.2f"
+        ),
+        "precio_competitivo_historico": st.column_config.NumberColumn(
+            "Precio competitivo histórico", format="$ %.2f"
+        ),
+        "muestras_participacion": st.column_config.NumberColumn(
+            "Cantidad de muestras", format="%d"
+        ),
+        "confianza_precio": st.column_config.TextColumn(
+            "Confianza del precio", width="large"
+        ),
+    }
+
+
+def _render_price_benchmark_legend() -> None:
+    st.caption(
+        "Referencias históricas por unidad: **referencia típico** = mediana de "
+        "precios referenciales comparables; **participación típico** = mediana de "
+        "ofertas unitarias comparables; **competitivo histórico** = percentil 25 de "
+        "esas ofertas. La confianza explica entre paréntesis su base: actos, ofertas, "
+        "vínculos ficha-renglón, consistencia de unidad y fecha más reciente. Son "
+        "referencias de mercado, no costos de proveedor ni garantías de adjudicación."
+    )
+
+
+def _render_price_benchmark_summary(
+    fichas: object,
+    repository: AnalyticsRepository,
+) -> None:
+    benchmark = _price_benchmark_for_fichas(fichas, repository)
+    if benchmark.empty:
+        st.caption(
+            "Aún no hay una muestra unitaria comparable para la selección. "
+            "El histórico de actos permanece disponible sin estimar precios."
+        )
+        return
+    visible_columns = [
+        "ficha",
+        "nombre_ficha",
+        *PRICE_BENCHMARK_VALUE_COLUMNS,
+    ]
+    visible = benchmark[
+        [column for column in visible_columns if column in benchmark.columns]
+    ].copy()
+    st.dataframe(
+        visible,
+        width="stretch",
+        hide_index=True,
+        height=min(420, 86 + 35 * max(1, len(visible))),
+        column_config=_price_benchmark_column_config(),
+    )
+    _render_price_benchmark_legend()
+
+
 def _money(value: object) -> str:
     try:
         return f"${float(value or 0):,.2f}"
@@ -1083,6 +1204,7 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
     providers = _provider_data(ficha, filters, repository)
     catalog = _catalog_data(ficha, repository)
     acts = _acts_data(ficha, filters, repository)
+    acts = _enrich_acts_with_price_benchmark(acts, ficha, repository)
     tab1, tab2, tab3 = st.tabs(["Competidores observados", "Proveedores de catálogo", "Actos y evidencia"])
     with tab1:
         if providers.empty:
@@ -1129,8 +1251,10 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
                     "reference_amount_context": st.column_config.NumberColumn("Total acto (contexto)", format="$ %.2f"),
                     "award_amount_attributed": st.column_config.NumberColumn("Adjudicado atribuible", format="$ %.2f"),
                     "award_amount_context": st.column_config.NumberColumn("Adjudicado acto (contexto)", format="$ %.2f"),
+                    **_price_benchmark_column_config(),
                 },
               )
+            _render_price_benchmark_legend()
 
 
 def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
@@ -1230,6 +1354,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         return
 
     acts = acts.drop_duplicates(subset=["acto_key"], keep="first").reset_index(drop=True)
+    acts = _enrich_acts_with_price_benchmark(acts, ficha, repository)
     reference_total = pd.to_numeric(
         acts.get("reference_amount_attributed"), errors="coerce"
     ).fillna(0).sum()
@@ -1247,6 +1372,8 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     if not valid_dates.empty:
         st.caption(f"Cobertura temporal encontrada: **{valid_dates.min()} → {valid_dates.max()}**")
 
+    _render_price_benchmark_summary((ficha,), repository)
+
     display_columns = [
         "enlace", "acto_key", "titulo", "estado", "publication_date",
         "celebration_date", "award_date", "reference_amount_attributed",
@@ -1255,6 +1382,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         "award_amount_attribution_source", "source_line_count",
         "attributed_line_count", "winner", "participant_count", "is_unique_ficha",
         "detection_method", "detection_evidence",
+        *PRICE_BENCHMARK_VALUE_COLUMNS,
     ]
     display = intelligence_view_frame(
         acts[[column for column in display_columns if column in acts.columns]]
@@ -1283,6 +1411,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
             "is_unique_ficha": st.column_config.CheckboxColumn("Ficha única"),
             "detection_method": st.column_config.TextColumn("Método"),
             "detection_evidence": st.column_config.TextColumn("Evidencia", width="large"),
+            **_price_benchmark_column_config(),
         },
     )
     st.download_button(
@@ -1368,6 +1497,8 @@ def _render_multi_ficha_lookup(repository: AnalyticsRepository) -> None:
         )
     if not valid_dates.empty:
         st.caption(f"Cobertura temporal encontrada: **{valid_dates.min()} -> {valid_dates.max()}**")
+
+    _render_price_benchmark_summary(selected, repository)
 
     display_columns = [
         "enlace", "fichas_coincidentes", "fichas_coincidentes_count", "acto_key",
@@ -1777,6 +1908,7 @@ def _render_study_result(
     is_previous: bool = False,
     acts: pd.DataFrame | None = None,
     minsa_url: str = "",
+    price_benchmark: pd.DataFrame | None = None,
 ) -> None:
     if not run:
         return
@@ -1806,6 +1938,10 @@ def _render_study_result(
             "El estudio está registrado, pero no produjo renglones de detalle."
         )
         return
+    if isinstance(price_benchmark, pd.DataFrame) and not price_benchmark.empty:
+        benchmark_row = price_benchmark.iloc[0]
+        for column in PRICE_BENCHMARK_VALUE_COLUMNS:
+            detail[column] = benchmark_row.get(column)
     for column in [
         "cantidad",
         "precio_unitario_participacion",
@@ -1870,6 +2006,7 @@ def _render_study_result(
         "nivel_certeza",
         "requiere_revision",
         "observaciones",
+        *PRICE_BENCHMARK_VALUE_COLUMNS,
     ]
     st.dataframe(
         intelligence_view_frame(
@@ -1925,8 +2062,11 @@ def _render_study_result(
             "observaciones": st.column_config.TextColumn(
                 "Observaciones", width="large"
             ),
+            **_price_benchmark_column_config(),
         },
     )
+    if isinstance(price_benchmark, pd.DataFrame) and not price_benchmark.empty:
+        _render_price_benchmark_legend()
     st.download_button(
         "Descargar resultado del estudio (CSV)",
         data=dataframe_to_csv_bytes(detail),
@@ -2132,6 +2272,9 @@ def _render_deep_study(
                     is_previous=previous_result,
                     acts=historical_context,
                     minsa_url=str(row.get("enlace_minsa", "") or "").strip(),
+                    price_benchmark=_price_benchmark_for_fichas(
+                        (ficha,), repository
+                    ),
                 )
             else:
                 st.caption(

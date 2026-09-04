@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-09-01-deep-study-catalog-v8"
+ANALYTICS_SERVICE_VERSION = "2026-09-04-rir-price-benchmarks-v9"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -456,7 +456,8 @@ class AnalyticsRepository:
                       AND table_name IN (
                           'intel_actos_fichas', 'intel_acto_proponentes',
                           'intel_ficha_metadata', 'intel_ficha_catalogo',
-                          'intel_acto_profile_counts'
+                          'intel_acto_profile_counts',
+                          'intel_ficha_price_benchmarks'
                       )
                     """
                 ),
@@ -472,6 +473,12 @@ class AnalyticsRepository:
             profile_count_columns = set(
                 schema.loc[schema["table_name"].eq("intel_acto_profile_counts"), "column_name"].astype(str)
             )
+            price_benchmark_columns = set(
+                schema.loc[
+                    schema["table_name"].eq("intel_ficha_price_benchmarks"),
+                    "column_name",
+                ].astype(str)
+            )
         else:
             inspector = inspect(self.engine)
             tables = set(inspector.get_table_names())
@@ -480,6 +487,14 @@ class AnalyticsRepository:
             profile_count_columns = (
                 {column["name"] for column in inspector.get_columns("intel_acto_profile_counts")}
                 if "intel_acto_profile_counts" in tables
+                else set()
+            )
+            price_benchmark_columns = (
+                {
+                    column["name"]
+                    for column in inspector.get_columns("intel_ficha_price_benchmarks")
+                }
+                if "intel_ficha_price_benchmarks" in tables
                 else set()
             )
         missing = sorted(required - tables)
@@ -525,6 +540,62 @@ class AnalyticsRepository:
             "moderado_count",
             "estricto_count",
         }.issubset(profile_count_columns)
+        self._has_price_benchmarks = {
+            "ficha",
+            "precio_referencia_tipico",
+            "precio_participacion_tipico",
+            "precio_competitivo_historico",
+            "actos_con_muestra",
+            "muestras_participacion",
+            "confianza_precio",
+        }.issubset(price_benchmark_columns)
+
+    def price_benchmarks_for_fichas(
+        self, fichas: Sequence[str] = ()
+    ) -> pd.DataFrame:
+        """Precios unitarios históricos comparables para fichas sin CT ni RS.
+
+        La tabla es opcional durante despliegues escalonados. Hasta que el
+        constructor analítico la publique, la aplicación devuelve un marco
+        vacío en vez de romper las páginas existentes.
+        """
+
+        columns = [
+            "ficha",
+            "nombre_ficha",
+            "unidad_comparable",
+            "precio_referencia_tipico",
+            "precio_participacion_tipico",
+            "precio_competitivo_historico",
+            "actos_con_muestra",
+            "muestras_referencia",
+            "muestras_participacion",
+            "muestras_ganadoras",
+            "ultima_muestra",
+            "nivel_confianza",
+            "confianza_precio",
+            "updated_at",
+        ]
+        if not self._has_price_benchmarks:
+            return pd.DataFrame(columns=columns)
+        selected = normalize_ficha_list(fichas)
+        params: dict[str, Any] = {}
+        clause = ""
+        if selected:
+            placeholders: list[str] = []
+            for index, ficha in enumerate(selected):
+                key = f"price_ficha_{index}"
+                params[key] = ficha
+                placeholders.append(f":{key}")
+            clause = " WHERE ficha IN (" + ", ".join(placeholders) + ")"
+        query = (
+            "SELECT "
+            + ", ".join(columns)
+            + " FROM intel_ficha_price_benchmarks"
+            + clause
+            + " ORDER BY ficha"
+        )
+        return pd.read_sql_query(text(query), self.engine, params=params)
 
     def build_metadata(self) -> dict[str, str]:
         try:
