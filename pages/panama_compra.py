@@ -63,6 +63,7 @@ from services import panama_compra_no_requirements as _no_requirements_rules
 from services.rir_supplier_research import (
     RIR_TOP5_SHEET,
     latest_top5_snapshot,
+    top5_link_coverage,
     top5_general_recommendation,
 )
 
@@ -7388,7 +7389,12 @@ def _render_rir_daily_top5() -> None:
         "evaluacion_directa": "Evaluación directa",
         "accion_inmediata": "Acción inmediata",
         "proveedor_objetivo": "Proveedor objetivo",
+        "producto_recomendado": "Producto recomendado",
+        "marca_producto": "Marca",
+        "pais_origen": "País de origen",
         "enlace_acto": "Acto",
+        "enlace_ficha_minsa": "Ficha MINSA",
+        "enlace_producto_recomendado": "Producto",
     }
     available = [column for column in display_columns if column in snapshot.columns]
     executive = snapshot[available].rename(columns=display_columns)
@@ -7413,16 +7419,39 @@ def _render_rir_daily_top5() -> None:
             "Proveedor objetivo": st.column_config.TextColumn(
                 "Proveedor objetivo", width="medium"
             ),
-            "Acto": st.column_config.LinkColumn("Acto", display_text="Abrir"),
+            "Producto recomendado": st.column_config.TextColumn(
+                "Producto recomendado", width="medium"
+            ),
+            "Marca": st.column_config.TextColumn("Marca", width="medium"),
+            "País de origen": st.column_config.TextColumn(
+                "País de origen", width="small"
+            ),
+            "Acto": st.column_config.LinkColumn("Acto", display_text="Abrir acto"),
+            "Ficha MINSA": st.column_config.LinkColumn(
+                "Ficha MINSA", display_text="Abrir ficha"
+            ),
+            "Producto": st.column_config.LinkColumn(
+                "Producto", display_text="Ver producto"
+            ),
         },
     )
+
+    link_coverage = top5_link_coverage(snapshot)
+    if any(count < len(snapshot) for count in link_coverage.values()):
+        st.warning(
+            "El corte diario está visible, pero tiene enlaces pendientes de validar. "
+            "La siguiente corrida debe completar acto, ficha MINSA y producto."
+        )
 
     recommendation = top5_general_recommendation(snapshot)
     if recommendation:
         st.info(f"**Recomendación directa:** {recommendation}")
     st.caption(
         "El Top 5 es el último corte diario publicado en Google Sheets. Los cortes "
-        "anteriores se conservan para auditar entradas, movimientos y salidas."
+        "anteriores se conservan para auditar entradas, movimientos y salidas. "
+        "El precio competitivo histórico es el percentil 25 de ofertas unitarias "
+        "comparables; la diferencia bruta preliminar resta el costo localizado, pero "
+        "todavía no descuenta flete, impuestos ni otros gastos y no equivale a utilidad."
     )
 
 

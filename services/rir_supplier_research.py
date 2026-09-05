@@ -6,7 +6,26 @@ import pandas as pd
 
 
 RIR_TOP5_SHEET = "RIR_TOP5_DIARIO"
-RIR_TOP5_SERVICE_VERSION = 1
+RIR_TOP5_SERVICE_VERSION = 2
+RIR_TOP5_LINK_COLUMNS = (
+    "enlace_acto",
+    "enlace_ficha_minsa",
+    "enlace_producto_recomendado",
+)
+
+
+def top5_link_coverage(frame: pd.DataFrame | None) -> dict[str, int]:
+    """Count valid HTTP(S) links for each executive-snapshot link field."""
+
+    coverage = {column: 0 for column in RIR_TOP5_LINK_COLUMNS}
+    if frame is None or frame.empty:
+        return coverage
+    for column in RIR_TOP5_LINK_COLUMNS:
+        if column not in frame.columns:
+            continue
+        values = frame[column].fillna("").astype(str).str.strip().str.lower()
+        coverage[column] = int(values.str.match(r"^https?://").sum())
+    return coverage
 
 
 def latest_top5_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:

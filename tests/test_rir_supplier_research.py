@@ -4,6 +4,7 @@ import pandas as pd
 
 from services.rir_supplier_research import (
     latest_top5_snapshot,
+    top5_link_coverage,
     top5_general_recommendation,
 )
 
@@ -90,3 +91,33 @@ def test_top5_general_recommendation_uses_first_non_empty_value() -> None:
         {"recomendacion_general": [None, "", "Trabajar primero 108541 y 60939."]}
     )
     assert top5_general_recommendation(frame) == "Trabajar primero 108541 y 60939."
+
+
+def test_top5_link_coverage_counts_only_http_links() -> None:
+    frame = pd.DataFrame(
+        {
+            "enlace_acto": ["https://panamacompra.example/1", ""],
+            "enlace_ficha_minsa": [
+                "https://ctni.minsa.gob.pa/Utilities/LoadFicha/?idficha=1&idparam=0",
+                "ftp://invalid.example/2",
+            ],
+            "enlace_producto_recomendado": [
+                "http://supplier.example/product/1",
+                None,
+            ],
+        }
+    )
+
+    assert top5_link_coverage(frame) == {
+        "enlace_acto": 1,
+        "enlace_ficha_minsa": 1,
+        "enlace_producto_recomendado": 1,
+    }
+
+
+def test_top5_link_coverage_handles_legacy_snapshot() -> None:
+    assert top5_link_coverage(pd.DataFrame({"enlace_acto": ["https://acto"]})) == {
+        "enlace_acto": 1,
+        "enlace_ficha_minsa": 0,
+        "enlace_producto_recomendado": 0,
+    }
