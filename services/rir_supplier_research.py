@@ -5,22 +5,29 @@ from __future__ import annotations
 import pandas as pd
 
 
-RIR_TOP5_SHEET = "RIR_TOP5_DIARIO"
-RIR_TOP5_SERVICE_VERSION = 2
-RIR_TOP5_LINK_COLUMNS = (
+RIR_TOP10_SHEET = "RIR_TOP10_DIARIO"
+RIR_TOP_LIMIT = 10
+RIR_TOP_SERVICE_VERSION = 3
+RIR_TOP_LINK_COLUMNS = (
     "enlace_acto",
     "enlace_ficha_minsa",
     "enlace_producto_recomendado",
 )
 
+# Compatibilidad temporal con despliegues/cachés que todavía importan los
+# nombres anteriores. El módulo nuevo utiliza los símbolos RIR_TOP10_*.
+RIR_TOP5_SHEET = RIR_TOP10_SHEET
+RIR_TOP5_SERVICE_VERSION = RIR_TOP_SERVICE_VERSION
+RIR_TOP5_LINK_COLUMNS = RIR_TOP_LINK_COLUMNS
 
-def top5_link_coverage(frame: pd.DataFrame | None) -> dict[str, int]:
+
+def top_link_coverage(frame: pd.DataFrame | None) -> dict[str, int]:
     """Count valid HTTP(S) links for each executive-snapshot link field."""
 
-    coverage = {column: 0 for column in RIR_TOP5_LINK_COLUMNS}
+    coverage = {column: 0 for column in RIR_TOP_LINK_COLUMNS}
     if frame is None or frame.empty:
         return coverage
-    for column in RIR_TOP5_LINK_COLUMNS:
+    for column in RIR_TOP_LINK_COLUMNS:
         if column not in frame.columns:
             continue
         values = frame[column].fillna("").astype(str).str.strip().str.lower()
@@ -28,14 +35,19 @@ def top5_link_coverage(frame: pd.DataFrame | None) -> dict[str, int]:
     return coverage
 
 
-def latest_top5_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
-    """Return the newest complete daily Top-5 snapshot, ordered by ranking.
+def latest_top_snapshot(
+    frame: pd.DataFrame | None,
+    *,
+    rank_limit: int = RIR_TOP_LIMIT,
+) -> pd.DataFrame:
+    """Return the newest complete daily snapshot, ordered by ranking.
 
     Daily reruns may temporarily leave more than one row for the same ranking.
     The newest ``actualizado_en`` wins, so Streamlit remains deterministic while
     the writer replaces that day's rows.
     """
 
+    rank_limit = max(1, int(rank_limit))
     if frame is None or frame.empty:
         return pd.DataFrame()
     if "fecha_corte" not in frame.columns or "ranking" not in frame.columns:
@@ -48,7 +60,7 @@ def latest_top5_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
     result["__ranking__"] = pd.to_numeric(result["ranking"], errors="coerce")
     result = result[
         result["__fecha_corte__"].notna()
-        & result["__ranking__"].between(1, 5, inclusive="both")
+        & result["__ranking__"].between(1, rank_limit, inclusive="both")
     ].copy()
     if result.empty:
         return pd.DataFrame()
@@ -75,15 +87,17 @@ def latest_top5_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
     for _day, daily in result.groupby("__day__", sort=False):
         daily = daily.drop_duplicates("__ranking__", keep="last")
         daily_frames.append(daily)
-        if set(daily["__ranking__"].astype(int)) == {1, 2, 3, 4, 5}:
+        if set(daily["__ranking__"].astype(int)) == set(
+            range(1, rank_limit + 1)
+        ):
             result = daily
             break
     else:
-        # En la primera corrida puede no haber todavía cinco candidatas válidas.
+        # En la primera corrida puede no haber todavía suficientes candidatas válidas.
         # En ese único caso se muestra el corte más reciente disponible.
         result = daily_frames[0]
 
-    result = result.sort_values("__ranking__", kind="stable").head(5)
+    result = result.sort_values("__ranking__", kind="stable").head(rank_limit)
     result["ranking"] = result["__ranking__"].astype(int)
     return result.drop(
         columns=["__fecha_corte__", "__ranking__", "__actualizado_en__", "__day__"],
@@ -91,7 +105,19 @@ def latest_top5_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def top5_general_recommendation(frame: pd.DataFrame | None) -> str:
+def latest_top10_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """Return the latest complete Top-10 cut, with partial-cut fallback."""
+
+    return latest_top_snapshot(frame, rank_limit=RIR_TOP_LIMIT)
+
+
+def latest_top5_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """Compatibility helper for consumers that explicitly still need Top 5."""
+
+    return latest_top_snapshot(frame, rank_limit=5)
+
+
+def top_general_recommendation(frame: pd.DataFrame | None) -> str:
     """Return the first non-empty executive recommendation in a snapshot."""
 
     if frame is None or frame.empty or "recomendacion_general" not in frame.columns:
@@ -99,3 +125,15 @@ def top5_general_recommendation(frame: pd.DataFrame | None) -> str:
     values = frame["recomendacion_general"].fillna("").astype(str).str.strip()
     values = values[values.ne("")]
     return values.iloc[0] if not values.empty else ""
+
+
+def top5_link_coverage(frame: pd.DataFrame | None) -> dict[str, int]:
+    """Backward-compatible alias for :func:`top_link_coverage`."""
+
+    return top_link_coverage(frame)
+
+
+def top5_general_recommendation(frame: pd.DataFrame | None) -> str:
+    """Backward-compatible alias for :func:`top_general_recommendation`."""
+
+    return top_general_recommendation(frame)

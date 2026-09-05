@@ -4,6 +4,8 @@ import pandas as pd
 
 from services.rir_supplier_research import (
     latest_top5_snapshot,
+    latest_top10_snapshot,
+    top_link_coverage,
     top5_link_coverage,
     top5_general_recommendation,
 )
@@ -86,6 +88,56 @@ def test_latest_top5_snapshot_rejects_invalid_schema_or_rank() -> None:
     ).empty
 
 
+def test_latest_top10_snapshot_returns_all_ten_in_rank_order() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "fecha_corte": "2026-09-06",
+                "ranking": ranking,
+                "ficha": f"ficha-{ranking}",
+                "actualizado_en": f"2026-09-06T09:{ranking:02d}:00-05:00",
+            }
+            for ranking in range(10, 0, -1)
+        ]
+    )
+
+    result = latest_top10_snapshot(frame)
+
+    assert result["ranking"].tolist() == list(range(1, 11))
+    assert result["ficha"].tolist() == [f"ficha-{rank}" for rank in range(1, 11)]
+
+
+def test_latest_top10_snapshot_keeps_previous_complete_cut_during_partial_write() -> None:
+    frame = pd.DataFrame(
+        [
+            *[
+                {
+                    "fecha_corte": "2026-09-05",
+                    "ranking": ranking,
+                    "ficha": f"complete-{ranking}",
+                    "actualizado_en": "2026-09-05T08:00:00-05:00",
+                }
+                for ranking in range(1, 11)
+            ],
+            *[
+                {
+                    "fecha_corte": "2026-09-06",
+                    "ranking": ranking,
+                    "ficha": f"partial-{ranking}",
+                    "actualizado_en": "2026-09-06T08:00:00-05:00",
+                }
+                for ranking in range(1, 7)
+            ],
+        ]
+    )
+
+    result = latest_top10_snapshot(frame)
+
+    assert result["ficha"].tolist() == [
+        f"complete-{ranking}" for ranking in range(1, 11)
+    ]
+
+
 def test_top5_general_recommendation_uses_first_non_empty_value() -> None:
     frame = pd.DataFrame(
         {"recomendacion_general": [None, "", "Trabajar primero 108541 y 60939."]}
@@ -113,6 +165,7 @@ def test_top5_link_coverage_counts_only_http_links() -> None:
         "enlace_ficha_minsa": 1,
         "enlace_producto_recomendado": 1,
     }
+    assert top_link_coverage(frame) == top5_link_coverage(frame)
 
 
 def test_top5_link_coverage_handles_legacy_snapshot() -> None:

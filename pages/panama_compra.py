@@ -60,11 +60,33 @@ from services.panama_compra_db_filters import (
     date_filter_columns,
 )
 from services import panama_compra_no_requirements as _no_requirements_rules
-from services.rir_supplier_research import (
-    RIR_TOP5_SHEET,
-    latest_top5_snapshot,
-    top5_link_coverage,
-    top5_general_recommendation,
+from services import rir_supplier_research as _rir_supplier_research
+
+if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 3:
+    try:
+        _rir_supplier_research = importlib.reload(_rir_supplier_research)
+    except Exception:
+        pass
+
+RIR_TOP10_SHEET = getattr(
+    _rir_supplier_research,
+    "RIR_TOP10_SHEET",
+    getattr(_rir_supplier_research, "RIR_TOP5_SHEET", "RIR_TOP10_DIARIO"),
+)
+latest_top10_snapshot = getattr(
+    _rir_supplier_research,
+    "latest_top10_snapshot",
+    _rir_supplier_research.latest_top5_snapshot,
+)
+top_link_coverage = getattr(
+    _rir_supplier_research,
+    "top_link_coverage",
+    _rir_supplier_research.top5_link_coverage,
+)
+top_general_recommendation = getattr(
+    _rir_supplier_research,
+    "top_general_recommendation",
+    _rir_supplier_research.top5_general_recommendation,
 )
 
 _NO_REQUIREMENTS_RULES_REQUIRED_VERSION = 2
@@ -7363,14 +7385,14 @@ def _render_price_method_legend() -> None:
     )
 
 
-def _render_rir_daily_top5() -> None:
+def _render_rir_daily_top10() -> None:
     """Muestra el último corte ejecutivo sin ocultar la investigación completa."""
 
-    st.markdown("### Top 5 actual para RIR")
-    snapshot = latest_top5_snapshot(load_df(RIR_TOP5_SHEET))
+    st.markdown("### Top 10 actual para RIR")
+    snapshot = latest_top10_snapshot(load_df(RIR_TOP10_SHEET))
     if snapshot.empty:
         st.info(
-            "El Top 5 diario todavía no tiene un corte válido. La investigación "
+            "El Top 10 diario todavía no tiene un corte válido. La investigación "
             "detallada permanece disponible abajo."
         )
         return
@@ -7379,7 +7401,12 @@ def _render_rir_daily_top5() -> None:
     if pd.notna(corte):
         st.caption(
             f"Último corte: {corte.strftime('%d/%m/%Y')} · "
-            f"{len(snapshot)} oportunidades"
+            f"{len(snapshot)} de 10 oportunidades"
+        )
+    if len(snapshot) < 10:
+        st.info(
+            "Este es el corte histórico parcial disponible. La próxima corrida con "
+            "el prompt actualizado debe publicar los diez puestos sin inventar datos."
         )
 
     display_columns = {
@@ -7392,9 +7419,11 @@ def _render_rir_daily_top5() -> None:
         "producto_recomendado": "Producto recomendado",
         "marca_producto": "Marca",
         "pais_origen": "País de origen",
+        "resultado_cumplimiento": "Cumplimiento",
+        "viabilidad_economica": "Viabilidad económica",
         "enlace_acto": "Acto",
-        "enlace_ficha_minsa": "Ficha MINSA",
-        "enlace_producto_recomendado": "Producto",
+        "enlace_ficha_minsa": "Ficha CTNI",
+        "enlace_producto_recomendado": "Proveedor/producto",
     }
     available = [column for column in display_columns if column in snapshot.columns]
     executive = snapshot[available].rename(columns=display_columns)
@@ -7402,7 +7431,7 @@ def _render_rir_daily_top5() -> None:
         executive,
         use_container_width=True,
         hide_index=True,
-        height=min(610, 78 + len(executive) * 104),
+        height=min(1110, 78 + len(executive) * 104),
         row_height=96,
         column_config={
             "#": st.column_config.NumberColumn("#", width="small", format="%d"),
@@ -7426,28 +7455,89 @@ def _render_rir_daily_top5() -> None:
             "País de origen": st.column_config.TextColumn(
                 "País de origen", width="small"
             ),
-            "Acto": st.column_config.LinkColumn("Acto", display_text="Abrir acto"),
-            "Ficha MINSA": st.column_config.LinkColumn(
-                "Ficha MINSA", display_text="Abrir ficha"
+            "Cumplimiento": st.column_config.TextColumn(
+                "Cumplimiento", width="medium"
             ),
-            "Producto": st.column_config.LinkColumn(
-                "Producto", display_text="Ver producto"
+            "Viabilidad económica": st.column_config.TextColumn(
+                "Viabilidad económica", width="large"
+            ),
+            "Acto": st.column_config.LinkColumn("Acto", display_text="Abrir acto"),
+            "Ficha CTNI": st.column_config.LinkColumn(
+                "Ficha CTNI", display_text="Abrir ficha"
+            ),
+            "Proveedor/producto": st.column_config.LinkColumn(
+                "Proveedor/producto", display_text="Abrir proveedor"
             ),
         },
     )
 
-    link_coverage = top5_link_coverage(snapshot)
+    link_coverage = top_link_coverage(snapshot)
     if any(count < len(snapshot) for count in link_coverage.values()):
         st.warning(
             "El corte diario está visible, pero tiene enlaces pendientes de validar. "
-            "La siguiente corrida debe completar acto, ficha MINSA y producto."
+            "La siguiente corrida debe completar acto, ficha CTNI y proveedor/producto."
         )
 
-    recommendation = top5_general_recommendation(snapshot)
+    detail_fields = {
+        "resultado_cumplimiento",
+        "analisis_cumplimiento_ficha",
+        "viabilidad_economica",
+        "correo_sugerido_proveedor",
+    }
+    if any(column in snapshot.columns for column in detail_fields):
+        st.markdown("#### Detalle de la oportunidad")
+        choices = list(snapshot.index)
+
+        def _detail_label(index: int) -> str:
+            row = snapshot.loc[index]
+            rank_value = pd.to_numeric(row.get("ranking"), errors="coerce")
+            ranking = int(rank_value) if pd.notna(rank_value) else 0
+            ficha = _clean_text(row.get("ficha")) or "Sin ficha"
+            title = _clean_text(row.get("oportunidad")) or ficha
+            return f"#{ranking} · {ficha} · {title}"
+
+        selected = st.selectbox(
+            "Selecciona una oportunidad para revisar el análisis y el correo",
+            options=choices,
+            format_func=_detail_label,
+            key="rir_top10_detail_selection",
+        )
+        detail = snapshot.loc[selected]
+        link_columns = (
+            ("Abrir acto", "enlace_acto"),
+            ("Abrir ficha CTNI", "enlace_ficha_minsa"),
+            ("Abrir proveedor/producto", "enlace_producto_recomendado"),
+        )
+        link_slots = st.columns(3)
+        for slot, (label, column) in zip(link_slots, link_columns):
+            url = _clean_text(detail.get(column))
+            if re.match(r"^https?://", url, flags=re.IGNORECASE):
+                slot.link_button(label, url, use_container_width=True)
+            else:
+                slot.caption(f"{label}: pendiente")
+
+        result = _clean_text(detail.get("resultado_cumplimiento")) or "Pendiente"
+        technical = _clean_text(detail.get("analisis_cumplimiento_ficha"))
+        viability = _clean_text(detail.get("viabilidad_economica"))
+        email_text = _clean_text(detail.get("correo_sugerido_proveedor"))
+        st.markdown(f"**Resultado del cumplimiento técnico:** {result}")
+        st.write(technical or "Pendiente de comparar la ficha CTNI con el producto.")
+        st.markdown("**Viabilidad económica**")
+        st.write(viability or "Pendiente de validar costo puesto en Panamá y margen.")
+        email_hash = hashlib.sha1(email_text.encode("utf-8")).hexdigest()[:12]
+        st.text_area(
+            "Correo sugerido al proveedor",
+            value=email_text or "Pendiente de generar.",
+            height=260,
+            disabled=True,
+            key=f"rir_top10_email_{email_hash}",
+        )
+
+    recommendation = top_general_recommendation(snapshot)
     if recommendation:
         st.info(f"**Recomendación directa:** {recommendation}")
     st.caption(
-        "El Top 5 es el último corte diario publicado en Google Sheets. Los cortes "
+        "El Top 10 es el último corte diario publicado en Google Sheets. Los cortes "
         "anteriores se conservan para auditar entradas, movimientos y salidas. "
         "El precio competitivo histórico es el percentil 25 de ofertas unitarias "
         "comparables; la diferencia bruta preliminar resta el costo localizado, pero "
@@ -7456,7 +7546,7 @@ def _render_rir_daily_top5() -> None:
 
 
 def _render_rir_supplier_research() -> None:
-    _render_rir_daily_top5()
+    _render_rir_daily_top10()
     st.divider()
     st.markdown("### Investigación detallada")
     st.caption(
