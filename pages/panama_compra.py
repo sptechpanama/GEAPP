@@ -60,6 +60,11 @@ from services.panama_compra_db_filters import (
     date_filter_columns,
 )
 from services import panama_compra_no_requirements as _no_requirements_rules
+from services.rir_supplier_research import (
+    RIR_TOP5_SHEET,
+    latest_top5_snapshot,
+    top5_general_recommendation,
+)
 
 _NO_REQUIREMENTS_RULES_REQUIRED_VERSION = 2
 if (
@@ -7357,7 +7362,74 @@ def _render_price_method_legend() -> None:
     )
 
 
+def _render_rir_daily_top5() -> None:
+    """Muestra el último corte ejecutivo sin ocultar la investigación completa."""
+
+    st.markdown("### Top 5 actual para RIR")
+    snapshot = latest_top5_snapshot(load_df(RIR_TOP5_SHEET))
+    if snapshot.empty:
+        st.info(
+            "El Top 5 diario todavía no tiene un corte válido. La investigación "
+            "detallada permanece disponible abajo."
+        )
+        return
+
+    corte = pd.to_datetime(snapshot["fecha_corte"], errors="coerce").max()
+    if pd.notna(corte):
+        st.caption(
+            f"Último corte: {corte.strftime('%d/%m/%Y')} · "
+            f"{len(snapshot)} oportunidades"
+        )
+
+    display_columns = {
+        "ranking": "#",
+        "oportunidad": "Oportunidad",
+        "numeros_preliminares": "Números preliminares",
+        "evaluacion_directa": "Evaluación directa",
+        "accion_inmediata": "Acción inmediata",
+        "proveedor_objetivo": "Proveedor objetivo",
+        "enlace_acto": "Acto",
+    }
+    available = [column for column in display_columns if column in snapshot.columns]
+    executive = snapshot[available].rename(columns=display_columns)
+    st.dataframe(
+        executive,
+        use_container_width=True,
+        hide_index=True,
+        height=min(610, 78 + len(executive) * 104),
+        row_height=96,
+        column_config={
+            "#": st.column_config.NumberColumn("#", width="small", format="%d"),
+            "Oportunidad": st.column_config.TextColumn("Oportunidad", width="medium"),
+            "Números preliminares": st.column_config.TextColumn(
+                "Números preliminares", width="large"
+            ),
+            "Evaluación directa": st.column_config.TextColumn(
+                "Evaluación directa", width="large"
+            ),
+            "Acción inmediata": st.column_config.TextColumn(
+                "Acción inmediata", width="large"
+            ),
+            "Proveedor objetivo": st.column_config.TextColumn(
+                "Proveedor objetivo", width="medium"
+            ),
+            "Acto": st.column_config.LinkColumn("Acto", display_text="Abrir"),
+        },
+    )
+
+    recommendation = top5_general_recommendation(snapshot)
+    if recommendation:
+        st.info(f"**Recomendación directa:** {recommendation}")
+    st.caption(
+        "El Top 5 es el último corte diario publicado en Google Sheets. Los cortes "
+        "anteriores se conservan para auditar entradas, movimientos y salidas."
+    )
+
+
 def _render_rir_supplier_research() -> None:
+    _render_rir_daily_top5()
+    st.divider()
+    st.markdown("### Investigación detallada")
     st.caption(
         "Investigación externa para actos RIR sin requisitos. ChatGPT Pro puede completar "
         "esta hoja independiente usando el acto, la ficha, el renglón y las referencias "
