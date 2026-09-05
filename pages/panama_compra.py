@@ -6415,15 +6415,18 @@ SHEET_LABELS = {
     "cl_abiertas_rir_sin_requisitos": "CL abiertas RIR sin requisitos",
     "cl_abiertas": "CL abiertas",
     "cl_abiertas_rir_con_ct": "CL abiertas RIR con CT",
+    "cl_abiertas_419_sfd": "CL abiertas Ley 419 sin ficha",
     "cl_abiertas_ct_rir": "CL abiertas CT_RIR",
     "cl_prog_sin_ficha": "CL programadas sin ficha",
     "cl_prog_sin_requisitos": "CL programadas sin requisitos",
     "cl_prog_con_ct": "CL programadas con CT",
+    "cl_prog_419_sfd": "CL programadas Ley 419 sin ficha",
     "cl_prog_ct_rir": "CL programadas CT_RIR",
     "cl_prioritarios": "CL prioritarios",
     "ap_con_ct": "AP con CT",
     "ap_sin_ficha": "AP sin ficha",
     "ap_sin_requisitos": "AP sin requisitos",
+    "ap_419_sfd": "AP Ley 419 sin ficha",
     "ap_ct_rir": "AP CT_RIR",
     "ctni_solicitudes": "Solicitudes de fichas",
     "ctni_homologaciones": "Homologaciones",
@@ -6459,12 +6462,20 @@ SHEET_GROUPS = {
         "cl_abiertas_rir_sin_requisitos",
         "cl_abiertas",
         "cl_abiertas_rir_con_ct",
+        "cl_abiertas_419_sfd",
         "cl_prog_sin_ficha",
         "cl_prog_sin_requisitos",
         "cl_prog_con_ct",
+        "cl_prog_419_sfd",
         "ap_con_ct",
         "ap_sin_ficha",
         "ap_sin_requisitos",
+        "ap_419_sfd",
+    ],
+    "Ley 419 sin ficha detectada": [
+        "cl_abiertas_419_sfd",
+        "cl_prog_419_sfd",
+        "ap_419_sfd",
     ],
     "Otras fuentes": [
         "otras_fuentes",
@@ -6499,6 +6510,7 @@ CATEGORY_ORDER = [
     "Cotizaciones Abiertas",
     "Cotizaciones Programadas",
     "Licitaciones",
+    "Ley 419 sin ficha detectada",
     "Criterios Tecnicos RIR",
     "Investigación RIR sin requisitos",
     "Actos RS/SP",
@@ -8400,6 +8412,8 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         st.info("No hay filas para los filtros actuales.")
     else:
         preview_view, money_cfg = _prepare_money_columns_for_sorting(preview_df)
+        if "ley_proceso" in preview_view.columns and "Ley del proceso" not in preview_view.columns:
+            preview_view = preview_view.rename(columns={"ley_proceso": "Ley del proceso"})
         st.dataframe(
             preview_view,
             use_container_width=True,
@@ -8713,6 +8727,43 @@ for tab, category_name in zip(category_tabs, ordered_categories):
 
         if category_name == "Investigación RIR sin requisitos":
             _render_rir_supplier_research()
+            continue
+
+        if category_name == "Ley 419 sin ficha detectada":
+            parts: list[pd.DataFrame] = []
+            for source_sheet in sheets:
+                source_df = load_df(source_sheet)
+                if source_df.empty:
+                    continue
+                source_df = source_df.copy()
+                source_df["Tipo convocatoria"] = _sheet_tipo_convocatoria(source_sheet)
+                source_df["Pestana origen"] = _sheet_label(source_sheet)
+                parts.append(source_df)
+
+            if parts:
+                df = _deduplicate_keyword_hits(
+                    pd.concat(parts, ignore_index=True, sort=False)
+                )
+            else:
+                df = pd.DataFrame()
+
+            st.caption(
+                "Actos confirmados como Ley 419 cuyo detalle no contiene una ficha "
+                "técnica detectable. Los casos con ley no identificada permanecen en "
+                "sus categorías originales."
+            )
+            if df.empty:
+                st.info("Sin actos confirmados en esta categoría.")
+            else:
+                read_only_cols = [c for c in df.columns if not _is_checkbox_target(c)]
+                df_read_only = df[read_only_cols].copy() if read_only_cols else df.copy()
+                render_df(
+                    df_read_only,
+                    "ley_419_sfd_unificado",
+                    pc_state_df,
+                    pc_config_df,
+                    suffix=tab_suffix,
+                )
             continue
 
         if category_name == "Criterios Tecnicos RIR":
