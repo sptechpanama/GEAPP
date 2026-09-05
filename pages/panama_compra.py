@@ -7738,7 +7738,7 @@ def render_df(
     today = date.today()
     today_ts = pd.Timestamp(today)
 
-    with st.expander("🔎 Filtros", expanded=True):
+    with st.expander("🔎 Filtros", expanded=False):
         if "Entidad" in df.columns:
             opciones = sorted([e for e in df["Entidad"].dropna().unique()])
             sel = st.multiselect("Entidad", opciones, key=keyp+"ent")
@@ -8529,7 +8529,7 @@ def _render_otras_fuentes_module() -> None:
         "Mayor monto": "amount_desc",
         "Prioridad y score": "priority_score",
     }
-    with st.expander("Filtros y orden", expanded=True):
+    with st.expander("Filtros y orden", expanded=False):
         # El formulario evita consultar Supabase en cada clic mientras el
         # usuario todavía está armando sus filtros.
         with st.form("otras_fuentes_filter_form", clear_on_submit=False):
