@@ -49,12 +49,49 @@ HVAC_OVER_15K_KEYWORDS = (
     "bomba de calor>15k",
     "climatizacion*>15k",
 )
-KEYWORD_RULES_VERSION = 3
+POWER_GENERATION_KEYWORDS = (
+    "planta electric*",
+    "plantas electric*",
+    "panta electric*",
+    "planta de emergencia*",
+    "plantas de emergencia*",
+    "grupo electrogen*",
+    "grupos electrogen*",
+    "generador electric*",
+    "generadores electric*",
+    "generador de emergencia*",
+    "generadores de emergencia*",
+    "tablero de transferencia automat*",
+    "tableros de transferencia automat*",
+    "sistema de transferencia automat*",
+    "sistemas de transferencia automat*",
+)
+ENGINEERING_PLAN_KEYWORDS = (
+    "confeccion de plano*",
+    "elaboracion de plano*",
+    "digitalizacion de plano*",
+    "actualizacion de plano*",
+    "diseno arquitectonic*",
+    "diseno electric*",
+    "diseno electromecanic*",
+    "diseno de instalaciones electric*",
+    "tramite de aprobacion de plano*",
+    "servicio de tramite de plano*",
+    "planos as built",
+    "plano como construido*",
+)
+RS_SP_CONTEXTUAL_KEYWORDS = (
+    *POWER_GENERATION_KEYWORDS,
+    *ENGINEERING_PLAN_KEYWORDS,
+)
+RS_SP_CONTEXT_RULES_VERSION = 1
+KEYWORD_RULES_VERSION = 4
 DEFAULT_PANAMACOMPRA_KEYWORDS = (
     "chiller",
     "york",
     "daikin",
     *HVAC_OVER_15K_KEYWORDS,
+    *RS_SP_CONTEXTUAL_KEYWORDS,
 )
 DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS = (
     "automotriz",
@@ -63,6 +100,7 @@ DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS = (
     "protector solar",
     "oracle solaris",
     "correa del serpentin",
+    "techo de planta electric*",
 )
 # Variantes gramaticales evidentes que representan exactamente el mismo
 # contexto negativo. La lista visible y persistente conserva un solo nombre
@@ -122,6 +160,17 @@ class KeywordRule:
         if self.minimum_amount is None:
             return self.term
         return f"{self.term}>{_format_rule_amount(self.minimum_amount)}"
+
+
+@dataclass(frozen=True)
+class KeywordFieldMatch:
+    """Resultado de evaluar una fila sin mezclar renglones independientes."""
+
+    terms: tuple[str, ...]
+    fields: tuple[str, ...]
+    field_values: tuple[str, ...]
+    suppressed_terms: tuple[str, ...] = ()
+    context_policy: str = ""
 
 
 def _normalize_search_text(value: object) -> str:
@@ -726,3 +775,120 @@ def negative_keywords_in_matching_context(
                 seen.add(term)
                 matches.append(term)
     return matches
+
+
+@lru_cache(maxsize=1)
+def _rs_sp_contextual_term_bodies() -> frozenset[str]:
+    return frozenset(
+        rule.term
+        for raw in RS_SP_CONTEXTUAL_KEYWORDS
+        if (rule := parse_keyword_rule(raw)) is not None
+    )
+
+
+def is_rs_sp_contextual_keyword(value: object) -> bool:
+    """Indica si una regla pertenece al bloque nuevo de plantas/planos."""
+
+    rule = parse_keyword_rule(value)
+    return bool(rule and rule.term in _rs_sp_contextual_term_bodies())
+
+
+def _is_line_or_partial_adjudication(value: object) -> bool:
+    normalized = _normalize_search_text(value)
+    if not normalized:
+        return False
+    return any(
+        token in normalized.split()
+        for token in ("renglon", "renglones", "item", "items", "linea", "lineas")
+    ) or "parcial" in normalized
+
+
+def match_keyword_fields(
+    fields: Sequence[tuple[object, object]],
+    keywords: Iterable[object],
+    *,
+    reference_amount: object = None,
+    adjudication_type: object = "",
+) -> KeywordFieldMatch:
+    """Evalua palabras por campo y protege actos globales con items mixtos.
+
+    Las reglas historicas conservan exactamente su comportamiento. Las reglas
+    nuevas de plantas electricas y planos se aceptan en titulo/descripcion. Si
+    aparecen solo dentro de ``Item_n``, se aceptan cuando la adjudicacion es por
+    renglon/parcial o cuando todos los items no vacios tienen ese mismo contexto.
+    """
+
+    configured = normalize_keyword_terms(keywords)
+    field_matches: list[tuple[str, str, list[str], bool]] = []
+    for raw_name, raw_value in fields:
+        name = str(raw_name or "").strip()
+        value = str(raw_value or "").strip()
+        matches = match_keywords_in_text(
+            value,
+            configured,
+            reference_amount=reference_amount,
+        )
+        field_matches.append(
+            (name, value, matches, _normalize_search_text(name).startswith("item"))
+        )
+
+    contextual_in_primary = {
+        term
+        for name, _value, matches, is_item in field_matches
+        if not is_item
+        for term in matches
+        if is_rs_sp_contextual_keyword(term)
+    }
+    contextual_in_items = {
+        term
+        for _name, _value, matches, is_item in field_matches
+        if is_item
+        for term in matches
+        if is_rs_sp_contextual_keyword(term)
+    }
+    contextual_allowed = bool(contextual_in_primary)
+    context_policy = "primary_context" if contextual_allowed else ""
+    if contextual_in_items and not contextual_allowed:
+        if _is_line_or_partial_adjudication(adjudication_type):
+            contextual_allowed = True
+            context_policy = "line_adjudication"
+        else:
+            item_rows = [item for item in field_matches if item[3] and item[1]]
+            contextual_allowed = bool(item_rows) and all(
+                any(is_rs_sp_contextual_keyword(term) for term in matches)
+                for _name, _value, matches, _is_item in item_rows
+            )
+            context_policy = "all_items_context" if contextual_allowed else "mixed_items_suppressed"
+
+    accepted_terms: list[str] = []
+    accepted_fields: list[str] = []
+    accepted_values: list[str] = []
+    suppressed_terms: list[str] = []
+    for name, value, matches, _is_item in field_matches:
+        accepted_here = [
+            term
+            for term in matches
+            if not is_rs_sp_contextual_keyword(term) or contextual_allowed
+        ]
+        rejected_here = [
+            term
+            for term in matches
+            if is_rs_sp_contextual_keyword(term) and not contextual_allowed
+        ]
+        for term in accepted_here:
+            if term not in accepted_terms:
+                accepted_terms.append(term)
+        for term in rejected_here:
+            if term not in suppressed_terms:
+                suppressed_terms.append(term)
+        if accepted_here:
+            accepted_fields.append(name)
+            accepted_values.append(value)
+
+    return KeywordFieldMatch(
+        terms=tuple(accepted_terms),
+        fields=tuple(accepted_fields),
+        field_values=tuple(accepted_values),
+        suppressed_terms=tuple(suppressed_terms),
+        context_policy=context_policy,
+    )

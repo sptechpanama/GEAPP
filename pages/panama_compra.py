@@ -110,7 +110,7 @@ from services.panama_compra_no_requirements import (
     find_scope_column,
 )
 
-_KEYWORD_RULES_REQUIRED_VERSION = 3
+_KEYWORD_RULES_REQUIRED_VERSION = 4
 if getattr(_keyword_registry, "KEYWORD_RULES_VERSION", 0) < _KEYWORD_RULES_REQUIRED_VERSION:
     # En un hot-reload Streamlit puede conservar el módulo anterior aunque la
     # página ya sea nueva. Forzamos una recarga antes de habilitar escrituras.
@@ -162,6 +162,7 @@ negative_keywords_in_matching_context = getattr(
     "negative_keywords_in_matching_context",
     lambda **_kwargs: [],
 )
+match_keyword_fields = _keyword_registry.match_keyword_fields
 
 
 def match_keywords_in_text(text, keywords, *, reference_amount=None):
@@ -4058,37 +4059,39 @@ def _keyword_match_columns(
         ],
     )
     title_col = _resolve_column_by_alias(df.columns.tolist(), ["titulo", "titulo del acto"])
+    adjudication_col = _resolve_column_by_alias(
+        df.columns.tolist(),
+        [
+            "tipo de adjudicacion",
+            "modalidad de adjudicacion",
+            "forma de adjudicacion",
+            "modalidad",
+        ],
+    )
 
     matched_rows: list[dict[str, object]] = []
     for _, row in df.iterrows():
         row_payload = row.to_dict()
         reference_amount = row_payload.get(price_col) if price_col else None
-        matched_terms: list[str] = []
-        matched_cols: list[str] = []
-        for col in text_columns:
-            column_matches = match_keywords_in_text(
-                row_payload.get(col, ""),
-                keyword_terms,
-                reference_amount=reference_amount,
-            )
-            if not column_matches:
-                continue
-            for term in column_matches:
-                if term not in matched_terms:
-                    matched_terms.append(term)
-            if col not in matched_cols:
-                matched_cols.append(col)
-        if not matched_terms:
+        field_match = match_keyword_fields(
+            [(col, row_payload.get(col, "")) for col in text_columns],
+            keyword_terms,
+            reference_amount=reference_amount,
+            adjudication_type=(
+                row_payload.get(adjudication_col, "") if adjudication_col else ""
+            ),
+        )
+        if not field_match.terms:
             continue
         negative_matches = negative_keywords_in_matching_context(
             title=row_payload.get(title_col, "") if title_col else "",
-            matched_field_values=(row_payload.get(col, "") for col in matched_cols),
+            matched_field_values=field_match.field_values,
             negative_keywords=negative_terms,
         )
         if negative_matches:
             continue
-        row_payload["Palabras clave detectadas"] = ", ".join(matched_terms)
-        row_payload["Campos con coincidencia"] = ", ".join(matched_cols)
+        row_payload["Palabras clave detectadas"] = ", ".join(field_match.terms)
+        row_payload["Campos con coincidencia"] = ", ".join(field_match.fields)
         matched_rows.append(row_payload)
 
     if not matched_rows:

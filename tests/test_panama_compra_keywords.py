@@ -8,11 +8,15 @@ import pytest
 
 from services.panama_compra_keywords import (
     DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
+    DEFAULT_PANAMACOMPRA_KEYWORDS,
+    ENGINEERING_PLAN_KEYWORDS,
     HVAC_OVER_15K_KEYWORDS,
+    POWER_GENERATION_KEYWORDS,
     KeywordRegistryConflictError,
     KeywordRegistryStore,
     apply_keyword_changes,
     keyword_table_column_order,
+    match_keyword_fields,
     match_keywords_in_text,
     match_negative_keywords_in_text,
     negative_keywords_in_matching_context,
@@ -160,6 +164,7 @@ def test_default_negative_terms_are_minimal_and_canonical():
         "protector solar",
         "oracle solaris",
         "correa del serpentin",
+        "techo de planta electric*",
     ]
 
 
@@ -206,6 +211,74 @@ def test_negative_filter_only_uses_title_and_positive_matching_fields():
         matched_field_values=["Paneles fotovoltaicos"],
         negative_keywords=DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS,
     ) == []
+
+
+def test_power_and_plan_rules_are_seeded_without_generic_noise_terms():
+    assert set(POWER_GENERATION_KEYWORDS).issubset(DEFAULT_PANAMACOMPRA_KEYWORDS)
+    assert set(ENGINEERING_PLAN_KEYWORDS).issubset(DEFAULT_PANAMACOMPRA_KEYWORDS)
+    assert "mantenimiento" not in DEFAULT_PANAMACOMPRA_KEYWORDS
+    assert "reparacion" not in DEFAULT_PANAMACOMPRA_KEYWORDS
+    assert "planos" not in DEFAULT_PANAMACOMPRA_KEYWORDS
+    assert "diseno" not in DEFAULT_PANAMACOMPRA_KEYWORDS
+
+
+def test_contextual_rules_accept_title_and_description_matches():
+    result = match_keyword_fields(
+        [
+            ("titulo", "Mantenimiento de planta electrica de emergencia"),
+            ("descripcion", "Incluye repuestos y pruebas"),
+            ("Item_1", "Aceite"),
+        ],
+        POWER_GENERATION_KEYWORDS,
+        adjudication_type="Global",
+    )
+    assert result.terms == ("planta electric*",)
+    assert result.fields == ("titulo",)
+    assert result.context_policy == "primary_context"
+
+
+def test_contextual_rules_suppress_unrelated_item_inside_global_package():
+    result = match_keyword_fields(
+        [
+            ("titulo", "Compra de materiales y equipos diversos"),
+            ("Item_1", "Aceite para generador electrico"),
+            ("Item_2", "Alimentos secos"),
+        ],
+        POWER_GENERATION_KEYWORDS,
+        adjudication_type="Global",
+    )
+    assert result.terms == ()
+    assert result.suppressed_terms == ("generador electric*",)
+    assert result.context_policy == "mixed_items_suppressed"
+
+
+def test_contextual_rules_accept_matching_item_when_award_is_by_line():
+    result = match_keyword_fields(
+        [
+            ("titulo", "Compra de equipos diversos"),
+            ("Item_1", "Cargador para planta electrica"),
+            ("Item_2", "Bomba de agua"),
+        ],
+        POWER_GENERATION_KEYWORDS,
+        adjudication_type="Adjudicacion parcial por renglon",
+    )
+    assert result.terms == ("planta electric*",)
+    assert result.fields == ("Item_1",)
+    assert result.context_policy == "line_adjudication"
+
+
+def test_contextual_guard_never_suppresses_existing_rules():
+    result = match_keyword_fields(
+        [
+            ("titulo", "Compra de equipos diversos"),
+            ("Item_1", "Chiller y generador electrico"),
+            ("Item_2", "Mobiliario"),
+        ],
+        ["chiller", *POWER_GENERATION_KEYWORDS],
+        adjudication_type="Global",
+    )
+    assert result.terms == ("chiller",)
+    assert result.suppressed_terms == ("generador electric*",)
 
 
 def test_amount_modifier_preserves_exact_or_root_matching():
