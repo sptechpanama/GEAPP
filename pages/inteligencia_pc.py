@@ -174,22 +174,22 @@ def _open_repository(database_url: str) -> InteligenciaPCRepository:
     return repository
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=1)
 def _options(_repo: InteligenciaPCRepository) -> dict[str, list[str]]:
     return _repo.filter_options()
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _family_market_summary(filters: PCFilters, _repo: InteligenciaPCRepository) -> pd.DataFrame:
     return _repo.family_market_summary(filters)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _monthly_market_trend(filters: PCFilters, _repo: InteligenciaPCRepository) -> pd.DataFrame:
     return _repo.monthly_market_trend(filters)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=3)
 def _project_page(
     filters: PCFilters,
     sort_column: str,
@@ -207,24 +207,24 @@ def _project_page(
     )
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _provider_market_ranking(filters: PCFilters, _repo: InteligenciaPCRepository) -> pd.DataFrame:
     return _repo.provider_market_ranking(filters, limit=300)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=1)
 def _provider_top_ranking(filters: PCFilters, _repo: InteligenciaPCRepository) -> pd.DataFrame:
     # El scoring personalizado debe evaluar el universo completo de proveedores,
     # no una muestra previa ordenada por monto ganado.
     return _repo.provider_market_ranking(filters, limit=20_000, detailed=True)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _entity_market_ranking(filters: PCFilters, _repo: InteligenciaPCRepository) -> pd.DataFrame:
     return _repo.entity_market_ranking(filters, limit=1000)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _provider_entity_ranking(
     filters: PCFilters,
     provider: str,
@@ -235,13 +235,13 @@ def _provider_entity_ranking(
     return _repo.provider_entity_ranking(filters, provider=provider, limit=3000)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=1)
 def _family_provider_ranking(filters: PCFilters, _repo: InteligenciaPCRepository) -> pd.DataFrame:
     # La concentracion de mercado exige todas las relaciones categoria-proveedor.
     return _repo.family_provider_ranking(filters, limit=50_000)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _low_competition_projects(
     filters: PCFilters,
     maximum_participants: int,
@@ -257,17 +257,17 @@ def _low_competition_projects(
     )
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _proposals_for_act_keys(act_keys: tuple[str, ...], _repo: InteligenciaPCRepository) -> pd.DataFrame:
     return _repo.proposals_for_act_keys(act_keys)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=3)
 def _company_options(search: str, _repo: InteligenciaPCRepository) -> list[str]:
     return _repo.company_options(search)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _company_acts(company: str, filters: PCFilters, _repo: InteligenciaPCRepository) -> pd.DataFrame:
     return _repo.company_acts(company, filters)
 

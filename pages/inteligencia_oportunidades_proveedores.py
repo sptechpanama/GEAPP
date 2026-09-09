@@ -202,7 +202,7 @@ def _require_repository() -> AnalyticsRepository:
         raise
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=3)
 def _master_data(
     filters: AnalyticsFilters,
     cache_version: str,
@@ -215,22 +215,22 @@ def _master_data(
     return _repo.master_metrics(filters, include_expensive=False)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=1)
 def _filter_options(_repo: AnalyticsRepository) -> dict[str, list[str]]:
     return _repo.filter_options()
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=3)
 def _monthly_data(filters: AnalyticsFilters, fichas: tuple[str, ...], _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.monthly_trend(filters, fichas=fichas)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=3)
 def _acts_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.acts_for_ficha(ficha, filters)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=2)
 def _all_acts_data(
     ficha: str,
     cache_version: str,
@@ -248,7 +248,7 @@ def _all_acts_data(
     )
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=1)
 def _ficha_search_options(
     cache_version: str,
     _repo: AnalyticsRepository,
@@ -260,7 +260,7 @@ def _ficha_search_options(
     return pd.DataFrame(columns=["ficha", "nombre_ficha"])
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=2)
 def _all_multi_ficha_acts_data(
     fichas: tuple[str, ...], _repo: AnalyticsRepository
 ) -> pd.DataFrame:
@@ -300,27 +300,27 @@ def _all_multi_ficha_acts_data(
     return result.reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=3)
 def _provider_candidates_data(query: str, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.find_providers(query)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=2)
 def _all_provider_acts_data(provider_norm: str, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.all_acts_for_provider(provider_norm)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=3)
 def _provider_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.providers_for_ficha(ficha, filters)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=3)
 def _catalog_data(ficha: str, _repo: AnalyticsRepository) -> pd.DataFrame:
     return _repo.catalog_for_ficha(ficha)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=2)
 def _price_benchmark_data(
     fichas: tuple[str, ...],
     api_version: str,
@@ -471,7 +471,7 @@ def _normalize_ficha(value: object) -> str:
     return match.group(0) if match else ""
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=3)
 def _drive_ficha_list(kind: str, configured_file_id: str) -> tuple[tuple[str, ...], str]:
     settings = {
         "favoritos": ("prospeccion_rir_favoritos.xlsx",),
@@ -927,7 +927,7 @@ def _sheet_id_candidates(kind: str) -> tuple[str, ...]:
     return tuple(output)
 
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False, ttl=60, max_entries=3)
 def _tracking_records_cached(
     sheet_ids: tuple[str, ...],
 ) -> list[dict[str, str]]:
@@ -937,7 +937,7 @@ def _tracking_records_cached(
     return list_tracking_fichas(client, sheet_id=sheet_ids)
 
 
-@st.cache_data(show_spinner=False, ttl=30)
+@st.cache_data(show_spinner=False, ttl=30, max_entries=3)
 def _study_result_cached(
     sheet_ids: tuple[str, ...],
     ficha: str,
@@ -954,7 +954,7 @@ def _study_result_cached(
     )
 
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False, ttl=60, max_entries=3)
 def _study_runs_cached(
     sheet_ids: tuple[str, ...],
 ) -> list[dict[str, str]]:

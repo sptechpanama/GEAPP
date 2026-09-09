@@ -532,7 +532,7 @@ def _panamacompra_drive_file_id() -> str:
     return ""
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=900, max_entries=2, show_spinner=False)
 def _panamacompra_drive_metadata(file_id: str) -> dict[str, str]:
     """Obtiene la huella del archivo mediante delegación o cuenta de servicio."""
     fid = _normalize_drive_file_id(file_id)
@@ -703,7 +703,7 @@ def _active_db_backend() -> str:
     return "postgres" if _supabase_db_url() else "sqlite"
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def get_postgres_db_update_summary(db_url: str) -> dict[str, str]:
     summary = {
         "last_data_update_at": "",
@@ -775,7 +775,7 @@ def _connect_sqlite(db_path: str):
     return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def list_postgres_tables(db_url: str) -> list[str]:
     engine = _pg_engine(db_url)
     query = text(
@@ -789,7 +789,7 @@ def list_postgres_tables(db_url: str) -> list[str]:
     return [str(r[0]) for r in rows]
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=4, show_spinner=False)
 def count_postgres_rows(db_url: str, table_name: str) -> int:
     identifier = _quote_identifier(table_name)
     query = text(f"SELECT COUNT(1) FROM {identifier}")
@@ -799,7 +799,7 @@ def count_postgres_rows(db_url: str, table_name: str) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def load_postgres_preview(db_url: str, table_name: str, limit: int) -> pd.DataFrame:
     identifier = _quote_identifier(table_name)
     limit = max(1, int(limit))
@@ -809,7 +809,7 @@ def load_postgres_preview(db_url: str, table_name: str, limit: int) -> pd.DataFr
         return pd.read_sql_query(text(query), conn)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def list_sqlite_tables(db_path: str) -> list[str]:
     with _connect_sqlite(db_path) as conn:
         cur = conn.execute(
@@ -819,7 +819,7 @@ def list_sqlite_tables(db_path: str) -> list[str]:
         return [row[0] for row in cur.fetchall()]
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=4, show_spinner=False)
 def count_sqlite_rows(db_path: str, table_name: str) -> int:
     identifier = _quote_identifier(table_name)
     with _connect_sqlite(db_path) as conn:
@@ -828,7 +828,7 @@ def count_sqlite_rows(db_path: str, table_name: str) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFrame:
     identifier = _quote_identifier(table_name)
     limit = max(1, int(limit))
@@ -837,7 +837,7 @@ def load_sqlite_preview(db_path: str, table_name: str, limit: int) -> pd.DataFra
         return pd.read_sql_query(query, conn)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def get_sqlite_db_update_summary(db_path: str) -> dict[str, str]:
     summary = {
         "last_data_update_at": "",
@@ -882,7 +882,7 @@ def get_sqlite_db_update_summary(db_path: str) -> dict[str, str]:
     return summary
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=4, show_spinner=False)
 def list_sqlite_columns(db_path: str, table_name: str) -> list[str]:
     identifier = _quote_identifier(table_name)
     with _connect_sqlite(db_path) as conn:
@@ -891,7 +891,7 @@ def list_sqlite_columns(db_path: str, table_name: str) -> list[str]:
     return [str(r[1]) for r in rows]
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=4, show_spinner=False)
 def list_postgres_columns(db_url: str, table_name: str) -> list[str]:
     engine = _pg_engine(db_url)
     query = text(
@@ -2123,7 +2123,7 @@ def _normalize_drive_file_id(raw: str) -> str:
     return value
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, max_entries=2, show_spinner=False)
 def load_drive_excel(file_id: str) -> pd.DataFrame:
     fid = _normalize_drive_file_id(file_id)
     if not fid:
@@ -2787,7 +2787,10 @@ def render_db_reference_panel(
         st.error(f"No se pudo contar registros de {table_name}: {exc}")
         return
 
-    show_all_default = key_prefix.startswith("pc_fichas")
+    # Renderizar decenas de miles de filas de una sola vez multiplica el uso de
+    # memoria (DataFrame + serializacion Arrow + datos del navegador). La
+    # opcion sigue disponible, pero se pagina por defecto.
+    show_all_default = False
     show_all_rows = st.toggle(
         "Mostrar todas las filas en una sola pagina",
         value=show_all_default,
@@ -2886,7 +2889,9 @@ def render_drive_reference_panel(
         key=f"{key_prefix}_page_size",
     )
     total = len(filtered)
-    show_all_default = key_prefix.startswith("pc_fichas")
+    # Mantener paginacion por defecto evita enviar el catalogo completo al
+    # navegador y protege el limite de memoria de Streamlit Community Cloud.
+    show_all_default = False
     show_all_rows = st.toggle(
         "Mostrar todas las filas en una sola pagina",
         value=show_all_default,
@@ -3665,7 +3670,7 @@ def _ctni_metadata_catalog_file_ids() -> tuple[str, ...]:
     return tuple(dict.fromkeys(candidates))
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False, max_entries=1)
 def _ct_rir_catalog_names(file_id: str) -> dict[str, str]:
     if not file_id:
         return {}
@@ -3697,7 +3702,7 @@ def _ct_rir_catalog_names(file_id: str) -> dict[str, str]:
     return lookup
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False, max_entries=1)
 def _ctni_ficha_catalog_metadata(file_id: str) -> dict[str, dict[str, str]]:
     """Lee la metadata oficial del catálogo para enriquecer fichas CTNI.
 
@@ -3767,7 +3772,7 @@ def _ctni_ficha_catalog_metadata(file_id: str) -> dict[str, dict[str, str]]:
     return metadata
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False, max_entries=1)
 def _ctni_ficha_database_metadata(
     backend: str,
     db_url: str,
@@ -4308,7 +4313,7 @@ def _coerce_registro_sanitario_label(value: object) -> str:
     return "No"
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def _load_table_subset(
     backend: str,
     db_url: str,
@@ -4339,7 +4344,7 @@ def _load_table_subset(
         return pd.read_sql_query(query, conn)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=1, show_spinner=False)
 def _build_prospeccion_rir_dataframe(
     backend: str,
     db_url: str,
@@ -5639,7 +5644,7 @@ def append_manual_request(job_name: str, job_label: str, note: str) -> bool:
     return True
 
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=180, max_entries=2, show_spinner=False)
 def load_pc_state() -> pd.DataFrame:
     """Carga el estado de los jobs PanamáCompra desde Finanzas Operativas."""
     try:
@@ -5697,7 +5702,7 @@ def load_pc_state() -> pd.DataFrame:
     return data.drop(columns=["__started_ts", "__order"], errors="ignore")
 
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=180, max_entries=2, show_spinner=False)
 def load_pc_config() -> pd.DataFrame:
     """Obtiene la configuración de programación (días/horas) desde la hoja pc_config."""
     sheet_id = _pc_config_sheet_id()
@@ -5738,9 +5743,9 @@ def _format_pc_duration(row: pd.Series) -> str:
         return "—"
 
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=180, max_entries=1, show_spinner=False)
 def _latest_sheet_update_by_job() -> dict[str, str]:
-    """Obtiene la fecha mas reciente de actualizacion por job a partir de sus hojas."""
+    """Obtiene la fecha reciente por job leyendo solo la columna necesaria."""
 
     def _normalize_col(name: str) -> str:
         value = str(name or "").strip().lower()
@@ -5750,20 +5755,32 @@ def _latest_sheet_update_by_job() -> dict[str, str]:
         value = re.sub(r"\s+", " ", value)
         return value
 
+    # Avoid loading complete worksheets just to inspect one date column.
+    try:
+        spreadsheet = get_gc().open_by_key(SHEET_ID)
+    except Exception as exc:
+        print(f"[panama_compra] No se pudo consultar fechas de hojas: {exc}")
+        return {}
+
     latest_map: dict[str, str] = {}
     for job_key, sheets in JOB_SOURCE_SHEETS.items():
         latest_ts = pd.NaT
         for sheet_name in sheets:
             try:
-                sheet_df = load_df(sheet_name)
+                worksheet = spreadsheet.worksheet(sheet_name)
+                header_rows = worksheet.get("1:10")
             except Exception:
                 continue
 
-            if sheet_df is None or sheet_df.empty:
+            if not header_rows:
                 continue
 
-            update_col = None
-            for col in sheet_df.columns:
+            update_col = 0
+            for col_index, col in (
+                (index, value)
+                for header_row in header_rows
+                for index, value in enumerate(header_row, start=1)
+            ):
                 if col == ROW_ID_COL:
                     continue
                 normalized = _normalize_col(col)
@@ -5772,13 +5789,18 @@ def _latest_sheet_update_by_job() -> dict[str, str]:
                     or normalized.startswith("fecha de actualizacion")
                     or ("fecha" in normalized and "actualiz" in normalized)
                 ):
-                    update_col = col
+                    update_col = col_index
                     break
 
             if not update_col:
                 continue
 
-            parsed = _parse_sheet_date_column(sheet_df[update_col])
+            try:
+                update_values = worksheet.col_values(int(update_col))
+            except Exception:
+                continue
+
+            parsed = _parse_sheet_date_column(pd.Series(update_values, dtype="string"))
             if parsed.empty:
                 continue
 
@@ -6624,7 +6646,7 @@ def _read_sheet_df(sheet_name: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def load_df(sheet_name: str) -> pd.DataFrame:
     """Carga general conservando el comportamiento histórico de la página."""
     try:
@@ -6831,7 +6853,7 @@ def _ctni_analytics_repository(
     )
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False, max_entries=2)
 def _ctni_recent_demand_rows(
     fichas: tuple[str, ...],
     api_version: str,
@@ -7270,7 +7292,7 @@ RIR_PRICE_COLUMNS = (
 )
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False, max_entries=2)
 def _rir_price_benchmarks(
     fichas: tuple[str, ...],
     api_version: str,
@@ -8430,7 +8452,7 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         f"Mostrando hasta {rows_per_page} filas por pagina."
     )
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False, max_entries=1)
 def _otras_fuentes_bootstrap(db_url: str):
     engine = _pg_engine(db_url)
     ready, available = _otras_fuentes.schema_ready(engine)
@@ -8457,12 +8479,12 @@ def _otras_fuentes_bootstrap(db_url: str):
     )
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False, max_entries=2)
 def _otras_fuentes_search(db_url: str, filters: _otras_fuentes.OpportunityFilters) -> pd.DataFrame:
     return _otras_fuentes.search_opportunities(_pg_engine(db_url), filters)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False, max_entries=2)
 def _otras_fuentes_documents(db_url: str, opportunity_id: str) -> pd.DataFrame:
     return _otras_fuentes.load_documents(_pg_engine(db_url), opportunity_id)
 
@@ -8702,14 +8724,22 @@ def _render_otras_fuentes_module() -> None:
         st.rerun()
 
 
-# ---- UI: pestañas de categorías + desplegable de hojas ----
+# ---- UI: navegación selectiva de categorías + desplegable de hojas ----
 pc_state_df = load_pc_state()
 pc_config_df = load_pc_config()
 ordered_categories = [c for c in CATEGORY_ORDER if c in SHEET_GROUPS]
-category_tabs = st.tabs(ordered_categories)
+selected_category = st.radio(
+    "Sección de Panamá Compra",
+    options=ordered_categories,
+    horizontal=True,
+    key="pc_category_selector",
+)
 
-for tab, category_name in zip(category_tabs, ordered_categories):
-    with tab:
+# Streamlit ejecuta el contenido de todas las pestañas creadas con ``st.tabs``
+# en cada rerun, incluso las no visibles. Montar una sola categoria evita leer
+# simultaneamente todas las hojas grandes y conserva todas las funciones.
+for category_name in (selected_category,):
+    with st.container():
         st.subheader(category_name)
         sheets = SHEET_GROUPS.get(category_name, [])
         if not sheets:
@@ -8952,45 +8982,69 @@ with st.expander("Palabras negativas RS/SP", expanded=False):
     _render_negative_keyword_manager(key_prefix="pc_negative_keywords")
 
 with st.expander("Base de datos de actos publicos, fichas y oferentes", expanded=False):
-    render_panamacompra_db_panel(show_header=False)
+    if st.toggle(
+        "Cargar base de datos",
+        value=False,
+        key="pc_load_database_panel",
+        help="Se carga solo al solicitarla para reducir memoria y acelerar la pagina.",
+    ):
+        render_panamacompra_db_panel(show_header=False)
+    else:
+        st.caption("Activa el selector para consultar la base de datos.")
 
 with st.expander("Fichas tecnicas", expanded=False):
-    # Prioriza el documento de fichas con enlace (Drive) por encima de la tabla antigua.
-    if fichas_file_id:
-        render_drive_reference_panel(
-            title="Fichas tecnicas",
-            file_id=str(fichas_file_id or ""),
-            key_prefix="pc_fichas",
-            show_header=False,
-        )
-    elif fichas_table:
-        render_db_reference_panel(
-            title="Fichas tecnicas",
-            key_prefix="pc_fichas",
-            backend=backend_refs,
-            db_url=db_url_refs,
-            db_path_str=db_path_refs,
-            table_name=fichas_table,
-            show_header=False,
-        )
+    if st.toggle(
+        "Cargar fichas tecnicas",
+        value=False,
+        key="pc_load_fichas_panel",
+        help="Evita mantener el catalogo completo en memoria cuando no se utiliza.",
+    ):
+        # Prioriza el documento de fichas con enlace (Drive) por encima de la tabla antigua.
+        if fichas_file_id:
+            render_drive_reference_panel(
+                title="Fichas tecnicas",
+                file_id=str(fichas_file_id or ""),
+                key_prefix="pc_fichas",
+                show_header=False,
+            )
+        elif fichas_table:
+            render_db_reference_panel(
+                title="Fichas tecnicas",
+                key_prefix="pc_fichas",
+                backend=backend_refs,
+                db_url=db_url_refs,
+                db_path_str=db_path_refs,
+                table_name=fichas_table,
+                show_header=False,
+            )
+        else:
+            st.info("No hay fuente configurada para Fichas tecnicas.")
     else:
-        st.info("No hay fuente configurada para Fichas tecnicas.")
+        st.caption("Activa el selector para consultar el catalogo de fichas.")
 
 with st.expander("Oferentes y catalogos", expanded=False):
-    if catalogos_table:
-        render_db_reference_panel(
-            title="Oferentes y catalogos",
-            key_prefix="pc_catalogos",
-            backend=backend_refs,
-            db_url=db_url_refs,
-            db_path_str=db_path_refs,
-            table_name=catalogos_table,
-            show_header=False,
-        )
+    if st.toggle(
+        "Cargar oferentes y catalogos",
+        value=False,
+        key="pc_load_catalogos_panel",
+        help="Se carga solo cuando se necesita para no ocupar memoria permanentemente.",
+    ):
+        if catalogos_table:
+            render_db_reference_panel(
+                title="Oferentes y catalogos",
+                key_prefix="pc_catalogos",
+                backend=backend_refs,
+                db_url=db_url_refs,
+                db_path_str=db_path_refs,
+                table_name=catalogos_table,
+                show_header=False,
+            )
+        else:
+            render_drive_reference_panel(
+                title="Oferentes y catalogos",
+                file_id=str(catalogos_file_id or ""),
+                key_prefix="pc_catalogos",
+                show_header=False,
+            )
     else:
-        render_drive_reference_panel(
-            title="Oferentes y catalogos",
-            file_id=str(catalogos_file_id or ""),
-            key_prefix="pc_catalogos",
-            show_header=False,
-        )
+        st.caption("Activa el selector para consultar oferentes y catalogos.")
