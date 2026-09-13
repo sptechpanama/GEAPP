@@ -110,7 +110,7 @@ from services.panama_compra_no_requirements import (
     find_scope_column,
 )
 
-_KEYWORD_RULES_REQUIRED_VERSION = 4
+_KEYWORD_RULES_REQUIRED_VERSION = 5
 if getattr(_keyword_registry, "KEYWORD_RULES_VERSION", 0) < _KEYWORD_RULES_REQUIRED_VERSION:
     # En un hot-reload Streamlit puede conservar el módulo anterior aunque la
     # página ya sea nueva. Forzamos una recarga antes de habilitar escrituras.
@@ -3410,7 +3410,7 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
             remove_raw = st.text_input(
                 "O escribe reglas para quitar",
                 key=f"{key_prefix}_remove_input",
-                placeholder="Ej: split>15k, vrf>15k",
+                placeholder="Ej: split>8k, vrf>8k",
                 disabled=bool(registry_warning),
             )
             remove_clicked = st.form_submit_button(
@@ -3422,8 +3422,8 @@ def _render_keyword_watch_manager(*, key_prefix: str = "pc_keywords") -> list[st
     st.caption(
         "Coincidencia exacta por defecto. Usa * solo al final para buscar por raíz; "
         "por ejemplo, fotovolta* incluye fotovoltaico, fotovoltaica y sus plurales. "
-        "Agrega >15k para exigir un precio de referencia mayor de $15,000; "
-        "por ejemplo, aire acondicion*>15k."
+        "Agrega >8k para exigir un precio de referencia mayor de $8,000; "
+        "por ejemplo, aire acondicion*>8k."
     )
 
     if add_clicked or remove_clicked:

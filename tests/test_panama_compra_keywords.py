@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+
+def test_8k_threshold_and_new_hvac_families_without_broad_noise():
+    from services.panama_compra_keywords import HVAC_TECHNICAL_KEYWORDS, match_keywords_in_text, DEFAULT_PANAMACOMPRA_KEYWORDS
+    rules = ["aires acondicion*>8k"]
+    assert not match_keywords_in_text("Aires acondicionados", rules, reference_amount=8000)
+    assert match_keywords_in_text("Aires acondicionados", rules, reference_amount=8000.01) == rules
+    assert match_keywords_in_text("Aires acondicionados tipo piso-techo", rules, reference_amount=13755) == rules
+    assert match_keywords_in_text("FILTRO PLISADO MERV.13", HVAC_TECHNICAL_KEYWORDS) == ["filtro plisad*", "merv"]
+    assert match_keywords_in_text("BLOWERS CENTRIFUGOS 18 X 18", HVAC_TECHNICAL_KEYWORDS) == ["blowers centrifug*"]
+    assert match_keywords_in_text("REPUESTOS PARA EL SISTEMA HVAC", HVAC_TECHNICAL_KEYWORDS) == ["hvac"]
+    assert not match_keywords_in_text("BLOWER DE PISO Y DESBROZADORA", HVAC_TECHNICAL_KEYWORDS)
+    assert not match_keywords_in_text("CENTRIFUGA DE LABORATORIO", HVAC_TECHNICAL_KEYWORDS)
+    assert not match_keywords_in_text("FILTRO DE ACEITE PARA VEHICULO", HVAC_TECHNICAL_KEYWORDS)
+    assert not any(term.endswith(">15k") for term in DEFAULT_PANAMACOMPRA_KEYWORDS)
+
 import ast
 import re
 from pathlib import Path
@@ -526,8 +541,8 @@ def test_missing_worksheet_is_created_with_safe_defaults():
     assert snapshot.remote_ok is True
     assert spreadsheet.created is True
     assert list(snapshot.terms[:3]) == ["chiller", "york", "daikin"]
-    assert "aire acondicion*>15k" in snapshot.terms
-    assert "vrf>15k" in snapshot.terms
+    assert "aire acondicion*>8k" in snapshot.terms
+    assert "vrf>8k" in snapshot.terms
 
 
 def test_mutate_adds_root_term_from_latest_remote_state_and_verifies():

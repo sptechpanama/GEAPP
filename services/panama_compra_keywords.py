@@ -49,6 +49,16 @@ HVAC_OVER_15K_KEYWORDS = (
     "bomba de calor>15k",
     "climatizacion*>15k",
 )
+# Keep the old tuple for recovery of legacy rows and imports.
+HVAC_OVER_8K_KEYWORDS = tuple(rule.replace(">15k", ">8k") for rule in HVAC_OVER_15K_KEYWORDS)
+HVAC_TECHNICAL_KEYWORDS = (
+    "hvac",
+    "blower centrifug*",
+    "blowers centrifug*",
+    "filtro plisad*",
+    "filtros plisad*",
+    "merv",
+)
 POWER_GENERATION_KEYWORDS = (
     "planta electric*",
     "plantas electric*",
@@ -85,12 +95,13 @@ RS_SP_CONTEXTUAL_KEYWORDS = (
     *ENGINEERING_PLAN_KEYWORDS,
 )
 RS_SP_CONTEXT_RULES_VERSION = 1
-KEYWORD_RULES_VERSION = 4
+KEYWORD_RULES_VERSION = 5
 DEFAULT_PANAMACOMPRA_KEYWORDS = (
     "chiller",
     "york",
     "daikin",
-    *HVAC_OVER_15K_KEYWORDS,
+    *HVAC_OVER_8K_KEYWORDS,
+    *HVAC_TECHNICAL_KEYWORDS,
     *RS_SP_CONTEXTUAL_KEYWORDS,
 )
 DEFAULT_PANAMACOMPRA_NEGATIVE_KEYWORDS = (
@@ -197,7 +208,7 @@ def _legacy_hvac_rule_aliases() -> dict[str, str]:
 
     return {
         _normalize_search_text(rule.replace("*", "").replace(">", " ")): rule
-        for rule in HVAC_OVER_15K_KEYWORDS
+        for rule in (*HVAC_OVER_15K_KEYWORDS, *HVAC_OVER_8K_KEYWORDS)
     }
 
 
