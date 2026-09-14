@@ -24,11 +24,11 @@ if getattr(service, 'API_VERSION', 0) < 3:
 LOCAL_SOURCES = ('acp_sli', 'acp', 'ensa', 'ena', 'idaan', 'cruz_roja', 'ciudad_saber', 'ungm')
 PORTALS = {
     'acp_sli': ('https://apps.pancanal.com/sli/', 'Licitaciones abiertas y enmendadas; registro SLI para ofertar.'),
-    'acp': ('https://pancanal.com/estudios-de-mercado/', 'Consultas previas a la contratación; no equivalen a una licitación.'),
+    'acp': ('https://pancanal.com/solicitudes-de-informaciones/', 'Consultas previas a la contratación; no equivalen a una licitación.'),
     'ensa': ('https://ensa.com.pa/contratistas-proveedores/', 'Licitaciones, registro de contratistas y documentos de contratación.'),
     'ena': ('https://ena.com.pa/activas/', 'Avisos, solicitudes y anexos de ENA Corredores.'),
     'idaan': ('https://compras.idaan.gob.pa/home', 'Compras publicadas en el portal corporativo de IDAAN.'),
-    'cruz_roja': ('https://cruzroja.org.pa/licitaciones/', 'Compras y contrataciones de Cruz Roja Panameña.'),
+    'cruz_roja': ('https://cruzroja.org.pa/licitaciones-publicas/', 'Compras y contrataciones de Cruz Roja Panameña.'),
     'ciudad_saber': ('https://ciudaddelsaber.org/es/oportunidades/convocatorias/', 'Convocatorias de organizaciones de la comunidad.'),
     'ifrc': ('https://www.ifrc.org/es/nuestra-promesa/servicios-humanitarios-globales/oportunidades-negocio', 'Compras humanitarias; verificar destino y requisitos de proveedor.'),
 }
