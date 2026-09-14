@@ -32,16 +32,6 @@ from core.config import APP_ROOT, DB_PATH
 from sheets import get_client, read_worksheet
 from services.access_control import require_page_access
 from services import auth_drive as _auth_drive
-from services import otras_fuentes as _otras_fuentes
-
-# Streamlit puede conservar la versión anterior del servicio durante un
-# despliegue en caliente. Recargarlo evita combinar una página nueva con una
-# interfaz antigua que todavía no incluía `load_dashboard_snapshot`.
-if getattr(_otras_fuentes, "API_VERSION", 0) < 2:
-    try:
-        _otras_fuentes = importlib.reload(_otras_fuentes)
-    except Exception:
-        pass
 
 get_drive_delegated = _auth_drive.get_drive_delegated
 # Streamlit puede conservar temporalmente el módulo anterior durante un
@@ -6502,9 +6492,6 @@ SHEET_GROUPS = {
         "cl_prog_419_sfd",
         "ap_419_sfd",
     ],
-    "Otras fuentes": [
-        "otras_fuentes",
-    ],
     "CTNI": [
         "ctni_solicitudes",
         "ctni_homologaciones",
@@ -6539,7 +6526,6 @@ CATEGORY_ORDER = [
     "Criterios Tecnicos RIR",
     "Investigación RIR sin requisitos",
     "Actos RS/SP",
-    "Otras fuentes",
     "CTNI",
     "Prioritarias",
 ]
@@ -8452,300 +8438,6 @@ def render_panamacompra_db_panel(*, show_header: bool = True) -> None:
         f"Mostrando hasta {rows_per_page} filas por pagina."
     )
 
-@st.cache_data(ttl=60, show_spinner=False, max_entries=1)
-def _otras_fuentes_bootstrap(db_url: str):
-    engine = _pg_engine(db_url)
-    ready, available = _otras_fuentes.schema_ready(engine)
-    if not ready:
-        return ready, sorted(available), pd.DataFrame(), {}, {}, {}
-    snapshot_loader = getattr(_otras_fuentes, "load_dashboard_snapshot", None)
-    if callable(snapshot_loader):
-        health, last_run, overview, options = snapshot_loader(engine)
-    else:
-        # Compatibilidad defensiva con procesos Streamlit que mantengan el
-        # servicio anterior en memoria. La siguiente recarga usará el camino
-        # optimizado de una sola consulta.
-        health = _otras_fuentes.load_source_health(engine)
-        last_run = _otras_fuentes.load_last_run(engine)
-        overview = _otras_fuentes.load_overview(engine)
-        options = _otras_fuentes.load_filter_options(engine)
-    return (
-        True,
-        sorted(available),
-        health,
-        last_run,
-        overview,
-        options,
-    )
-
-
-@st.cache_data(ttl=60, show_spinner=False, max_entries=2)
-def _otras_fuentes_search(db_url: str, filters: _otras_fuentes.OpportunityFilters) -> pd.DataFrame:
-    return _otras_fuentes.search_opportunities(_pg_engine(db_url), filters)
-
-
-@st.cache_data(ttl=600, show_spinner=False, max_entries=2)
-def _otras_fuentes_documents(db_url: str, opportunity_id: str) -> pd.DataFrame:
-    return _otras_fuentes.load_documents(_pg_engine(db_url), opportunity_id)
-
-
-def _render_otras_fuentes_module() -> None:
-    st.caption(
-        "Oportunidades normalizadas de ACP, ENSA, IDAAN, ENA, UNGM Panamá, UNGM regional/global, "
-        "BID, Banco Mundial, UNICEF, Cruz Roja y Ciudad del Saber. "
-        "La captura se ejecuta en el orquestador; esta vista solo consulta Supabase."
-    )
-    db_url = _supabase_db_url()
-    if not db_url:
-        st.warning("Configura SUPABASE_DB_URL para consultar Otras fuentes desde Streamlit.")
-        return
-    try:
-        ready, available, health, last_run, overview, options = _otras_fuentes_bootstrap(db_url)
-    except Exception as exc:
-        st.error(f"No fue posible consultar Otras fuentes en Supabase: {exc}")
-        return
-    if not ready:
-        st.info(
-            "El módulo está listo, pero aún no se ha ejecutado su primera línea base. "
-            "Ejecuta Otras fuentes desde el orquestador o con el botón inferior."
-        )
-        missing = sorted(_otras_fuentes.REQUIRED_TABLES.difference(set(available)))
-        if missing:
-            st.caption("Tablas pendientes: " + ", ".join(missing))
-        if st.button("▶ Crear primera línea base", key="otras_fuentes_first_run"):
-            if append_manual_request("otras_fuentes", "Otras fuentes", "Primera línea base desde Streamlit"):
-                st.success("Solicitud registrada. El orquestador la ejecutará en su próximo ciclo.")
-        return
-
-    if getattr(_otras_fuentes, "API_VERSION", 0) < 2:
-        st.info("La actualización del módulo está terminando. Recarga la página en unos segundos.")
-        return
-    status = str(last_run.get("status") or "sin corrida").lower()
-    indicator = "🟢" if status == "success" else ("🟡" if status == "partial" else "🔴")
-    finished = str(last_run.get("finished_at") or "")
-    st.caption(f"{indicator} Última corrida: {status} {finished}".strip())
-
-    metric_cols = st.columns(4)
-    metrics = (
-        ("Para evaluar", overview.get("relevant", 0)),
-        ("Por revisar", overview.get("review", 0)),
-        ("Histórico", overview.get("historical", 0)),
-        ("Sin encaje", overview.get("no_match", 0)),
-    )
-    for column, (label, value) in zip(metric_cols, metrics):
-        column.metric(label, f"{int(value or 0):,}")
-    selected_view = st.radio(
-        "Mostrar oportunidades", options=list(_otras_fuentes.VIEW_LABELS),
-        format_func=lambda value: _otras_fuentes.VIEW_LABELS[value], horizontal=True,
-        key="otras_fuentes_review_view",
-    )
-    st.caption(
-        "Para evaluar: coincidencia sectorial y plazo vigente; no implica elegibilidad ni rentabilidad confirmadas. "
-        "Por revisar conserva fechas desconocidas, documentos incompletos y restricciones. "
-        "Histórico y Sin encaje siguen disponibles; no se borran avisos."
-    )
-    if st.session_state.get("otras_fuentes_previous_view") != selected_view:
-        st.session_state["otras_fuentes_page"] = 1
-        st.session_state["otras_fuentes_previous_view"] = selected_view
-
-    if not health.empty:
-        health_view = health.copy()
-        health_view["Fuente"] = health_view["source"].map(_otras_fuentes.SOURCE_LABELS).fillna(health_view["display_name"])
-        health_view["Estado"] = health_view["last_error"].fillna("").map(lambda value: "🔴 Error" if str(value).strip() else "🟢 Correcto")
-        health_view["Último éxito"] = health_view["last_success_at"].fillna("")
-        health_view["Registros"] = pd.to_numeric(health_view["last_count"], errors="coerce").fillna(0).astype(int)
-        with st.expander("Estado de las fuentes", expanded=False):
-            st.dataframe(
-                health_view[["Fuente", "Estado", "Último éxito", "Registros"]],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    sort_options = {
-        "Más recientemente publicadas": "published_desc",
-        "Más recientemente detectadas": "detected_desc",
-        "Fecha límite más próxima": "deadline_asc",
-        "Mayor monto": "amount_desc",
-        "Coincidencia temática": "priority_score",
-    }
-    with st.expander("Filtros y orden", expanded=False):
-        # El formulario evita consultar Supabase en cada clic mientras el
-        # usuario todavía está armando sus filtros.
-        with st.form("otras_fuentes_filter_form", clear_on_submit=False):
-            row1 = st.columns([2.1, 1.4, 1.4, 1.2])
-            search = row1[0].text_input(
-                "Buscar",
-                placeholder="Título, comprador, descripción o código",
-                key="otras_fuentes_search",
-            )
-            sources = row1[1].multiselect(
-                "Fuentes",
-                options=options.get("source", []),
-                format_func=lambda value: _otras_fuentes.SOURCE_LABELS.get(value, value),
-                key="otras_fuentes_sources",
-            )
-            companies = row1[2].multiselect(
-                "Empresa objetivo",
-                options=["RS/SP", "RIR"],
-                key="otras_fuentes_companies_v2",
-            )
-            priorities = row1[3].multiselect(
-                "Coincidencia temática",
-                options=options.get("priority", []),
-                key="otras_fuentes_priorities",
-            )
-            row2 = st.columns([1.5, 1.1, 1.1, 1.1, 1])
-            statuses = row2[0].multiselect(
-                "Estado",
-                options=options.get("status", []),
-                key="otras_fuentes_statuses",
-            )
-            use_dates = row2[1].checkbox(
-                "Filtrar por fecha", value=False, key="otras_fuentes_use_dates"
-            )
-            start_date = row2[2].date_input(
-                "Desde", value=date.today() - timedelta(days=365), key="otras_fuentes_start"
-            )
-            end_date = row2[3].date_input(
-                "Hasta", value=date.today(), key="otras_fuentes_end"
-            )
-            only_active = row2[4].checkbox(
-                "Solo activas", value=False, key="otras_fuentes_only_active"
-            )
-            scope_cols = st.columns(2)
-            scopes = scope_cols[0].multiselect("Destino", ["Panamá", "Región", "Global"], key="otras_fuentes_scopes")
-            deduplicate = scope_cols[1].checkbox("Agrupar anuncios con el mismo código y enlace oficial", value=True, key="otras_fuentes_dedup")
-            row3 = st.columns([2.2, 1, 3])
-            sort_label = row3[0].selectbox(
-                "Ordenar por",
-                options=list(sort_options),
-                index=0,
-                key="otras_fuentes_sort",
-            )
-            page_size = row3[1].selectbox(
-                "Filas por página",
-                options=[50, 100, 200],
-                index=0,
-                key="otras_fuentes_page_size",
-            )
-            submitted = row3[2].form_submit_button(
-                "Aplicar filtros y orden", use_container_width=False
-            )
-
-    if submitted:
-        st.session_state["otras_fuentes_page"] = 1
-    page = max(1, int(st.session_state.get("otras_fuentes_page", 1)))
-
-    filters = _otras_fuentes.OpportunityFilters(
-        search=search,
-        view=selected_view,
-        scopes=tuple(scopes),
-        deduplicate=deduplicate,
-        sources=tuple(sources),
-        companies=tuple(companies),
-        statuses=tuple(statuses),
-        priorities=tuple(priorities),
-        start_date=start_date.isoformat() if use_dates else "",
-        end_date=end_date.isoformat() if use_dates else "",
-        only_active=only_active,
-        sort_by=sort_options[sort_label],
-        limit=int(page_size),
-        offset=(page - 1) * int(page_size),
-    )
-    try:
-        frame = _otras_fuentes_search(db_url, filters)
-    except Exception as exc:
-        st.error(f"No se pudieron aplicar los filtros: {exc}")
-        return
-
-    total_results = 0
-    if not frame.empty and "total_resultados" in frame.columns:
-        total_results = int(pd.to_numeric(frame["total_resultados"], errors="coerce").fillna(0).iloc[0])
-    total_pages = max(1, int(math.ceil(total_results / max(1, int(page_size)))))
-    if page > total_pages:
-        st.session_state["otras_fuentes_page"] = total_pages
-        st.rerun()
-
-    pager = st.columns([1, 2, 1, 5])
-    if pager[0].button(
-        "← Anterior", key="otras_fuentes_previous_page", disabled=page <= 1
-    ):
-        st.session_state["otras_fuentes_page"] = page - 1
-        st.rerun()
-    pager[1].caption(
-        f"Página {page:,} de {total_pages:,} · {total_results:,} oportunidades"
-    )
-    if pager[2].button(
-        "Siguiente →", key="otras_fuentes_next_page", disabled=page >= total_pages
-    ):
-        st.session_state["otras_fuentes_page"] = page + 1
-        st.rerun()
-
-    if frame.empty:
-        st.info("No hay oportunidades para los filtros seleccionados.")
-    else:
-        view = frame.copy()
-        view["Fuente"] = view["source"].map(_otras_fuentes.SOURCE_LABELS).fillna(view["source"])
-        view = view.rename(
-            columns={
-                "title": "Título", "source_type": "Tipo", "buyer": "Comprador",
-                "publication_date": "Publicada", "deadline": "Fecha límite", "status": "Estado",
-                "estimated_value": "Monto", "matched_company": "Empresa objetivo",
-                "priority": "Coincidencia", "fit_score": "Score", "source_url": "Enlace",
-                "country": "País", "review_reason": "Motivo", "review_bucket": "Revisión",
-                "fuentes_coincidentes": "Fuentes coincidentes",
-            }
-        )
-        view["Estado"] = view["Revisión"].map(_otras_fuentes.VIEW_LABELS).fillna(view["Estado"])
-        display_cols = [
-            "Fuente", "Título", "Tipo", "Comprador", "Publicada", "Fecha límite", "Estado",
-            "Monto", "Empresa objetivo", "País", "Motivo", "Fuentes coincidentes", "Enlace",
-        ]
-        st.dataframe(
-            view[[column for column in display_cols if column in view]],
-            use_container_width=True,
-            hide_index=True,
-            height=620,
-            column_config={
-                "Monto": st.column_config.NumberColumn(format="$ %.2f"),
-                "Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-                "Enlace": st.column_config.LinkColumn(display_text="Abrir"),
-            },
-        )
-        labels = {
-            str(row["id"]): f"{_otras_fuentes.SOURCE_LABELS.get(str(row['source']), row['source'])} · {str(row['title'])[:110]}"
-            for _, row in frame.iterrows()
-        }
-        selected_id = st.selectbox(
-            "Documentos de una oportunidad",
-            options=[""] + list(labels),
-            format_func=lambda value: "Seleccione una oportunidad" if not value else labels[value],
-            key="otras_fuentes_detail",
-        )
-        if selected_id:
-            documents = _otras_fuentes_documents(db_url, selected_id)
-            if documents.empty:
-                st.caption("Esta oportunidad no publicó documentos separados del enlace principal.")
-            else:
-                docs = documents.rename(columns={"title": "Documento", "document_type": "Tipo", "url": "Enlace"})
-                st.dataframe(
-                    docs[["Documento", "Tipo", "Enlace"]],
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={"Enlace": st.column_config.LinkColumn(display_text="Abrir")},
-                )
-
-    action_cols = st.columns([1, 1, 4])
-    if action_cols[0].button("▶ Actualizar ahora", key="otras_fuentes_manual"):
-        if append_manual_request("otras_fuentes", "Otras fuentes", "Actualización manual desde Streamlit"):
-            st.success("Solicitud registrada. El orquestador la tomará en su próximo ciclo.")
-    if action_cols[1].button("↻ Refrescar vista", key="otras_fuentes_refresh"):
-        _otras_fuentes_bootstrap.clear()
-        _otras_fuentes_search.clear()
-        _otras_fuentes_documents.clear()
-        st.rerun()
-
-
 # ---- UI: navegación selectiva de categorías + desplegable de hojas ----
 pc_state_df = load_pc_state()
 pc_config_df = load_pc_config()
@@ -8771,10 +8463,6 @@ for category_name in (selected_category,):
         selector_slug = re.sub(r"[^0-9a-z]+", "_", category_name.lower())
         selector_key = f"sheet_selector_{selector_slug.strip('_')}"
         tab_suffix = selector_slug.strip("_") or None
-
-        if category_name == "Otras fuentes":
-            _render_otras_fuentes_module()
-            continue
 
         if category_name == "CTNI":
             _render_ctni_module()

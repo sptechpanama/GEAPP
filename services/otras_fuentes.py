@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
-API_VERSION = 2
+API_VERSION = 3
 
 REQUIRED_TABLES = {
     "external_sources",
@@ -19,7 +19,9 @@ REQUIRED_TABLES = {
 }
 
 SOURCE_LABELS = {
-    "acp": "ACP",
+    "acp": "ACP · Estudios de mercado",
+    "acp_sli": "ACP · Licitaciones SLI",
+    "ifrc": "IFRC · Compras humanitarias",
     "ensa": "ENSA",
     "idaan": "IDAAN",
     "ena": "ENA",
@@ -83,8 +85,13 @@ def _review_cte(dialect: str = "postgresql") -> str:
     display_title = field('display_title')
     detail_text = ("json_extract(COALESCE(NULLIF(o.raw_payload_json,''),'{}'), '$.document_analysis.text')"
                    if dialect == 'sqlite' else "(COALESCE(NULLIF(o.raw_payload_json,''),'{}')::jsonb -> 'document_analysis' ->> 'text')")
+    superseded = ("json_extract(COALESCE(NULLIF(o.raw_payload_json,''),'{}'), '$.superseded_by')"
+                  if dialect == 'sqlite' else "(COALESCE(NULLIF(o.raw_payload_json,''),'{}')::jsonb ->> 'superseded_by')")
+    official_code = ("json_extract(COALESCE(NULLIF(o.raw_payload_json,''),'{}'), '$.official_number')"
+                     if dialect == 'sqlite' else "(COALESCE(NULLIF(o.raw_payload_json,''),'{}')::jsonb ->> 'official_number')")
     return f"""WITH enriched AS (
         SELECT o.*, COALESCE({day}, '') AS deadline_date,
+               COALESCE(NULLIF({official_code},''), o.external_id) AS display_code,
                COALESCE(NULLIF({display_title},''), o.title) AS display_title,
                COALESCE({detail_text}, '') AS document_text,
                COALESCE({at}, '') AS deadline_at,
@@ -92,7 +99,7 @@ def _review_cte(dialect: str = "postgresql") -> str:
                COALESCE({reason}, 'Clasificación pendiente; el anuncio se conserva para revisión') AS stored_reason,
                COALESCE({scope}, 'Global') AS market_scope,
                CASE WHEN CAST({closed} AS TEXT) IN ('true','1') OR o.is_active = 0 THEN 1 ELSE 0 END AS explicitly_closed
-        FROM external_opportunities o
+        FROM external_opportunities o WHERE COALESCE({superseded}, '') = ''
     ), reviewed AS (
         SELECT e.*, CASE
             WHEN explicitly_closed = 1
@@ -220,10 +227,12 @@ def load_dashboard_snapshot(
 def load_source_health(engine: Engine) -> pd.DataFrame:
     query = text(
         """
-        SELECT source, display_name, baseline_completed, last_success_at, last_error_at,
-               last_error, last_count, last_run_id, updated_at
-        FROM external_sources
-        ORDER BY source
+        SELECT s.source, s.display_name, s.baseline_completed, s.last_success_at, s.last_error_at,
+               s.last_error, s.last_count, s.last_run_id, s.updated_at,
+               r.status AS capture_status, r.coverage, r.record_count
+        FROM external_sources s LEFT JOIN external_source_runs r
+          ON r.source=s.source AND r.run_id=s.last_run_id
+        ORDER BY s.source
         """
     )
     return pd.read_sql_query(query, engine)
@@ -317,7 +326,9 @@ def build_search_query(filters: OpportunityFilters, *, dialect: str = "postgresq
         company_clauses.append(f"o.matched_company LIKE :company_{index}")
     if company_clauses: clauses.append('(' + ' OR '.join(company_clauses) + ')')
     _add_in_filter(clauses, params, "o.market_scope", "scope", filters.scopes)
-    if filters.view != "all":
+    if filters.view == 'current':
+        clauses.append("o.review_bucket IN ('relevant','review')")
+    elif filters.view != "all":
         params["view"] = filters.view if filters.view in VIEW_LABELS else "relevant"
         clauses.append("o.review_bucket = :view")
     _add_in_filter(clauses, params, "o.status", "status", filters.statuses)
@@ -344,7 +355,7 @@ def build_search_query(filters: OpportunityFilters, *, dialect: str = "postgresq
             SELECT o.* FROM ranked o WHERE {' AND '.join(clauses)}
               AND {'o.duplicate_position = 1' if filters.deduplicate else '1=1'}
         )
-        SELECT o.id, o.source, o.external_id, o.display_title AS title, o.source_type, o.buyer, o.country,
+        SELECT o.id, o.source, o.display_code AS external_id, o.display_title AS title, o.source_type, o.buyer, o.country,
                o.publication_date, COALESCE(NULLIF(o.deadline_date,''), o.deadline) AS deadline,
                o.status, o.estimated_value, o.currency,
                o.matched_company, o.priority, o.fit_score, o.source_url,
@@ -376,3 +387,12 @@ def load_documents(engine: Engine, opportunity_id: str) -> pd.DataFrame:
         engine,
         params={"opportunity_id": opportunity_id},
     )
+
+
+def load_opportunity_detail(engine: Engine, opportunity_id: str) -> dict:
+    frame = pd.read_sql_query(text('''SELECT id, title, description, source_url, external_id,
+        registration_required, submission_channel, eligibility, procurement_method,
+        raw_payload_json, matched_keywords_json, matched_fields_json, sector,
+        publication_date, deadline, first_seen_at, last_seen_at, last_changed_at
+        FROM external_opportunities WHERE id=:id'''), engine, params={'id': opportunity_id})
+    return frame.iloc[0].to_dict() if not frame.empty else {}
