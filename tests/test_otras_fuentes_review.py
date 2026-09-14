@@ -28,7 +28,7 @@ def db():
         for id,bucket,deadline,company,url,scope,seen,at in records:
             q = {'bucket':bucket,'reason':'evidencia','deadline_date':deadline,'deadline_at':at,'scope':scope,'closed':False}
             data = {k:'' for k in columns}
-            data.update(id=id,title=id,external_id=id,source='ungm',source_url=url,canonical_url=url,
+            data.update(id=id,title=id,external_id='open' if id=='dup' else id,source='ungm',source_url=url,canonical_url=url,
                         matched_company=company,raw_payload_json=json.dumps({'qualification':q}),
                         last_seen_at=seen,publication_date='2026-09-12',deadline=deadline,status='Activa',
                         is_active=1,fit_score=42,estimated_value=20000)
@@ -73,6 +73,21 @@ def test_legacy_without_metadata_is_reviewed_instead_of_crashing(db):
         c.execute(text("UPDATE external_opportunities SET raw_payload_json='{}' WHERE id='open'"))
     assert 'open' in set(search(db,view='review').id)
     assert 'Clasificación pendiente' in search(db,view='review').set_index('id').loc['open','review_reason']
+
+
+def test_different_official_codes_sharing_a_listing_url_are_preserved(db):
+    with db.begin() as c:
+        c.execute(text("UPDATE external_opportunities SET external_id='another-act' WHERE id='dup'"))
+    assert {'open','dup'}.issubset(set(search(db).id))
+
+
+def test_older_expired_copy_does_not_reappear_after_a_deadline_extension(db):
+    with db.begin() as c:
+        q={'bucket':'relevant','deadline_date':'2026-01-01','deadline_at':'','scope':'Panamá','closed':False}
+        c.execute(text("UPDATE external_opportunities SET raw_payload_json=:q,source='ungm_international' WHERE id='dup'"),{'q':json.dumps({'qualification':q})})
+    assert 'dup' not in set(search(db,view='historical').id)
+    assert 'dup' in set(search(db,view='historical',sources=('ungm_international',)).id)
+    assert sum(len(search(db,view=v)) for v in ('relevant','review','historical','no_match')) == len(search(db,view='all'))
 
 
 def test_review_counts_are_deduplicated(db):

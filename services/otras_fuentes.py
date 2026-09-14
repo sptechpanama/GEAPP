@@ -122,7 +122,7 @@ def load_review_counts(engine: Engine) -> dict[str, int]:
     query = _review_cte(engine.dialect.name) + """,
         distinct_notices AS (
             SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY COALESCE(NULLIF(canonical_url,''), id)
+                PARTITION BY COALESCE(NULLIF(canonical_url,''), id), external_id
                 ORDER BY last_seen_at DESC, id) AS position
             FROM reviewed
         ) SELECT review_bucket, COUNT(*) AS count FROM distinct_notices
@@ -309,6 +309,8 @@ def build_search_query(filters: OpportunityFilters, *, dialect: str = "postgresq
             "OR LOWER(COALESCE(o.buyer,'')) LIKE :search OR LOWER(COALESCE(o.external_id,'')) LIKE :search)"
         )
     _add_in_filter(clauses, params, "o.source", "source", filters.sources)
+    source_clauses: list[str] = []
+    _add_in_filter(source_clauses, params, "o.source", "source", filters.sources)
     company_clauses = []
     for index, company in enumerate(filters.companies):
         params[f"company_{index}"] = f"%{company}%"
@@ -332,12 +334,15 @@ def build_search_query(filters: OpportunityFilters, *, dialect: str = "postgresq
     order_by = SORT_ORDERS.get(filters.sort_by, SORT_ORDERS["published_desc"])
     order_by = f"{order_by}, o.id ASC"
     query = _review_cte(dialect) + f""",
-        filtered AS (
+        ranked AS (
             SELECT o.*, ROW_NUMBER() OVER (
-                PARTITION BY COALESCE(NULLIF(o.canonical_url,''), o.id)
+                PARTITION BY COALESCE(NULLIF(o.canonical_url,''), o.id), o.external_id
                 ORDER BY o.last_seen_at DESC, o.id) AS duplicate_position,
-                COUNT(*) OVER (PARTITION BY COALESCE(NULLIF(o.canonical_url,''), o.id)) AS fuentes_coincidentes
-            FROM reviewed o WHERE {' AND '.join(clauses)}
+                COUNT(*) OVER (PARTITION BY COALESCE(NULLIF(o.canonical_url,''), o.id), o.external_id) AS fuentes_coincidentes
+            FROM reviewed o WHERE {' AND '.join(source_clauses) if source_clauses else '1=1'}
+        ), filtered AS (
+            SELECT o.* FROM ranked o WHERE {' AND '.join(clauses)}
+              AND {'o.duplicate_position = 1' if filters.deduplicate else '1=1'}
         )
         SELECT o.id, o.source, o.external_id, o.display_title AS title, o.source_type, o.buyer, o.country,
                o.publication_date, COALESCE(NULLIF(o.deadline_date,''), o.deadline) AS deadline,
@@ -347,7 +352,6 @@ def build_search_query(filters: OpportunityFilters, *, dialect: str = "postgresq
                o.review_bucket, o.review_reason, o.market_scope, o.fuentes_coincidentes,
                COUNT(*) OVER() AS total_resultados
         FROM filtered o
-        WHERE {'o.duplicate_position = 1' if filters.deduplicate else '1=1'}
         ORDER BY {order_by}
         LIMIT :limit OFFSET :offset
     """

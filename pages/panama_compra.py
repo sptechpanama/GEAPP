@@ -8614,7 +8614,7 @@ def _render_otras_fuentes_module() -> None:
             )
             scope_cols = st.columns(2)
             scopes = scope_cols[0].multiselect("Destino", ["Panamá", "Región", "Global"], key="otras_fuentes_scopes")
-            deduplicate = scope_cols[1].checkbox("Agrupar anuncios con el mismo enlace oficial", value=True, key="otras_fuentes_dedup")
+            deduplicate = scope_cols[1].checkbox("Agrupar anuncios con el mismo código y enlace oficial", value=True, key="otras_fuentes_dedup")
             row3 = st.columns([2.2, 1, 3])
             sort_label = row3[0].selectbox(
                 "Ordenar por",
