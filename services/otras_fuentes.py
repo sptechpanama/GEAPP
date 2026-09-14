@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import Any, Iterable
 
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+
+API_VERSION = 2
 
 REQUIRED_TABLES = {
     "external_sources",
@@ -43,6 +46,9 @@ class OpportunityFilters:
     sort_by: str = "published_desc"
     limit: int = 100
     offset: int = 0
+    view: str = "relevant"
+    scopes: tuple[str, ...] = ()
+    deduplicate: bool = True
 
 
 SORT_ORDERS = {
@@ -63,6 +69,68 @@ SORT_ORDERS = {
         "o.last_seen_at DESC"
     ),
 }
+
+
+VIEW_LABELS = {"relevant": "Para evaluar", "review": "Por revisar", "historical": "Histórico", "no_match": "Sin encaje", "all": "Todos"}
+
+
+def _review_cte(dialect: str = "postgresql") -> str:
+    def field(name):
+        if dialect == "sqlite":
+            return f"json_extract(COALESCE(NULLIF(o.raw_payload_json,''),'{{}}'), '$.qualification.{name}')"
+        return f"(COALESCE(NULLIF(o.raw_payload_json,''),'{{}}')::jsonb -> 'qualification' ->> '{name}')"
+    day, at, bucket, reason, scope, closed = [field(k) for k in ('deadline_date','deadline_at','bucket','reason','scope','closed')]
+    display_title = field('display_title')
+    detail_text = ("json_extract(COALESCE(NULLIF(o.raw_payload_json,''),'{}'), '$.document_analysis.text')"
+                   if dialect == 'sqlite' else "(COALESCE(NULLIF(o.raw_payload_json,''),'{}')::jsonb -> 'document_analysis' ->> 'text')")
+    return f"""WITH enriched AS (
+        SELECT o.*, COALESCE({day}, '') AS deadline_date,
+               COALESCE(NULLIF({display_title},''), o.title) AS display_title,
+               COALESCE({detail_text}, '') AS document_text,
+               COALESCE({at}, '') AS deadline_at,
+               COALESCE({bucket}, 'review') AS stored_bucket,
+               COALESCE({reason}, 'Clasificación pendiente; el anuncio se conserva para revisión') AS stored_reason,
+               COALESCE({scope}, 'Global') AS market_scope,
+               CASE WHEN CAST({closed} AS TEXT) IN ('true','1') OR o.is_active = 0 THEN 1 ELSE 0 END AS explicitly_closed
+        FROM external_opportunities o
+    ), reviewed AS (
+        SELECT e.*, CASE
+            WHEN explicitly_closed = 1
+              OR (deadline_at <> '' AND deadline_at < :now)
+              OR (deadline_at = '' AND deadline_date <> '' AND deadline_date < :today) THEN 'historical'
+            WHEN stored_bucket = 'relevant' AND COALESCE(last_seen_at,'') < :stale_before THEN 'review'
+            ELSE stored_bucket END AS review_bucket,
+            CASE WHEN explicitly_closed = 1 THEN 'Cerrada o adjudicada; conservada en el histórico'
+              WHEN (deadline_at <> '' AND deadline_at < :now)
+                OR (deadline_at = '' AND deadline_date <> '' AND deadline_date < :today) THEN 'Fecha límite vencida; conservada en el histórico'
+              WHEN stored_bucket = 'relevant' AND COALESCE(last_seen_at,'') < :stale_before THEN 'Sin reconfirmar durante más de 7 días; revisar vigencia oficial'
+              ELSE stored_reason END AS review_reason
+        FROM enriched e
+    )"""
+
+
+def _time_params(now: datetime | None = None) -> dict[str, str]:
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None: now = now.replace(tzinfo=timezone.utc)
+    local = now.astimezone(timezone(timedelta(hours=-5)))
+    return {"now": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            "today": local.date().isoformat(),
+            "stale_before": (local - timedelta(days=7)).date().isoformat()}
+
+
+def load_review_counts(engine: Engine) -> dict[str, int]:
+    query = _review_cte(engine.dialect.name) + """,
+        distinct_notices AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY COALESCE(NULLIF(canonical_url,''), id)
+                ORDER BY last_seen_at DESC, id) AS position
+            FROM reviewed
+        ) SELECT review_bucket, COUNT(*) AS count FROM distinct_notices
+          WHERE position=1 GROUP BY review_bucket"""
+    frame = pd.read_sql_query(text(query), engine, params=_time_params())
+    counts = {key: 0 for key in VIEW_LABELS if key != 'all'}
+    counts.update({str(row.review_bucket): int(row.count) for row in frame.itertuples()})
+    return counts
 
 
 def schema_ready(engine: Engine) -> tuple[bool, set[str]]:
@@ -145,6 +213,7 @@ def load_dashboard_snapshot(
         key: sorted(str(value).strip() for value in (options_payload.get(key) or []) if str(value).strip())
         for key in ("source", "matched_company", "status", "priority")
     }
+    overview.update(load_review_counts(engine))
     return pd.DataFrame(health_payload), last_run, overview, options
 
 
@@ -225,21 +294,30 @@ def _add_in_filter(
     clauses.append(f"{column} IN ({','.join(names)})")
 
 
-def build_search_query(filters: OpportunityFilters) -> tuple[str, dict[str, Any]]:
+def build_search_query(filters: OpportunityFilters, *, dialect: str = "postgresql", now: datetime | None = None) -> tuple[str, dict[str, Any]]:
     clauses = ["1=1"]
     params: dict[str, Any] = {
         "limit": max(1, min(int(filters.limit), 500)),
         "offset": max(0, int(filters.offset)),
+        **_time_params(now),
     }
     search = str(filters.search or "").strip()
     if search:
         params["search"] = f"%{search.lower()}%"
         clauses.append(
-            "(LOWER(o.title) LIKE :search OR LOWER(COALESCE(o.description,'')) LIKE :search "
+            "(LOWER(o.title) LIKE :search OR LOWER(o.display_title) LIKE :search OR LOWER(o.document_text) LIKE :search OR LOWER(COALESCE(o.description,'')) LIKE :search "
             "OR LOWER(COALESCE(o.buyer,'')) LIKE :search OR LOWER(COALESCE(o.external_id,'')) LIKE :search)"
         )
     _add_in_filter(clauses, params, "o.source", "source", filters.sources)
-    _add_in_filter(clauses, params, "o.matched_company", "company", filters.companies)
+    company_clauses = []
+    for index, company in enumerate(filters.companies):
+        params[f"company_{index}"] = f"%{company}%"
+        company_clauses.append(f"o.matched_company LIKE :company_{index}")
+    if company_clauses: clauses.append('(' + ' OR '.join(company_clauses) + ')')
+    _add_in_filter(clauses, params, "o.market_scope", "scope", filters.scopes)
+    if filters.view != "all":
+        params["view"] = filters.view if filters.view in VIEW_LABELS else "relevant"
+        clauses.append("o.review_bucket = :view")
     _add_in_filter(clauses, params, "o.status", "status", filters.statuses)
     _add_in_filter(clauses, params, "o.priority", "priority", filters.priorities)
     if filters.start_date:
@@ -249,25 +327,27 @@ def build_search_query(filters: OpportunityFilters) -> tuple[str, dict[str, Any]
         clauses.append("COALESCE(NULLIF(o.publication_date,''), o.first_seen_at) <= :end_date")
         params["end_date"] = filters.end_date + "T23:59:59"
     if filters.only_active:
-        clauses.append("o.is_active = 1")
+        clauses.append("o.is_active = 1 AND o.review_bucket <> 'historical'")
 
     order_by = SORT_ORDERS.get(filters.sort_by, SORT_ORDERS["published_desc"])
     order_by = f"{order_by}, o.id ASC"
-    query = f"""
-        SELECT o.id, o.source, o.external_id, o.title, o.source_type, o.buyer,
-               o.publication_date, o.deadline, o.status, o.estimated_value, o.currency,
+    query = _review_cte(dialect) + f""",
+        filtered AS (
+            SELECT o.*, ROW_NUMBER() OVER (
+                PARTITION BY COALESCE(NULLIF(o.canonical_url,''), o.id)
+                ORDER BY o.last_seen_at DESC, o.id) AS duplicate_position,
+                COUNT(*) OVER (PARTITION BY COALESCE(NULLIF(o.canonical_url,''), o.id)) AS fuentes_coincidentes
+            FROM reviewed o WHERE {' AND '.join(clauses)}
+        )
+        SELECT o.id, o.source, o.external_id, o.display_title AS title, o.source_type, o.buyer, o.country,
+               o.publication_date, COALESCE(NULLIF(o.deadline_date,''), o.deadline) AS deadline,
+               o.status, o.estimated_value, o.currency,
                o.matched_company, o.priority, o.fit_score, o.source_url,
                o.first_seen_at, o.last_seen_at, o.cross_source_key,
-               COALESCE(d.duplicate_count, 1) AS fuentes_coincidentes,
+               o.review_bucket, o.review_reason, o.market_scope, o.fuentes_coincidentes,
                COUNT(*) OVER() AS total_resultados
-        FROM external_opportunities o
-        LEFT JOIN (
-            SELECT cross_source_key, COUNT(*) AS duplicate_count
-            FROM external_opportunities
-            WHERE cross_source_key <> ''
-            GROUP BY cross_source_key
-        ) d ON d.cross_source_key = o.cross_source_key
-        WHERE {' AND '.join(clauses)}
+        FROM filtered o
+        WHERE {'o.duplicate_position = 1' if filters.deduplicate else '1=1'}
         ORDER BY {order_by}
         LIMIT :limit OFFSET :offset
     """
@@ -275,7 +355,7 @@ def build_search_query(filters: OpportunityFilters) -> tuple[str, dict[str, Any]
 
 
 def search_opportunities(engine: Engine, filters: OpportunityFilters) -> pd.DataFrame:
-    query, params = build_search_query(filters)
+    query, params = build_search_query(filters, dialect=engine.dialect.name)
     return pd.read_sql_query(text(query), engine, params=params)
 
 

@@ -32,7 +32,9 @@ def test_search_query_applies_every_filter_without_interpolating_values():
 def test_empty_filters_keep_query_valid():
     query, params = build_search_query(OpportunityFilters())
     assert "WHERE 1=1" in query
-    assert params == {"limit": 100, "offset": 0}
+    assert params['limit'] == 100 and params['offset'] == 0
+    assert params['view'] == 'relevant'
+    assert {'today', 'now', 'stale_before'}.issubset(params)
 
 
 def test_sort_order_is_selected_from_safe_allowlist():
