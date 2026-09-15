@@ -255,9 +255,12 @@ def main():
     metrics[2].metric('Histórico', f"{overview.get('historical', 0):,}")
     metrics[3].metric('Total sin duplicados', f"{sum(overview.get(k, 0) for k in ('relevant', 'review', 'historical', 'no_match')):,}")
     state = last_run.get('status')
-    indicator = '🟢' if state == 'success' else ('🟠' if state == 'partial' else '🔴')
-    st.caption(f"{indicator} Última corrida: {human_date(last_run.get('finished_at'))} · " +
-               {'success': 'Completada', 'partial': 'Completada con fuentes pendientes', 'error': 'Fallida'}.get(state, 'Pendiente'))
+    indicator = {'success': '🟢', 'partial': '🟠', 'error': '🔴', 'running': '🔵'}.get(state, '⚪')
+    if state == 'running':
+        st.caption(f"{indicator} Captura en curso desde {human_date(last_run.get('started_at'))}. Se mantienen disponibles los datos publicados.")
+    else:
+        st.caption(f"{indicator} Última corrida: {human_date(last_run.get('finished_at'))} · " +
+                   {'success': 'Completada', 'partial': 'Completada con fuentes pendientes', 'error': 'Fallida'}.get(state, 'Pendiente'))
     if last_run.get('source_count'):
         st.caption(f"Fuentes consultadas en esa corrida: {last_run['source_count']}. Horario: todos los días a las 06:20, 12:20 y 18:20 (Panamá), con el servidor encendido.")
     actions = st.columns([1, 1, 3])
