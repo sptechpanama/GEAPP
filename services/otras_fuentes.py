@@ -1,15 +1,35 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Iterable
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 from sqlalchemy.engine import Engine
 
 
-API_VERSION = 4
+API_VERSION = 5
+
+
+def load_email_health(engine: Engine) -> dict:
+    """Optional during rolling deployment; absence is never reported as success."""
+    if not inspect(engine).has_table('external_email_deliveries'):
+        return {'available': False}
+    has_state = inspect(engine).has_table('external_email_state')
+    check = {}
+    with engine.connect() as connection:
+        rows = connection.execute(text("""SELECT status, COUNT(DISTINCT event_id) AS events,
+            COUNT(*) AS deliveries, MAX(updated_at) AS updated_at
+            FROM external_email_deliveries WHERE event_id NOT LIKE 'verification:%'
+            GROUP BY status""")).mappings().all()
+        probe = connection.execute(text("""SELECT MAX(updated_at) FROM external_email_deliveries
+            WHERE event_id LIKE 'verification:%' AND status='sent'""")).scalar()
+        if has_state:
+            value = connection.execute(text("SELECT value FROM external_email_state WHERE key='smtp_health'")).scalar()
+            check = json.loads(value or '{}')
+    return {'available': True, 'statuses': [dict(row) for row in rows], 'last_probe_accepted': probe, 'check': check}
 
 REQUIRED_TABLES = {
     "external_sources",

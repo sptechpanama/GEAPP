@@ -19,7 +19,7 @@ from services.external_requests import queue_external_refresh
 from services import external_access
 from ui.theme import apply_global_theme
 
-if getattr(service, 'API_VERSION', 0) < 4:
+if getattr(service, 'API_VERSION', 0) < 5:
     service = importlib.reload(service)
 
 LOCAL_SOURCES = ('acp_sli', 'acp', 'ensa', 'ena', 'idaan', 'cruz_roja', 'ciudad_saber', 'ungm')
@@ -32,6 +32,7 @@ PORTALS = {
     'cruz_roja': ('https://cruzroja.org.pa/licitaciones-publicas/', 'Compras y contrataciones de Cruz Roja Panameña.'),
     'ciudad_saber': ('https://ciudaddelsaber.org/es/oportunidades/convocatorias/', 'Convocatorias de organizaciones de la comunidad.'),
     'ifrc': ('https://www.ifrc.org/our-work/supply-chain-management/business-opportunities', 'Compras humanitarias; verificar destino y requisitos de proveedor.'),
+    'idb': ('https://bidfortheamericas.connectamericas.com/es', 'Avisos públicos aprobados de BID for the Americas. La fecha de publicación corresponde al alta en ese catálogo. El documento oficial confirma requisitos, moneda y plazo.'),
     'naturgy': (external_access.GUIDES['naturgy']['url'], external_access.GUIDES['naturgy']['access']),
     'aes': (external_access.GUIDES['aes']['url'], external_access.GUIDES['aes']['access']),
 }
@@ -74,6 +75,11 @@ def search(filters):
 @st.cache_data(ttl=90, max_entries=1, show_spinner=False)
 def health_data():
     return service.load_source_health(database())
+
+
+@st.cache_data(ttl=90, max_entries=1, show_spinner=False)
+def email_health_data():
+    return service.load_email_health(database())
 
 
 @st.cache_data(ttl=60, max_entries=1, show_spinner=False)
@@ -214,6 +220,33 @@ def detail_dialog(row):
 def render_sources(health):
     st.subheader('Fuentes y cobertura')
     st.caption('El monitor usa el orquestador existente. La caída de una fuente conserva su histórico y no detiene las demás.')
+    with st.expander('Correo de alertas · Estado de envíos', expanded=False):
+        try:
+            mail = email_health_data()
+            if not mail['available']:
+                st.info('Comprobantes de correo pendientes de publicar por el orquestador.')
+            else:
+                check = mail.get('check') or {}
+                if check.get('status') == 'configuration_missing':
+                    st.warning('La configuración de correo del servidor está incompleta; los avisos se conservan.')
+                if check.get('checked_at'):
+                    st.caption('Cola de envíos comprobada: ' + human_date(check['checked_at']))
+                labels = {'sent': 'Aceptado por el servidor de correo', 'pending': 'Pendiente de reintento',
+                          'sending': 'Enviando', 'uncertain': 'Confirmación pendiente de revisar',
+                          'legacy_unverified': 'Historial anterior sin comprobante',
+                          'skipped': 'Ya no vigente o relevante'}
+                for row in mail['statuses']:
+                    st.write(f"{labels.get(row['status'], row['status'])}: {row['events']:,} aviso(s)")
+                if not mail['statuses']:
+                    st.caption('Aún no hay avisos registrados para envío.')
+                if mail.get('last_probe_accepted'):
+                    st.caption('Última prueba aceptada por el servidor: ' + human_date(mail['last_probe_accepted']))
+                st.caption('La aceptación por el servidor no confirma llegada a la bandeja de entrada. '
+                           'Los fallos se conservan para reintento; los envíos de resultado incierto y el historial '
+                           'sin comprobante requieren revisión para evitar duplicados. Un aviso puede tener varios destinatarios.')
+        except Exception:
+            logging.getLogger(__name__).exception('Consulta del estado de correo externo fallida')
+            st.warning('No se pudo comprobar el correo. La consulta de oportunidades sigue disponible.')
     for source in dict.fromkeys([*PORTALS, *health.get('source', pd.Series(dtype=str)).tolist()]):
         matches = health[health['source'].eq(source)] if not health.empty else pd.DataFrame()
         row = matches.iloc[0].to_dict() if not matches.empty else {}
@@ -265,7 +298,7 @@ def main():
         st.caption(f"Fuentes consultadas en esa corrida: {last_run['source_count']}. Horario: todos los días a las 06:20, 12:20 y 18:20 (Panamá), con el servidor encendido.")
     actions = st.columns([1, 1, 3])
     if actions[0].button('Actualizar vista', use_container_width=True):
-        snapshot.clear(); search.clear(); detail_data.clear(); health_data.clear(); access_data.clear()
+        snapshot.clear(); search.clear(); detail_data.clear(); health_data.clear(); access_data.clear(); email_health_data.clear()
         st.rerun()
     if actions[1].button('Solicitar captura', use_container_width=True):
         try:
