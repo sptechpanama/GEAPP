@@ -16,9 +16,10 @@ from sqlalchemy import create_engine
 from services.access_control import require_page_access
 from services import otras_fuentes as service
 from services.external_requests import queue_external_refresh
+from services import external_access
 from ui.theme import apply_global_theme
 
-if getattr(service, 'API_VERSION', 0) < 3:
+if getattr(service, 'API_VERSION', 0) < 4:
     service = importlib.reload(service)
 
 LOCAL_SOURCES = ('acp_sli', 'acp', 'ensa', 'ena', 'idaan', 'cruz_roja', 'ciudad_saber', 'ungm')
@@ -30,7 +31,9 @@ PORTALS = {
     'idaan': ('https://compras.idaan.gob.pa/home', 'Compras publicadas en el portal corporativo de IDAAN.'),
     'cruz_roja': ('https://cruzroja.org.pa/licitaciones-publicas/', 'Compras y contrataciones de Cruz Roja Panameña.'),
     'ciudad_saber': ('https://ciudaddelsaber.org/es/oportunidades/convocatorias/', 'Convocatorias de organizaciones de la comunidad.'),
-    'ifrc': ('https://www.ifrc.org/es/nuestra-promesa/servicios-humanitarios-globales/oportunidades-negocio', 'Compras humanitarias; verificar destino y requisitos de proveedor.'),
+    'ifrc': ('https://www.ifrc.org/our-work/supply-chain-management/business-opportunities', 'Compras humanitarias; verificar destino y requisitos de proveedor.'),
+    'naturgy': (external_access.GUIDES['naturgy']['url'], external_access.GUIDES['naturgy']['access']),
+    'aes': (external_access.GUIDES['aes']['url'], external_access.GUIDES['aes']['access']),
 }
 SORTS = {'Más recientemente publicadas': 'published_desc', 'Cierre más próximo': 'deadline_asc',
          'Detectadas recientemente': 'detected_desc', 'Mayor monto publicado': 'amount_desc'}
@@ -71,6 +74,62 @@ def search(filters):
 @st.cache_data(ttl=90, max_entries=1, show_spinner=False)
 def health_data():
     return service.load_source_health(database())
+
+
+@st.cache_data(ttl=60, max_entries=1, show_spinner=False)
+def access_data():
+    return external_access.load_access(database())
+
+
+def render_access():
+    st.subheader('Naturgy y AES · Registro de RS/SP')
+    st.caption('Se verifica el portal público. Las compras privadas requieren evaluación e invitación; aún no están siendo extraídas.')
+    company = st.selectbox('Empresa que se registrará', external_access.COMPANIES, key='external_access_company')
+    try:
+        saved = access_data()
+        can_save = True
+    except Exception:
+        logging.getLogger(__name__).exception('Consulta de registros de proveedor fallida')
+        st.warning('No se pudo consultar el seguimiento guardado. Los pasos oficiales siguen disponibles; intenta Actualizar vista.')
+        saved, can_save = [], False
+    view = pd.DataFrame(external_access.access_rows(saved, company))
+    if not can_save:
+        view['Estado'] = 'Sin consultar'
+    st.dataframe(view, hide_index=True, use_container_width=True,
+                 column_config={'Registro / pasos oficiales': st.column_config.LinkColumn(display_text='Abrir registro ↗'),
+                                'Pendiente para acceder': st.column_config.TextColumn(width='large')})
+    for source, guide in external_access.GUIDES.items():
+        with st.expander(guide['name'] + ' · Pasos y seguimiento', expanded=False):
+            st.write(guide['access'])
+            for number, step in enumerate(guide['steps'], 1):
+                st.write(f'{number}. {step}')
+            st.link_button('Registro y pasos oficiales ↗', guide['registration_url'])
+            st.link_button('Proceso oficial de proveedores ↗', guide['url'])
+            row = next((r for r in saved if r['source'] == source and r['company'] == company), {})
+            revision = row.get('updated_at') or 'new'
+            with st.form(f'access_{source}_{company}_{revision}'):
+                current = row.get('status', 'Pendiente')
+                status = st.selectbox('Estado del trámite', external_access.STATUSES,
+                                     index=external_access.STATUSES.index(current) if current in external_access.STATUSES else 0)
+                notes = st.text_area('Notas de seguimiento', value=row.get('notes') or '', max_chars=1500)
+                submitted = st.form_submit_button('Guardar seguimiento', disabled=not can_save)
+            if submitted:
+                try:
+                    external_access.save_access(database(), source=source, company=company, status=status, notes=notes,
+                        actor=st.session_state.get('username', 'usuario'), expected_updated_at=row.get('updated_at'))
+                    access_data.clear()
+                    st.session_state.external_access_saved = True
+                    st.rerun()
+                except ValueError as exc:
+                    st.warning(str(exc)); access_data.clear()
+                except Exception:
+                    logging.getLogger(__name__).exception('Guardar seguimiento de proveedor falló')
+                    st.error('No se pudo guardar. El seguimiento anterior se conserva; vuelve a intentarlo.')
+            if row.get('updated_at'):
+                st.caption('Guardado: ' + human_date(row['updated_at']) + ' · ' + row.get('updated_by', ''))
+    if st.session_state.pop('external_access_saved', False):
+        st.success('Seguimiento guardado en Supabase.')
+    st.caption('Cambiar el estado registra tu avance; no crea cuentas, envía solicitudes ni conecta automáticamente portales privados.')
 
 
 @st.cache_data(ttl=300, max_entries=4, show_spinner=False)
@@ -159,9 +218,11 @@ def render_sources(health):
         matches = health[health['source'].eq(source)] if not health.empty else pd.DataFrame()
         row = matches.iloc[0].to_dict() if not matches.empty else {}
         state = row.get('capture_status') or ('error' if row.get('last_error') else 'pending')
-        marker = {'success': '🟢', 'partial': '🟠', 'error': '🔴'}.get(state, '⚪')
-        with st.expander(f"{marker} {service.SOURCE_LABELS.get(source, source)} · {int(row.get('last_count') or 0):,} registros", expanded=False):
-            st.write({'success': 'Última captura completada', 'partial': 'Última captura parcial', 'error': 'Última captura fallida'}.get(state, 'Sin captura confirmada'))
+        marker = {'success': '🟢', 'partial': '🟠', 'error': '🔴', 'access_required': '🟠'}.get(state, '⚪')
+        quantity = 'Requiere acceso' if source in external_access.GUIDES else f"{int(row.get('last_count') or 0):,} registros en última captura con datos"
+        with st.expander(f"{marker} {service.SOURCE_LABELS.get(source, source)} · {quantity}", expanded=False):
+            st.write({'success': 'Última captura completada', 'partial': 'Última captura parcial', 'error': 'Última captura fallida', 'access_required': 'Portal verificado · Acceso a licitaciones pendiente'}.get(state, 'Sin captura confirmada'))
+            st.caption('Última comprobación: ' + human_date(row.get('updated_at')))
             st.caption('Último éxito: ' + human_date(row.get('last_success_at')))
             if row.get('coverage'):
                 st.write(row['coverage'])
@@ -197,9 +258,11 @@ def main():
     indicator = '🟢' if state == 'success' else ('🟠' if state == 'partial' else '🔴')
     st.caption(f"{indicator} Última corrida: {human_date(last_run.get('finished_at'))} · " +
                {'success': 'Completada', 'partial': 'Completada con fuentes pendientes', 'error': 'Fallida'}.get(state, 'Pendiente'))
+    if last_run.get('source_count'):
+        st.caption(f"Fuentes consultadas en esa corrida: {last_run['source_count']}. Horario: todos los días a las 06:20, 12:20 y 18:20 (Panamá), con el servidor encendido.")
     actions = st.columns([1, 1, 3])
     if actions[0].button('Actualizar vista', use_container_width=True):
-        snapshot.clear(); search.clear(); detail_data.clear(); health_data.clear()
+        snapshot.clear(); search.clear(); detail_data.clear(); health_data.clear(); access_data.clear()
         st.rerun()
     if actions[1].button('Solicitar captura', use_container_width=True):
         try:
@@ -211,12 +274,18 @@ def main():
         except Exception:
             logging.getLogger(__name__).exception('Solicitud manual de captura externa fallida')
             st.error('No se pudo registrar la solicitud en pc_manual. Las corridas programadas se mantienen.')
-    area = st.radio('Explorar', ['Todas las oportunidades', 'RS/SP', 'RIR', 'Fuentes y cobertura'], horizontal=True)
+    area = st.radio('Explorar', ['Todas las oportunidades', 'RS/SP', 'RIR', 'Fuentes y cobertura', 'Registros y accesos'], horizontal=True)
+    if area == 'Registros y accesos':
+        render_access()
+        return
     if area == 'Fuentes y cobertura':
         render_sources(health_data())
         return
     if area == 'RIR':
         st.caption('Busca por palabras y variantes de los productos de tus fichas en seguimiento, además de términos médicos generales. No exige el número de ficha en el anuncio. La ficha relacionada es una referencia para revisar el producto.')
+    if area == 'RS/SP':
+        with st.expander('Naturgy y AES · Acceso a licitaciones y pasos de registro', expanded=False):
+            render_access()
     with st.expander('Filtros', expanded=False):
         with st.form('external_filters'):
             cols = st.columns(3)

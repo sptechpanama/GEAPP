@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
-API_VERSION = 3
+API_VERSION = 4
 
 REQUIRED_TABLES = {
     "external_sources",
@@ -19,6 +19,8 @@ REQUIRED_TABLES = {
 }
 
 SOURCE_LABELS = {
+    'naturgy': 'Naturgy Panamá · Acceso pendiente',
+    'aes': 'AES Panamá · Acceso pendiente',
     "acp": "ACP · Estudios de mercado",
     "acp_sli": "ACP · Licitaciones SLI",
     "ifrc": "IFRC · Compras humanitarias",
