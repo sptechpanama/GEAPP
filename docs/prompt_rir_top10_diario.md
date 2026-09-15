@@ -26,7 +26,8 @@ priorices un margen aparente si el producto no puede validarse o entregarse.
    snippet de buscador como prueba final.
 
 No envíes correos ni contactes proveedores. Solo redacta el correo para revisión
-humana. No cambies permisos, no publiques archivos y no modifiques otras hojas.
+humana. Actualiza únicamente `RIR_INVESTIGACION_PROVEEDORES` y `RIR_TOP10_DIARIO`.
+No cambies permisos ni las hojas de actos o precios históricos.
 
 ### Selección del Top 10
 
@@ -40,9 +41,11 @@ humana. No cambies permisos, no publiques archivos y no modifiques otras hojas.
    enlaces rotos o incompatibilidades técnicas materiales.
 5. Si una ficha aparece en un acto mixto, analiza únicamente el renglón realmente
    asociado; no atribuyas a la ficha el monto completo de otros renglones.
-6. Publica exactamente diez posiciones distintas. Si no existen diez candidatas
-   que superen la validación mínima, conserva el último corte completo y reporta
-   por qué no publicaste uno nuevo. Nunca rellenes puestos inventando datos.
+6. Publica hasta diez posiciones distintas en un corte con la fecha de hoy.
+   Si califican tres, publica esas tres; no dejes un Top antiguo como sustituto
+   de una investigación actualizada. Nunca rellenes puestos inventando datos.
+   Si no califica ninguna, informa expresamente que no hay Top nuevo y conserva
+   el histórico con su fecha original, sin presentarlo como vigente.
 
 ### Tres enlaces obligatorios por oportunidad
 
@@ -130,13 +133,19 @@ orden:
 
 Reglas de escritura:
 
+0. Primero actualiza la investigación detallada en `RIR_INVESTIGACION_PROVEEDORES`
+   conservando su esquema y `id_estable` por acto, ficha y renglón. Mantén el
+   historial y marca `No vigente` cuando exista evidencia de que venció. Escribe
+   `actualizado_en` con fecha y hora de Panamá. Luego publica el Top del mismo día;
+   escribir la investigación detallada no actualiza automáticamente el Top.
 1. Usa `fecha_corte|ranking|ficha|numero_acto` como `id_snapshot`.
-2. Prepara y valida las diez filas antes de escribir. Marca `estado=Vigente`
-   únicamente cuando el bloque completo esté terminado.
+2. Prepara y valida todas las filas seleccionadas (entre una y diez) antes de
+   escribirlas juntas en una sola operación. Marca `estado=Vigente` únicamente
+   cuando el bloque completo esté terminado y el acto siga abierto.
 3. Una repetición del mismo día reemplaza solo ese corte. Conserva cortes de
    fechas anteriores para auditoría.
 4. Mantén una sola fila por ranking 1–10 y no alteres encabezados ni formatos.
-5. Comprueba al final que las diez filas tienen los tres enlaces, ficha, acto,
+5. Comprueba al final que todas las filas tienen los tres enlaces, ficha, acto,
    producto, marca, país, resultado técnico, viabilidad y correo.
 6. Relee el rango escrito y confirma que no hay truncamientos, duplicados,
    enlaces genéricos o campos desplazados.

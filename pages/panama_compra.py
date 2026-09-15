@@ -52,7 +52,7 @@ from services.panama_compra_db_filters import (
 from services import panama_compra_no_requirements as _no_requirements_rules
 from services import rir_supplier_research as _rir_supplier_research
 
-if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 3:
+if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 4:
     try:
         _rir_supplier_research = importlib.reload(_rir_supplier_research)
     except Exception:
@@ -7408,11 +7408,20 @@ def _render_price_method_legend() -> None:
     )
 
 
-def _render_rir_daily_top10() -> None:
+@st.cache_data(ttl=60, max_entries=1, show_spinner=False)
+def _read_rir_research_frames() -> dict[str, pd.DataFrame]:
+    spreadsheet = get_gc().open_by_key(SHEET_ID)
+    response = spreadsheet.values_batch_get(
+        [f"'{name}'!A1:AZ" for name in _rir_supplier_research.RIR_RESEARCH_SHEETS]
+    )
+    return _rir_supplier_research.research_frames_from_values(response)
+
+
+def _render_rir_daily_top10(frame: pd.DataFrame) -> None:
     """Muestra el último corte ejecutivo sin ocultar la investigación completa."""
 
-    st.markdown("### Top 10 actual para RIR")
-    snapshot = latest_top10_snapshot(load_df(RIR_TOP10_SHEET))
+    st.markdown("### Top 10 publicado para RIR")
+    snapshot = latest_top10_snapshot(frame)
     if snapshot.empty:
         st.info(
             "El Top 10 diario todavía no tiene un corte válido. La investigación "
@@ -7427,14 +7436,15 @@ def _render_rir_daily_top10() -> None:
             f"{len(snapshot)} de 10 oportunidades"
         )
     if len(snapshot) < 10:
-        st.info(
-            "Este es el corte histórico parcial disponible. La próxima corrida con "
-            "el prompt actualizado debe publicar los diez puestos sin inventar datos."
+        st.caption(
+            "Se muestran las oportunidades del corte más reciente, aunque haya menos "
+            "de diez. La investigación detallada puede tener actualizaciones posteriores."
         )
 
     display_columns = {
         "ranking": "#",
         "oportunidad": "Oportunidad",
+        "fecha_cierre": "Cierre registrado",
         "numeros_preliminares": "Números preliminares",
         "evaluacion_directa": "Evaluación directa",
         "accion_inmediata": "Acción inmediata",
@@ -7569,15 +7579,52 @@ def _render_rir_daily_top10() -> None:
 
 
 def _render_rir_supplier_research() -> None:
-    _render_rir_daily_top10()
+    controls = st.columns([1, 2])
+    if controls[0].button("Actualizar investigación", key="rir_research_refresh"):
+        _read_rir_research_frames.clear()
+    controls[1].link_button(
+        "Abrir resultados en Sheets",
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit",
+    )
+    previous = st.session_state.get("__rir_research_last_good")
+    loaded = _rir_supplier_research.read_research_safely(_read_rir_research_frames, previous)
+    if loaded.error:
+        if not loaded.using_previous:
+            st.error(loaded.error + " Pulsa Actualizar investigación para reintentar.")
+            return
+        st.warning(
+            loaded.error + " Se conserva la última lectura disponible de "
+            + loaded.checked_at.strftime("%d/%m/%Y %H:%M") + "."
+        )
+    else:
+        st.session_state["__rir_research_last_good"] = loaded
+    frames = loaded.frames
+    frame = frames[_rir_supplier_research.RIR_RESEARCH_SHEET]
+    top_frame = frames[RIR_TOP10_SHEET]
+    dates = {
+        "Investigaciones": _rir_supplier_research.research_updated_at(frame),
+        "Top publicado": _rir_supplier_research.research_updated_at(top_frame),
+        "Precios históricos": _rir_supplier_research.research_updated_at(frames[_rir_supplier_research.RIR_PRICES_SHEET]),
+    }
+    st.caption(" · ".join(
+        f"{label}: {value.strftime('%d/%m/%Y %H:%M') if value is not None else 'Sin fecha'}"
+        for label, value in dates.items()
+    ) + " (hora de Panamá)")
+    research_date, top_date = dates["Investigaciones"], dates["Top publicado"]
+    if research_date is not None and (top_date is None or research_date.date() > top_date.date()):
+        st.warning(
+            "La investigación detallada tiene cambios posteriores al Top. "
+            "ChatGPT debe publicar también el nuevo corte en RIR_TOP10_DIARIO; "
+            "actualizar los actos o recargar esta página no genera ese ranking."
+        )
+    _render_rir_daily_top10(top_frame)
     st.divider()
     st.markdown("### Investigación detallada")
     st.caption(
         "Investigación externa para actos RIR sin requisitos. ChatGPT Pro puede completar "
         "esta hoja independiente usando el acto, la ficha, el renglón y las referencias "
-        "históricas; Streamlit solo presenta los resultados validados."
+        "históricas; Streamlit muestra lo publicado en Sheets."
     )
-    frame = load_df("RIR_INVESTIGACION_PROVEEDORES")
     if frame.empty:
         st.info(
             "La hoja de investigación está lista pero aún no contiene resultados. "
@@ -7585,20 +7632,22 @@ def _render_rir_supplier_research() -> None:
         )
         return
 
-    visible = frame.drop(columns=[ROW_ID_COL], errors="ignore").copy()
+    include_inactive = st.checkbox(
+        "Incluir investigaciones no vigentes", value=False,
+        key="rir_research_include_inactive",
+    )
+    visible = _rir_supplier_research.prepare_research_table(
+        frame.drop(columns=[ROW_ID_COL], errors="ignore"),
+        include_inactive=include_inactive,
+    )
+    st.caption("Orden: actualizaciones más recientes primero. El historial se conserva en Sheets.")
     filter_cols = st.columns([2.2, 1.2, 1.2])
     search = filter_cols[0].text_input(
         "Buscar acto, ficha, producto o proveedor",
         key="rir_supplier_research_search",
     )
-    status_column = next(
-        (column for column in visible if _normalize_column_key(column) == "estado investigacion"),
-        None,
-    )
-    mode_column = next(
-        (column for column in visible if _normalize_column_key(column) == "medio recomendado"),
-        None,
-    )
+    status_column = _rir_supplier_research.research_column(visible, "estado_investigacion")
+    mode_column = _rir_supplier_research.research_column(visible, "medio_recomendado")
     if status_column:
         options = sorted(visible[status_column].dropna().astype(str).unique())
         selected = filter_cols[1].multiselect(
@@ -7623,7 +7672,12 @@ def _render_rir_supplier_research() -> None:
         ).any(axis=1)
         visible = visible.loc[mask]
 
-    column_config: dict[str, object] = {}
+    leading = [column for column in ("actualizado_en", "fecha_investigacion", "estado_investigacion", "numero_acto", "ficha", "nombre_ficha") if column in visible]
+    visible = visible.loc[:, leading + [column for column in visible if column not in leading]]
+    column_config: dict[str, object] = {
+        "actualizado_en": st.column_config.TextColumn("Última actualización"),
+        "fecha_investigacion": st.column_config.TextColumn("Primera investigación"),
+    }
     for column in visible.columns:
         normalized = _normalize_column_key(column)
         if "precio" in normalized:
