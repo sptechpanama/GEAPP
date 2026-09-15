@@ -49,6 +49,13 @@ def test_mixed_by_line_remains_allowed():
     assert review(live={"tipo_acto": "Acto mixto", "tipo_adjudicacion": "Renglón"})["vigencia"] == "Vigente"
 
 
+@pytest.mark.parametrize("changes", [{"fichas_con_requisitos": "101000 (CT)"},
+    {"fichas_por_verificar": "108148", "tipo_adjudicacion": "Renglón"},
+    {"fichas_con_requisitos": "108148 (RS)", "tipo_adjudicacion": "Renglón"}])
+def test_contradictory_or_incomplete_eligibility_is_not_silently_accepted(changes):
+    assert review(live=changes)["vigencia"] == "Por verificar"
+
+
 def test_missing_source_does_not_claim_live_verification():
     assert assess_research_validity(pd.DataFrame([ROW]), now=NOW).iloc[0]["vigencia"] == "Por verificar"
 

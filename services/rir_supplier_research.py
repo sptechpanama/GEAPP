@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 RIR_TOP10_SHEET = "RIR_TOP10_DIARIO"
 RIR_TOP_LIMIT = 10
-RIR_TOP_SERVICE_VERSION = 5
+RIR_TOP_SERVICE_VERSION = 6
 RIR_RESEARCH_SHEET = "RIR_INVESTIGACION_PROVEEDORES"
 RIR_PRICES_SHEET = "RIR_PRECIOS_HISTORICOS"
 RIR_RESEARCH_SHEETS = (RIR_TOP10_SHEET, RIR_RESEARCH_SHEET, RIR_PRICES_SHEET)
@@ -219,11 +219,15 @@ def assess_research_validity(frame: pd.DataFrame, current_acts: pd.DataFrame | N
             if live_close is not None and checked is not None and (published is None or checked >= published):
                 closed, exact = live_close, live_exact
             codes = set(re.findall(r"\b\d{4,7}\b", _text(live.get("fichas_sin_requisitos"))))
+            restricted = set(re.findall(r"\b\d{4,7}\b", _text(live.get("fichas_con_requisitos"))))
+            unverified = set(re.findall(r"\b\d{4,7}\b", _text(live.get("fichas_por_verificar"))))
             if _key(row)[1] not in codes:
                 reason = reason or "Ficha no confirmada sin requisitos en la captura actual"
+            if _key(row)[1] in restricted | unverified:
+                reason = reason or "La ficha tiene requisitos o una clasificación pendiente en la captura"
             scope = research_column_key(_text(live.get("tipo_acto")))
             award = research_column_key(_text(live.get("tipo_adjudicacion")))
-            if "mixto" in scope and not any(word in award for word in ("renglon", "parcial", "linea", "item")):
+            if ("mixto" in scope or restricted or unverified) and not any(word in award for word in ("renglon", "parcial", "linea", "item")):
                 reason = reason or "Acto mixto sin adjudicación por renglón"
             if research_column_key(_text(live.get("descartar"))) in {"true", "si", "1", "x"}:
                 reason = reason or "Descartada en la vista de actos"
@@ -252,7 +256,8 @@ def read_current_research_acts(spreadsheet) -> pd.DataFrame:
     """Read only identity, date and eligibility columns, never the item payloads."""
     fields = {"enlace": "enlace_acto", "fecha": "fecha_cierre", "fecha_de_actualizacion": "verificado_en",
               "fichas_sin_requisitos": "fichas_sin_requisitos", "tipo_de_adjudicacion": "tipo_adjudicacion",
-              "tipo_de_acto_sin_requisitos": "tipo_acto", "descartar": "descartar"}
+              "tipo_de_acto_sin_requisitos": "tipo_acto", "descartar": "descartar",
+              "fichas_con_requisitos": "fichas_con_requisitos", "fichas_por_verificar": "fichas_por_verificar"}
     heads = spreadsheet.values_batch_get([f"'{name}'!A1:AZ1" for name in RIR_ACT_SHEETS]).get("valueRanges", [])
     if len(heads) != len(RIR_ACT_SHEETS):
         raise ValueError("Lectura incompleta de las fuentes de actos RIR")

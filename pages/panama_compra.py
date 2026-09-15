@@ -52,7 +52,7 @@ from services.panama_compra_db_filters import (
 from services import panama_compra_no_requirements as _no_requirements_rules
 from services import rir_supplier_research as _rir_supplier_research
 
-if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 5:
+if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 6:
     try:
         _rir_supplier_research = importlib.reload(_rir_supplier_research)
     except Exception:
