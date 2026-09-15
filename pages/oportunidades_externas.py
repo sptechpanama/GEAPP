@@ -106,6 +106,14 @@ def render_detail(row):
     keywords = parsed_json(data.get('matched_keywords_json'), [])
     if keywords:
         st.write('**Coincidencias:** ' + ', '.join(keywords))
+    product_hits = raw.get('rir_product_matches') or []
+    if product_hits:
+        with st.expander('Productos RIR relacionados por palabras', expanded=False):
+            for hit in product_hits:
+                st.write(f"**{hit.get('ficha', '')} · {hit.get('name', '')}**")
+                st.caption('Coincidencia en ' + hit.get('field', '') + ': ' + ', '.join(hit.get('terms', [])))
+                st.write(hit.get('evidence', ''))
+            st.caption('Son familias de productos por revisar. No confirma medidas, modelos ni cumplimiento de la ficha MINSA.')
     explicit = raw.get('explicit_fichas') or []
     st.caption('Fichas técnicas explícitas: ' + (', '.join(explicit) if explicit else 'No identificadas en el texto leído.'))
     st.caption('Una coincidencia de producto no confirma la equivalencia con una ficha MINSA ni la elegibilidad para ofertar.')
@@ -207,6 +215,8 @@ def main():
     if area == 'Fuentes y cobertura':
         render_sources(health_data())
         return
+    if area == 'RIR':
+        st.caption('Busca por palabras y variantes de los productos de tus fichas en seguimiento, además de términos médicos generales. No exige el número de ficha en el anuncio. La ficha relacionada es una referencia para revisar el producto.')
     with st.expander('Filtros', expanded=False):
         with st.form('external_filters'):
             cols = st.columns(3)
