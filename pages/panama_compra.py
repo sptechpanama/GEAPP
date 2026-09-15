@@ -52,7 +52,7 @@ from services.panama_compra_db_filters import (
 from services import panama_compra_no_requirements as _no_requirements_rules
 from services import rir_supplier_research as _rir_supplier_research
 
-if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 4:
+if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 5:
     try:
         _rir_supplier_research = importlib.reload(_rir_supplier_research)
     except Exception:
@@ -7417,15 +7417,28 @@ def _read_rir_research_frames() -> dict[str, pd.DataFrame]:
     return _rir_supplier_research.research_frames_from_values(response)
 
 
-def _render_rir_daily_top10(frame: pd.DataFrame) -> None:
+@st.cache_data(ttl=60, max_entries=1, show_spinner=False)
+def _read_rir_current_acts() -> pd.DataFrame:
+    return _rir_supplier_research.read_current_research_acts(get_gc().open_by_key(SHEET_ID))
+
+
+def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=None) -> None:
     """Muestra el último corte ejecutivo sin ocultar la investigación completa."""
 
-    st.markdown("### Top 10 publicado para RIR")
-    snapshot = latest_top10_snapshot(frame)
+    st.markdown("### Top 10 vigente para RIR")
+    published = latest_top10_snapshot(frame)
+    reviewed = _rir_supplier_research.assess_research_validity(published, current_acts, research=research)
+    snapshot = reviewed.loc[reviewed["vigencia"].eq("Vigente")].reset_index(drop=True)
+    removed = reviewed.loc[~reviewed["vigencia"].eq("Vigente")]
+    if not removed.empty:
+        with st.expander(f"Fuera del Top vigente: {len(removed)} oportunidades", expanded=False):
+            st.dataframe(removed[[c for c in ("ranking", "numero_acto", "ficha", "oportunidad", "cierre_verificado", "vigencia", "motivo_vigencia") if c in removed]], hide_index=True, use_container_width=True)
+            st.caption("La investigación y el ranking originales se conservan en Sheets.")
     if snapshot.empty:
         st.info(
-            "El Top 10 diario todavía no tiene un corte válido. La investigación "
-            "detallada permanece disponible abajo."
+            "No hay oportunidades vigentes verificadas en el último ranking publicado. "
+            "Los cierres vencidos y los datos pendientes de confirmar no se presentan como "
+            "opciones para participar. La investigación detallada permanece disponible abajo."
         )
         return
 
@@ -7444,7 +7457,7 @@ def _render_rir_daily_top10(frame: pd.DataFrame) -> None:
     display_columns = {
         "ranking": "#",
         "oportunidad": "Oportunidad",
-        "fecha_cierre": "Cierre registrado",
+        "cierre_verificado": "Cierre verificado",
         "numeros_preliminares": "Números preliminares",
         "evaluacion_directa": "Evaluación directa",
         "accion_inmediata": "Acción inmediata",
@@ -7566,11 +7579,13 @@ def _render_rir_daily_top10(frame: pd.DataFrame) -> None:
             key=f"rir_top10_email_{email_hash}",
         )
 
-    recommendation = top_general_recommendation(snapshot)
+    recommendation = top_general_recommendation(snapshot) if removed.empty else ""
     if recommendation:
         st.info(f"**Recomendación directa:** {recommendation}")
     st.caption(
-        "El Top 10 es el último corte diario publicado en Google Sheets. Los cortes "
+        "Se verifica la vigencia al consultar la vista y cada minuto mientras está abierta. "
+        "Se conserva el orden del último ranking investigado; filtrar cierres no renueva "
+        "cotizaciones ni valida nuevamente al proveedor. Los cortes "
         "anteriores se conservan para auditar entradas, movimientos y salidas. "
         "El precio competitivo histórico es el percentil 25 de ofertas unitarias "
         "comparables; la diferencia bruta preliminar resta el costo localizado, pero "
@@ -7578,10 +7593,12 @@ def _render_rir_daily_top10(frame: pd.DataFrame) -> None:
     )
 
 
+@st.fragment(run_every="60s")
 def _render_rir_supplier_research() -> None:
     controls = st.columns([1, 2])
     if controls[0].button("Actualizar investigación", key="rir_research_refresh"):
         _read_rir_research_frames.clear()
+        _read_rir_current_acts.clear()
     controls[1].link_button(
         "Abrir resultados en Sheets",
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit",
@@ -7599,6 +7616,11 @@ def _render_rir_supplier_research() -> None:
     else:
         st.session_state["__rir_research_last_good"] = loaded
     frames = loaded.frames
+    try:
+        current_acts = _read_rir_current_acts()
+    except Exception:
+        current_acts = None
+        st.warning("No se pudo verificar la última captura de actos. El historial sigue disponible; ninguna oportunidad se marcará vigente hasta recuperar esta lectura.")
     frame = frames[_rir_supplier_research.RIR_RESEARCH_SHEET]
     top_frame = frames[RIR_TOP10_SHEET]
     dates = {
@@ -7611,13 +7633,13 @@ def _render_rir_supplier_research() -> None:
         for label, value in dates.items()
     ) + " (hora de Panamá)")
     research_date, top_date = dates["Investigaciones"], dates["Top publicado"]
-    if research_date is not None and (top_date is None or research_date.date() > top_date.date()):
-        st.warning(
+    if research_date is not None and (top_date is None or research_date > top_date):
+        st.caption(
             "La investigación detallada tiene cambios posteriores al Top. "
-            "ChatGPT debe publicar también el nuevo corte en RIR_TOP10_DIARIO; "
-            "actualizar los actos o recargar esta página no genera ese ranking."
+            "La vista comprueba los cierres y las retiradas automáticamente; las nuevas "
+            "investigaciones pendientes no se convierten en recomendaciones sin evaluarlas."
         )
-    _render_rir_daily_top10(top_frame)
+    _render_rir_daily_top10(top_frame, frame, current_acts)
     st.divider()
     st.markdown("### Investigación detallada")
     st.caption(
@@ -7640,6 +7662,9 @@ def _render_rir_supplier_research() -> None:
         frame.drop(columns=[ROW_ID_COL], errors="ignore"),
         include_inactive=include_inactive,
     )
+    visible = _rir_supplier_research.assess_research_validity(visible, current_acts)
+    if not include_inactive:
+        visible = visible.loc[~visible["vigencia"].isin(["Vencida", "No vigente"])]
     st.caption("Orden: actualizaciones más recientes primero. El historial se conserva en Sheets.")
     filter_cols = st.columns([2.2, 1.2, 1.2])
     search = filter_cols[0].text_input(
@@ -7672,9 +7697,12 @@ def _render_rir_supplier_research() -> None:
         ).any(axis=1)
         visible = visible.loc[mask]
 
-    leading = [column for column in ("actualizado_en", "fecha_investigacion", "estado_investigacion", "numero_acto", "ficha", "nombre_ficha") if column in visible]
+    leading = [column for column in ("vigencia", "cierre_verificado", "motivo_vigencia", "actualizado_en", "fecha_investigacion", "estado_investigacion", "numero_acto", "ficha", "nombre_ficha") if column in visible]
     visible = visible.loc[:, leading + [column for column in visible if column not in leading]]
     column_config: dict[str, object] = {
+        "vigencia": st.column_config.TextColumn("Vigencia del acto"),
+        "cierre_verificado": st.column_config.TextColumn("Cierre verificado"),
+        "motivo_vigencia": st.column_config.TextColumn("Verificación de vigencia"),
         "actualizado_en": st.column_config.TextColumn("Última actualización"),
         "fecha_investigacion": st.column_config.TextColumn("Primera investigación"),
     }
@@ -7695,6 +7723,7 @@ def _render_rir_supplier_research() -> None:
         column_config=column_config,
     )
     st.caption(f"{len(visible):,} investigaciones visibles.")
+    st.caption("Vigencia del acto indica únicamente si su plazo sigue abierto según la captura reciente; el estado de investigación conserva las comprobaciones pendientes del producto y proveedor.")
     _render_price_method_legend()
 
 

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 RIR_TOP10_SHEET = "RIR_TOP10_DIARIO"
 RIR_TOP_LIMIT = 10
-RIR_TOP_SERVICE_VERSION = 4
+RIR_TOP_SERVICE_VERSION = 5
 RIR_RESEARCH_SHEET = "RIR_INVESTIGACION_PROVEEDORES"
 RIR_PRICES_SHEET = "RIR_PRECIOS_HISTORICOS"
 RIR_RESEARCH_SHEETS = (RIR_TOP10_SHEET, RIR_RESEARCH_SHEET, RIR_PRICES_SHEET)
@@ -118,8 +118,170 @@ def latest_top_snapshot(
 
 def latest_top10_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
     """Show the newest published cut, even when fewer than ten qualify."""
-
+    # A writer may publish a dated rank-0 row to explicitly report an empty Top.
+    # Do not revive yesterday's opportunities when today's cut contains none.
+    if frame is not None and not frame.empty and "fecha_corte" in frame:
+        dates = pd.to_datetime(frame["fecha_corte"], errors="coerce", format="mixed", utc=True)
+        frame = frame.loc[dates.dt.normalize().eq(dates.max().normalize())] if dates.notna().any() else frame
     return latest_top_snapshot(frame, rank_limit=RIR_TOP_LIMIT, prefer_complete=False)
+
+
+PANAMA = ZoneInfo("America/Panama")
+RIR_ACT_SHEETS = ("cl_abiertas_rir_sin_requisitos", "cl_prog_sin_requisitos", "ap_sin_requisitos")
+INACTIVE_LABELS = {"no_vigente", "vencido", "vencida", "cancelado", "cancelada", "archivado", "archivada", "descartado", "descartada", "suspendido", "adjudicado", "desierto"}
+
+
+def _text(value: object) -> str:
+    return "" if value is None or pd.isna(value) else str(value).strip()
+
+
+def _local_timestamp(value: object) -> pd.Timestamp | None:
+    raw = _text(value)
+    if not raw:
+        return None
+    try:
+        parsed = pd.to_datetime(raw, dayfirst=not bool(re.match(r"^\d{4}-", raw)), errors="raise")
+        return parsed.tz_localize(PANAMA) if parsed.tzinfo is None else parsed.tz_convert(PANAMA)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _deadline(value: object) -> tuple[pd.Timestamp | None, bool]:
+    raw = _text(value)
+    # Published CL dates commonly contain an opening-to-closing date range.
+    tokens = re.findall(r"(?:\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{4})(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)?", raw)
+    token = tokens[-1] if tokens else raw
+    return _local_timestamp(token), bool(re.search(r"\d{1,2}:\d{2}", token))
+
+
+def _line(row: Mapping) -> str:
+    value = _text(row.get("renglon"))
+    if value:
+        return value.removesuffix(".0")
+    found = re.search(r"renglon\s*(\d+)", research_column_key(row.get("oportunidad", "")).replace("_", " "))
+    return found.group(1) if found else ""
+
+
+def _key(row: Mapping) -> tuple[str, str, str]:
+    return (_text(row.get("numero_acto")), _text(row.get("ficha")).removesuffix(".0"), _line(row))
+
+
+def assess_research_validity(frame: pd.DataFrame, current_acts: pd.DataFrame | None = None,
+                             *, research: pd.DataFrame | None = None, now=None) -> pd.DataFrame:
+    """Evaluate saved evidence against the clock and latest scraper publication.
+
+    Never writes research dates, supplier prices or rankings. Unknown dates,
+    unknown closing times today, stale sources and mixed global acts cannot be
+    presented as actionable opportunities.
+    """
+    clock = _local_timestamp(now) if now is not None else pd.Timestamp.now(tz=PANAMA)
+    if clock is None:
+        raise ValueError("Fecha de verificación inválida")
+    acts = {}
+    if current_acts is not None and not current_acts.empty:
+        for row in current_acts.to_dict("records"):
+            key = _text(row.get("numero_acto"))
+            checked = _local_timestamp(row.get("verificado_en"))
+            old = acts.get(key)
+            if key and (old is None or (checked is not None and (old[0] is None or checked > old[0]))):
+                acts[key] = (checked, row)
+    investigations = {}
+    if research is not None and not research.empty:
+        # Latest version wins per exact act/ficha/line; never mix distinct lines.
+        for row in reversed(prepare_research_table(research, include_inactive=True).to_dict("records")):
+            investigations[_key(row)] = row
+    output = []
+    for row in frame.to_dict("records"):
+        item = dict(row)
+        raw = _text(row.get("fecha_cierre"))
+        if not raw:
+            match = re.search(r"\bcierre\s*:\s*((?:\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{4})(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)?)", _text(row.get("observaciones")), flags=re.I)
+            raw = match.group(1) if match else ""
+        closed, exact = _deadline(raw)
+        reason = ""
+        status = research_column_key(_text(row.get("estado_investigacion")) or _text(row.get("estado")))
+        if status in INACTIVE_LABELS:
+            reason = "Retirada en la investigación publicada"
+        newer = investigations.get(_key(row))
+        if newer:
+            if research_column_key(_text(newer.get("estado_investigacion"))) in INACTIVE_LABELS:
+                reason = "Retirada en la investigación más reciente"
+            updated = _local_timestamp(newer.get("actualizado_en"))
+            previous = _local_timestamp(row.get("actualizado_en"))
+            if not reason and updated is not None and previous is not None and updated > previous:
+                reason = "El análisis cambió después de publicar el ranking"
+        checked, live = acts.get(_text(row.get("numero_acto")), (None, None))
+        source_note = "Sin verificación reciente del scraper"
+        if live is not None:
+            source_note = "Verificado con la última captura del scraper"
+            live_close, live_exact = _deadline(live.get("fecha_cierre"))
+            published = _local_timestamp(row.get("actualizado_en"))
+            if live_close is not None and checked is not None and (published is None or checked >= published):
+                closed, exact = live_close, live_exact
+            codes = set(re.findall(r"\b\d{4,7}\b", _text(live.get("fichas_sin_requisitos"))))
+            if _key(row)[1] not in codes:
+                reason = reason or "Ficha no confirmada sin requisitos en la captura actual"
+            scope = research_column_key(_text(live.get("tipo_acto")))
+            award = research_column_key(_text(live.get("tipo_adjudicacion")))
+            if "mixto" in scope and not any(word in award for word in ("renglon", "parcial", "linea", "item")):
+                reason = reason or "Acto mixto sin adjudicación por renglón"
+            if research_column_key(_text(live.get("descartar"))) in {"true", "si", "1", "x"}:
+                reason = reason or "Descartada en la vista de actos"
+            if checked is None or clock - checked > pd.Timedelta(hours=36):
+                reason = reason or "Captura del scraper sin verificar en las últimas 36 horas"
+        else:
+            reason = reason or source_note
+        if closed is None:
+            validity, reason = "Por verificar", reason or "Sin fecha de cierre verificable"
+        elif (exact and closed <= clock) or (not exact and closed.date() < clock.date()):
+            validity, reason = "Vencida", "La fecha de cierre registrada ya pasó"
+        elif not exact and closed.date() == clock.date():
+            validity, reason = "Por verificar", "Cierra hoy, pero falta la hora exacta"
+        elif reason:
+            validity = "No vigente" if "Retirada" in reason else "Por verificar"
+        else:
+            validity, reason = "Vigente", source_note
+        item.update(vigencia=validity, motivo_vigencia=reason,
+                    cierre_verificado=closed.isoformat() if closed is not None and exact else (closed.strftime("%Y-%m-%d") if closed is not None else ""),
+                    verificado_en=checked.isoformat() if checked is not None else "")
+        output.append(item)
+    return pd.DataFrame(output, columns=list(frame.columns) + [c for c in ("vigencia", "motivo_vigencia", "cierre_verificado", "verificado_en") if c not in frame.columns])
+
+
+def read_current_research_acts(spreadsheet) -> pd.DataFrame:
+    """Read only identity, date and eligibility columns, never the item payloads."""
+    fields = {"enlace": "enlace_acto", "fecha": "fecha_cierre", "fecha_de_actualizacion": "verificado_en",
+              "fichas_sin_requisitos": "fichas_sin_requisitos", "tipo_de_adjudicacion": "tipo_adjudicacion",
+              "tipo_de_acto_sin_requisitos": "tipo_acto", "descartar": "descartar"}
+    heads = spreadsheet.values_batch_get([f"'{name}'!A1:AZ1" for name in RIR_ACT_SHEETS]).get("valueRanges", [])
+    if len(heads) != len(RIR_ACT_SHEETS):
+        raise ValueError("Lectura incompleta de las fuentes de actos RIR")
+    ranges, targets = [], []
+    for name, data in zip(RIR_ACT_SHEETS, heads):
+        headers = data.get("values", [[]])[0]
+        found = set()
+        for position, label in enumerate(headers, 1):
+            key = research_column_key(label)
+            if key in fields:
+                found.add(key)
+                col, number = "", position
+                while number:
+                    number, remainder = divmod(number - 1, 26)
+                    col = chr(65 + remainder) + col
+                ranges.append(f"'{name}'!{col}2:{col}15000")
+                targets.append((name, fields[key]))
+        if found != set(fields):
+            raise ValueError(f"Faltan columnas de verificación en {name}")
+    values = spreadsheet.values_batch_get(ranges).get("valueRanges", [])
+    if len(values) != len(targets):
+        raise ValueError("Lectura incompleta de fechas de cierre")
+    tables = {name: {} for name in RIR_ACT_SHEETS}
+    for (name, column), data in zip(targets, values):
+        tables[name][column] = pd.Series([row[0] if row else "" for row in data.get("values", [])], dtype=object)
+    result = pd.concat([pd.DataFrame(table) for table in tables.values()], ignore_index=True).fillna("")
+    if not result.empty:
+        result["numero_acto"] = result["enlace_acto"].str.extract(r"(\d{4}-\d+(?:-\d+)+-[A-Z]+-\d+)", expand=False)
+    return result
 
 
 def research_column_key(value: object) -> str:
