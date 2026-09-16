@@ -7595,6 +7595,9 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
 
 @st.fragment(run_every="60s")
 def _render_rir_supplier_research() -> None:
+    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 6:
+        st.info("La vista RIR está terminando de actualizarse. Vuelve a cargar la página en unos segundos; las investigaciones guardadas se conservan.")
+        return
     controls = st.columns([1, 2])
     if controls[0].button("Actualizar investigación", key="rir_research_refresh"):
         _read_rir_research_frames.clear()
