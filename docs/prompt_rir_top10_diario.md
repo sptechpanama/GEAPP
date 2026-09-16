@@ -31,21 +31,30 @@ No cambies permisos ni las hojas de actos o precios históricos.
 
 ### Selección del Top 10
 
-1. Parte de actos vigentes y accionables para RIR, sin Registro Sanitario cuando
-   ese sea el alcance de la investigación. Verifica la fecha y hora de cierre.
+1. Parte de actos vigentes y accionables para RIR cuyas fichas no requieran ni
+   Criterio Técnico ni Registro Sanitario. Confírmalo en las columnas de fichas
+   sin requisitos, con requisitos y pendientes de verificar de las hojas de actos.
+   Excluye clasificaciones contradictorias o pendientes. Verifica fecha y hora de
+   cierre en Panamá; si cierra hoy y no conoces la hora, queda por verificar.
+   La captura del scraper debe tener como máximo 36 horas. Una captura más vieja
+   no confirma vigencia; si la fuente no está disponible, informa esa limitación.
 2. Deduplica por número de acto + ficha + producto/renglón.
 3. Evalúa como mínimo: coincidencia técnica, evidencia documental, costo
    localizado, precio competitivo histórico, costo puesto en Panamá, plazo,
    logística, disponibilidad, competencia y riesgo de ejecución.
 4. Excluye candidatos vencidos, productos genéricos sin modelo verificable,
    enlaces rotos o incompatibilidades técnicas materiales.
-5. Si una ficha aparece en un acto mixto, analiza únicamente el renglón realmente
-   asociado; no atribuyas a la ficha el monto completo de otros renglones.
+5. Incluye un acto mixto únicamente si la adjudicación es parcial o por renglón y
+   la ficha seleccionada está confirmada sin requisitos. Excluye mixtos globales
+   o con adjudicación desconocida. Analiza únicamente el renglón asociado; no
+   atribuyas a la ficha el monto completo de otros renglones.
 6. Publica hasta diez posiciones distintas en un corte con la fecha de hoy.
    Si califican tres, publica esas tres; no dejes un Top antiguo como sustituto
    de una investigación actualizada. Nunca rellenes puestos inventando datos.
-   Si no califica ninguna, informa expresamente que no hay Top nuevo y conserva
-   el histórico con su fecha original, sin presentarlo como vigente.
+   Si la revisión terminó y no califica ninguna, publica el corte vacío explícito
+   descrito abajo. Conserva el histórico con su fecha original. Si no pudiste
+   completar la revisión por un error de acceso, informa el error y no publiques
+   un corte vacío como si hubieras terminado.
 
 ### Tres enlaces obligatorios por oportunidad
 
@@ -136,11 +145,16 @@ Reglas de escritura:
 0. Primero actualiza la investigación detallada en `RIR_INVESTIGACION_PROVEEDORES`
    conservando su esquema y `id_estable` por acto, ficha y renglón. Mantén el
    historial y marca `No vigente` cuando exista evidencia de que venció. Escribe
-   `actualizado_en` con fecha y hora de Panamá. Luego publica el Top del mismo día;
+   `actualizado_en` en ISO 8601 con fecha, hora y zona de Panamá, por ejemplo
+   `2026-09-15T20:15:00-05:00`. Luego publica el Top del mismo día, con una marca de
+   tiempo igual o posterior a las investigaciones que resume;
    escribir la investigación detallada no actualiza automáticamente el Top.
 1. Usa `fecha_corte|ranking|ficha|numero_acto` como `id_snapshot`.
 2. Prepara y valida todas las filas seleccionadas (entre una y diez) antes de
-   escribirlas juntas en una sola operación. Marca `estado=Vigente` únicamente
+   escribirlas juntas en una sola operación. Si el nuevo corte tiene menos filas
+   que el corte previo del mismo día, retira solo las filas sobrantes de ese día
+   en la misma operación; no dejes posiciones viejas mezcladas con las nuevas.
+   Marca `estado=Vigente` únicamente
    cuando el bloque completo esté terminado y el acto siga abierto.
 3. Una repetición del mismo día reemplaza solo ese corte. Conserva cortes de
    fechas anteriores para auditoría.
@@ -149,6 +163,16 @@ Reglas de escritura:
    producto, marca, país, resultado técnico, viabilidad y correo.
 6. Relee el rango escrito y confirma que no hay truncamientos, duplicados,
    enlaces genéricos o campos desplazados.
+7. Cuando la revisión completa no encuentre candidatas válidas, registra una sola
+   fila de control con `fecha_corte` de hoy, `ranking=0`,
+   `estado=Sin oportunidades vigentes`, `id_snapshot=fecha_corte|0|sin_top`,
+   `actualizado_en` real y la explicación en `recomendacion_general`. Deja vacíos
+   ficha, acto, precios y enlaces: esta fila no es una recomendación y está exenta
+   de los campos de producto. Sustituye el corte de hoy, conservando los anteriores.
+   Streamlit entiende este corte vacío y no recupera un Top antiguo para llenarlo.
+8. Incluye el renglón explícito en `oportunidad`, por ejemplo `Renglón 2: ...`, y
+   consérvalo en la investigación detallada. No combines estudios de renglones
+   distintos aunque compartan acto y ficha.
 
 Al terminar, responde en este chat con:
 
