@@ -43,7 +43,15 @@ No cambies permisos ni las hojas de actos o precios históricos.
    localizado, precio competitivo histórico, costo puesto en Panamá, plazo,
    logística, disponibilidad, competencia y riesgo de ejecución.
 4. Excluye candidatos vencidos, productos genéricos sin modelo verificable,
-   enlaces rotos o incompatibilidades técnicas materiales.
+   falsos positivos de ficha e incompatibilidades técnicas materiales.
+   Un precio, stock, plazo logístico o documento aún pendiente NO excluye por sí
+   solo una oportunidad concreta. Clasifícala como `Para cotizar o confirmar`,
+   identificando exactamente qué falta y qué acción resolvería cada pendiente.
+   La falta de modelo exacto permite investigar una alternativa identificada,
+   pero nunca afirmar equivalencia. Un producto probado incompatible se descarta.
+   Si falta un enlace CTNI, concilia la ficha oficial: puede permanecer para
+   evaluar solo si su identidad y ausencia de CT/RS ya están confirmadas en la
+   captura; no lo marques listo para ofertar. Nunca inventes la URL.
 5. Incluye un acto mixto únicamente si la adjudicación es parcial o por renglón y
    la ficha seleccionada está confirmada sin requisitos. Excluye mixtos globales
    o con adjudicación desconocida. Analiza únicamente el renglón asociado; no
@@ -56,9 +64,13 @@ No cambies permisos ni las hojas de actos o precios históricos.
    completar la revisión por un error de acceso, informa el error y no publiques
    un corte vacío como si hubieras terminado.
 
-### Tres enlaces obligatorios por oportunidad
+### Tres enlaces por oportunidad
 
-Cada fila final debe contener tres enlaces HTTP(S) funcionales y distintos:
+Busca y conserva los tres enlaces HTTP(S) funcionales y distintos. Si el enlace
+CTNI sigue pendiente, déjalo vacío y explícalo en `que_falta`; no excluyas una
+alternativa investigable solo por ese enlace. El acto y el producto/proveedor
+localizado sí deben tener un enlace concreto. Para `Lista para ofertar`, los
+tres enlaces deben estar verificados:
 
 1. `enlace_acto`: acto oficial específico de Panamá Compra.
 2. `enlace_ficha_minsa`: ficha oficial CTNI/MINSA. Tómalo exclusivamente de la
@@ -70,6 +82,48 @@ Cada fila final debe contener tres enlaces HTTP(S) funcionales y distintos:
 Registra también `producto_recomendado`, `marca_producto`, `pais_origen` y
 `proveedor_objetivo`. Si un dato no puede verificarse, escribe `No confirmado`;
 no lo inventes.
+
+### Situación y pendientes: selección flexible, cumplimiento explícito
+
+1. `Para cotizar o confirmar`: hay un acto vigente, ficha/renglón identificados
+   sin CT ni RS y una alternativa de proveedor/producto concreta. Admite precio,
+   stock, transporte, documentos o especificaciones pendientes de confirmar,
+   expresando los pendientes sin afirmar cumplimiento ni margen.
+2. `Lista para ofertar`: solo cuando exista evidencia reciente (máximo 36 horas)
+   de cumplimiento técnico, costo puesto, stock, entrega y viabilidad económica.
+3. No reintroduzcas vencidos, clasificaciones de requisitos pendientes o
+   contradictorias, mixtos globales, fichas mal asignadas o productos incompatibles.
+   La inexistencia de un proveedor concreto queda en investigación detallada.
+4. Conserva el esquema de investigación. Dentro de `observaciones`, agrega o
+   reemplaza este bloque, con una propiedad por línea y valores reales:
+
+```text
+[EVALUACION_RIR_V2]
+situacion=Para cotizar o confirmar
+que_falta=Enumerar pendientes específicos; si está todo confirmado, Ninguno
+accion_inmediata=La siguiente gestión concreta y a quién dirigirla
+bloqueo_material=ninguno
+cumplimiento_confirmado=no
+costo_puesto_confirmado=no
+stock_confirmado=no
+entrega_confirmada=no
+economia_viable=no
+[/EVALUACION_RIR_V2]
+```
+
+Usa `si` únicamente con evidencia y fecha de confirmación en la narración.
+`no` significa aún no confirmado, no una incompatibilidad por sí mismo. Si existe
+un impedimento comprobado, escribe su razón en `bloqueo_material`. No conviertas
+la frase antigua `Fuera del Top` en un bloqueo: revisa si solo faltaba una cotización.
+Conserva la evidencia, los pendientes técnicos y las fechas originales.
+No renueves `actualizado_en` para simular una investigación que no realizaste.
+
+Streamlit construye una selección vigente directamente con la investigación y
+los actos, cada 60 segundos mientras la vista está abierta. Una investigación
+nueva reemplaza las afirmaciones antiguas del mismo acto/ficha/renglón; no hereda
+márgenes ni modelos del Top anterior. Tu Top sigue aportando prioridad editorial
+cuando su análisis continúa actualizado. Por eso debes publicar ambos cortes,
+pero un Top atrasado ya no debe impedir ver los nuevos candidatos pendientes.
 
 ### Análisis de cumplimiento técnico
 
@@ -148,19 +202,23 @@ Reglas de escritura:
    `actualizado_en` en ISO 8601 con fecha, hora y zona de Panamá, por ejemplo
    `2026-09-15T20:15:00-05:00`. Luego publica el Top del mismo día, con una marca de
    tiempo igual o posterior a las investigaciones que resume;
-   escribir la investigación detallada no actualiza automáticamente el Top.
+   escribir la investigación detallada no modifica la hoja Top, pero sí alimenta
+   automáticamente las oportunidades para evaluar de Streamlit.
 1. Usa `fecha_corte|ranking|ficha|numero_acto` como `id_snapshot`.
 2. Prepara y valida todas las filas seleccionadas (entre una y diez) antes de
    escribirlas juntas en una sola operación. Si el nuevo corte tiene menos filas
    que el corte previo del mismo día, retira solo las filas sobrantes de ese día
    en la misma operación; no dejes posiciones viejas mezcladas con las nuevas.
-   Marca `estado=Vigente` únicamente
-   cuando el bloque completo esté terminado y el acto siga abierto.
+   Usa `estado=Lista para ofertar` o `estado=Para cotizar o confirmar` según la
+   evidencia. El bloque EVALUACION_RIR_V2 de la investigación detallada es el
+   respaldo de las confirmaciones. Publica ambos cortes con la misma fecha y hora
+   para que la investigación detallada conserve esos campos en la selección.
 3. Una repetición del mismo día reemplaza solo ese corte. Conserva cortes de
    fechas anteriores para auditoría.
 4. Mantén una sola fila por ranking 1–10 y no alteres encabezados ni formatos.
-5. Comprueba al final que todas las filas tienen los tres enlaces, ficha, acto,
-   producto, marca, país, resultado técnico, viabilidad y correo.
+5. Comprueba ficha, acto, renglón, producto, marca, país, resultado técnico,
+   viabilidad, correo y los enlaces. Los datos no confirmados permanecen
+   explícitamente pendientes; no rellenes huecos por suposición.
 6. Relee el rango escrito y confirma que no hay truncamientos, duplicados,
    enlaces genéricos o campos desplazados.
 7. Cuando la revisión completa no encuentre candidatas válidas, registra una sola

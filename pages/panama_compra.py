@@ -52,7 +52,7 @@ from services.panama_compra_db_filters import (
 from services import panama_compra_no_requirements as _no_requirements_rules
 from services import rir_supplier_research as _rir_supplier_research
 
-if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 6:
+if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 7:
     try:
         _rir_supplier_research = importlib.reload(_rir_supplier_research)
     except Exception:
@@ -7423,53 +7423,46 @@ def _read_rir_current_acts() -> pd.DataFrame:
 
 
 def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=None) -> None:
-    """Muestra el último corte ejecutivo sin ocultar la investigación completa."""
+    """Recalcula prioridades vigentes con la última investigación de cada renglón."""
 
-    st.markdown("### Top 10 vigente para RIR")
-    published = latest_top10_snapshot(frame)
-    reviewed = _rir_supplier_research.assess_research_validity(published, current_acts, research=research)
-    snapshot = reviewed.loc[reviewed["vigencia"].eq("Vigente")].reset_index(drop=True)
-    removed = reviewed.loc[~reviewed["vigencia"].eq("Vigente")]
+    st.markdown("### Oportunidades para evaluar · RIR")
+    eligible, removed = _rir_supplier_research.build_research_opportunities(research, frame, current_acts)
+    if not eligible.empty:
+        filters = st.columns(2)
+        situation = filters[0].selectbox("Situación", ["Todas", "Lista para ofertar", "Para cotizar o confirmar"], key="rir_candidates_situation")
+        amount = filters[1].selectbox("Mostrar", ["Top 10", "Todas las oportunidades"], key="rir_candidates_amount")
+        snapshot = eligible if situation == "Todas" else eligible.loc[eligible["situacion"].eq(situation)]
+        if amount == "Top 10":
+            snapshot = snapshot.head(10)
+        snapshot = snapshot.reset_index(drop=True)
+        st.caption(f"{len(eligible):,} candidatas vigentes · {eligible['situacion'].eq('Lista para ofertar').sum():,} listas para ofertar · {len(snapshot):,} visibles. Orden: preparación, prioridad del Top cuando sigue actualizada y cierre más próximo.")
+    else:
+        snapshot = eligible
     if not removed.empty:
-        with st.expander(f"Fuera del Top vigente: {len(removed)} oportunidades", expanded=False):
-            st.dataframe(removed[[c for c in ("ranking", "numero_acto", "ficha", "oportunidad", "cierre_verificado", "vigencia", "motivo_vigencia") if c in removed]], hide_index=True, use_container_width=True)
+        with st.expander(f"Historial y pendientes fuera de la selección: {len(removed)}", expanded=False):
+            st.dataframe(removed[[c for c in ("numero_acto", "ficha", "oportunidad", "cierre_verificado", "vigencia", "motivo_exclusion") if c in removed]], hide_index=True, use_container_width=True)
             st.caption("La investigación y el ranking originales se conservan en Sheets.")
     if snapshot.empty:
         st.info(
-            "No hay oportunidades vigentes verificadas en el último ranking publicado. "
-            "Los cierres vencidos y los datos pendientes de confirmar no se presentan como "
-            "opciones para participar. La investigación detallada permanece disponible abajo."
+            "No hay candidatas que cumplan esta selección en la captura disponible. "
+            "Revisa el filtro de situación y los motivos del desplegable. "
+            "La investigación detallada permanece disponible abajo."
         )
         return
 
-    corte = pd.to_datetime(snapshot["fecha_corte"], errors="coerce").max()
-    if pd.notna(corte):
-        st.caption(
-            f"Último corte: {corte.strftime('%d/%m/%Y')} · "
-            f"{len(snapshot)} de 10 oportunidades"
-        )
-    if len(snapshot) < 10:
-        st.caption(
-            "Se muestran las oportunidades del corte más reciente, aunque haya menos "
-            "de diez. La investigación detallada puede tener actualizaciones posteriores."
-        )
-
     display_columns = {
         "ranking": "#",
+        "ficha": "Ficha",
         "oportunidad": "Oportunidad",
+        "situacion": "Situación",
         "cierre_verificado": "Cierre verificado",
-        "numeros_preliminares": "Números preliminares",
-        "evaluacion_directa": "Evaluación directa",
+        "que_falta": "Qué falta confirmar",
         "accion_inmediata": "Acción inmediata",
         "proveedor_objetivo": "Proveedor objetivo",
-        "producto_recomendado": "Producto recomendado",
-        "marca_producto": "Marca",
-        "pais_origen": "País de origen",
-        "resultado_cumplimiento": "Cumplimiento",
-        "viabilidad_economica": "Viabilidad económica",
         "enlace_acto": "Acto",
         "enlace_ficha_minsa": "Ficha CTNI",
         "enlace_producto_recomendado": "Proveedor/producto",
+        "actualizado_en": "Último estudio",
     }
     available = [column for column in display_columns if column in snapshot.columns]
     executive = snapshot[available].rename(columns=display_columns)
@@ -7519,10 +7512,7 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
 
     link_coverage = top_link_coverage(snapshot)
     if any(count < len(snapshot) for count in link_coverage.values()):
-        st.warning(
-            "El corte diario está visible, pero tiene enlaces pendientes de validar. "
-            "La siguiente corrida debe completar acto, ficha CTNI y proveedor/producto."
-        )
+        st.caption("Los enlaces pendientes aparecen vacíos y se indican en ‘Qué falta confirmar’; no se construyen enlaces CTNI por suposición.")
 
     detail_fields = {
         "resultado_cumplimiento",
@@ -7532,9 +7522,11 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
     }
     if any(column in snapshot.columns for column in detail_fields):
         st.markdown("#### Detalle de la oportunidad")
+        snapshot = snapshot.copy()
+        snapshot.index = snapshot.apply(lambda row: f"{row.get('numero_acto', '')}|{row.get('ficha', '')}|{row.get('renglon', '')}", axis=1)
         choices = list(snapshot.index)
 
-        def _detail_label(index: int) -> str:
+        def _detail_label(index: str) -> str:
             row = snapshot.loc[index]
             rank_value = pd.to_numeric(row.get("ranking"), errors="coerce")
             ranking = int(rank_value) if pd.notna(rank_value) else 0
@@ -7542,6 +7534,8 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
             title = _clean_text(row.get("oportunidad")) or ficha
             return f"#{ranking} · {ficha} · {title}"
 
+        if st.session_state.get("rir_top10_detail_selection") not in choices:
+            st.session_state["rir_top10_detail_selection"] = choices[0]
         selected = st.selectbox(
             "Selecciona una oportunidad para revisar el análisis y el correo",
             options=choices,
@@ -7568,8 +7562,22 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
         email_text = _clean_text(detail.get("correo_sugerido_proveedor"))
         st.markdown(f"**Resultado del cumplimiento técnico:** {result}")
         st.write(technical or "Pendiente de comparar la ficha CTNI con el producto.")
+        st.markdown("**Qué falta confirmar**")
+        st.write(_clean_text(detail.get("que_falta")))
+        st.markdown("**Próxima acción**")
+        st.write(_clean_text(detail.get("accion_inmediata")))
         st.markdown("**Viabilidad económica**")
         st.write(viability or "Pendiente de validar costo puesto en Panamá y margen.")
+        if _clean_text(detail.get("numeros_preliminares")):
+            st.write(_clean_text(detail.get("numeros_preliminares")))
+        commercial = {label: _clean_text(detail.get(column)) for column, label in (
+            ("cantidad", "Cantidad del renglón"), ("unidad", "Unidad"),
+            ("termino_entrega", "Plazo de entrega"), ("precio_proveedor", "Precio localizado"),
+            ("moneda", "Moneda"), ("pais_origen", "País registrado"),
+            ("precio_competitivo_historico", "Precio competitivo histórico (P25 de ofertas comparables)"),
+        ) if _clean_text(detail.get(column))}
+        if commercial:
+            st.dataframe(pd.DataFrame(commercial.items(), columns=["Dato", "Valor registrado"]), hide_index=True, use_container_width=True)
         email_hash = hashlib.sha1(email_text.encode("utf-8")).hexdigest()[:12]
         st.text_area(
             "Correo sugerido al proveedor",
@@ -7579,14 +7587,12 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
             key=f"rir_top10_email_{email_hash}",
         )
 
-    recommendation = top_general_recommendation(snapshot) if removed.empty else ""
-    if recommendation:
-        st.info(f"**Recomendación directa:** {recommendation}")
     st.caption(
-        "Se verifica la vigencia al consultar la vista y cada minuto mientras está abierta. "
-        "Se conserva el orden del último ranking investigado; filtrar cierres no renueva "
-        "cotizaciones ni valida nuevamente al proveedor. Los cortes "
-        "anteriores se conservan para auditar entradas, movimientos y salidas. "
+        "La selección se recalcula cada minuto con la última investigación y captura de actos, "
+        "aunque el Top publicado en Sheets no se haya renovado. ‘Para cotizar o confirmar’ "
+        "permite evaluar pendientes; no acredita cumplimiento ni rentabilidad. ‘Lista para ofertar’ "
+        "exige confirmaciones explícitas de cumplimiento, costo puesto, stock, entrega y viabilidad "
+        "económica de las últimas 36 horas. La vista no renueva cotizaciones ni investiga proveedores. "
         "El precio competitivo histórico es el percentil 25 de ofertas unitarias "
         "comparables; la diferencia bruta preliminar resta el costo localizado, pero "
         "todavía no descuenta flete, impuestos ni otros gastos y no equivale a utilidad."
@@ -7595,11 +7601,11 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
 
 @st.fragment(run_every="60s")
 def _render_rir_supplier_research() -> None:
-    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 6:
+    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 7:
         st.info("La vista RIR está terminando de actualizarse. Vuelve a cargar la página en unos segundos; las investigaciones guardadas se conservan.")
         return
     controls = st.columns([1, 2])
-    if controls[0].button("Actualizar investigación", key="rir_research_refresh"):
+    if controls[0].button("Recargar datos", key="rir_research_refresh"):
         _read_rir_research_frames.clear()
         _read_rir_current_acts.clear()
     controls[1].link_button(
@@ -7610,7 +7616,7 @@ def _render_rir_supplier_research() -> None:
     loaded = _rir_supplier_research.read_research_safely(_read_rir_research_frames, previous)
     if loaded.error:
         if not loaded.using_previous:
-            st.error(loaded.error + " Pulsa Actualizar investigación para reintentar.")
+            st.error(loaded.error + " Pulsa Recargar datos para reintentar.")
             return
         st.warning(
             loaded.error + " Se conserva la última lectura disponible de "
@@ -7628,20 +7634,29 @@ def _render_rir_supplier_research() -> None:
     top_frame = frames[RIR_TOP10_SHEET]
     dates = {
         "Investigaciones": _rir_supplier_research.research_updated_at(frame),
-        "Top publicado": _rir_supplier_research.research_updated_at(top_frame),
+        "Top de ChatGPT": _rir_supplier_research.research_updated_at(top_frame),
         "Precios históricos": _rir_supplier_research.research_updated_at(frames[_rir_supplier_research.RIR_PRICES_SHEET]),
     }
     st.caption(" · ".join(
         f"{label}: {value.strftime('%d/%m/%Y %H:%M') if value is not None else 'Sin fecha'}"
         for label, value in dates.items()
     ) + " (hora de Panamá)")
-    research_date, top_date = dates["Investigaciones"], dates["Top publicado"]
+    research_date, top_date = dates["Investigaciones"], dates["Top de ChatGPT"]
     if research_date is not None and (top_date is None or research_date > top_date):
         st.caption(
-            "La investigación detallada tiene cambios posteriores al Top. "
-            "La vista comprueba los cierres y las retiradas automáticamente; las nuevas "
-            "investigaciones pendientes no se convierten en recomendaciones sin evaluarlas."
+            "El Top de ChatGPT tiene un corte anterior. El cuadro incorpora automáticamente "
+            "la investigación más reciente y señala lo que falta confirmar."
         )
+    st.caption("Recarga automática cada 60 segundos mientras esta sección está abierta. Recargar datos consulta Sheets; no ejecuta una búsqueda de proveedores.")
+    for issue in _rir_supplier_research.research_health(frame, current_acts):
+        st.warning(issue)
+    with st.expander("Cómo se mantiene actualizado", expanded=False):
+        st.write("El orquestador publica las capturas de actos. ChatGPT guarda la investigación de proveedores en Sheets. Este cuadro combina ambos y revisa los cierres cada minuto mientras está abierto, sin esperar a que se publique otro Top.")
+        st.caption("La computadora del orquestador debe permanecer encendida y conectada. Las cotizaciones y confirmaciones del proveedor conservan su fecha real; una recarga de pantalla no las renueva.")
+        prompt_path = Path(__file__).resolve().parents[1] / "docs" / "prompt_rir_top10_diario.md"
+        if prompt_path.is_file():
+            st.download_button("Descargar instrucciones de investigación diaria", prompt_path.read_text(encoding="utf-8"),
+                               file_name="prompt_rir_investigacion_diaria.md", mime="text/markdown", key="rir_research_prompt_download")
     _render_rir_daily_top10(top_frame, frame, current_acts)
     st.divider()
     st.markdown("### Investigación detallada")
