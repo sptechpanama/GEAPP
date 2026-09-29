@@ -19,6 +19,7 @@ from PIL import Image as PILImage
 
 
 SP_COMPANY_NAME = "SP Tech Solutions S.A."
+LP_DOCUMENTS_API_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -605,13 +606,27 @@ def render_lp_document(
     company_name: str,
     document_name: str,
     assets_dir: Path,
+    company_profile: Optional[LPCompanyProfile] = None,
 ) -> bytes:
-    profile = get_lp_company_profile(company_name)
+    profile = company_profile or get_lp_company_profile(company_name)
     document = Document(str(template_path))
 
     for paragraph in _iter_inner_paragraphs(document):
         original = str(paragraph.text or "")
-        transformed = _apply_company_identity(original, profile)
+        transformed = original
+        # The editable signatory belongs to the buying entity, not the bidder.
+        # Change only the entity's introduction and its standalone signature label.
+        if "pacto_de_integridad" in document_name:
+            position = str(replacements.get("[cargo_entidad]", "Representante Legal")).strip()
+            if not position:
+                raise ValueError("Indica el cargo del representante de la entidad para el pacto.")
+            transformed = re.sub(r"(en su calidad de\s+)Representante Legal(?=\s+de\s+\[entidad\])",
+                                 lambda match: match.group(1) + position, transformed, flags=re.I)
+            if transformed.strip().casefold() == "representante legal":
+                transformed = position
+        transformed = _apply_company_identity(transformed, profile)
+        if replacements.get("[identidad_contratista]") and transformed.startswith("Entre los suscritos a saber;"):
+            transformed = _replace_contractor_segment(transformed, str(replacements["[identidad_contratista]"]))
         transformed = _replace_tokens(transformed, replacements)
         if transformed != original:
             paragraph.text = transformed

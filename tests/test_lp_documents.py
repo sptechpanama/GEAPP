@@ -98,6 +98,21 @@ def _document_text(data: bytes) -> str:
     )
 
 
+@pytest.mark.parametrize("company,template", [("RS Engineering", "template_pacto_de_integridad.docx"),
+    ("RS Engineering", "template_pacto_de_integridad_sf.docx"),
+    ("RIR Medical", "template_pacto_de_integridad_rir.docx"),
+    ("RIR Medical", "template_pacto_de_integridad_sf_rir.docx"),
+    (SP_COMPANY_NAME, "template_pacto_de_integridad.docx"),
+    (SP_COMPANY_NAME, "template_pacto_de_integridad_sf.docx")])
+def test_buyer_position_changes_introduction_and_signature_without_changing_bidder(company, template):
+    rendered = render_lp_document(TEMPLATES / template, {**REPLACEMENTS, "[cargo_entidad]": "Director médico asignado"},
+        company_name=company, document_name="pacto_de_integridad.docx", assets_dir=ASSETS)
+    text = _all_word_text(rendered)
+    assert "en su calidad de Director médico asignado" in text
+    assert text.count("Director médico asignado") == 2
+    assert get_lp_company_profile(company).representative in text
+
+
 def _normalized_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 

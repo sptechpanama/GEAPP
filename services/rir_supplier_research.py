@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 RIR_TOP10_SHEET = "RIR_TOP10_DIARIO"
 RIR_TOP_LIMIT = 10
-RIR_TOP_SERVICE_VERSION = 7
+RIR_TOP_SERVICE_VERSION = 8
 RIR_RESEARCH_SHEET = "RIR_INVESTIGACION_PROVEEDORES"
 RIR_PRICES_SHEET = "RIR_PRECIOS_HISTORICOS"
 RIR_RESEARCH_SHEETS = (RIR_TOP10_SHEET, RIR_RESEARCH_SHEET, RIR_PRICES_SHEET)
@@ -399,6 +399,22 @@ def _http(value: object) -> str:
     return value if re.match(r"^https?://[^\s]+$", value, re.I) else ""
 
 
+def supplier_contact_evidence(row: Mapping) -> str:
+    """A named supplier and a traceable quotation/email can support a pending case.
+
+    A bare email or invented freshness is never a technical/economic approval.
+    Keep contact data out of URL columns and keep all original dates untouched.
+    """
+    supplier = _text(row.get("proveedor_objetivo")) or _text(row.get("proveedor_con_precio")) or _text(row.get("proveedor_potencial"))
+    contact = " ".join(_text(row.get(k)) for k in ("contacto_proveedor", "contacto_potencial"))
+    evidence = " ".join(_text(row.get(k)) for k in ("fuentes", "observaciones"))
+    email = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", contact)
+    traceable = re.search(r"(?:message[_ ]?ids?|thread[_ ]?id)\s*[:= ]\s*[a-zA-Z0-9_-]{6,}|(?:cotizaci[oó]n|quotation)\s*(?:n[oº.]?|#)?\s*\d{2,}", evidence, re.I)
+    if supplier and email and traceable:
+        return "Correo/cotización registrada; confirmar documentos y condiciones"
+    return ""
+
+
 def _research_candidate(row: Mapping) -> dict:
     """Adapt saved research to the executive view without fabricating a ranking."""
     item = dict(row)
@@ -464,8 +480,9 @@ def build_research_opportunities(research: pd.DataFrame | None, published: pd.Da
             blocker = blocker or "Falta identificar acto, ficha y renglón exactos"
         if research_column_key(_text(row.get("estado_investigacion"))) == "sin_proveedor_verificable":
             blocker = blocker or "Falta localizar un proveedor/producto concreto"
-        if not _http(row.get("enlace_producto_recomendado")):
-            blocker = blocker or "Falta un enlace al producto o proveedor localizado"
+        contact_evidence = supplier_contact_evidence(row)
+        if not _http(row.get("enlace_producto_recomendado")) and not contact_evidence:
+            blocker = blocker or "Falta un enlace al producto/proveedor o evidencia de contacto verificable"
         if not _http(row.get("enlace_acto")):
             blocker = blocker or "Falta el enlace oficial al acto"
         if row["vigencia"] != "Vigente" or blocker:
@@ -481,11 +498,15 @@ def build_research_opportunities(research: pd.DataFrame | None, published: pd.Da
                  and bool(_http(row.get("enlace_ficha_minsa")))
                  and evidence is not None and pd.Timedelta(0) <= clock - evidence <= pd.Timedelta(hours=36))
         row["situacion"] = "Lista para ofertar" if ready else "Para cotizar o confirmar"
+        row["evidencia_proveedor"] = contact_evidence or "Enlace al producto/proveedor registrado"
+        if not _http(row.get("enlace_producto_recomendado")):
+            row["situacion"] = "Para cotizar o confirmar"
+            row["que_falta"] = "Registrar enlace del producto/proveedor y verificar su cotización. " + row["que_falta"]
         if not _http(row.get("enlace_ficha_minsa")):
             row["que_falta"] = "Verificar enlace y ficha CTNI oficial. " + row["que_falta"]
         row["prioridad_publicada"] = row.get("ranking", 999) if row["origen_evaluacion"] != "Investigación detallada" else 999
         accepted.append(row)
-    eligible = pd.DataFrame(accepted, columns=list(dict.fromkeys([*reviewed.columns, "situacion", "prioridad_publicada"])))
+    eligible = pd.DataFrame(accepted, columns=list(dict.fromkeys([*reviewed.columns, "situacion", "prioridad_publicada", "evidencia_proveedor"])))
     if not eligible.empty:
         eligible["__ready"] = eligible["situacion"].eq("Lista para ofertar")
         eligible["__close"] = pd.to_datetime(eligible["cierre_verificado"], format="mixed", utc=True, errors="coerce")
@@ -513,6 +534,37 @@ def research_health(research: pd.DataFrame, current_acts: pd.DataFrame | None, *
         if stale:
             issues.append(f"{stale} actos tienen una captura de más de 36 horas o sin fecha. Revisar la última ejecución de CL abiertas, programadas y licitaciones en el orquestador.")
     return issues
+
+
+def pending_research_acts(research: pd.DataFrame | None, current_acts: pd.DataFrame | None, *, now=None) -> pd.DataFrame:
+    """Current act/ficha pairs lacking a study; do not invent a row or supplier."""
+    if current_acts is None or current_acts.empty:
+        return pd.DataFrame()
+    known = {(_key(row)[0], _key(row)[1]) for row in (research.to_dict("records") if research is not None else [])}
+    unique = {}
+    for act in current_acts.to_dict("records"):
+        for ficha in re.findall(r"\b\d{4,7}\b", _text(act.get("fichas_sin_requisitos"))):
+            key = (_text(act.get("numero_acto")), ficha)
+            if key[0] and key not in known:
+                unique[key] = {"numero_acto": key[0], "ficha": ficha, "enlace_acto": act.get("enlace_acto", ""),
+                               "fecha_cierre": act.get("fecha_cierre", ""), "estado_investigacion": "Pendiente de investigar"}
+    checked = assess_research_validity(pd.DataFrame(unique.values()), current_acts, now=now)
+    if checked.empty:
+        return checked
+    return checked.loc[checked["vigencia"].eq("Vigente")].reset_index(drop=True)
+
+
+def research_publication_issues(research: pd.DataFrame | None) -> list[str]:
+    """Surface stale metadata without turning a date written in prose into approval."""
+    inconsistent = 0
+    for row in (research.to_dict("records") if research is not None else []):
+        structured = _local_timestamp(row.get("actualizado_en"))
+        if structured is None:
+            continue
+        dates = re.findall(r"\[RIR_[^\]\n]*?(\d{4}-\d{2}-\d{2})[^\]\n]*\]", _text(row.get("observaciones")))
+        if any((parsed := _local_timestamp(value)) is not None and parsed.date() > structured.date() for value in dates):
+            inconsistent += 1
+    return ([f"{inconsistent} investigaciones contienen seguimientos posteriores a su fecha de actualización. ChatGPT debe guardar la fecha real de la revisión en actualizado_en y publicar el Top del mismo corte; la app no cambia esas fechas."] if inconsistent else [])
 
 
 def prepare_research_table(frame: pd.DataFrame, *, include_inactive: bool = False) -> pd.DataFrame:

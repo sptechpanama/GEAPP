@@ -181,6 +181,15 @@ No afirmes que RIR ya adjudicó el acto ni prometas una compra. Indica que se es
 evaluando una oportunidad pública y que la oferta depende de validación técnica
 y comercial.
 
+### Publicación completa y seguimiento (obligatorio)
+
+- Compara TODAS las capturas actuales de CL abiertas, programadas y AP sin requisitos con la investigación existente por acto y ficha; investiga también las nuevas. No reduzcas la corrida a seguir los proveedores ya contactados.
+- Actualiza `actualizado_en` cuando realmente revises o cambies una investigación. Una nota de seguimiento fechada dentro de `observaciones` no sustituye este campo. No refresques fechas de cotizaciones, confirmaciones o capturas que no verificaste.
+- Publica siempre investigación y Top del mismo corte, con la misma marca temporal para las filas que resume el Top. Guarda además las evidencias originales y su fecha.
+- Un proveedor identificado, con correo válido y evidencia trazable de cotización o mensaje, puede aparecer como `Para cotizar o confirmar` aunque no haya URL pública. Conserva su correo en `contacto_proveedor`, referencia de cotización o message_id en `fuentes` y explica el enlace faltante. Nunca inventes enlaces ni conviertas correos en URLs. Completa `enlace_producto_recomendado` en el Top cuando exista una URL comprobada.
+- Separa la recepción de una respuesta del cumplimiento técnico: un vendedor puede decir que cumple y su catálogo contradecirlo. Esas discrepancias deben permanecer en `que_falta`; si se demuestra incumplimiento, registra el bloqueo.
+- Relee ambas hojas después de publicar y reporta fecha de corte, número de estudios nuevos, actualizados y posiciones del Top. Si falla la escritura, informa el error sin declarar éxito. No reescribas la captura del scraper.
+
 ### Escritura segura en Google Sheets
 
 Actualiza la hoja `RIR_TOP10_DIARIO` con exactamente estas columnas A:Y y en este

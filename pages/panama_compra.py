@@ -52,7 +52,7 @@ from services.panama_compra_db_filters import (
 from services import panama_compra_no_requirements as _no_requirements_rules
 from services import rir_supplier_research as _rir_supplier_research
 
-if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 7:
+if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 8:
     try:
         _rir_supplier_research = importlib.reload(_rir_supplier_research)
     except Exception:
@@ -7459,6 +7459,7 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
         "que_falta": "Qué falta confirmar",
         "accion_inmediata": "Acción inmediata",
         "proveedor_objetivo": "Proveedor objetivo",
+        "evidencia_proveedor": "Evidencia del proveedor",
         "enlace_acto": "Acto",
         "enlace_ficha_minsa": "Ficha CTNI",
         "enlace_producto_recomendado": "Proveedor/producto",
@@ -7650,6 +7651,9 @@ def _render_rir_supplier_research() -> None:
     st.caption("Recarga automática cada 60 segundos mientras esta sección está abierta. Recargar datos consulta Sheets; no ejecuta una búsqueda de proveedores.")
     for issue in _rir_supplier_research.research_health(frame, current_acts):
         st.warning(issue)
+    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) >= 8:
+        for issue in _rir_supplier_research.research_publication_issues(frame):
+            st.warning(issue)
     with st.expander("Cómo se mantiene actualizado", expanded=False):
         st.write("El orquestador publica las capturas de actos. ChatGPT guarda la investigación de proveedores en Sheets. Este cuadro combina ambos y revisa los cierres cada minuto mientras está abierto, sin esperar a que se publique otro Top.")
         st.caption("La computadora del orquestador debe permanecer encendida y conectada. Las cotizaciones y confirmaciones del proveedor conservan su fecha real; una recarga de pantalla no las renueva.")
@@ -7657,7 +7661,21 @@ def _render_rir_supplier_research() -> None:
         if prompt_path.is_file():
             st.download_button("Descargar instrucciones de investigación diaria", prompt_path.read_text(encoding="utf-8"),
                                file_name="prompt_rir_investigacion_diaria.md", mime="text/markdown", key="rir_research_prompt_download")
+        repair_path = Path(__file__).resolve().parents[1] / "docs" / "prompt_rir_reparar_publicacion.md"
+        if repair_path.is_file():
+            st.download_button("Descargar prompt para corregir la publicación en ChatGPT", repair_path.read_text(encoding="utf-8"),
+                               file_name=repair_path.name, mime="text/markdown", key="rir_research_repair_prompt_download")
     _render_rir_daily_top10(top_frame, frame, current_acts)
+    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) >= 8:
+        waiting = _rir_supplier_research.pending_research_acts(frame, current_acts)
+        with st.expander(f"Actos y fichas pendientes de investigar: {len(waiting):,}", expanded=False):
+            st.caption("Capturas vigentes sin estudio asociado a esa ficha y acto. Son trabajo pendiente para ChatGPT; no son recomendaciones de compra ni tienen proveedor validado.")
+            if waiting.empty:
+                st.info("No hay nuevas combinaciones de acto y ficha verificadas pendientes de investigar en esta captura.")
+            else:
+                st.dataframe(waiting[["numero_acto", "ficha", "cierre_verificado", "enlace_acto"]].rename(
+                    columns={"numero_acto": "Acto", "ficha": "Ficha", "cierre_verificado": "Cierre", "enlace_acto": "Enlace"}),
+                    hide_index=True, column_config={"Enlace": st.column_config.LinkColumn("Enlace", display_text="Abrir acto")})
     st.divider()
     st.markdown("### Investigación detallada")
     st.caption(

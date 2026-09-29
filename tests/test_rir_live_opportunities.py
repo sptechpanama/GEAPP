@@ -3,6 +3,7 @@ import pytest
 
 from services.rir_supplier_research import (
     _deadline, assess_research_validity, build_research_opportunities, research_health,
+    pending_research_acts, research_publication_issues, supplier_contact_evidence,
 )
 
 NOW = "2026-09-17T14:00:00-05:00"
@@ -206,3 +207,35 @@ def test_one_incomplete_source_does_not_hide_other_confirmed_sources():
     live = read_current_research_acts(Reader())
     assert len(live) == 2 and len(live.attrs['source_errors']) == 1
     assert len(build_research_opportunities(pd.DataFrame([ROW]), None, live, now=NOW)[0]) == 1
+
+
+def test_supplier_with_traceable_email_can_be_reviewed_without_a_public_website():
+    changes = {**READY, "fecha_cierre": "2026-09-22", "contacto_potencial": "sales@manufacturer.example", "observaciones": "Cotización #1567. Pendiente de verificar configuración y flete."}
+    rows, excluded = board(row=changes)
+    assert excluded.empty and len(rows) == 1
+    assert rows.iloc[0].situacion == "Para cotizar o confirmar"
+    assert rows.iloc[0].enlace_producto_recomendado == ""
+    assert "Correo/cotización" in rows.iloc[0].evidencia_proveedor
+    assert "Registrar enlace" in rows.iloc[0].que_falta
+    assert board(row={**changes, "observaciones": "Sin evidencia disponible"})[0].empty
+
+
+@pytest.mark.parametrize("change", [{"verificado_en": "2026-09-01"}, {"tipo_acto": "Acto mixto", "tipo_adjudicacion": "Global"}, {"fichas_con_requisitos": "41364 (CT)"}])
+def test_traceable_contact_never_bypasses_current_source_or_regulatory_requirements(change):
+    assert board(row={"contacto_potencial": "sales@maker.example", "observaciones": "message_id: abc123456"}, live=change)[0].empty
+
+
+def test_unknown_products_are_visible_for_new_research_without_inventing_a_supplier():
+    live = pd.DataFrame([LIVE, {**LIVE, "numero_acto": ACT + "X", "fichas_sin_requisitos": "60939, 48589"}, LIVE])
+    rows = pending_research_acts(pd.DataFrame([ROW]), live, now=NOW)
+    assert sorted(rows.ficha) == ["48589", "60939"]
+    assert "proveedor_objetivo" not in rows and "renglon" not in rows
+    assert set(rows.estado_investigacion) == {"Pendiente de investigar"}
+    assert pending_research_acts(None, pd.DataFrame([{**LIVE, "fecha_cierre": "2026-09-01"}]), now=NOW).empty
+
+
+def test_follow_up_written_in_notes_does_not_renew_structured_evidence_date():
+    frame = pd.DataFrame([{**ROW, "observaciones": "[RIR_NOCHE_2026-09-28] Revisar proveedor"}])
+    assert research_publication_issues(frame)
+    assert frame.iloc[0].actualizado_en == ROW["actualizado_en"]
+    assert not research_publication_issues(pd.DataFrame([ROW]))

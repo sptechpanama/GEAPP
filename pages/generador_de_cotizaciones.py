@@ -30,7 +30,12 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from sheets import get_client, read_worksheet, write_worksheet
 from entities import client_selector, _load_clients, WS_CLIENTES
 from services.access_control import require_page_access
-from services.lp_documents import SP_COMPANY_NAME, render_lp_document
+from services import lp_documents as _lp_documents
+if getattr(_lp_documents, "LP_DOCUMENTS_API_VERSION", 0) < 2:
+    import importlib
+    _lp_documents = importlib.reload(_lp_documents)
+SP_COMPANY_NAME = _lp_documents.SP_COMPANY_NAME
+render_lp_document = _lp_documents.render_lp_document
 from ui.theme import apply_global_theme
 
 st.set_page_config(page_title="Generador de cotizaciones", page_icon="🧾", layout="wide")
@@ -1464,6 +1469,7 @@ def _build_lp_doc_replacements(
     numero_acto: str,
     lugar_entrega: str,
     tiempo_entrega: str,
+    cargo_entidad: str = "Representante Legal",
 ) -> dict[str, str]:
     replacements = _fecha_spanish_tokens(fecha_base)
     replacements.update(
@@ -1475,6 +1481,7 @@ def _build_lp_doc_replacements(
             "[titulo]": str(titulo or "").strip(),
             "[numero_de_acto]": str(numero_acto or "").strip(),
             "[cedula]": str(cedula or "").strip(),
+            "[cargo_entidad]": str(cargo_entidad or "").strip(),
             "[lugar]": str(lugar_entrega or "").strip(),
             "[entrega]": str(tiempo_entrega or "").strip(),
         }
@@ -1499,6 +1506,7 @@ def _build_lp_documents(
     numero_acto: str,
     lugar_entrega: str,
     tiempo_entrega: str,
+    cargo_entidad: str = "Representante Legal",
 ) -> list[dict[str, Any]]:
     specs = LP_DOC_SPECS.get(empresa_full) or LP_DOC_SPECS["RS Engineering"]
     docs_out: list[dict[str, Any]] = []
@@ -1513,6 +1521,7 @@ def _build_lp_documents(
             numero_acto=numero_acto,
             lugar_entrega=lugar_entrega,
             tiempo_entrega=tiempo_entrega,
+            cargo_entidad=cargo_entidad,
         )
         # Ajuste específico de Doc_Gen:
         # medidas/no-incapacidad/desglose/nota/carta usan "representante_documentos".
@@ -3388,6 +3397,7 @@ TAB_OPTIONS = [
     "Cotizacion - Estandar",
     "Historial de cotizaciones",
     LP_DOC_TAB_NAME,
+    "Anestesia-Docs",
 ]
 pending_tab = st.session_state.pop(PENDING_TAB_KEY, None)
 if pending_tab in TAB_OPTIONS:
@@ -3403,6 +3413,12 @@ active_tab = st.segmented_control(
     key="cotizaciones_tab",
     label_visibility="collapsed",
 )
+
+if active_tab == "Anestesia-Docs":
+    from services.anestesia_view import render_anestesia_docs
+    if creds is None:
+        client, creds = get_client()
+    render_anestesia_docs(creds, _current_user())
 
 if active_tab == "Cotización - Panamá Compra":
     st.subheader("Generar cotización desde Panamá Compra")
@@ -3855,12 +3871,15 @@ if active_tab == LP_DOC_TAB_NAME:
         )
     with col_lp5:
         st.text_input("Cédula representante", key="lp_doc_cedula", placeholder="8-888-888")
+        st.text_input("Cargo del representante de la entidad (Pacto)", key="lp_doc_cargo_entidad",
+                      value="Representante Legal", placeholder="Director, representante legal, delegado…")
         st.date_input("Fecha del documento", key="lp_doc_fecha")
 
     if st.button("Generar documentos LP"):
         representante_pacto = str(st.session_state.get("lp_doc_representante_pacto") or "").strip()
         representante_docs = str(st.session_state.get("lp_doc_representante_docs") or "").strip()
         cedula_lp = str(st.session_state.get("lp_doc_cedula") or "").strip()
+        cargo_lp = str(st.session_state.get("lp_doc_cargo_entidad") or "").strip()
         enlace_lp = str(st.session_state.get("lp_doc_enlace") or "").strip()
 
         missing = []
@@ -3872,6 +3891,8 @@ if active_tab == LP_DOC_TAB_NAME:
             missing.append("Representante legal (Documentos)")
         if not cedula_lp:
             missing.append("Cédula representante")
+        if not cargo_lp:
+            missing.append("Cargo del representante de la entidad")
 
         if missing:
             st.warning("Completa estos campos: " + ", ".join(missing))
@@ -3982,6 +4003,7 @@ if active_tab == LP_DOC_TAB_NAME:
                     numero_acto=numero_lp,
                     lugar_entrega=lugar_lp,
                     tiempo_entrega=tiempo_lp,
+                    cargo_entidad=cargo_lp,
                 )
 
                 zip_buffer = BytesIO()
