@@ -44,6 +44,26 @@ def fixture():
     return source, config, docs
 
 
+@pytest.mark.parametrize("catalog,model", [("K", "LB4330K"), ("C", "LB4330C")])
+def test_full_certificate_covers_both_variants_but_quote_selects_only_one(catalog, model):
+    source, config, docs = fixture()
+    config.update(catalog=catalog, catalog_model=model)
+    for doc in docs:
+        doc.update(catalogs="K,C", models="LB4330K, LB4330C", evidence="CT páginas 1 y 2; catálogo página 4")
+    checks, chosen = validate_package(source, config, docs)
+    assert all(c["estado"] == "Vigente documentalmente" for c in checks), checks
+    assert chosen["criterio_tecnico"]["models"] == "LB4330K, LB4330C"
+
+
+@pytest.mark.parametrize("catalog,model", [("C", "LB4330K"), ("K", "LB4330C")])
+def test_full_certificate_does_not_allow_wrong_mask_selection(catalog, model):
+    source, config, docs = fixture()
+    config.update(catalog=catalog, catalog_model=model)
+    for doc in docs: doc.update(catalogs="K,C", models="LB4330K,LB4330C")
+    checks, _ = validate_package(source, config, docs)
+    assert any("corresponde al catálogo" in c["motivo"] for c in checks)
+
+
 @pytest.mark.parametrize("mode,subtotal,tax,total", [("exento", "18000.00", "0.00", "18000.00"),
     ("adicional", "18000.00", "1260.00", "19260.00"), ("incluido", "16822.43", "1177.57", "18000.00")])
 def test_tax_never_double_counts_unit_price(mode, subtotal, tax, total):

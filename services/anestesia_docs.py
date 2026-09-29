@@ -207,6 +207,9 @@ def validate_package(source: dict, config: dict, library: list[dict], *, today: 
         errors.append("La vigencia debe cubrir al menos la fecha de presentación del acto.")
     if config.get("catalog") not in CATALOGS:
         errors.append("Selecciona catálogo C (5) o K (4).")
+    model_catalog = {"lb4330k": "K", "lb4330c": "C"}.get(normalized(config.get("catalog_model")))
+    if model_catalog and config.get("catalog") != model_catalog:
+        errors.append(f"El modelo {config['catalog_model']} corresponde al catálogo {model_catalog}. Corrige la selección y el modelo de esta oferta.")
     if config.get("source_confirmed") is not True:
         errors.append("Confirma los requisitos y anexos del acto antes de preparar el expediente.")
     if not config.get("delivery") or not config.get("delivery_place"):

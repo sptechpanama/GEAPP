@@ -3415,10 +3415,14 @@ active_tab = st.segmented_control(
 )
 
 if active_tab == "Anestesia-Docs":
-    from services.anestesia_view import render_anestesia_docs
+    import importlib
+    from services import anestesia_view
+    if getattr(anestesia_view, "ANESTESIA_UI_VERSION", 0) < 2:
+        for module in ("anestesia_docs", "anestesia_storage", "anestesia_source", "anestesia_documents", "anestesia_view"):
+            importlib.reload(importlib.import_module("services." + module))
     if creds is None:
         client, creds = get_client()
-    render_anestesia_docs(creds, _current_user())
+    anestesia_view.render_anestesia_docs(creds, _current_user())
 
 if active_tab == "Cotización - Panamá Compra":
     st.subheader("Generar cotización desde Panamá Compra")

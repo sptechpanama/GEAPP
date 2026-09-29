@@ -8,6 +8,7 @@ import time
 import uuid
 
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.errors import HttpError
 
 from services.anestesia_docs import file_hash, now_iso
 
@@ -35,8 +36,21 @@ class AnestesiaStorage:
         self.sheet_id, self.parent_id = sheet_id, parent_id
 
     def ensure_tables(self):
-        metadata = self.sheets.spreadsheets().get(spreadsheetId=self.sheet_id,
-            fields="sheets.properties").execute()
+        try:
+            metadata = self.sheets.spreadsheets().get(spreadsheetId=self.sheet_id,
+                fields="sheets.properties").execute()
+        except HttpError as exc:
+            # PC_MANUAL_SHEET_ID can be a historical XLSX. Reuse the existing
+            # native orchestrator book; never convert it or create a second queue.
+            office = exc.resp.status == 400 and "must not be an office file" in str(exc).lower()
+            if not office or self.sheet_id == SHEET_ID:
+                raise
+            metadata = self.sheets.spreadsheets().get(spreadsheetId=SHEET_ID,
+                fields="sheets.properties").execute()
+            titles = {s["properties"]["title"] for s in metadata.get("sheets", [])}
+            if not {"pc_config", "pc_manual"}.issubset(titles):
+                raise ValueError("El libro alternativo no contiene la cola del orquestador. No se modificó ningún archivo.") from exc
+            self.sheet_id = SHEET_ID
         existing = {s["properties"]["title"] for s in metadata.get("sheets", [])}
         missing = [name for name in TABLES if name not in existing]
         if missing:

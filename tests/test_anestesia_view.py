@@ -14,6 +14,7 @@ SOURCE = {"url": "https://www.panamacompra.gob.pa", "number": "ACTO-PRUEBA", "pu
 
 class Storage:
     sheet_id = "test-sheet-ui"
+    parent_id = "test-drive-ui"
     def __init__(self):
         self.tables = {"ANESTESIA_EXPEDIENTES": [{"id": "a" * 32, "number": "ACTO-PRUEBA", "source_id": "source",
             "state": "Datos capturados", "updated_at": "2026-09-28", "detail": "Ejemplo", "url": "https://www.panamacompra.gob.pa"}],
@@ -54,3 +55,47 @@ def test_google_read_failure_is_visible_instead_of_erasing_library():
         app.run()
         assert not app.exception and any("corte de red" in e.value for e in app.error)
         assert storage.tables["ANESTESIA_EXPEDIENTES"]
+
+
+def test_resolved_workbook_survives_reruns_and_configuration_changes():
+    view._records.clear(); view._json.clear()
+    connections = []
+    class ResolvingStorage(Storage):
+        def __init__(self, *args, sheet_id, parent_id):
+            super().__init__()
+            self.sheet_id, self.parent_id = sheet_id, parent_id
+        def ensure_tables(self):
+            connections.append(self.sheet_id)
+            if self.sheet_id == "office": self.sheet_id = "native"
+        def rows(self, name):
+            assert self.sheet_id in {"native", "other-native"}
+            return super().rows(name)
+    with patch.object(view, "AnestesiaStorage", ResolvingStorage), patch.object(view, "build"):
+        app = AppTest.from_string("from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')", default_timeout=20)
+        app.secrets["app"] = {"PC_MANUAL_SHEET_ID": "office"}
+        app.session_state["anes_tables_ready"] = True  # session predating the fix
+        app.run()
+        assert not app.exception and not app.error
+        app.radio[0].set_value("Biblioteca y vigencias").run()
+        assert not app.exception and not app.error
+        assert connections == ["office"]
+        app.secrets["app"] = {"PC_MANUAL_SHEET_ID": "other-native"}
+        app.run()
+        assert not app.exception and not app.error
+        assert connections == ["office", "other-native"]
+
+
+def test_participation_evidence_is_visible_without_changing_offer_selection():
+    view._records.clear(); view._json.clear()
+    storage = Storage()
+    job = storage.tables["ANESTESIA_EXPEDIENTES"][0]
+    job["participation"] = {"model": "LB4330K", "catalog": "K",
+        "quotation_url": "https://drive.google.com/file/d/quote/view", "folder_url": "https://drive.google.com/drive/folders/history",
+        "observations": ["Primera cotización incorrecta: conservar solo como antecedente."]}
+    with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"):
+        app = AppTest.from_string("from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')", default_timeout=20)
+        app.secrets["app"] = {}
+        app.run()
+        assert not app.exception and not app.error
+        assert any("LB4330K" in m.value for m in app.markdown)
+        assert "config" not in job  # archive does not authorize or create a new bid

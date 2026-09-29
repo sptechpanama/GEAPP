@@ -14,6 +14,8 @@ from services.anestesia_docs import (CATALOGS, COMPANY, KINDS, PANAMA, now_iso, 
 from services.anestesia_source import route, source_is_closed
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
+ANESTESIA_UI_VERSION = 2
+
 
 @st.cache_data(ttl=20, max_entries=30, show_spinner=False)
 def _records(sheet_id, table, _storage):
@@ -76,7 +78,8 @@ def _library(storage, actor):
         expires = right.date_input("Fecha de vencimiento (si consta)", value=parse_date(previous.get("expires")))
         catalogs = left.multiselect("Catálogos expresamente cubiertos", ["C", "K"], default=[c for c in previous.get("catalogs", "").split(",") if c in CATALOGS], format_func=CATALOGS.get)
         fichas = right.text_input("Fichas expresamente cubiertas", value=previous.get("fichas", ""), placeholder="43358")
-        models = st.text_input("Modelos exactos expresamente cubiertos (separados por coma)", value=previous.get("models", ""), placeholder="LB4330K")
+        models = st.text_input("Modelos exactos expresamente cubiertos (separados por coma)", value=previous.get("models", ""), placeholder="Ej.: LB4330K, LB4330C")
+        st.caption("Un CT puede cubrir varios modelos. Registra todas sus páginas; la cotización ofrecerá únicamente el modelo seleccionado para el acto.")
         act = st.text_input("Número de acto específico, si aplica", value=previous.get("act", ""), help="Obligatorio para retorsión y calidad. Déjalo vacío en certificados generales.")
         evidence = st.text_area("Evidencia de verificación: páginas, fechas, titular, producto y alcance",
             value=previous.get("evidence", ""), placeholder="Ej.: página 1, vigencia impresa hasta..., emitido para RIR..., modelo LB4330K...")
@@ -130,6 +133,7 @@ def _configure(source, job, storage, actor):
         tax_evidence = st.text_input("Respaldo del tratamiento tributario", value=cfg.get("tax_evidence", ""))
         brand = c1.text_input("Marca", value=cfg.get("catalog_brand", ""))
         model = c2.text_input("Modelo / referencia exacta", value=cfg.get("catalog_model", ""), placeholder="Verificar en el catálogo y CT")
+        st.caption("MFLAB: K = LB4330K, mascarilla talla 4; C = LB4330C, mascarilla talla 5. El CT puede cubrir ambos; esta oferta debe indicar cuál se entrega.")
         delivery = st.text_area("Calendario de entregas completo", value=cfg.get("delivery", ""),
             placeholder="Ej.: 300 unidades a 30 días; 300 a 45 días; 300 a 60 días calendario desde...")
         place = st.text_input("Lugar exacto de entrega", value=cfg.get("delivery_place", ""))
@@ -206,9 +210,14 @@ def render_anestesia_docs(creds, actor):
         build("sheets", "v4", credentials=creds, cache_discovery=False),
         sheet_id=app.get("PC_MANUAL_SHEET_ID", SHEET_ID), parent_id=app.get("DRIVE_COTIZACIONES_FOLDER_ID", DRIVE_PARENT))
     try:
-        if not st.session_state.get("anes_tables_ready"):
+        configuration = (storage.sheet_id, storage.parent_id)
+        ready = st.session_state.get("anes_workbook_ready", {})
+        if ready.get("configuration") == configuration:
+            storage.sheet_id = ready["resolved_id"]
+        else:
             storage.ensure_tables()
-            st.session_state["anes_tables_ready"] = True
+            st.session_state["anes_workbook_ready"] = {
+                "configuration": configuration, "resolved_id": storage.sheet_id}
         left, right = st.columns([4, 1])
         section = left.radio("Vista", ["Expedientes", "Biblioteca y vigencias"], horizontal=True, label_visibility="collapsed")
         if right.button("Actualizar estado", key="anes_refresh"):
@@ -244,6 +253,16 @@ def render_anestesia_docs(creds, actor):
         st.caption("Último cambio: " + job.get("updated_at", ""))
         if job.get("folder_url"):
             st.link_button("Abrir carpeta e historial del expediente", job["folder_url"])
+        participation = job.get("participation", {})
+        if participation:
+            with st.expander("Participación anterior de RIR y documentos recuperados", expanded=False):
+                st.write(f"Modelo ofrecido en la cotización: **{participation.get('model', 'Pendiente')}** · "
+                         f"Catálogo **{participation.get('catalog', 'Pendiente')}**.")
+                st.caption("Antecedente documental: no sustituye la revisión de requisitos ni los datos de una nueva oferta.")
+                st.link_button("Abrir cotización de referencia", participation["quotation_url"])
+                st.link_button("Ver adjuntos originales de la participación", participation["folder_url"])
+                for note in participation.get("observations", []):
+                    st.info(note)
         if job.get("state") in {"En cola", "Procesando"}:
             st.info("Puedes cambiar de página: la tarea continúa en el orquestador. Usa Actualizar estado para consultar el resultado.")
             return
