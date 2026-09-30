@@ -80,3 +80,14 @@ de correo en bandeja ni disponibilidad continua del portal por comprobar aceptac
 Evidencia local de solo lectura: `C:/Users/rodri/tmp/audit_ct43358_20260930/`.
 Incluye listados originales, 1,262 detalles, comparación Sheets, anexos, OCR, simulaciones
 y resultados del detector. Los originales del portal y las hojas operativas no se alteraron.
+
+## Activación verificada
+
+Se esperó a que Otras fuentes terminara correctamente a las 12:33:44 antes de reiniciar
+el orquestador libre de trabajos. La nueva instancia, PID 17016, inició a las 12:35:04.
+CT RIR y el recordatorio 43358 terminaron su comprobación a las 12:35:13 sin errores,
+sin pendientes ni envíos nuevos. El registro de alertas enviadas y la última corrida
+exitosa de Otras fuentes se conservaron íntegros.
+La ejecución adicional del barrido completo, con escritura y SMTP bloqueados para la
+auditoría, recorrió las 15 hojas: diez actos de fichas vigiladas y los mismos tres de
+43358. No hubo coincidencias adicionales de 43358 en las hojas Ley 419.
