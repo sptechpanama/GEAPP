@@ -15,7 +15,7 @@ from services.anestesia_source import route, source_is_closed
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 3
+ANESTESIA_UI_VERSION = 4
 
 
 @st.cache_data(ttl=20, max_entries=30, show_spinner=False)
@@ -306,7 +306,8 @@ def _health_panel(storage):
         st.caption("Los documentos en Drive se conservan. Reintenta con Actualizar estado; no se consideran faltantes por un fallo de conexión.")
         return
     today = datetime.now(PANAMA).date()
-    _table(library_health(rows, as_of=today, catalog=catalog))
+    _table([{key: value for key, value in row.items() if key != "Qué falta / comprobación"}
+            for row in library_health(rows, as_of=today, catalog=catalog)])
     st.caption(f"Control al {today:%d/%m/%Y} (Panamá). Se muestra la última versión aplicable; se actualiza cada 60 segundos mientras esta pestaña está abierta. "
                "Registro Público, retorsión y calidad se verifican contra el pliego de cada acto. "
                "La revisión documental no sustituye la consulta de autenticidad al emisor.")
