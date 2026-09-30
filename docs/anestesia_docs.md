@@ -7,6 +7,27 @@ La captura y conversión de documentos se ejecutan en la cola `pc_manual` del or
 
 ## Secuencia
 
+Al abrir la pestaña aparece **Documentos actuales y vigencias**: una fila por documento
+aplicable al catálogo K o C. Se muestran la última versión, emisión, vencimiento,
+enlace al original y motivo del estado. El historial completo queda en un desplegable
+de Biblioteca y vigencias. Los estados diferencian Vigente documentalmente, Vence hoy,
+Vence pronto (7 días), Vencido, Falta, Pendiente de verificar y Según pliego.
+El panel consulta de nuevo cada 60 segundos mientras está abierto, usando la fecha de Panamá.
+Un corte de red se informa como tal; no se interpreta como biblioteca vacía.
+
+Para reemplazar un certificado: **Biblioteca y vigencias → seleccionar documento o Nuevo PDF →
+adjuntar original actualizado → registrar datos y evidencia → Guardar nueva versión y verificación**.
+DGI/CSS se contrastan contra el emisor, titular y fechas impresas del PDF; si es escaneado,
+se intenta OCR en Drive. La carga queda pendiente si no puede comprobarse o no coincide.
+Marcar la casilla de revisión no anula esas comprobaciones. La huella vincula la validación
+al archivo y sus metadatos. En los otros documentos se conserva la revisión registrada
+de alcance y formalidades: el programa no sustituye al emisor ni certifica autenticidad.
+
+Antes de crear siquiera la cotización, el worker comprueba también los PDF reales y sus
+huellas, además de las reglas del expediente. Actualizar una fecha en la interfaz o
+cargar una nueva versión incompleta no permite utilizar silenciosamente una versión anterior.
+La vigencia debe cubrir la presentación del acto, aunque el documento todavía sea válido hoy.
+
 1. **Consultar acto y anexos**: introducir el enlace de PanamáCompra. Se verifica que el identificador y el número coincidan y se conservan los anexos originales. Los PDF escaneados se leen mediante OCR de Drive. Una captura incompleta bloquea la preparación.
 2. **Biblioteca y vigencias**: cargar un PDF actualizado o seleccionar uno guardado para revisar sus metadatos. Registrar emisión, vencimiento, titular, ficha/modelo cubiertos y evidencia con página. Confirmar notaría, apostilla e idioma cuando correspondan. Guardar conserva el original y añade una versión; nunca renueva las fechas por haber subido el archivo.
 3. **Datos y preparación**: elegir C (5) o K (4); introducir precio **unitario**, ITBMS exento/adicional/incluido, marca y modelo, entregas completas, lugar, garantía/esterilidad y datos del representante de la entidad para el pacto. Revisar requisitos adicionales.

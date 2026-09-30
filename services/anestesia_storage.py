@@ -141,15 +141,23 @@ class AnestesiaStorage:
     def json_file(self, file_id):
         return json.loads(self.get_bytes(file_id, max_size=8 * 1024 * 1024).decode("utf-8"))
 
+    def _validated_metadata(self, data, metadata):
+        from services.anestesia_health import certificate_content_check
+        validation = certificate_content_check(data, metadata)
+        if metadata.get('kind') in {'css', 'dgi'} and validation['unreadable_pages']:
+            try:
+                folder = self.folder('Lectura de certificados', self.root())
+                text = self.convert_document(data, f"{metadata['kind']}_{file_hash(data)[:12]}.pdf", folder, pdf_input=True).decode('utf8')
+                validation = certificate_content_check(data, metadata, ocr_text=text)
+            except Exception:
+                validation['errors'].append('No se pudo completar la lectura OCR. El original se conserva pendiente; reintenta su verificación.')
+        metadata = {**metadata, "content_validation": validation}
+        if validation["errors"]:
+            metadata["verified"] = False
+        return metadata
+
     def upload_document(self, name, data, metadata, *, actor):
-        import fitz
-        try:
-            doc = fitz.open(stream=data, filetype="pdf")
-            if doc.is_encrypted or not len(doc):
-                raise ValueError("PDF cifrado o vacío")
-            doc.close()
-        except Exception as exc:
-            raise ValueError("Adjunta un PDF legible, sin contraseña, con todas sus páginas.") from exc
+        metadata = self._validated_metadata(data, metadata)
         ident = uuid.uuid4().hex
         folder = self.folder("Biblioteca de documentos", self.root())
         file = self.put(folder, f"{metadata['kind'].replace(':', '-')}_{ident[:8]}_{safe_name(name)}", data, "application/pdf")
@@ -165,6 +173,8 @@ class AnestesiaStorage:
         data = self.get_bytes(original["file_id"])
         if file_hash(data) != original["sha256"]:
             raise ValueError("El PDF cambió en Drive. Carga su nueva versión antes de verificarlo.")
+        checked = self._validated_metadata(data, {**original, **metadata})
+        metadata = {**metadata, 'verified': checked.get('verified', False), 'content_validation': checked['content_validation']}
         ident = uuid.uuid4().hex
         document = {**original, **metadata, "id": ident, "created_at": now_iso(), "actor": actor,
                     "previous_id": original["id"]}

@@ -209,7 +209,10 @@ class FakeStorage:
         self.saved = {"id": IDENT, "number": ACT, "state": "Datos capturados", "source_id": "source"}
         self.tables = {"ANESTESIA_DOCUMENTOS": deepcopy(docs), "ANESTESIA_REVISIONES": []}
         for item in self.tables["ANESTESIA_DOCUMENTOS"]:
-            data = ("original " + item["kind"]).encode()
+            issuer = 'DIRECCION GENERAL DE INGRESOS' if item['kind'] == 'dgi' else 'CAJA DEL SEGURO SOCIAL\nNumero patronal: 123'
+            with fitz.open() as pdf:
+                pdf.new_page().insert_text((40, 40), f"{issuer}\nRIR MEDICAL ENGINEERING\nEmision: {item['issued']}\nValido hasta: {item['expires']}")
+                data = pdf.tobytes()
             item["sha256"] = file_hash(data); self.objects[item["file_id"]] = data
     def job(self, ident): return dict(self.saved)
     def save_job(self, changes): self.saved.update(changes); return dict(self.saved)
@@ -236,6 +239,22 @@ def generated(monkeypatch):
     review = {**approval(manifest), "id": "review"}
     storage.tables["ANESTESIA_REVISIONES"].append(review)
     return source, storage, manifest
+
+
+def test_wrong_certificate_content_blocks_before_creating_quotation(monkeypatch):
+    source, config, docs = fixture()
+    storage = FakeStorage(source, docs)
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((40, 40), 'COTIZACION DE PRUEBA - NO ES UN PAZ Y SALVO')
+        data = pdf.tobytes()
+    storage.objects['css'] = data
+    next(d for d in storage.tables['ANESTESIA_DOCUMENTOS'] if d['kind'] == 'css')['sha256'] = file_hash(data)
+    before = set(storage.objects)
+    monkeypatch.setattr(worker, 'capture', lambda *a, **kw: source)
+    result = worker.run_request(storage, {'action':'generate','request_id':IDENT,'config':config}, execution_id='wrong-pdf',root=ROOT)
+    assert result['state'] == 'Bloqueado'
+    assert set(storage.objects) == before  # no quotation, pact or other deliverable created
+    assert 'paz y salvo CSS' in result['checks'][0]['motivo']
 
 
 def test_worker_generates_reviewable_bundle_and_only_publishes_exact_approved_files(monkeypatch):

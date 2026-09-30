@@ -12,9 +12,10 @@ from googleapiclient.discovery import build
 from services.anestesia_docs import (CATALOGS, COMPANY, KINDS, PANAMA, now_iso, parse_date,
                                     review_errors, review_prompt, totals, validate_package)
 from services.anestesia_source import route, source_is_closed
+from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 2
+ANESTESIA_UI_VERSION = 3
 
 
 @st.cache_data(ttl=20, max_entries=30, show_spinner=False)
@@ -56,7 +57,8 @@ def _library(storage, actor):
     st.caption("Cada carga conserva el original y su historial en Drive. La fecha de subida no renueva su vigencia.")
     rows = _records(storage.sheet_id, "ANESTESIA_DOCUMENTOS", storage)
     today = datetime.now(PANAMA).date()
-    _table([{"Documento": r.get("label", KINDS.get(r.get("kind"), r.get("kind"))),
+    with st.expander("Historial de documentos (incluye versiones anteriores)", expanded=False):
+        _table([{"Documento": r.get("label", KINDS.get(r.get("kind"), r.get("kind"))),
              "Catálogo": r.get("catalogs", ""), "Emisión": r.get("issued", ""), "Vence": r.get("expires", ""),
              "Estado": "Vencido" if parse_date(r.get("expires")) and parse_date(r["expires"]) < today
              else "Datos verificados" if r.get("verified") is True else "Pendiente de verificación",
@@ -84,9 +86,9 @@ def _library(storage, actor):
         evidence = st.text_area("Evidencia de verificación: páginas, fechas, titular, producto y alcance",
             value=previous.get("evidence", ""), placeholder="Ej.: página 1, vigencia impresa hasta..., emitido para RIR..., modelo LB4330K...")
         no_expiry = st.checkbox("Verifiqué que no tiene vencimiento expreso (cuando corresponda)", value=bool(previous.get("no_expiry_confirmed", False)))
-        notarized = st.checkbox("Autenticación notarial presente y verificada")
-        apostilled = st.checkbox("Apostilla o legalización presente y verificada")
-        translated = st.checkbox("Original en español o traducción autorizada verificada")
+        notarized = st.checkbox("Autenticación notarial presente y verificada", value=bool(previous.get("notarized")))
+        apostilled = st.checkbox("Apostilla o legalización presente y verificada", value=bool(previous.get("apostilled")))
+        translated = st.checkbox("Original en español o traducción autorizada verificada", value=bool(previous.get("translation_verified")))
         verified = st.checkbox("Revisé el PDF, el titular y los datos anteriores; no inferí fechas ni cobertura")
         save = st.form_submit_button("Guardar nueva versión y verificación", type="primary")
     if save:
@@ -101,9 +103,10 @@ def _library(storage, actor):
                     "evidence": evidence.strip(), "no_expiry_confirmed": no_expiry, "notarized": notarized,
                     "apostilled": apostilled, "translation_verified": translated, "verified": verified}
                 if uploaded:
-                    storage.upload_document(uploaded.name, uploaded.getvalue(), metadata, actor=actor)
+                    saved = storage.upload_document(uploaded.name, uploaded.getvalue(), metadata, actor=actor)
                 else:
-                    storage.revise_document(previous, metadata, actor=actor)
+                    saved = storage.revise_document(previous, metadata, actor=actor)
+                st.session_state["anes_document_result"] = saved.get("content_validation", {}).get("errors", [])
             _refresh()
 
 
@@ -222,6 +225,7 @@ def render_anestesia_docs(creds, actor):
         section = left.radio("Vista", ["Expedientes", "Biblioteca y vigencias"], horizontal=True, label_visibility="collapsed")
         if right.button("Actualizar estado", key="anes_refresh"):
             _refresh()
+        _health_panel(storage)
         if section == "Biblioteca y vigencias":
             _library(storage, actor)
             return
@@ -289,3 +293,24 @@ def render_anestesia_docs(creds, actor):
     except Exception as exc:
         st.error(f"No fue posible completar la operación documental: {exc}")
         st.caption("Los originales y expedientes anteriores se conservan. Reintenta con Actualizar estado.")
+
+
+@st.fragment(run_every="60s")
+def _health_panel(storage):
+    st.markdown("#### Documentos actuales y vigencias")
+    catalog = st.selectbox("Comprobar biblioteca para catálogo", ["K", "C"], format_func=CATALOGS.get, key="anes_health_catalog")
+    try:
+        rows = _records(storage.sheet_id, "ANESTESIA_DOCUMENTOS", storage)
+    except Exception as exc:
+        st.error(f"No se pudo comprobar la biblioteca en esta lectura: {exc}")
+        st.caption("Los documentos en Drive se conservan. Reintenta con Actualizar estado; no se consideran faltantes por un fallo de conexión.")
+        return
+    today = datetime.now(PANAMA).date()
+    _table(library_health(rows, as_of=today, catalog=catalog))
+    st.caption(f"Control al {today:%d/%m/%Y} (Panamá). Se muestra la última versión aplicable; se actualiza cada 60 segundos mientras esta pestaña está abierta. "
+               "Registro Público, retorsión y calidad se verifican contra el pliego de cada acto. "
+               "La revisión documental no sustituye la consulta de autenticidad al emisor.")
+    for issue in st.session_state.pop("anes_document_result", []):
+        st.warning("Documento guardado pendiente de verificación: " + issue)
+    st.info("Para corregir un vencido o faltante, abre Biblioteca y vigencias y adjunta la nueva versión. "
+            "Antes de generar se vuelve a leer la biblioteca y se comprueban vigencia, catálogo, modelo y requisitos hasta la fecha de presentación. Un documento pendiente o vencido bloquea la generación.")

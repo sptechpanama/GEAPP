@@ -63,8 +63,11 @@ def test_valid_configured_native_workbook_is_preserved():
 
 
 def test_metadata_revision_keeps_pdf_and_previous_record_immutable(monkeypatch):
+    import fitz
     storage = AnestesiaStorage(None, None)
-    data = b"original certificate"
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((40, 40), 'Original certificate')
+        data = pdf.tobytes()
     original = {"id": "previous", "file_id": "drive-original", "sha256": file_hash(data), "kind": "css",
         "verified": False, "expires": "2026-04-30", "url": "https://drive.example/original", "_row": 2}
     copy = deepcopy(original)
@@ -75,6 +78,8 @@ def test_metadata_revision_keeps_pdf_and_previous_record_immutable(monkeypatch):
     assert original == copy and new["id"] != original["id"]
     assert new["file_id"] == "drive-original" and new["expires"] == "2026-04-30"
     assert new["previous_id"] == "previous" and "_row" not in new
+    assert new['verified'] is False  # a checkbox cannot validate unreadable dates/issuer
+    assert new['content_validation']['errors']
     assert len(writes) == 1 and "row" not in writes[0][1]
 
 

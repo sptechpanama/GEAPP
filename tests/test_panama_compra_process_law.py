@@ -34,13 +34,16 @@ def test_law_419_category_is_visible_after_licitaciones() -> None:
     assert order.index("Ley 419 sin ficha detectada") == order.index("Licitaciones") + 1
 
 
-def test_new_sheets_feed_rs_sp_but_not_ct_rir() -> None:
+def test_law_419_sheets_also_receive_watched_ficha_recovery_scan() -> None:
     tree = ast.parse(PAGE.read_text(encoding="utf-8"))
     groups = _literal_assignment(tree, "SHEET_GROUPS")
     ct_rir = set(_literal_assignment(tree, "CT_RIR_SCAN_SHEETS"))
 
     assert NEW_SHEETS.issubset(groups["Actos RS/SP"])
-    assert NEW_SHEETS.isdisjoint(ct_rir)
+    assert NEW_SHEETS.issubset(ct_rir)
+    # They are scanned for watched products, never accepted as CT RIR by law alone.
+    direct = set(_literal_assignment(tree, "CT_RIR_DIRECT_SHEETS"))
+    assert NEW_SHEETS.isdisjoint(direct)
 
 
 def test_law_419_view_unifies_and_deduplicates_three_sources() -> None:
@@ -53,7 +56,7 @@ def test_law_419_view_unifies_and_deduplicates_three_sources() -> None:
 
 def test_database_preview_uses_human_process_law_label() -> None:
     source = PAGE.read_text(encoding="utf-8")
-    panel_start = source.index("def render_panamacompra_db_panel")
-    panel_end = source.index("@st.cache_data", panel_start)
-    panel = source[panel_start:panel_end]
+    node = next(n for n in ast.parse(source).body
+                if isinstance(n, ast.FunctionDef) and n.name == 'render_panamacompra_db_panel')
+    panel = ast.get_source_segment(source, node)
     assert '"ley_proceso": "Ley del proceso"' in panel

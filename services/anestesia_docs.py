@@ -134,7 +134,7 @@ def document_status(document: dict | None, requirement: dict, *, as_of: date, ca
     if kind not in EXPIRING and not expiry and document.get("no_expiry_confirmed") is not True:
         errors.append("Confirmar con evidencia si no tiene vencimiento expreso.")
     maximum = requirement.get("max_age_months")
-    if kind == "registro_publico" and not maximum:
+    if kind == "registro_publico" and not maximum and not requirement.get("library_only"):
         errors.append("Falta confirmar la antigüedad máxima que exige este acto.")
     if maximum and issued and as_of > add_months(issued, int(maximum)):
         errors.append(f"Supera los {maximum} meses permitidos por el requisito del acto.")
@@ -162,6 +162,13 @@ def document_status(document: dict | None, requirement: dict, *, as_of: date, ca
         errors.append("La declaración es anterior a la publicación del acto.")
     if not document.get("sha256") or not document.get("file_id"):
         errors.append("No existe un original almacenado y con huella verificable en Drive.")
+    validation = document.get("content_validation")
+    if validation is not None:
+        from services.anestesia_health import metadata_hash
+        if (validation.get("sha256") != document.get("sha256")
+                or validation.get("metadata_hash") != metadata_hash(document)):
+            errors.append("Cambió el PDF o sus datos después de comprobarlo. Verifica la nueva versión.")
+        errors.extend(validation.get("errors", []))
     return {"documento": label, "kind": kind, "estado": "Bloqueado" if errors else "Vigente documentalmente",
             "motivo": " ".join(errors) or "Fechas, alcance y formalidades verificados; sujeto a revisión del expediente.",
             "id": document.get("id", ""), "vence": str(expiry or "Sin vencimiento expreso"),

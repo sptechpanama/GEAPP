@@ -14,6 +14,7 @@ from services.anestesia_docs import (PANAMA, canonical_hash, file_hash, now_iso,
                                     review_prompt, totals, validate_package)
 from services.anestesia_documents import pact_docx, quote_docx
 from services.anestesia_source import capture, source_is_closed
+from services.anestesia_health import certificate_content_check
 
 
 def write_json(storage, folder, name, value):
@@ -62,6 +63,23 @@ def run_request(storage, payload, *, execution_id, root: Path):
                 saved = write_json(storage, verify_folder, "acto_y_anexos.json", fresh)
                 return storage.save_job({**base, "source_id": saved["file_id"], "state": "Datos capturados",
                     "detail": "El acto o sus anexos cambiaron. Revisa la nueva captura y confirma los datos antes de generar."})
+            closed, reason = source_is_closed(fresh)
+            if closed:
+                raise ValueError(reason)
+            # Validate actual originals before producing even the quotation.
+            originals = {}
+            for kind, document in selected.items():
+                data = storage.get_bytes(document["file_id"])
+                if file_hash(data) != document["sha256"]:
+                    raise ValueError(f"El original de {kind} cambió en Drive. Registra la versión actualizada.")
+                validation = certificate_content_check(data, document,
+                    ocr_text=(document.get('content_validation') or {}).get('ocr_text', ''))
+                if validation["errors"]:
+                    return storage.save_job({**base, "state": "Bloqueado", "config": config,
+                        "detail": "Actualiza o corrige el certificado antes de generar.",
+                        "checks": [{"documento": document.get("label", kind), "estado": "Bloqueado",
+                                    "motivo": " ".join(validation["errors"]), "enlace": document.get("url", "")}]})
+                originals[kind] = data
             draft_folder = storage.folder("Borradores - " + execution_id[:8], folder)
             conversion = storage.folder("Conversión Word a PDF", draft_folder)
             files = []
@@ -76,9 +94,7 @@ def run_request(storage, payload, *, execution_id, root: Path):
                         raise ValueError("El PDF no contiene el número del acto. Revisar la conversión.")
                 files.append({**storage.put(draft_folder, name.replace(".docx", ".pdf"), pdf, "application/pdf"), "deliverable": True})
             for n, (kind, document) in enumerate(selected.items(), 3):
-                data = storage.get_bytes(document["file_id"])
-                if file_hash(data) != document["sha256"]:
-                    raise ValueError(f"El original de {kind} cambió en Drive. Registra la versión actualizada.")
+                data = originals[kind]
                 saved = storage.put(draft_folder, f"{n:02d}_{kind.replace(':', '_')}.pdf", data, "application/pdf")
                 files.append({**saved, "deliverable": True, "library_id": document["id"], "kind": kind})
             amounts = totals(source["items"][0]["cantidad"], config["price"], config["tax_mode"], config.get("tax_rate", 7))
