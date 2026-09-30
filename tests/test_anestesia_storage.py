@@ -109,3 +109,19 @@ def test_existing_worker_registration_does_not_duplicate_configuration():
         {"values": [["id", "job", "requested_by", "requested_at", "status", "notes", "payload", "result_file_id", "result_file_url", "result_file_name", "result_error"]]}]}
     AnestesiaStorage(None, sheets).register_worker(python_path="python", script_path="script")
     api.append.assert_not_called()
+
+
+def test_read_queue_result_uses_request_id_and_never_changes_other_jobs():
+    sheets = MagicMock()
+    api = sheets.spreadsheets.return_value.values.return_value
+    api.get.return_value.execute.return_value = {'values': [
+        ['status', 'id', 'job', 'result_error'],
+        ['done', 'other', 'lp_doc_generator'],
+        ['error', 'mine', 'anestesia_docs', 'Could not start worker'],
+        ['pending', 'foreign', 'lp_doc_generator']]}
+    storage = AnestesiaStorage(None, sheets)
+    assert storage.queue_request('mine')['result_error'] == 'Could not start worker'
+    assert storage.queue_request('foreign') is None
+    assert storage.queue_request('missing') is None
+    api.update.assert_not_called()
+    api.append.assert_not_called()

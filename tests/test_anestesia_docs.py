@@ -294,3 +294,16 @@ def test_capture_error_preserves_previous_source_and_library(monkeypatch):
     with pytest.raises(TimeoutError):
         worker.run_request(storage, {"action": "capture", "request_id": IDENT, "url": URL}, execution_id="failed", root=ROOT)
     assert storage.objects == before and storage.saved["source_id"] == "source"
+
+
+@pytest.mark.parametrize('catalog', ['K', 'C'])
+def test_initial_capture_preserves_offer_entered_before_the_worker_runs(monkeypatch, catalog):
+    source, _, docs = fixture()
+    storage = FakeStorage(source, docs)
+    config = {'catalog': catalog, 'price': '19.875', 'tax_mode': 'incluido', 'tax_rate': 7}
+    storage.saved.update(state='En cola', config=deepcopy(config))
+    monkeypatch.setattr(worker, 'capture', lambda *args: source)
+    result = worker.run_request(storage, {'action': 'capture', 'request_id': IDENT, 'url': URL}, execution_id='initial-capture', root=ROOT)
+    assert result['state'] == 'Datos capturados' and result['config'] == config
+    assert storage.json_file(result['source_id']) == source
+    assert not result.get('manifest_id')  # capture is not a generated or approved bid

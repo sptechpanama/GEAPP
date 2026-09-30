@@ -1,6 +1,6 @@
 """Exercise the real Streamlit controls with fake storage; no external writes."""
 from copy import deepcopy
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import pytest
 
 pytest.importorskip("streamlit")
@@ -22,9 +22,22 @@ class Storage:
     def ensure_tables(self): pass
     def rows(self, name): return deepcopy(self.tables[name])
     def json_file(self, name): return deepcopy(SOURCE)
+    def job(self, ident):
+        return next((r for r in self.rows("ANESTESIA_EXPEDIENTES") if r["id"] == ident), None)
+    def queue_request(self, ident): return {"id": ident, "status": "pending"}
     def save_job(self, data):
-        row = next(r for r in self.tables["ANESTESIA_EXPEDIENTES"] if r["id"] == data["id"])
+        row = next((r for r in self.tables["ANESTESIA_EXPEDIENTES"] if r["id"] == data["id"]), None)
+        if row is None:
+            row = {}
+            self.tables["ANESTESIA_EXPEDIENTES"].append(row)
         row.update(data); return row
+
+
+@pytest.fixture(autouse=True)
+def clear_live_cache():
+    view._live_job.clear()
+    yield
+    view._live_job.clear()
 
 
 def test_can_open_historical_case_library_and_validate_without_an_exception():
@@ -102,3 +115,129 @@ def test_participation_evidence_is_visible_without_changing_offer_selection():
         assert not app.exception and not app.error
         assert any("LB4330K" in m.value for m in app.markdown)
         assert "config" not in job  # archive does not authorize or create a new bid
+
+
+APP = "from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')"
+ACT_URL = "https://www.panamacompra.gob.pa/Inicio/#/solicitud-de-cotizacion/2026-1-10-01-08-CL-051598/0nM6ICc0JCL2AjN1UDMxojIpJye"
+
+
+@pytest.mark.parametrize("catalog", ["K", "C"])
+@pytest.mark.parametrize("tax_mode", ["exento", "adicional", "incluido"])
+def test_new_offer_data_saved_before_capture_and_reused_after_completion(catalog, tax_mode):
+    storage = Storage()
+    view._records.clear(); view._json.clear()
+    def enqueue(payload, **kwargs):
+        # The worker can start immediately: inputs must already be persisted.
+        pending = storage.job(payload['request_id'])
+        assert pending['config'] == {'catalog': catalog, 'price': '19.875', 'tax_mode': tax_mode, 'tax_rate': 7.0}
+        assert payload['action'] == 'capture'
+        return 'queue-new'
+    with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"), patch.object(storage, "enqueue", side_effect=enqueue, create=True) as queued:
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').set_value(ACT_URL)
+        app.selectbox(key='anes_new_catalog').set_value(catalog)
+        app.number_input(key='anes_new_price').set_value(19.875)
+        app.selectbox(key='anes_new_tax_mode').set_value(tax_mode)
+        next(b for b in app.button if b.label == 'Consultar acto y anexos').click().run()
+        assert not app.exception and not app.error
+        assert queued.call_count == 1
+        job = storage.tables['ANESTESIA_EXPEDIENTES'][-1]
+        assert job['state'] == 'En cola' and job['queue_id'] == 'queue-new'
+        assert any('cada 5 segundos' in i.value for i in app.info)
+        assert not any(b.label == 'Comprobar requisitos y preparar borradores' for b in app.button)
+        # Old 20-second table cache is intentionally retained. Live polling wins.
+        storage.save_job({'id': job['id'], 'state': 'Datos capturados', 'source_id': 'source', 'updated_at': '2026-09-30T14:00:00'})
+        view._live_job.clear()
+        app.run()
+        assert not app.exception and not app.error
+        assert any('Acto y anexos listos' in s.value for s in app.success)
+        assert next(w for w in app.selectbox if w.label == 'Mascarilla / catálogo').value == catalog
+        assert next(w for w in app.number_input if w.label == 'Precio UNITARIO de participación (USD)').value == 19.875
+        assert next(w for w in app.selectbox if w.label == 'ITBMS').value == tax_mode
+        assert queued.call_count == 1  # polling never submits another request
+
+
+@pytest.mark.parametrize('catalog,price', [(None, 20), ('K', 0)])
+def test_incomplete_offer_is_not_queued(catalog, price):
+    storage = Storage()
+    view._records.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), patch.object(storage, 'enqueue', create=True) as queued:
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').set_value(ACT_URL)
+        app.selectbox(key='anes_new_catalog').set_value(catalog)
+        app.number_input(key='anes_new_price').set_value(price)
+        next(b for b in app.button if b.label == 'Consultar acto y anexos').click().run()
+        assert not app.exception and any('precio unitario mayor que cero' in e.value for e in app.error)
+        queued.assert_not_called()
+        assert len(storage.tables['ANESTESIA_EXPEDIENTES']) == 1
+
+
+def test_duplicate_active_capture_selects_existing_without_replacing_offer():
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(number='2026-1-10-01-08-CL-051598', state='Procesando', queue_id='q', config={'catalog': 'C', 'price': '20'})
+    view._records.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), patch.object(storage, 'enqueue', create=True) as queued:
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').set_value(ACT_URL)
+        next(b for b in app.button if b.label == 'Consultar acto y anexos').click().run()
+        assert not app.exception and not app.error
+        queued.assert_not_called()
+        assert len(storage.tables['ANESTESIA_EXPEDIENTES']) == 1
+        assert storage.job(job['id'])['config'] == {'catalog': 'C', 'price': '20'}
+
+
+@pytest.mark.parametrize('state', ['Procesando', 'Datos capturados', 'Bloqueado', 'Pendiente de revisión', 'Listo para entregar', 'Error'])
+def test_background_transition_refreshes_once_and_never_enqueues(state):
+    previous = {'id': 'job', 'state': 'En cola'}
+    with patch.object(view, '_live_job', return_value={**previous, 'state': state}), patch.object(view, '_refresh') as refresh, patch.object(view, '_enqueue') as enqueue:
+        app = AppTest.from_string("from services.anestesia_view import _watch_job\nfrom types import SimpleNamespace\n_watch_job(SimpleNamespace(sheet_id='test'), {'id': 'job', 'state': 'En cola'})")
+        app.run()
+        assert not app.exception
+        refresh.assert_called_once()
+        enqueue.assert_not_called()
+
+
+def test_poll_same_state_does_not_rerun_forms_and_network_failure_retries():
+    job = {'id': 'job', 'state': 'Procesando'}
+    with patch.object(view, '_live_job', return_value=job) as poll, patch.object(view, '_refresh') as refresh:
+        app = AppTest.from_string("from services.anestesia_view import _watch_job\nfrom types import SimpleNamespace\n_watch_job(SimpleNamespace(sheet_id='test'), {'id': 'job', 'state': 'Procesando'})")
+        app.run()
+        assert not app.exception
+        refresh.assert_not_called()
+        poll.side_effect = TimeoutError('Temporary outage')
+        app.run()
+        assert not app.exception and any('reintentará automáticamente' in w.value for w in app.warning)
+        refresh.assert_not_called()
+
+
+def test_terminal_queue_error_is_visible_without_rerun_loop_or_altering_stored_data():
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(state='En cola', queue_id='broken')
+    before = deepcopy(job)
+    view._records.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), patch.object(storage, 'queue_request', return_value={'status': 'error', 'result_error': 'Worker no pudo iniciar'}):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception
+        assert any('Worker no pudo iniciar' in w.value for w in app.warning)
+        assert any(b.label == 'Volver a capturar acto y anexos' for b in app.button)
+        assert job == before  # reading a failed queue never mutates history
+
+
+def test_worker_completing_between_reads_is_not_reported_as_failed():
+    storage = Mock()
+    waiting = {'id': 'job', 'state': 'Procesando', 'queue_id': 'q'}
+    complete = {**waiting, 'state': 'Datos capturados', 'source_id': 'source'}
+    storage.job.side_effect = [waiting, complete]
+    storage.queue_request.return_value = {'status': 'done'}
+    assert view._live_job('sheet-race', 'job', storage) == complete
+    storage.save_job.assert_not_called()

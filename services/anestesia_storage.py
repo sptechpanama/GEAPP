@@ -188,6 +188,18 @@ class AnestesiaStorage:
     def job(self, ident):
         return next((r for r in self.rows("ANESTESIA_EXPEDIENTES") if r.get("id") == ident), None)
 
+    def queue_request(self, ident):
+        """Read this module's request without changing the shared queue."""
+        values = self.sheets.spreadsheets().values().get(spreadsheetId=self.sheet_id,
+            range="'pc_manual'!A1:K20000").execute().get("values", [])
+        if not values or not {"id", "job", "status"}.issubset(values[0]):
+            raise ValueError("No se pudo comprobar la cola del orquestador: encabezados inesperados.")
+        for row in values[1:]:
+            request = dict(zip(values[0], row))
+            if request.get("id") == ident and request.get("job") == "anestesia_docs":
+                return request
+        return None
+
     def save_job(self, data):
         current = self.job(data["id"])
         saved = {**(current or {}), **data, "updated_at": now_iso()}

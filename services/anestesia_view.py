@@ -15,7 +15,10 @@ from services.anestesia_source import route, source_is_closed
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 4
+ANESTESIA_UI_VERSION = 5
+ACTIVE_STATES = {"En cola", "Procesando"}
+CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
+TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
 
 
 @st.cache_data(ttl=20, max_entries=30, show_spinner=False)
@@ -28,13 +31,46 @@ def _json(file_id, _storage):
     return _storage.json_file(file_id)
 
 
+@st.cache_data(ttl=5, max_entries=64, show_spinner=False)
+def _live_job(sheet_id, ident, _storage):
+    # Separate from the library cache: completion must be visible promptly.
+    job = _storage.job(ident)
+    if job and job.get("state") in ACTIVE_STATES and job.get("queue_id"):
+        request = _storage.queue_request(job["queue_id"])
+        if request and request.get("status") in {"error", "failed", "cancelled", "canceled", "done"}:
+            # The worker may have completed between the two reads.
+            current = _storage.job(ident)
+            if current and current.get("queue_id") == job["queue_id"] and current.get("state") in ACTIVE_STATES:
+                return {**current, "state": "Error", "detail": request.get("result_error") or
+                        "La tarea terminó sin actualizar el expediente. Revisa la ejecución y vuelve a capturar el acto."}
+            return current
+    return job
+
+
 def _refresh():
     _records.clear()
+    _live_job.clear()
     st.rerun()
 
 
+@st.fragment(run_every="5s")
+def _watch_job(storage, job):
+    """Poll only while working; editable offer forms are outside this fragment."""
+    try:
+        current = _live_job(storage.sheet_id, job["id"], storage)
+    except Exception:
+        st.warning("No se pudo consultar el estado en este momento. Se reintentará automáticamente en 5 segundos; el expediente se conserva.")
+        return
+    if not current:
+        st.warning("No se encontró el expediente en esta consulta. Se volverá a comprobar en 5 segundos.")
+        return
+    if current != job:
+        _refresh()
+    st.info("Actualización automática cada 5 segundos. Al terminar aparecerá el resultado y el siguiente paso. Puedes cambiar de página: la tarea continúa en el orquestador.")
+
+
 def _enqueue(storage, job, action, actor, **payload):
-    if job.get("state") in {"En cola", "Procesando"}:
+    if job.get("state") in ACTIVE_STATES:
         raise ValueError("Ya hay una solicitud en curso para este expediente.")
     app = st.secrets.get("app", {})
     execution = storage.enqueue({"action": action, "request_id": job["id"], **payload}, actor=actor,
@@ -127,11 +163,11 @@ def _configure(source, job, storage, actor):
             if registry else "Registro Público: confirma la antigüedad máxima directamente en el requisito del acto.")
     with st.form("anes_config_" + job["id"]):
         c1, c2 = st.columns(2)
-        catalog = c1.selectbox("Catálogo", ["K", "C"], index=0 if cfg.get("catalog", "K") == "K" else 1, format_func=CATALOGS.get)
+        catalog = c1.selectbox("Mascarilla / catálogo", ["K", "C"], index=0 if cfg.get("catalog", "K") == "K" else 1, format_func=CATALOG_LABELS.get)
         price = c2.number_input("Precio UNITARIO de participación (USD)", min_value=0.0, value=float(cfg.get("price", 0)), step=0.01, format="%.4f")
         modes = ["exento", "adicional", "incluido"]
         mode = c1.selectbox("ITBMS", modes, index=modes.index(cfg.get("tax_mode", "exento")),
-            format_func=lambda x: {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}[x])
+            format_func=TAX_LABELS.get)
         tax_rate = c2.number_input("Tasa de ITBMS (%)", min_value=0.0, max_value=100.0, value=float(cfg.get("tax_rate", 7)))
         tax_evidence = st.text_input("Respaldo del tratamiento tributario", value=cfg.get("tax_evidence", ""))
         brand = c1.text_input("Marca", value=cfg.get("catalog_brand", ""))
@@ -232,26 +268,50 @@ def render_anestesia_docs(creds, actor):
         with st.expander("Nuevo expediente", expanded=True):
             with st.form("anes_new"):
                 url = st.text_input("Enlace del acto en PanamáCompra", placeholder="https://www.panamacompra.gob.pa/Inicio/#/...")
+                c1, c2 = st.columns(2)
+                catalog = c1.selectbox("Mascarilla / catálogo a ofrecer", ["K", "C"], index=None,
+                    placeholder="Selecciona mascarilla 4 o 5", format_func=CATALOG_LABELS.get, key="anes_new_catalog")
+                price = c2.number_input("Precio UNITARIO a ofrecer (USD)", min_value=0.0, value=0.0,
+                    step=0.01, format="%.4f", key="anes_new_price")
+                mode = c1.selectbox("ITBMS de la oferta", list(TAX_LABELS), format_func=TAX_LABELS.get, key="anes_new_tax_mode")
+                tax_rate = c2.number_input("Tasa ITBMS de la oferta (%)", min_value=0.0, max_value=100.0,
+                    value=7.0, key="anes_new_tax_rate")
+                st.caption("El precio es por kit. Estos datos se guardan con el expediente; podrás revisarlos antes de generar los documentos.")
                 create = st.form_submit_button("Consultar acto y anexos", type="primary")
             if create:
                 _, _, number = route(url.strip())
                 existing = storage.rows("ANESTESIA_EXPEDIENTES")
-                job = next((r for r in existing if r.get("number") == number and r.get("state") in {"En cola", "Procesando"}), None)
+                job = next((r for r in existing if r.get("number") == number and r.get("state") in ACTIVE_STATES), None)
                 if job:
+                    st.session_state["anes_selected"] = job["id"]
                     st.info("Ese acto ya tiene una captura en curso. Puedes seleccionarlo abajo.")
+                elif not catalog or price <= 0:
+                    st.error("Selecciona la mascarilla 4 o 5 e indica un precio unitario mayor que cero antes de consultar el acto.")
                 else:
-                    job = storage.save_job({"id": uuid.uuid4().hex, "number": number, "url": url.strip(), "state": "Nuevo", "created_by": actor})
+                    config = {"catalog": catalog, "price": str(price), "tax_mode": mode, "tax_rate": tax_rate}
+                    job = storage.save_job({"id": uuid.uuid4().hex, "number": number, "url": url.strip(),
+                        "state": "Nuevo", "created_by": actor, "config": config})
                     st.session_state["anes_selected"] = job["id"]
                     _enqueue(storage, job, "capture", actor, url=url.strip())
-        jobs = sorted(_records(storage.sheet_id, "ANESTESIA_EXPEDIENTES", storage), key=lambda r: r.get("updated_at", ""), reverse=True)
+        # Append order and labels stay stable as jobs progress. Dynamic labels or
+        # sorting by updated_at can reset Streamlit's selection to another case.
+        jobs = list(reversed(_records(storage.sheet_id, "ANESTESIA_EXPEDIENTES", storage)))
         if not jobs:
             st.info("Consulta un acto y carga los certificados vigentes en Biblioteca y vigencias para comenzar.")
             return
         mapping = {r["id"]: r for r in jobs}
         if st.session_state.get("anes_selected") not in mapping:
             st.session_state["anes_selected"] = next(iter(mapping))
+        # A page visit must not resurrect an old cached "En cola" result.
+        ident = st.session_state["anes_selected"]
+        try:
+            current = _live_job(storage.sheet_id, ident, storage)
+            if current:
+                mapping[ident] = current
+        except Exception:
+            st.warning("No se pudo actualizar el estado. Se muestra la última lectura disponible; usa Actualizar estado para reintentar.")
         selected = st.selectbox("Expediente", list(mapping), key="anes_selected",
-            format_func=lambda k: f"{mapping[k].get('number', k)} · {mapping[k].get('state', '')} · {k[:8]}")
+            format_func=lambda k: f"{mapping[k].get('number', k)} · {k[:8]}")
         job = mapping[selected]
         st.write(f"**{job['state']}** — {job.get('detail', '')}")
         st.caption("Último cambio: " + job.get("updated_at", ""))
@@ -267,9 +327,21 @@ def render_anestesia_docs(creds, actor):
                 st.link_button("Ver adjuntos originales de la participación", participation["folder_url"])
                 for note in participation.get("observations", []):
                     st.info(note)
-        if job.get("state") in {"En cola", "Procesando"}:
-            st.info("Puedes cambiar de página: la tarea continúa en el orquestador. Usa Actualizar estado para consultar el resultado.")
+        if job.get("state") in ACTIVE_STATES:
+            config = job.get("config") or {}
+            if config.get("catalog"):
+                st.caption(f"Oferta guardada: {CATALOG_LABELS.get(config['catalog'], config['catalog'])} · "
+                           f"USD {float(config.get('price', 0)):,.4f} por kit · {TAX_LABELS.get(config.get('tax_mode'), '')}.")
+            _watch_job(storage, job)
             return
+        if job.get("state") == "Datos capturados":
+            st.success("Acto y anexos listos. Completa o revisa los datos de la oferta abajo y pulsa «Comprobar requisitos y preparar borradores».")
+        elif job.get("state") == "Pendiente de revisión":
+            st.success("Borradores Word/PDF listos. Ya puedes abrirlos y realizar la revisión final.")
+        elif job.get("state") == "Listo para entregar":
+            st.success("Expediente listo para entregar. Abre la carpeta final o descarga el ZIP.")
+        elif job.get("state") in {"Error", "Bloqueado"}:
+            st.warning(job.get("detail") or "Revisa los datos y documentos antes de continuar.")
         if job.get("checks"):
             _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")} for c in job["checks"]])
         if job.get("final_url"):
