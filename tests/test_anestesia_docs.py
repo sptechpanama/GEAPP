@@ -12,7 +12,7 @@ import pytest
 from services.anestesia_docs import (AUDIT_CONTROLS, BASE_KINDS, COMPANY, PANAMA, canonical_hash,
     ANESTHESIA_WARRANTY, prepare_offer_config, document_status, file_hash, now_iso, public_registry_age, review_errors, totals, validate_package)
 from services.anestesia_documents import pact_docx, quote_docx
-from services.anestesia_source import delivery_destination, route, source_is_closed
+from services.anestesia_source import delivery_destination, portal_delivery_term, tax_source_evidence, route, source_is_closed
 from services import anestesia_worker as worker
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -379,3 +379,94 @@ def test_worker_generates_own_signed_quote_without_requesting_entity_or_proxy_da
     assert '24 meses' in content and 'Almacén general de la unidad solicitante' in content
     assert len(Document(BytesIO(storage.get_bytes(quote['file_id']))).inline_shapes) >= 1
     assert result['config']['signature_authorized'] is True
+
+
+@pytest.mark.parametrize('key', ['termino de entrega', 'Término de entrega', 'Plazo de entrega', 'Tiempo de entrega:'])
+def test_portal_delivery_reads_only_delivery_period_and_preserves_day_type(key):
+    assert portal_delivery_term({'info': {key: '30 Días hábiles', 'fecha de entrega de propuestas': '2026-10-01'}}) == '30 Días hábiles'
+    assert portal_delivery_term({'info': {'fecha de entrega de propuestas': '2026-10-01', 'forma de entrega': 'Total'}}) == ''
+
+
+@pytest.mark.parametrize('use_portal', [True, False])
+def test_explicit_delivery_choice_controls_offer_without_overwriting_manual_schedule(use_portal):
+    source, cfg, docs = fixture()
+    source['info']['termino de entrega'] = '60 Días calendario'
+    manual = '300 unidades a 30 días; 300 a 45 días; 300 a 60 días calendario desde la orden de compra.'
+    cfg.update(delivery_use_portal=use_portal, delivery_manual=manual,
+               delivery_portal_value='60 Días calendario', delivery_portal_source_hash=source['fingerprint'])
+    result = prepare_offer_config(source, cfg)
+    assert result['delivery'] == ('60 Días calendario' if use_portal else manual)
+    assert result['delivery_manual'] == manual
+    checks, _ = validate_package(source, result, docs)
+    assert all(c['estado'] == 'Vigente documentalmente' for c in checks), checks
+
+
+def test_portal_is_never_used_without_check_when_manual_schedule_is_empty():
+    source, cfg, docs = fixture()
+    source['info']['termino de entrega'] = '30 Días hábiles'
+    cfg.update(delivery_use_portal=False, delivery_manual='')
+    result = prepare_offer_config(source, cfg)
+    assert result['delivery'] == ''
+    checks, _ = validate_package(source, result, docs)
+    assert any('calendario completo' in c['motivo'] for c in checks)
+
+
+@pytest.mark.parametrize('change', ['missing', 'changed_period', 'changed_annex', 'unconfirmed'])
+def test_portal_delivery_requires_current_review_and_cannot_hide_missing_period(change):
+    source, cfg, docs = fixture()
+    source['info']['termino de entrega'] = '30 Días hábiles'
+    cfg.update(delivery_use_portal=True, delivery_portal_value='30 Días hábiles', delivery_portal_source_hash=source['fingerprint'])
+    if change == 'missing': source['info'].pop('termino de entrega')
+    elif change == 'changed_period': source['info']['termino de entrega'] = '45 Días calendario'
+    elif change == 'changed_annex': source['fingerprint'] = 'modified-annex'
+    elif change == 'unconfirmed': cfg.pop('delivery_portal_value')
+    checks, _ = validate_package(source, prepare_offer_config(source, cfg), docs)
+    assert any(c.get('kind') == 'expediente' and c['estado'] == 'Bloqueado' for c in checks)
+
+
+@pytest.mark.parametrize('catalog,model', [('K', 'LB4330K'), ('C', 'LB4330C')])
+def test_model_follows_mask_even_when_previous_configuration_had_the_other_model(catalog, model):
+    source, cfg, _ = fixture()
+    cfg.update(catalog=catalog, catalog_brand='Old brand', catalog_model='Old model')
+    result = prepare_offer_config(source, cfg)
+    assert result['catalog_model'] == model and result['catalog_brand'] == 'MFLAB'
+
+
+@pytest.mark.parametrize('mode', ['exento', 'adicional', 'incluido'])
+def test_tax_evidence_not_mandatory_and_does_not_override_selected_tax_mode(mode):
+    source, cfg, docs = fixture()
+    cfg.pop('tax_evidence')
+    cfg['tax_mode'] = mode
+    result = prepare_offer_config(source, cfg)
+    checks, _ = validate_package(source, result, docs)
+    assert all(c['estado'] == 'Vigente documentalmente' for c in checks), checks
+    assert result['tax_evidence'] == ''
+    assert result['tax_mode'] == mode
+    source['items'][0]['itbms'] = 0
+    result = prepare_offer_config(source, cfg)
+    assert result['tax_mode'] == mode and result['tax_rate'] == cfg['tax_rate']
+    assert result['tax_evidence_auto'] == [{'fuente': 'PanamáCompra, renglón 1: ITBMS', 'valor': '0'}]
+
+
+def test_available_tax_observations_and_legacy_notes_are_preserved_without_inventing_evidence():
+    source, cfg, _ = fixture()
+    source['attachments'] = [{'name': 'Presupuesto.pdf', 'text': 'ITBMS: 0.00%\nOtra información'}]
+    result = prepare_offer_config(source, cfg)
+    assert result['tax_evidence'] == cfg['tax_evidence']
+    assert tax_source_evidence(source) == [{'fuente': 'Presupuesto.pdf', 'valor': 'ITBMS: 0.00%'}]
+
+
+def test_worker_quote_uses_confirmed_portal_term_and_no_tax_note_is_required(monkeypatch):
+    source, cfg, docs = fixture()
+    source['info']['termino de entrega'] = '30 Días hábiles'
+    cfg.update(delivery_use_portal=True, delivery_manual='300 unidades a 45 días',
+               delivery_portal_value='30 Días hábiles', delivery_portal_source_hash=source['fingerprint'])
+    cfg.pop('tax_evidence')
+    storage = FakeStorage(source, docs)
+    monkeypatch.setattr(worker, 'capture', lambda *args, **kwargs: source)
+    result = worker.run_request(storage, {'action': 'generate', 'request_id': IDENT, 'config': cfg}, execution_id='portal-delivery', root=ROOT)
+    assert result['state'] == 'Pendiente de revisión'
+    manifest = storage.json_file(result['manifest_id'])
+    quote = next(f for f in manifest['files'] if f['name'] == '01_Cotizacion.docx')
+    content = text_docx(storage.get_bytes(quote['file_id']))
+    assert 'Entregas: 30 Días hábiles' in content and '300 unidades a 45 días' not in content

@@ -11,11 +11,11 @@ from googleapiclient.discovery import build
 
 from services.anestesia_docs import (CATALOGS, COMPANY, KINDS, PANAMA, now_iso, parse_date,
                                     prepare_offer_config, review_errors, review_prompt, totals, validate_package)
-from services.anestesia_source import delivery_destination, route, source_is_closed
+from services.anestesia_source import delivery_destination, portal_delivery_term, route, source_is_closed
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 6
+ANESTESIA_UI_VERSION = 7
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -169,12 +169,19 @@ def _configure(source, job, storage, actor):
         mode = c1.selectbox("ITBMS", modes, index=modes.index(cfg.get("tax_mode", "exento")),
             format_func=TAX_LABELS.get)
         tax_rate = c2.number_input("Tasa de ITBMS (%)", min_value=0.0, max_value=100.0, value=float(cfg.get("tax_rate", 7)))
-        tax_evidence = st.text_input("Respaldo del tratamiento tributario", value=cfg.get("tax_evidence", ""))
-        brand = c1.text_input("Marca", value=cfg.get("catalog_brand", ""))
-        model = c2.text_input("Modelo / referencia exacta", value=cfg.get("catalog_model", ""), placeholder="Verificar en el catálogo y CT")
-        st.caption("MFLAB: K = LB4330K, mascarilla talla 4; C = LB4330C, mascarilla talla 5. El CT puede cubrir ambos; esta oferta debe indicar cuál se entrega.")
-        delivery = st.text_area("Calendario de entregas completo", value=cfg.get("delivery", ""),
+        st.caption("Marca automática: MFLAB. Mascarilla 4 / K: modelo LB4330K; mascarilla 5 / C: modelo LB4330C.")
+        portal_term = portal_delivery_term(source)
+        st.markdown("**Término de entrega del portal:** " + (portal_term or "No disponible"))
+        portal_reviewed = (cfg.get("delivery_use_portal") is True and bool(portal_term)
+            and cfg.get("delivery_portal_value") == portal_term
+            and cfg.get("delivery_portal_source_hash") == source.get("fingerprint"))
+        use_portal = st.checkbox("Revisé los adjuntos y no indican una condición de entrega distinta; usar el plazo del portal.",
+            value=portal_reviewed, disabled=not bool(portal_term),
+            key=f"anes_delivery_portal_{job['id']}_{source.get('fingerprint', '')}_{portal_term}")
+        manual_default = cfg.get("delivery_manual", cfg.get("delivery", "") if not cfg.get("delivery_use_portal") else "")
+        delivery = st.text_area("Calendario de entregas completo (manual)", value=manual_default,
             placeholder="Ej.: 300 unidades a 30 días; 300 a 45 días; 300 a 60 días calendario desde...")
+        st.caption("Si marcas el check se usará el plazo del portal. Si no lo marcas, se usará únicamente el calendario manual, incluidas las entregas parciales.")
         place, place_evidence = delivery_destination(source)
         if place:
             st.markdown(f"**Lugar de entrega:** {place}")
@@ -196,8 +203,11 @@ def _configure(source, job, storage, actor):
         submit = st.form_submit_button("Comprobar requisitos y preparar borradores", type="primary", disabled=job.get("state") in {"En cola", "Procesando"})
     if submit:
         config = prepare_offer_config(source, {"catalog": catalog, "price": str(price), "tax_mode": mode, "tax_rate": tax_rate,
-            "tax_evidence": tax_evidence.strip(), "catalog_brand": brand.strip(), "catalog_model": model.strip(),
-            "delivery": delivery.strip(), "delivery_place": place.strip(),
+            "tax_evidence": cfg.get("tax_evidence", ""),
+            "delivery_manual": delivery.strip(), "delivery_use_portal": use_portal,
+            "delivery_portal_value": portal_term if use_portal else "",
+            "delivery_portal_source_hash": source.get("fingerprint") if use_portal else None,
+            "delivery_place": place.strip(),
             "document_date": str(document_date), "control_date": str(control_date), "proposal_validity_days": validity,
             "registry_max_months": max_age or None, "registry_rule_evidence": rule_evidence.strip(),
             "extra_requirements": [x.strip() for x in extras.splitlines() if x.strip()],

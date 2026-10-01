@@ -28,6 +28,7 @@ KINDS = {
     "poder": "Poder del apoderado (si aplica)", "otro": "Otro requisito del acto",
 }
 CATALOGS = {"C": "C (5)", "K": "K (4)"}
+CATALOG_MODELS = {"K": "LB4330K", "C": "LB4330C"}
 ANESTHESIA_WARRANTY = "24 meses de garantía y esterilidad no menor de 24 meses a partir de la fecha de entrega."
 EXPIRING = {"dgi", "css", "oferente", "criterio_tecnico", "registro_sanitario", "cedula"}
 PRODUCT_DOCS = {"catalogo", "criterio_tecnico", "registro_sanitario", "inscripcion_producto", "disposicion"}
@@ -205,13 +206,25 @@ def select_documents(library: list[dict], requirements: list[dict], catalog: str
 
 def prepare_offer_config(source: dict, config: dict) -> dict:
     """Standing instructions for Rodrigo's own 43358 proposals, not LP Generator."""
-    from services.anestesia_source import delivery_destination
+    from services.anestesia_source import delivery_destination, portal_delivery_term, tax_source_evidence
     place, evidence = delivery_destination(source)
     prepared = {**config, "warranty": ANESTHESIA_WARRANTY,
                 "require_rs": False, "require_power": False, "signature_authorized": True,
                 "signature_authorization": "Autorización permanente del titular para Anestesia-Docs (2026-09-30)"}
     if place:
         prepared.update(delivery_place=place, delivery_place_evidence=evidence)
+    model = CATALOG_MODELS.get(config.get("catalog"))
+    if model:
+        prepared.update(catalog_brand="MFLAB", catalog_model=model)
+    if config.get("delivery_use_portal") is True:
+        prepared["delivery"] = portal_delivery_term(source)
+    elif "delivery_manual" in config:
+        prepared["delivery"] = str(config.get("delivery_manual") or "").strip()
+    tax_observations = tax_source_evidence(source)
+    prepared["tax_evidence_auto"] = tax_observations
+    # Retain old notes; absence of evidence never blocks the selected ITBMS mode.
+    prepared["tax_evidence"] = config.get("tax_evidence") or "\n".join(
+        f"{e['fuente']}: {e['valor']}" for e in tax_observations)
     for field in ("entity_representative", "entity_id", "entity_role"):
         prepared.pop(field, None)
     return prepared
@@ -236,8 +249,15 @@ def validate_package(source: dict, config: dict, library: list[dict], *, today: 
         errors.append("Confirma los requisitos y anexos del acto antes de preparar el expediente.")
     if not config.get("delivery") or not config.get("delivery_place"):
         errors.append("Confirma el calendario completo y lugar de entrega de los anexos.")
-    if not config.get("tax_evidence"):
-        errors.append("Confirma el tratamiento tributario y su respaldo.")
+    if config.get("delivery_use_portal") is True:
+        from services.anestesia_source import portal_delivery_term
+        portal_term = portal_delivery_term(source)
+        if not portal_term:
+            errors.append("El portal no contiene un plazo de entrega utilizable. Ingresa el calendario manualmente.")
+        elif config.get("delivery_portal_value") != portal_term or config.get("delivery") != portal_term:
+            errors.append("El plazo del portal cambió o no fue confirmado. Revisa los adjuntos y confirma de nuevo o ingresa el calendario manualmente.")
+        if config.get("delivery_portal_source_hash") != source.get("fingerprint"):
+            errors.append("La captura del acto cambió después de revisar las entregas. Vuelve a revisar los adjuntos.")
     if not config.get("catalog_model") or not config.get("catalog_brand"):
         errors.append("Confirma modelo y marca exactos del catálogo ofertado.")
     if not config.get("warranty"):

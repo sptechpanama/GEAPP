@@ -54,6 +54,33 @@ def pdf_text(data: bytes):
         return "\n".join(f"[Página {i}]\n{text}" for i, text in enumerate(pages, 1)), missing
 
 
+def portal_delivery_term(source: dict) -> str:
+    """Only the portal's delivery period; never the proposal closing date."""
+    for key, value in source.get("info", {}).items():
+        if normalized(key).rstrip(":") in {"termino de entrega", "plazo de entrega", "tiempo de entrega"}:
+            term = " ".join(str(value or "").split())
+            if term and normalized(term) not in {"no aplica", "n/a", "por definir", "ver anexo", "segun anexo"}:
+                return term
+    return ""
+
+
+def tax_source_evidence(source: dict) -> list[dict]:
+    """Keep raw tax observations without deciding the bidder's tax treatment."""
+    evidence = []
+    for key, value in source.get("info", {}).items():
+        if normalized(key) in {"itbms", "impuesto", "impuestos", "tasa de itbms"} and value is not None and str(value).strip():
+            evidence.append({"fuente": f"PanamáCompra: {key}", "valor": str(value)})
+    for index, item in enumerate(source.get("items", []), 1):
+        value = item.get("itbms")
+        if value is not None and str(value).strip():
+            evidence.append({"fuente": f"PanamáCompra, renglón {item.get('numRenglon', index)}: ITBMS", "valor": str(value)})
+    for attachment in source.get("attachments", []):
+        snippets = re.findall(r"\b(?:ITBMS|I\.T\.B\.M\.S\.|IMPUESTO)[^\r\n]{0,160}", attachment.get("text", ""), re.I)
+        for snippet in snippets[:3]:
+            evidence.append({"fuente": attachment.get("name", "Anexo oficial"), "valor": snippet.strip()})
+    return evidence
+
+
 def delivery_destination(source: dict) -> tuple[str, str]:
     """Use an explicit delivery field or its labelled annex cell, not buyer address."""
     for key, value in source.get("info", {}).items():

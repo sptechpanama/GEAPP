@@ -265,3 +265,54 @@ def test_simplified_form_uses_source_destination_and_no_longer_asks_removed_fiel
         assert config['delivery_place'] == source['info']['lugar de entrega']
         assert config['signature_authorized'] and not config['require_rs'] and not config['require_power']
         assert not any('entity_' in k for k in config)
+
+
+def test_delivery_checkbox_persists_manual_schedule_and_resets_after_source_change():
+    storage = Storage()
+    source = deepcopy(SOURCE)
+    source['info'].update({'termino de entrega': '30 Días hábiles', 'lugar de entrega': 'Almacén general'})
+    source['fingerprint'] = 'first-capture'
+    view._records.clear(); view._json.clear()
+    def checkbox(app): return next(w for w in app.checkbox if w.label.startswith('Revisé los adjuntos'))
+    def manual(app): return next(w for w in app.text_area if w.label == 'Calendario de entregas completo (manual)')
+    def submit(app): next(b for b in app.button if b.label == 'Comprobar requisitos y preparar borradores').click().run()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), patch.object(storage, 'json_file', return_value=source):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception and not checkbox(app).value
+        assert not any(w.label in {'Respaldo del tratamiento tributario', 'Marca', 'Modelo / referencia exacta'} for w in app.text_input)
+        manual(app).set_value('50 unidades a 15 días; 100 unidades a 30 días hábiles.')
+        checkbox(app).check()
+        next(w for w in app.selectbox if w.label == 'Mascarilla / catálogo').set_value('C')
+        submit(app)
+        assert not app.exception
+        cfg = storage.tables['ANESTESIA_EXPEDIENTES'][0]['config']
+        assert cfg['delivery'] == '30 Días hábiles' and cfg['delivery_use_portal'] is True
+        assert cfg['catalog_brand'] == 'MFLAB' and cfg['catalog_model'] == 'LB4330C'
+        assert checkbox(app).value and '50 unidades' in manual(app).value
+        checkbox(app).uncheck()
+        submit(app)
+        assert not app.exception
+        cfg = storage.tables['ANESTESIA_EXPEDIENTES'][0]['config']
+        assert cfg['delivery'] == manual(app).value and not cfg['delivery_use_portal']
+        checkbox(app).check()
+        submit(app)
+        source['fingerprint'] = 'new-annex'
+        view._json.clear()
+        app.run()
+        assert not app.exception and not checkbox(app).value
+        assert '50 unidades' in manual(app).value
+
+
+def test_delivery_checkbox_disabled_when_no_portal_period_and_manual_remains_available():
+    storage = Storage()
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception
+        checkbox = next(w for w in app.checkbox if w.label.startswith('Revisé los adjuntos'))
+        assert checkbox.disabled and not checkbox.value
+        assert any(w.label == 'Calendario de entregas completo (manual)' for w in app.text_area)

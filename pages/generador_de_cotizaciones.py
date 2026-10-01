@@ -3417,7 +3417,7 @@ active_tab = st.segmented_control(
 if active_tab == "Anestesia-Docs":
     import importlib
     from services import anestesia_view
-    if getattr(anestesia_view, "ANESTESIA_UI_VERSION", 0) < 6:
+    if getattr(anestesia_view, "ANESTESIA_UI_VERSION", 0) < 7:
         for module in ("anestesia_docs", "anestesia_health", "anestesia_storage", "anestesia_source", "anestesia_documents", "anestesia_view"):
             importlib.reload(importlib.import_module("services." + module))
     if creds is None:
