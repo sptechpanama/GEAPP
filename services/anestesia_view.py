@@ -9,14 +9,14 @@ import pandas as pd
 import streamlit as st
 from googleapiclient.discovery import build
 
-from services.anestesia_docs import (CATALOGS, COMPANY, EXCLUDED_KINDS, KINDS, PANAMA, REGISTRY_MAX_MONTHS, now_iso, parse_date,
-                                    document_kind, document_status,
-                                    prepare_offer_config, review_errors, review_prompt, totals, validate_package)
+from services.anestesia_docs import (BASE_KINDS, CATALOGS, COMPANY, EXCLUDED_KINDS, KINDS, PANAMA, PRODUCT_DOCS, REGISTRY_MAX_MONTHS, now_iso, parse_date,
+                                    document_kind, select_documents,
+                                    prepare_offer_config, review_errors, review_prompt, validate_package)
 from services.anestesia_source import delivery_destination, portal_delivery_term, route, source_is_closed
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 12
+ANESTESIA_UI_VERSION = 13
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -90,146 +90,184 @@ def _table(rows):
         column_config={"enlace": st.column_config.LinkColumn("Documento", display_text="Abrir")})
 
 
+def _close_library():
+    st.session_state.pop("anes_document_dialog_open", None)
+
+
+@st.dialog("Actualizar documento", width="large", on_dismiss=_close_library)
 def _library(storage, actor):
-    st.caption("Cada carga conserva el original y su historial en Drive. La fecha de subida no renueva su vigencia.")
-    rows = [r for r in _records(storage.sheet_id, "ANESTESIA_DOCUMENTOS", storage)
-            if document_kind(r.get('kind')) not in EXCLUDED_KINDS]
-    today = datetime.now(PANAMA).date()
-    with st.expander("Historial de documentos (incluye versiones anteriores)", expanded=False):
-        history = []
-        for r in rows:
-            check = document_status(r, {"kind": r.get("kind", "otro"), "library_only": True},
-                as_of=today, catalog="K", act=r.get("act", ""))
-            history.append({"Documento": KINDS.get(document_kind(r.get("kind")), r.get("label", r.get("kind"))),
-             "Catálogo": r.get("catalogs", ""), "Emisión": r.get("issued", ""), "Vence": r.get("expires", ""),
-             "Estado": "Vencido" if parse_date(r.get("expires")) and parse_date(r["expires"]) < today
-             else "Datos verificados" if r.get("verified") is True else "Pendiente de verificación",
-             "Acto": r.get("act", ""), "enlace": r.get("url"), "Versión": r.get("created_at", "")})
-            if r.get("kind") == "registro_publico":
-                expiry = parse_date(check.get("vence"))
-                history[-1].update(Vence=str(expiry or ""), Estado="Vencido" if expiry and expiry < today
-                    else "Vence hoy" if expiry == today and check["estado"] == "Vigente documentalmente"
-                    else check["estado"])
-        _table(history)
-    st.markdown("#### Cargar o actualizar un documento")
-    entries = {r["id"]: r for r in rows}
-    chosen = st.selectbox("Nuevo PDF o revisar uno ya guardado", [""] + list(entries),
-        format_func=lambda k: "Cargar nuevo PDF" if not k else f"{entries[k].get('name', entries[k].get('kind'))} · {entries[k].get('created_at', '')}")
-    previous = entries.get(chosen, {})
+    # Always read current metadata when opening/revisiting the replacement dialog.
+    rows = storage.rows("ANESTESIA_DOCUMENTOS")
+    catalog = st.session_state.get("anes_health_catalog", "K")
+    health = library_health(rows, as_of=datetime.now(PANAMA).date(), catalog=catalog)
+    statuses = {r["Documento"]: r["Estado"] for r in health}
+    kinds = list(BASE_KINDS)
+    priority = {"Vencido": 0, "Falta": 1, "Pendiente de verificar": 2, "Vence hoy": 3, "Vence pronto": 4}
+    default = min(kinds, key=lambda k: priority.get(statuses.get(KINDS[k]), 5))
+    kind = st.selectbox("Documento a actualizar", kinds, index=kinds.index(default),
+        format_func=lambda k: f"{KINDS[k]} · {statuses.get(KINDS[k], 'Pendiente')}", key="anes_update_kind")
+    previous = select_documents(rows, [{"kind": kind}], catalog, "").get(kind, {})
     if previous.get("url"):
-        st.link_button("Abrir original que se verificará", previous["url"])
-    original_kind = document_kind(previous.get("kind", "dgi")).split(":")[0]
-    available_kinds = [kind for kind in KINDS if kind not in EXCLUDED_KINDS]
-    kind = st.selectbox("Documento", available_kinds, index=available_kinds.index(original_kind), format_func=KINDS.get, key="anes_library_kind_" + chosen)
-    with st.form("anes_library_" + chosen + kind, clear_on_submit=True):
-        uploaded = st.file_uploader("PDF original completo (máximo 30 MB)", type=["pdf"])
-        extra = st.text_input("Nombre exacto del requisito adicional", value=previous.get("kind", "").partition(":")[2], help="Solo para Otro requisito del acto.") if kind == "otro" else ""
+        st.link_button("Abrir documento actual", previous["url"])
+    revise = st.toggle("Solo corregir los datos del PDF actual", value=False,
+        disabled=not bool(previous), key="anes_revise_" + kind)
+    prefix = f"anes_doc_{kind}_{previous.get('id', 'missing')}_{revise}"
+    uploaded = None if revise else st.file_uploader("Adjuntar PDF actualizado", type=["pdf"], key=prefix + "_pdf")
+    # A different upload cannot inherit a prior certificate's dates or verification.
+    upload_id = str(getattr(uploaded, "file_id", ""))
+    initial = previous if revise else {}
+    with st.form(prefix + upload_id):
         left, right = st.columns(2)
-        issued = left.date_input("Fecha de emisión (si consta)", value=parse_date(previous.get("issued")))
-        expires = right.date_input("Fecha de vencimiento (si consta)", value=parse_date(previous.get("expires")))
+        issued = left.date_input("Fecha de emisión", value=parse_date(initial.get("issued")))
+        expires = right.date_input("Fecha de vencimiento", value=parse_date(initial.get("expires")))
         if kind == "registro_publico":
-            st.caption(f"El vencimiento para presentar se calcula automáticamente: emisión + {REGISTRY_MAX_MONTHS} meses. "
-                       "Completa vencimiento solo si el certificado imprime uno anterior; se aplicará la fecha más próxima.")
-        catalogs = left.multiselect("Catálogos expresamente cubiertos", ["C", "K"], default=[c for c in previous.get("catalogs", "").split(",") if c in CATALOGS], format_func=CATALOGS.get)
-        fichas = right.text_input("Fichas expresamente cubiertas", value=previous.get("fichas", ""), placeholder="43358")
-        models = st.text_input("Modelos exactos expresamente cubiertos (separados por coma)", value=previous.get("models", ""), placeholder="Ej.: LB4330K, LB4330C")
-        st.caption("Un CT puede cubrir varios modelos. Registra todas sus páginas; la cotización ofrecerá únicamente el modelo seleccionado para el acto.")
-        act = st.text_input("Número de acto específico, si aplica", value=previous.get("act", ""), help="Déjalo vacío en certificados generales.")
-        evidence = st.text_area("Evidencia de verificación: páginas, fechas, titular, producto y alcance",
-            value=previous.get("evidence", ""), placeholder="Ej.: página 1, vigencia impresa hasta..., emitido para RIR..., modelo LB4330K...")
-        no_expiry = st.checkbox("Verifiqué que no tiene vencimiento expreso (cuando corresponda)", value=bool(previous.get("no_expiry_confirmed", False)))
-        notarized = st.checkbox("Autenticación notarial presente y verificada", value=bool(previous.get("notarized")))
-        apostilled = st.checkbox("Apostilla o legalización presente y verificada", value=bool(previous.get("apostilled")))
-        translated = st.checkbox("Original en español o traducción autorizada verificada", value=bool(previous.get("translation_verified")))
-        verified = st.checkbox("Revisé el PDF, el titular y los datos anteriores; no inferí fechas ni cobertura")
-        save = st.form_submit_button("Guardar nueva versión y verificación", type="primary")
+            st.caption(f"Se calcula emisión + {REGISTRY_MAX_MONTHS} meses; completa vencimiento solo si el certificado indica uno anterior.")
+        catalogs = initial.get("catalogs", "")
+        fichas, models = initial.get("fichas", ""), initial.get("models", "")
+        if kind in PRODUCT_DOCS:
+            with st.expander("Cobertura del producto", expanded=True):
+                catalogs = ",".join(st.multiselect("Catálogos expresamente cubiertos", ["C", "K"],
+                    default=[c for c in catalogs.split(",") if c in CATALOGS], format_func=CATALOGS.get))
+                fichas = st.text_input("Fichas expresamente cubiertas", value=fichas, placeholder="43358")
+                models = st.text_input("Modelos expresamente cubiertos", value=models, placeholder="LB4330K, LB4330C")
+        evidence = st.text_area("Comprobación del documento", value=initial.get("evidence", ""),
+            placeholder="Indica la página donde constan el titular, las fechas y, si aplica, los modelos cubiertos.")
+        with st.expander("Otros datos de verificación", expanded=False):
+            no_expiry = st.checkbox("Sin vencimiento expreso verificado", value=bool(initial.get("no_expiry_confirmed")))
+            notarized = st.checkbox("Autenticación notarial verificada", value=bool(initial.get("notarized")))
+            apostilled = st.checkbox("Apostilla o legalización verificada", value=bool(initial.get("apostilled")))
+            translated = st.checkbox("Español o traducción autorizada verificada", value=bool(initial.get("translation_verified")))
+        verified = st.checkbox("Revisé el PDF, su titular y los datos indicados", key=prefix + upload_id + "_verified")
+        save = st.form_submit_button("Guardar documento", type="primary")
     if save:
-        if (not uploaded and not previous) or not evidence.strip() or (kind == "otro" and not extra.strip()):
-            st.error("Adjunta el PDF e indica la evidencia y, si aplica, el nombre del requisito adicional.")
-        else:
-            with st.spinner("Guardando original e índice..."):
-                metadata = {
-                    "kind": "otro:" + extra.strip() if kind == "otro" else kind, "label": extra.strip() if kind == "otro" else KINDS[kind],
-                    "company": COMPANY, "issued": str(issued or ""), "expires": str(expires or ""),
-                    "catalogs": ",".join(catalogs), "fichas": fichas.strip(), "models": models.strip(), "act": act.strip(),
-                    "evidence": evidence.strip(), "no_expiry_confirmed": no_expiry, "notarized": notarized,
-                    "apostilled": apostilled, "translation_verified": translated, "verified": verified}
-                if uploaded:
-                    saved = storage.upload_document(uploaded.name, uploaded.getvalue(), metadata, actor=actor)
-                else:
-                    saved = storage.revise_document(previous, metadata, actor=actor)
-                st.session_state["anes_document_result"] = saved.get("content_validation", {}).get("errors", [])
-            _refresh()
+        if (not revise and not uploaded) or not evidence.strip():
+            st.error("Adjunta el PDF actualizado e indica qué comprobaste en él.")
+            return
+        metadata = {"kind": kind, "label": KINDS[kind], "company": COMPANY,
+            "issued": str(issued or ""), "expires": str(expires or ""),
+            "catalogs": catalogs, "fichas": fichas.strip(), "models": models.strip(), "act": "",
+            "evidence": evidence.strip(), "no_expiry_confirmed": no_expiry, "notarized": notarized,
+            "apostilled": apostilled, "translation_verified": translated, "verified": verified}
+        try:
+            with st.spinner("Guardando documento en Drive..."):
+                saved = (storage.revise_document(previous, metadata, actor=actor) if revise else
+                    storage.upload_document(uploaded.name, uploaded.getvalue(), metadata, actor=actor))
+            issues = saved.get("content_validation", {}).get("errors", [])
+            st.session_state["anes_document_result"] = issues
+            st.session_state["anes_document_saved"] = KINDS[kind]
+        except Exception as exc:
+            st.error(f"No se pudo guardar el documento: {exc}. El original anterior se conserva.")
+            return
+        _close_library()
+        _refresh()
+    with st.expander("Versiones anteriores de este documento", expanded=False):
+        _table([{"Documento": r.get("name", KINDS[kind]), "Emisión": r.get("issued", ""),
+            "Vence": r.get("expires", ""), "Guardado": r.get("created_at", ""), "enlace": r.get("url", "")}
+            for r in reversed(rows) if document_kind(r.get("kind")) == kind])
 
 
 def _configure(source, job, storage, actor):
+    """One offer form, before and after asynchronous official capture."""
     cfg = prepare_offer_config(source, job.get("config") or {})
     today = datetime.now(PANAMA).date()
-    st.link_button("Abrir acto oficial", source["url"])
-    st.write(f"**{source.get('number')} · {source.get('purchase_unit') or source.get('entity')}**")
-    st.caption("El calendario detallado de los anexos prevalece sobre el plazo resumido del portal. Revisa todas las entregas parciales.")
-    _table([{"Documento": a["name"], "enlace": a["url"]} for a in source.get("attachments", [])])
-    for message in source.get("blocking_errors", []):
-        st.error(message)
-    closed, reason = source_is_closed(source)
-    if closed:
-        st.warning(reason + " Se permite estudiar este expediente histórico, pero no publicarlo como oferta vigente.")
-    st.info(f"Registro Público: máximo {cfg['registry_max_months']} meses desde su emisión. "
-            "La vigencia se calcula automáticamente y debe cubrir la fecha de presentación; si el certificado vence antes, se usa esa fecha.")
-    with st.form("anes_config_" + job["id"]):
+    new = job["id"] == "new"
+    busy = job.get("state") in ACTIVE_STATES
+    key = "anes_offer_" + job["id"]
+    if source:
+        st.write(f"**{source.get('number')} · {source.get('purchase_unit') or source.get('entity')}**")
+        with st.expander("Acto oficial y anexos", expanded=False):
+            st.link_button("Abrir acto oficial", source["url"])
+            _table([{"Documento": a["name"], "enlace": a["url"]} for a in source.get("attachments", [])])
+        closed, reason = source_is_closed(source)
+        if closed:
+            st.warning(reason + " Solo disponible para consulta histórica.")
+    with st.form(key):
+        url = st.text_input("Enlace del acto en PanamáCompra", value=job.get("url", ""),
+            placeholder="https://www.panamacompra.gob.pa/Inicio/#/...", disabled=not new,
+            key=key + "_url")
         c1, c2 = st.columns(2)
-        catalog = c1.selectbox("Mascarilla / catálogo", ["K", "C"], index=0 if cfg.get("catalog", "K") == "K" else 1, format_func=CATALOG_LABELS.get)
-        price = c2.number_input("Precio UNITARIO de participación (USD)", min_value=0.0, value=float(cfg.get("price", 0)), step=0.01, format="%.4f")
-        modes = ["exento", "adicional", "incluido"]
+        catalog = c1.selectbox("Mascarilla / catálogo", ["K", "C"],
+            index=["K", "C"].index(cfg["catalog"]) if cfg.get("catalog") in CATALOGS else None,
+            placeholder="Selecciona mascarilla 4 o 5", format_func=CATALOG_LABELS.get, disabled=busy, key=key + "_catalog")
+        price = c2.number_input("Precio UNITARIO de participación (USD)", min_value=0.0,
+            value=float(cfg.get("price", 0)), step=0.01, format="%.4f", disabled=busy, key=key + "_price")
+        modes = list(TAX_LABELS)
         mode = c1.selectbox("ITBMS", modes, index=modes.index(cfg.get("tax_mode", "exento")),
-            format_func=TAX_LABELS.get)
-        tax_rate = c2.number_input("Tasa de ITBMS (%)", min_value=0.0, max_value=100.0, value=float(cfg.get("tax_rate", 7)))
-        st.caption("Marca automática: MFLAB. Mascarilla 4 / K: modelo LB4330K; mascarilla 5 / C: modelo LB4330C.")
+            format_func=TAX_LABELS.get, disabled=busy, key=key + "_tax_mode")
+        tax_rate = c2.number_input("Tasa de ITBMS (%)", min_value=0.0, max_value=100.0,
+            value=float(cfg.get("tax_rate", 7)), disabled=busy, key=key + "_tax_rate")
+        st.caption("MFLAB · K: LB4330K (mascarilla 4) · C: LB4330C (mascarilla 5). Precio por kit.")
         portal_term = portal_delivery_term(source)
-        st.markdown("**Término de entrega del portal:** " + (portal_term or "No disponible"))
+        st.markdown("**Término de entrega del portal:** " + (portal_term or ("No disponible" if source else "Se obtendrá al consultar el acto")))
         portal_reviewed = (cfg.get("delivery_use_portal") is True and bool(portal_term)
             and cfg.get("delivery_portal_value") == portal_term
             and cfg.get("delivery_portal_source_hash") == source.get("fingerprint"))
         use_portal = st.checkbox("Revisé los adjuntos y no indican una condición de entrega distinta; usar el plazo del portal.",
-            value=portal_reviewed, disabled=not bool(portal_term),
+            value=portal_reviewed, disabled=busy or not bool(portal_term),
             key=f"anes_delivery_portal_{job['id']}_{source.get('fingerprint', '')}_{portal_term}")
         manual_default = cfg.get("delivery_manual", cfg.get("delivery", "") if not cfg.get("delivery_use_portal") else "")
         delivery = st.text_area("Calendario de entregas completo (manual)", value=manual_default,
-            placeholder="Ej.: 300 unidades a 30 días; 300 a 45 días; 300 a 60 días calendario desde...")
-        st.caption("Si marcas el check se usará el plazo del portal. Si no lo marcas, se usará únicamente el calendario manual, incluidas las entregas parciales.")
-        place, place_evidence = delivery_destination(source)
+            placeholder="Completa si no usas el plazo del portal, incluidas las entregas parciales.", disabled=busy, key=key + "_delivery")
+        place, _ = delivery_destination(source)
         if place:
             st.markdown(f"**Lugar de entrega:** {place}")
-            st.caption("Extraído de " + place_evidence)
+        elif source:
+            place = st.text_input("Lugar de entrega (solo si no se pudo extraer del anexo)",
+                value=cfg.get("delivery_place", ""), disabled=busy, key=key + "_place")
         else:
-            st.warning(place_evidence + " Completa este dato desde el anexo para continuar.")
-            place = st.text_input("Lugar de entrega (solo si no se pudo extraer del anexo)", value=cfg.get("delivery_place", ""))
-        st.markdown("**Garantía y esterilidad:** " + cfg["warranty"])
-        validity = st.number_input("Validez de la cotización (días)", min_value=1, value=int(cfg.get("proposal_validity_days", 30)))
-        document_date = c1.date_input("Fecha de los documentos", value=parse_date(cfg.get("document_date")) or today, max_value=today)
-        control_date = c2.date_input("Vigencia exigible hasta (presentación u otra fecha exigida)",
-            value=max(parse_date(cfg.get("control_date")) or today, today), min_value=today)
-        if cfg.get("extra_requirements"):
-            st.caption("Requisitos adicionales ya guardados en este expediente: " + "; ".join(cfg["extra_requirements"]))
-        confirmed = st.checkbox("Revisé todos los requisitos y anexos, su calendario y posibles modificaciones")
-        st.caption("Firma de RIR: Rodrigo Sánchez, representante legal. Se incorpora automáticamente con tu autorización permanente; no se utiliza apoderado.")
-        submit = st.form_submit_button("Comprobar requisitos y preparar borradores", type="primary", disabled=job.get("state") in {"En cola", "Procesando"})
-    if submit:
-        config = prepare_offer_config(source, {"catalog": catalog, "price": str(price), "tax_mode": mode, "tax_rate": tax_rate,
-            "tax_evidence": cfg.get("tax_evidence", ""),
-            "delivery_manual": delivery.strip(), "delivery_use_portal": use_portal,
-            "delivery_portal_value": portal_term if use_portal else "",
-            "delivery_portal_source_hash": source.get("fingerprint") if use_portal else None,
-            "delivery_place": place.strip(),
-            "document_date": str(document_date), "control_date": str(control_date), "proposal_validity_days": validity,
-            "extra_requirements": cfg.get("extra_requirements", []),
-            "source_confirmed": confirmed})
+            place = cfg.get("delivery_place", "")
+        with st.expander("Fechas y condiciones de la oferta", expanded=False):
+            st.markdown("**Garantía y esterilidad:** " + cfg["warranty"])
+            st.caption(f"Registro Público: máximo {cfg['registry_max_months']} meses desde su emisión.")
+            dates1, dates2 = st.columns(2)
+            document_date = dates1.date_input("Fecha de los documentos",
+                value=min(parse_date(cfg.get("document_date")) or today, today), max_value=today, disabled=busy, key=key + "_date")
+            control_date = dates2.date_input("Vigencia exigible hasta (presentación u otra fecha exigida)",
+                value=max(parse_date(cfg.get("control_date")) or today, today), min_value=today, disabled=busy, key=key + "_control")
+            validity = st.number_input("Validez de la cotización (días)", min_value=1,
+                value=int(cfg.get("proposal_validity_days", 30)), disabled=busy, key=key + "_validity")
+            if cfg.get("extra_requirements"):
+                st.caption("Requisitos adicionales ya guardados: " + "; ".join(cfg["extra_requirements"]))
+        confirmed = st.checkbox("Revisé todos los requisitos y anexos, su calendario y posibles modificaciones",
+            disabled=busy or not bool(source), key=key + "_confirmed_" + str(source.get("fingerprint", "")))
+        buttons = st.columns(2)
+        capture = buttons[0].form_submit_button("Consultar acto y anexos" if not source else "Actualizar acto y anexos", disabled=busy)
+        submit = buttons[1].form_submit_button("Generar documentos", type="primary", disabled=busy or not bool(source))
+    if not (capture or submit):
+        return
+    config = prepare_offer_config(source, {"catalog": catalog, "price": str(price), "tax_mode": mode, "tax_rate": tax_rate,
+        "tax_evidence": cfg.get("tax_evidence", ""), "delivery_manual": delivery.strip(), "delivery_use_portal": use_portal,
+        "delivery_portal_value": portal_term if use_portal else "",
+        "delivery_portal_source_hash": source.get("fingerprint") if use_portal else None,
+        "delivery_place": place.strip(), "document_date": str(document_date), "control_date": str(control_date),
+        "proposal_validity_days": validity, "extra_requirements": cfg.get("extra_requirements", []), "source_confirmed": confirmed})
+    if capture:
+        _, _, number = route(url.strip())
+        active = next((r for r in storage.rows("ANESTESIA_EXPEDIENTES")
+            if r.get("number") == number and r.get("state") in ACTIVE_STATES), None)
+        if active:
+            st.session_state["anes_select_next"] = active["id"]
+            _refresh()
+            return
+        if not catalog or price <= 0:
+            st.error("Selecciona la mascarilla 4 o 5 e indica un precio unitario mayor que cero antes de consultar el acto.")
+            return
+        # Do not transfer approval to a new official snapshot.
+        config.update(source_confirmed=False, delivery_use_portal=False,
+            delivery_portal_value="", delivery_portal_source_hash=None)
+        job = storage.save_job({"id": uuid.uuid4().hex if new else job["id"], "number": number,
+            "url": url.strip(), "state": "Nuevo", "config": config,
+            **({"created_by": actor} if new else {})})
+        st.session_state["anes_select_next"] = job["id"]
+        _enqueue(storage, job, "capture", actor, url=url.strip())
+    elif submit:
         checks, _ = validate_package(source, config, storage.rows("ANESTESIA_DOCUMENTOS"))
         if any(c["estado"] != "Vigente documentalmente" for c in checks):
             storage.save_job({"id": job["id"], "config": config, "checks": checks,
                 "state": "Bloqueado", "detail": "Actualiza los documentos o datos indicados. Se conservó tu configuración."})
             _refresh()
         else:
+            storage.save_job({"id": job["id"], "config": config})
             _enqueue(storage, job, "generate", actor, config=config)
 
 
@@ -352,109 +390,64 @@ def render_anestesia_docs(creds, actor):
             storage.ensure_tables()
             st.session_state["anes_workbook_ready"] = {
                 "configuration": configuration, "resolved_id": storage.sheet_id}
+        _health_panel(storage, actor)
+        if st.session_state.get("anes_document_dialog_open"):
+            _library(storage, actor)
+        st.markdown("#### Generar acto")
+        # Stable IDs and labels preserve the selected case while the worker advances.
+        jobs = list(reversed(_records(storage.sheet_id, "ANESTESIA_EXPEDIENTES", storage)))
+        mapping = {r["id"]: r for r in jobs}
+        next_selection = st.session_state.pop("anes_select_next", None)
+        if next_selection in mapping:
+            st.session_state["anes_selected"] = next_selection
+        if st.session_state.get("anes_selected") not in ["new", *mapping]:
+            st.session_state["anes_selected"] = next(iter(mapping), "new")
         left, right = st.columns([4, 1])
-        section = left.radio("Vista", ["Expedientes", "Biblioteca y vigencias"], horizontal=True, label_visibility="collapsed")
+        selected = left.selectbox("Acto a preparar", ["new", *mapping], key="anes_selected",
+            format_func=lambda k: "Nuevo acto" if k == "new" else f"{mapping[k].get('number', k)} · {k[:8]}")
         if right.button("Actualizar estado", key="anes_refresh"):
             _refresh()
-        _health_panel(storage)
-        if section == "Biblioteca y vigencias":
-            _library(storage, actor)
+        job = mapping.get(selected, {"id": "new", "state": "Nuevo"})
+        if selected != "new":
+            try:
+                job = _live_job(storage.sheet_id, selected, storage) or job
+            except Exception:
+                st.warning("No se pudo actualizar el estado. Se conserva la última lectura; usa Actualizar estado para reintentar.")
+            if job.get("state") == "Datos capturados":
+                st.success("Acto y anexos listos. Revisa la entrega y pulsa Generar documentos.")
+            elif job.get("state") == "Pendiente de revisión":
+                st.success("Borradores listos para la revisión final.")
+            elif job.get("state") == "Listo para entregar":
+                st.success("Expediente listo para entregar.")
+            elif job.get("state") in {"Error", "Bloqueado"}:
+                st.warning(job.get("detail") or "Revisa los datos y documentos para continuar.")
+            else:
+                st.write(f"**{job['state']}** — {job.get('detail', '')}")
+        source = _json(job["source_id"], storage) if job.get("source_id") else {}
+        _configure(source, job, storage, actor)
+        if selected == "new":
             return
-        with st.expander("Nuevo expediente", expanded=True):
-            with st.form("anes_new"):
-                url = st.text_input("Enlace del acto en PanamáCompra", placeholder="https://www.panamacompra.gob.pa/Inicio/#/...")
-                c1, c2 = st.columns(2)
-                catalog = c1.selectbox("Mascarilla / catálogo a ofrecer", ["K", "C"], index=None,
-                    placeholder="Selecciona mascarilla 4 o 5", format_func=CATALOG_LABELS.get, key="anes_new_catalog")
-                price = c2.number_input("Precio UNITARIO a ofrecer (USD)", min_value=0.0, value=0.0,
-                    step=0.01, format="%.4f", key="anes_new_price")
-                mode = c1.selectbox("ITBMS de la oferta", list(TAX_LABELS), format_func=TAX_LABELS.get, key="anes_new_tax_mode")
-                tax_rate = c2.number_input("Tasa ITBMS de la oferta (%)", min_value=0.0, max_value=100.0,
-                    value=7.0, key="anes_new_tax_rate")
-                st.caption("El precio es por kit. Estos datos se guardan con el expediente; podrás revisarlos antes de generar los documentos.")
-                create = st.form_submit_button("Consultar acto y anexos", type="primary")
-            if create:
-                _, _, number = route(url.strip())
-                existing = storage.rows("ANESTESIA_EXPEDIENTES")
-                job = next((r for r in existing if r.get("number") == number and r.get("state") in ACTIVE_STATES), None)
-                if job:
-                    st.session_state["anes_selected"] = job["id"]
-                    st.info("Ese acto ya tiene una captura en curso. Puedes seleccionarlo abajo.")
-                elif not catalog or price <= 0:
-                    st.error("Selecciona la mascarilla 4 o 5 e indica un precio unitario mayor que cero antes de consultar el acto.")
-                else:
-                    config = {"catalog": catalog, "price": str(price), "tax_mode": mode, "tax_rate": tax_rate}
-                    job = storage.save_job({"id": uuid.uuid4().hex, "number": number, "url": url.strip(),
-                        "state": "Nuevo", "created_by": actor, "config": config})
-                    st.session_state["anes_selected"] = job["id"]
-                    _enqueue(storage, job, "capture", actor, url=url.strip())
-        # Append order and labels stay stable as jobs progress. Dynamic labels or
-        # sorting by updated_at can reset Streamlit's selection to another case.
-        jobs = list(reversed(_records(storage.sheet_id, "ANESTESIA_EXPEDIENTES", storage)))
-        if not jobs:
-            st.info("Consulta un acto y carga los certificados vigentes en Biblioteca y vigencias para comenzar.")
-            return
-        mapping = {r["id"]: r for r in jobs}
-        if st.session_state.get("anes_selected") not in mapping:
-            st.session_state["anes_selected"] = next(iter(mapping))
-        # A page visit must not resurrect an old cached "En cola" result.
-        ident = st.session_state["anes_selected"]
-        try:
-            current = _live_job(storage.sheet_id, ident, storage)
-            if current:
-                mapping[ident] = current
-        except Exception:
-            st.warning("No se pudo actualizar el estado. Se muestra la última lectura disponible; usa Actualizar estado para reintentar.")
-        selected = st.selectbox("Expediente", list(mapping), key="anes_selected",
-            format_func=lambda k: f"{mapping[k].get('number', k)} · {k[:8]}")
-        job = mapping[selected]
-        st.write(f"**{job['state']}** — {job.get('detail', '')}")
-        st.caption("Último cambio: " + job.get("updated_at", ""))
-        _delivery_links(storage, job)
-        _reference_links(job)
         if job.get("state") in ACTIVE_STATES:
-            config = job.get("config") or {}
-            if config.get("catalog"):
-                st.caption(f"Oferta guardada: {CATALOG_LABELS.get(config['catalog'], config['catalog'])} · "
-                           f"USD {float(config.get('price', 0)):,.4f} por kit · {TAX_LABELS.get(config.get('tax_mode'), '')}.")
             _watch_job(storage, job)
-            return
-        if job.get("state") == "Datos capturados":
-            st.success("Acto y anexos listos. Completa o revisa los datos de la oferta abajo y pulsa «Comprobar requisitos y preparar borradores».")
-        elif job.get("state") == "Pendiente de revisión":
-            st.success("Borradores Word/PDF listos. Ya puedes abrirlos y realizar la revisión final.")
-        elif job.get("state") == "Listo para entregar":
-            st.success("Expediente listo para entregar. Abre la carpeta final o descarga el ZIP.")
-        elif job.get("state") in {"Error", "Bloqueado"}:
-            st.warning(job.get("detail") or "Revisa los datos y documentos antes de continuar.")
-        if job.get("checks"):
-            excluded_labels = {KINDS[kind] for kind in EXCLUDED_KINDS}
-            _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")}
-                    for c in job["checks"] if c.get('kind') not in EXCLUDED_KINDS and c.get('documento') not in excluded_labels])
-        if job.get("source_id"):
-            source = _json(job["source_id"], storage)
-            _review(storage, job, actor)
-            with st.expander("Datos y preparación del expediente", expanded=not bool(job.get("manifest_id"))):
-                _configure(source, job, storage, actor)
-        if job.get("url") and st.button("Volver a capturar acto y anexos", key="anes_recapture"):
-            _enqueue(storage, job, "capture", actor, url=job["url"])
-        with st.expander("Cómo funciona y qué debe verificarse", expanded=False):
-            st.markdown("1. Captura oficial y revisión de anexos.\n2. Certificados originales vigentes y metadatos comprobados.\n"
-                "3. Cotización en Word/PDF, con membrete y firma de Rodrigo Sánchez. Los certificados oficiales mantienen su formato y firma originales.\n"
-                "4. Auditoría externa sobre todos los archivos y devolución del JSON de revisión.\n"
-                "5. Revalidación del acto, vigencias y archivos antes de reemplazar los PDF de Entrega actual en Drive.\n\n"
-                "El pacto bilateral con la entidad corresponde a la etapa posterior indicada en los anexos de ejemplo; no se exige para preparar esta cotización. "
-                "Notaría y apostillas deben obtenerse cuando el acto las exija; insertar la firma de RIR no las sustituye. "
-                "La entrega estándar reproduce los 12 archivos de las participaciones de ejemplo: cotización y 11 respaldos separados. "
-                "El certificado de oferente y el catálogo de oferentes permanecen en archivos independientes. "
-                "Los originales, Word y revisiones se conservan en el historial; la carpeta para presentar contiene únicamente PDF.")
+        elif job.get("checks") or source.get("blocking_errors"):
+            with st.expander("Comprobaciones del expediente", expanded=job.get("state") in {"Error", "Bloqueado"}):
+                excluded_labels = {KINDS[kind] for kind in EXCLUDED_KINDS}
+                _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")}
+                    for c in job.get("checks", []) if c.get('kind') not in EXCLUDED_KINDS and c.get('documento') not in excluded_labels])
+                for message in source.get("blocking_errors", []):
+                    st.error(message)
+        _delivery_links(storage, job)
+        if job.get("state") not in ACTIVE_STATES and job.get("manifest_id"):
+            with st.expander("Revisión final y publicación", expanded=job.get("state") == "Pendiente de revisión"):
+                _review(storage, job, actor)
+        _reference_links(job)
     except Exception as exc:
         st.error(f"No fue posible completar la operación documental: {exc}")
         st.caption("Los originales y expedientes anteriores se conservan. Reintenta con Actualizar estado.")
 
 
 @st.fragment(run_every="60s")
-def _health_panel(storage):
+def _health_panel(storage, actor):
     st.markdown("#### Documentos actuales y vigencias")
     catalog = st.selectbox("Comprobar biblioteca para catálogo", ["K", "C"], format_func=CATALOGS.get, key="anes_health_catalog")
     try:
@@ -466,10 +459,13 @@ def _health_panel(storage):
     today = datetime.now(PANAMA).date()
     _table([{key: value for key, value in row.items() if key != "Qué falta / comprobación"}
             for row in library_health(rows, as_of=today, catalog=catalog)])
-    st.caption(f"Control al {today:%d/%m/%Y} (Panamá). Se muestra la última versión aplicable; se actualiza cada 60 segundos mientras esta pestaña está abierta. "
-               f"Registro Público: emisión + {REGISTRY_MAX_MONTHS} meses, o vencimiento impreso anterior; si el acto exige menos antigüedad, se aplica al generar. "
-               "La revisión documental no sustituye la consulta de autenticidad al emisor.")
+    st.caption(f"Control al {today:%d/%m/%Y} (Panamá) · actualización automática cada 60 segundos. "
+               "Al generar se verifican las vigencias para la fecha de presentación.")
+    saved = st.session_state.pop("anes_document_saved", None)
+    if saved:
+        st.success(f"{saved}: documento guardado. La tabla muestra su estado de verificación.")
     for issue in st.session_state.pop("anes_document_result", []):
         st.warning("Documento guardado pendiente de verificación: " + issue)
-    st.info("Para corregir un vencido o faltante, abre Biblioteca y vigencias y adjunta la nueva versión. "
-            "Antes de generar se vuelve a leer la biblioteca y se comprueban vigencia, catálogo, modelo y requisitos hasta la fecha de presentación. Un documento pendiente o vencido bloquea la generación.")
+    if st.button("Actualizar documento", key="anes_update_document"):
+        st.session_state["anes_document_dialog_open"] = True
+        st.rerun()

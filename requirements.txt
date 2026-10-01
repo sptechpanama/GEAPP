@@ -1,4 +1,4 @@
-streamlit>=1.38.0            # Framework de UI web en Python
+streamlit>=1.51.0            # Diálogos con cierre gestionado y actualización por fragmentos
 pandas>=2.2.2               # Manejo de DataFrames y fechas
 altair>=5.0.0                # Graficación declarativa
 google-api-python-client==2.149.0

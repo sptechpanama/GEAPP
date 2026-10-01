@@ -51,15 +51,15 @@ def test_can_open_historical_case_library_and_validate_without_an_exception():
         assert any('Documentos actuales y vigencias' in x.value for x in app.markdown)
         health = app.dataframe[0].value
         assert len(health) == 11 and 'Falta' in health['Estado'].tolist()
-        assert any("Registro Público" in x.value for x in app.info)
-        button = next(b for b in app.button if b.label == "Comprobar requisitos y preparar borradores")
+        assert any("Registro Público" in x.value for x in app.caption)
+        button = next(b for b in app.button if b.label == "Generar documentos")
         button.click().run()
         assert not app.exception
         assert storage.tables["ANESTESIA_EXPEDIENTES"][0]["state"] == "Bloqueado"
         assert len(app.dataframe) >= 1
-        app.radio[0].set_value("Biblioteca y vigencias").run()
+        next(b for b in app.button if b.label == "Actualizar documento").click().run()
         assert not app.exception
-        assert any("Guardar nueva versión" in b.label for b in app.button)
+        assert any(b.label == "Guardar documento" for b in app.button)
 
 
 def test_google_read_failure_is_visible_instead_of_erasing_library():
@@ -92,7 +92,7 @@ def test_resolved_workbook_survives_reruns_and_configuration_changes():
         app.session_state["anes_tables_ready"] = True  # session predating the fix
         app.run()
         assert not app.exception and not app.error
-        app.radio[0].set_value("Biblioteca y vigencias").run()
+        app.run()
         assert not app.exception and not app.error
         assert connections == ["office"]
         app.secrets["app"] = {"PC_MANUAL_SHEET_ID": "other-native"}
@@ -131,9 +131,9 @@ def test_registry_is_automatic_and_removed_boxes_do_not_erase_saved_requirements
         app.run()
         labels = [w.label for collection in (app.text_input, app.text_area, app.number_input) for w in collection]
         assert not any('Otros documentos' in label or 'Archivo/página' in label or 'Antigüedad máxima' in label for label in labels)
-        assert any('máximo 12 meses' in x.value for x in app.info)
+        assert any('máximo 12 meses' in x.value for x in app.caption)
         assert any('Requisito ya registrado' in x.value for x in app.caption)
-        next(b for b in app.button if b.label == 'Comprobar requisitos y preparar borradores').click().run()
+        next(b for b in app.button if b.label == 'Generar documentos').click().run()
         assert not app.exception
         saved = storage.tables['ANESTESIA_EXPEDIENTES'][0]['config']
         assert saved['registry_max_months'] == 12 and saved['registry_rule_evidence']
@@ -238,24 +238,28 @@ def test_new_offer_data_saved_before_capture_and_reused_after_completion(catalog
     def enqueue(payload, **kwargs):
         # The worker can start immediately: inputs must already be persisted.
         pending = storage.job(payload['request_id'])
-        assert pending['config'] == {'catalog': catalog, 'price': '19.875', 'tax_mode': tax_mode, 'tax_rate': 7.0}
+        assert {k: pending['config'][k] for k in ('catalog', 'price', 'tax_mode', 'tax_rate')} == {'catalog': catalog, 'price': '19.875', 'tax_mode': tax_mode, 'tax_rate': 7.0}
+        assert pending['config']['delivery_manual'] == 'Entrega acordada por revisar'
+        assert pending['config']['source_confirmed'] is False
         assert payload['action'] == 'capture'
         return 'queue-new'
     with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"), patch.object(storage, "enqueue", side_effect=enqueue, create=True) as queued:
         app = AppTest.from_string(APP, default_timeout=20)
         app.secrets['app'] = {}
         app.run()
+        app.selectbox(key='anes_selected').set_value('new').run()
         next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').set_value(ACT_URL)
-        app.selectbox(key='anes_new_catalog').set_value(catalog)
-        app.number_input(key='anes_new_price').set_value(19.875)
-        app.selectbox(key='anes_new_tax_mode').set_value(tax_mode)
+        app.selectbox(key='anes_offer_new_catalog').set_value(catalog)
+        app.number_input(key='anes_offer_new_price').set_value(19.875)
+        next(w for w in app.text_area if w.label == 'Calendario de entregas completo (manual)').set_value('Entrega acordada por revisar')
+        app.selectbox(key='anes_offer_new_tax_mode').set_value(tax_mode)
         next(b for b in app.button if b.label == 'Consultar acto y anexos').click().run()
         assert not app.exception and not app.error
         assert queued.call_count == 1
         job = storage.tables['ANESTESIA_EXPEDIENTES'][-1]
         assert job['state'] == 'En cola' and job['queue_id'] == 'queue-new'
         assert any('cada 5 segundos' in i.value for i in app.info)
-        assert not any(b.label == 'Comprobar requisitos y preparar borradores' for b in app.button)
+        assert next(b for b in app.button if b.label == 'Generar documentos').disabled
         # Old 20-second table cache is intentionally retained. Live polling wins.
         storage.save_job({'id': job['id'], 'state': 'Datos capturados', 'source_id': 'source', 'updated_at': '2026-09-30T14:00:00'})
         view._live_job.clear()
@@ -276,9 +280,10 @@ def test_incomplete_offer_is_not_queued(catalog, price):
         app = AppTest.from_string(APP, default_timeout=20)
         app.secrets['app'] = {}
         app.run()
+        app.selectbox(key='anes_selected').set_value('new').run()
         next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').set_value(ACT_URL)
-        app.selectbox(key='anes_new_catalog').set_value(catalog)
-        app.number_input(key='anes_new_price').set_value(price)
+        app.selectbox(key='anes_offer_new_catalog').set_value(catalog)
+        app.number_input(key='anes_offer_new_price').set_value(price)
         next(b for b in app.button if b.label == 'Consultar acto y anexos').click().run()
         assert not app.exception and any('precio unitario mayor que cero' in e.value for e in app.error)
         queued.assert_not_called()
@@ -294,6 +299,7 @@ def test_duplicate_active_capture_selects_existing_without_replacing_offer():
         app = AppTest.from_string(APP, default_timeout=20)
         app.secrets['app'] = {}
         app.run()
+        app.selectbox(key='anes_selected').set_value('new').run()
         next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').set_value(ACT_URL)
         next(b for b in app.button if b.label == 'Consultar acto y anexos').click().run()
         assert not app.exception and not app.error
@@ -338,7 +344,7 @@ def test_terminal_queue_error_is_visible_without_rerun_loop_or_altering_stored_d
         app.run()
         assert not app.exception
         assert any('Worker no pudo iniciar' in w.value for w in app.warning)
-        assert any(b.label == 'Volver a capturar acto y anexos' for b in app.button)
+        assert any(b.label == 'Actualizar acto y anexos' for b in app.button)
         assert job == before  # reading a failed queue never mutates history
 
 
@@ -368,7 +374,7 @@ def test_simplified_form_uses_source_destination_and_no_longer_asks_removed_fiel
         assert not any('Lugar' in label or 'Garantía' in label for label in labels)
         assert any('J.J.VALLARINO' in m.value for m in app.markdown)
         assert any('24 meses de garantía' in m.value for m in app.markdown)
-        next(b for b in app.button if b.label == 'Comprobar requisitos y preparar borradores').click().run()
+        next(b for b in app.button if b.label == 'Generar documentos').click().run()
         assert not app.exception
         config = storage.tables['ANESTESIA_EXPEDIENTES'][0]['config']
         assert config['delivery_place'] == source['info']['lugar de entrega']
@@ -384,7 +390,7 @@ def test_delivery_checkbox_persists_manual_schedule_and_resets_after_source_chan
     view._records.clear(); view._json.clear()
     def checkbox(app): return next(w for w in app.checkbox if w.label.startswith('Revisé los adjuntos'))
     def manual(app): return next(w for w in app.text_area if w.label == 'Calendario de entregas completo (manual)')
-    def submit(app): next(b for b in app.button if b.label == 'Comprobar requisitos y preparar borradores').click().run()
+    def submit(app): next(b for b in app.button if b.label == 'Generar documentos').click().run()
     with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), patch.object(storage, 'json_file', return_value=source):
         app = AppTest.from_string(APP, default_timeout=20)
         app.secrets['app'] = {}
@@ -425,3 +431,128 @@ def test_delivery_checkbox_disabled_when_no_portal_period_and_manual_remains_ava
         checkbox = next(w for w in app.checkbox if w.label.startswith('Revisé los adjuntos'))
         assert checkbox.disabled and not checkbox.value
         assert any(w.label == 'Calendario de entregas completo (manual)' for w in app.text_area)
+
+
+def test_one_offer_form_no_navigation_or_duplicate_fields_and_new_act_cannot_generate():
+    storage = Storage()
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception and not app.error
+        assert not app.radio
+        assert len(app.get('form')) == 1
+        assert [w.label for w in app.selectbox].count('Mascarilla / catálogo') == 1
+        assert [w.label for w in app.number_input].count('Precio UNITARIO de participación (USD)') == 1
+        assert not any(w.label in {'Nuevo expediente', 'Datos y preparación del expediente',
+            'Cómo funciona y qué debe verificarse'} for w in app.expander)
+        assert next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').disabled
+        assert not next(w for w in app.expander if w.label == 'Acto oficial y anexos').proto.expanded
+        app.selectbox(key='anes_selected').set_value('new').run()
+        assert not app.exception and not app.error
+        assert len(app.get('form')) == 1
+        assert not next(w for w in app.text_input if w.label == 'Enlace del acto en PanamáCompra').disabled
+        assert next(b for b in app.button if b.label == 'Generar documentos').disabled
+        assert not next(b for b in app.button if b.label == 'Consultar acto y anexos').disabled
+        assert any('Se obtendrá al consultar el acto' in m.value for m in app.markdown)
+
+
+def test_selection_does_not_mix_offers_and_waiting_form_cannot_enqueue_again():
+    storage = Storage()
+    a = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    a.update(config={'catalog': 'C', 'price': '18.5'})
+    b = {**a, 'id': 'b'*32, 'number': 'ACTO-2', 'state': 'En cola', 'queue_id': 'q',
+         'config': {'catalog': 'K', 'price': '28.5'}}
+    storage.tables['ANESTESIA_EXPEDIENTES'].append(b)
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception and not app.error
+        price = next(w for w in app.number_input if w.label == 'Precio UNITARIO de participación (USD)')
+        assert price.value == 28.5 and price.disabled
+        assert next(b for b in app.button if b.label == 'Actualizar acto y anexos').disabled
+        assert next(b for b in app.button if b.label == 'Generar documentos').disabled
+        app.selectbox(key='anes_selected').set_value(a['id']).run()
+        assert next(w for w in app.selectbox if w.label == 'Mascarilla / catálogo').value == 'C'
+        price = next(w for w in app.number_input if w.label == 'Precio UNITARIO de participación (USD)')
+        assert price.value == 18.5 and not price.disabled
+
+
+def _expired_css(storage):
+    row = {'id': 'old-css', 'kind': 'css', 'issued': '2020-01-01', 'expires': '2020-01-31',
+        'company': view.COMPANY, 'verified': True, 'evidence': 'Old reviewed document',
+        'url': 'https://drive.example/original-css', 'name': 'CSS-anterior.pdf', 'created_at': '2020-01-01'}
+    storage.tables['ANESTESIA_DOCUMENTOS'].append(row)
+    return row
+
+
+def test_replacement_prioritizes_expired_document_and_does_not_inherit_verification():
+    storage = Storage()
+    old = _expired_css(storage)
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), \
+            patch.object(storage, 'upload_document', create=True) as upload:
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        next(b for b in app.button if b.label == 'Actualizar documento').click().run()
+        assert not app.exception and not app.error
+        assert app.selectbox(key='anes_update_kind').value == 'css'
+        assert any('Paz y salvo CSS' in o and 'Vencido' in o for o in app.selectbox(key='anes_update_kind').options)
+        assert next(w for w in app.get('link_button') if w.label == 'Abrir documento actual').proto.url == old['url']
+        assert next(w for w in app.date_input if w.label == 'Fecha de emisión').value is None
+        assert next(w for w in app.date_input if w.label == 'Fecha de vencimiento').value is None
+        assert next(w for w in app.text_area if w.label == 'Comprobación del documento').value == ''
+        assert not next(w for w in app.checkbox if w.label.startswith('Revisé el PDF')).value
+        assert not any(w.label == 'Catálogos expresamente cubiertos' for w in app.multiselect)
+        next(b for b in app.button if b.label == 'Guardar documento').click().run()
+        assert any('Adjunta el PDF actualizado' in e.value for e in app.error)
+        upload.assert_not_called()
+        assert storage.tables['ANESTESIA_DOCUMENTOS'] == [old]
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_replacement_upload_preserves_original_and_reports_content_or_network_error(fails):
+    from io import BytesIO
+    from datetime import date
+    storage = Storage()
+    old = deepcopy(_expired_css(storage))
+    pdf = BytesIO(b'%PDF-test')
+    pdf.name, pdf.file_id = 'CSS-actualizado.pdf', 'new-upload'
+    result = {'errors': ['La fecha no coincide con el PDF.']}
+    def save(name, data, metadata, *, actor):
+        assert name == pdf.name and data == pdf.getvalue()
+        assert metadata['kind'] == 'css' and metadata['verified'] is True
+        assert metadata['issued'] == '2026-10-01' and metadata['expires'] == '2026-10-31'
+        assert metadata['evidence'] == 'Página 1: titular RIR y fechas impresas.'
+        assert storage.tables['ANESTESIA_DOCUMENTOS'][0] == old
+        if fails:
+            raise TimeoutError('Drive temporalmente inaccesible')
+        row = {**metadata, 'id': 'new-css', 'verified': False, 'content_validation': result}
+        storage.tables['ANESTESIA_DOCUMENTOS'].append(row)
+        return row
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), \
+            patch.object(view.st, 'file_uploader', return_value=pdf), \
+            patch.object(storage, 'upload_document', side_effect=save, create=True) as upload:
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        next(b for b in app.button if b.label == 'Actualizar documento').click().run()
+        next(w for w in app.date_input if w.label == 'Fecha de emisión').set_value(date(2026, 10, 1))
+        next(w for w in app.date_input if w.label == 'Fecha de vencimiento').set_value(date(2026, 10, 31))
+        next(w for w in app.text_area if w.label == 'Comprobación del documento').set_value('Página 1: titular RIR y fechas impresas.')
+        next(w for w in app.checkbox if w.label.startswith('Revisé el PDF')).check()
+        next(b for b in app.button if b.label == 'Guardar documento').click().run()
+        assert not app.exception
+        upload.assert_called_once()
+        assert storage.tables['ANESTESIA_DOCUMENTOS'][0] == old
+        if fails:
+            assert len(storage.tables['ANESTESIA_DOCUMENTOS']) == 1
+            assert any('Drive temporalmente inaccesible' in e.value for e in app.error)
+        else:
+            assert len(storage.tables['ANESTESIA_DOCUMENTOS']) == 2
+            assert any('La fecha no coincide' in w.value for w in app.warning)
