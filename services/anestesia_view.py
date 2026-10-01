@@ -16,7 +16,7 @@ from services.anestesia_source import delivery_destination, portal_delivery_term
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 9
+ANESTESIA_UI_VERSION = 10
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -367,8 +367,11 @@ def render_anestesia_docs(creds, actor):
         job = mapping[selected]
         st.write(f"**{job['state']}** — {job.get('detail', '')}")
         st.caption("Último cambio: " + job.get("updated_at", ""))
-        if job.get("folder_url"):
-            st.link_button("Abrir carpeta e historial del expediente", job["folder_url"])
+        folder_url = job.get("folder_url") or (
+            f"https://drive.google.com/drive/folders/{job['folder_id']}" if job.get("folder_id") else "")
+        if folder_url:
+            st.link_button("Ver archivos en Drive", folder_url, type="primary",
+                help="Abre la carpeta de este expediente con sus anexos, borradores e historial de documentos.")
         participation = job.get("participation", {})
         if participation:
             with st.expander("Participación anterior de RIR y documentos recuperados", expanded=False):
