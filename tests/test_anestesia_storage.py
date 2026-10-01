@@ -125,3 +125,15 @@ def test_read_queue_result_uses_request_id_and_never_changes_other_jobs():
     assert storage.queue_request('missing') is None
     api.update.assert_not_called()
     api.append.assert_not_called()
+
+
+def test_delivery_status_is_read_only_and_requires_the_owned_folder_role():
+    drive = MagicMock()
+    drive.files.return_value.get.return_value.execute.return_value = {
+        'mimeType': 'application/vnd.google-apps.folder', 'appProperties': {
+            'role': 'anestesia_current_delivery', 'state': 'ready', 'request': 'one', 'manifest': 'hash'}}
+    storage = AnestesiaStorage(drive, None)
+    assert storage.delivery_status('folder')['request'] == 'one'
+    drive.files.return_value.update.assert_not_called()
+    drive.files.return_value.get.return_value.execute.return_value['trashed'] = True
+    with pytest.raises(ValueError, match='verificar'): storage.delivery_status('folder')

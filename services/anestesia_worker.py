@@ -15,6 +15,7 @@ from services.anestesia_docs import (PANAMA, canonical_hash, file_hash, now_iso,
 from services.anestesia_documents import quote_docx
 from services.anestesia_source import capture, source_is_closed
 from services.anestesia_health import certificate_content_check
+from services.anestesia_delivery import DeliveryPublisher, original_pdf_set
 
 
 def write_json(storage, folder, name, value):
@@ -94,20 +95,23 @@ def run_request(storage, payload, *, execution_id, root: Path):
                     if not len(doc) or source["number"] not in " ".join(page.get_text() for page in doc):
                         raise ValueError("El PDF no contiene el número del acto. Revisar la conversión.")
                 files.append({**storage.put(draft_folder, name.replace(".docx", ".pdf"), pdf, "application/pdf"), "deliverable": True})
-            for n, (kind, document) in enumerate(selected.items(), 2):
-                data = originals[kind]
-                saved = storage.put(draft_folder, f"{n:02d}_{kind.replace(':', '_')}.pdf", data, "application/pdf")
-                files.append({**saved, "deliverable": True, "library_id": document["id"], "kind": kind})
+            original_files, delivery_notes = original_pdf_set(originals, selected)
+            for original in original_files:
+                saved = storage.put(draft_folder, original['name'], original['data'], "application/pdf")
+                files.append({**saved, "deliverable": True,
+                    **{key: value for key, value in original.items() if key not in {'name', 'data'}}})
             amounts = totals(source["items"][0]["cantidad"], config["price"], config["tax_mode"], config.get("tax_rate", 7))
             content = {"request_id": ident, "version": execution_id, "source": source, "config": config,
                 "amounts": amounts, "checks": checks, "documents": selected, "files": files, "created_at": now_iso(),
+                "delivery_pdf_count": sum(f['mime'] == 'application/pdf' for f in files), "delivery_notes": delivery_notes,
                 "folder_url": f"https://drive.google.com/drive/folders/{draft_folder}"}
             manifest = {**content, "manifest_hash": canonical_hash(content)}
             stored = write_json(storage, draft_folder, "manifest.json", manifest)
             prompt = storage.put(draft_folder, "LEEME_revision_ChatGPT.md", review_prompt(manifest).encode(), "text/markdown")
             return storage.save_job({**base, "state": "Pendiente de revisión", "detail": "Borradores preparados. Revisa en ChatGPT y adjunta el JSON de auditoría; aún no están habilitados para entregar.",
                 "manifest_id": stored["file_id"], "manifest_hash": manifest["manifest_hash"], "prompt_url": prompt["url"],
-                "draft_url": content["folder_url"], "checks": checks, "config": config})
+                "draft_url": content["folder_url"], "checks": checks, "config": config,
+                "delivery_pdf_count": content['delivery_pdf_count'], "delivery_notes": delivery_notes})
         if action == "finalize":
             if not job.get("manifest_id"):
                 raise ValueError("No hay borradores revisables.")
@@ -142,17 +146,29 @@ def run_request(storage, payload, *, execution_id, root: Path):
                     if file_hash(data) != file["sha256"]:
                         raise ValueError(f"Cambió el archivo {file['name']} después de la revisión.")
                     verified.append((file, data))
-            final_folder = storage.folder("Entrega - " + manifest["version"][:8], folder)
+            # Keep the exact approved PDFs as an immutable per-case snapshot.
+            # The common delivery folder is replaced only after this set is complete.
+            import uuid
+            final_folder = storage.folder("PDF revisados - " + uuid.uuid4().hex[:12], folder)
+            audit_folder = storage.folder("Revisión y descargables - " + manifest["version"], folder)
+            pdf_files = []
             buffer = BytesIO()
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipout:
                 for file, data in verified:
-                    storage.put(final_folder, file["name"], data, file["mime"])
-                    zipout.writestr(file["name"], data)
-            archive = storage.put(final_folder, f"Expediente_{source['number']}.zip", buffer.getvalue(), "application/zip")
-            write_json(storage, final_folder, "revision_registrada.json", reviews[0])
-            write_json(storage, final_folder, "manifest.json", manifest)
-            return storage.save_job({**base, "state": "Listo para entregar", "detail": "Expediente publicado con los mismos archivos revisados. No se presentó ninguna oferta automáticamente.",
-                "final_url": f"https://drive.google.com/drive/folders/{final_folder}", "zip_url": archive["url"], "published_at": now_iso(), "published_manifest": manifest["manifest_hash"]})
+                    if file['mime'] == 'application/pdf':
+                        pdf_files.append(storage.put(final_folder, file["name"], data, file["mime"]))
+                        zipout.writestr(file["name"], data)
+            archive = storage.put(audit_folder, f"Expediente_{source['number']}.zip", buffer.getvalue(), "application/zip")
+            write_json(storage, audit_folder, "revision_registrada.json", reviews[0])
+            write_json(storage, audit_folder, "manifest.json", manifest)
+            published = DeliveryPublisher(storage).publish(pdf_files, request_id=ident,
+                number=source['number'], manifest_hash=manifest['manifest_hash'])
+            return storage.save_job({**base, "state": "Listo para entregar",
+                "detail": f"{published['count']} PDF revisados publicados en Entrega actual. Se reemplazó el conjunto anterior y se conservó su historial.",
+                "final_url": f"https://drive.google.com/drive/folders/{published['folder_id']}",
+                "delivery_folder_id": published['folder_id'], "delivery_pdf_count": published['count'],
+                "archive_url": f"https://drive.google.com/drive/folders/{final_folder}",
+                "zip_url": archive["url"], "published_at": now_iso(), "published_manifest": manifest["manifest_hash"]})
         raise ValueError("Acción documental desconocida.")
     except Exception as exc:
         storage.save_job({"id": ident, "state": "Error", "detail": str(exc)[:1500], "last_execution": execution_id})

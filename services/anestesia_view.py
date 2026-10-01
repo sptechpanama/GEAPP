@@ -16,7 +16,7 @@ from services.anestesia_source import delivery_destination, portal_delivery_term
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 8
+ANESTESIA_UI_VERSION = 9
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -237,6 +237,10 @@ def _review(storage, job, actor):
     manifest = _json(job["manifest_id"], storage)
     st.markdown("#### Revisión final con ChatGPT")
     st.caption("Abre ChatGPT con el modelo de revisión disponible en tu plan, adjunta o conecta la carpeta y pega este prompt. No hay un envío automático a un chat personal.")
+    st.caption(f"Entrega prevista: {manifest.get('delivery_pdf_count', sum(f.get('mime') == 'application/pdf' for f in manifest.get('files', [])))} PDF. "
+               "Tras aprobar y revalidar, se reemplazará el contenido de Entrega actual; los Word y archivos de revisión quedarán en el historial.")
+    for note in manifest.get('delivery_notes', []):
+        st.info(note)
     st.link_button("Abrir borradores y originales", manifest["folder_url"])
     st.download_button("Descargar prompt exacto de revisión", review_prompt(manifest), "prompt_revision_anestesia.md", mime="text/markdown")
     with st.expander("Ver prompt", expanded=False):
@@ -259,6 +263,34 @@ def _review(storage, job, actor):
                 _enqueue(storage, job, "finalize", actor, review_id=saved["id"], user_confirmed=True)
         except (ValueError, TypeError, KeyError) as exc:
             st.error(f"No se pudo aceptar la revisión: {exc}")
+
+
+@st.fragment(run_every="10s")
+def _delivery_links(storage, job):
+    if not job.get('delivery_folder_id'):
+        # Historical delivery folders predate the common replacement folder.
+        st.link_button("Abrir expediente final en Drive", job['final_url'])
+    else:
+        try:
+            current = storage.delivery_status(job['delivery_folder_id'])
+            if (current.get('state') == 'ready' and current.get('request') == job['id']
+                    and current.get('manifest') == job.get('published_manifest')
+                    and job.get('state') == 'Listo para entregar'
+                    and job.get('manifest_hash') == job.get('published_manifest')):
+                st.link_button(f"Abrir {current.get('count', '')} PDF para entregar", job['final_url'], type='primary')
+                st.caption("Entrega actual corresponde a este expediente. La próxima solicitud completada reemplazará estos PDF.")
+            elif current.get('state') == 'updating':
+                st.warning("Se está reemplazando la entrega actual. Espera a que se complete la verificación de los PDF.")
+            elif current.get('request') == job['id']:
+                st.caption("Entrega actual conserva una versión anterior. Los nuevos documentos deben completar su revisión antes de reemplazarla.")
+            else:
+                st.caption("Entrega actual corresponde a otra solicitud. Los PDF revisados de este expediente siguen disponibles en su historial.")
+        except Exception:
+            st.warning("No se pudo verificar la entrega actual. Se reintentará en 10 segundos; conserva la referencia del expediente.")
+    if job.get('archive_url'):
+        st.link_button("PDF revisados de este expediente (historial)", job['archive_url'])
+    if job.get('zip_url'):
+        st.link_button("Descargar ZIP de los PDF de este expediente", job['zip_url'])
 
 
 def render_anestesia_docs(creds, actor):
@@ -365,9 +397,7 @@ def render_anestesia_docs(creds, actor):
         if job.get("checks"):
             _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")} for c in job["checks"]])
         if job.get("final_url"):
-            st.link_button("Abrir expediente final en Drive", job["final_url"])
-            st.link_button("Descargar ZIP", job["zip_url"])
-            st.caption("Conserva el corte de la última revisión. Si cambian fechas, anexos o certificados, genera y revisa una nueva versión.")
+            _delivery_links(storage, job)
         if job.get("source_id"):
             source = _json(job["source_id"], storage)
             _review(storage, job, actor)
@@ -379,10 +409,12 @@ def render_anestesia_docs(creds, actor):
             st.markdown("1. Captura oficial y revisión de anexos.\n2. Certificados originales vigentes y metadatos comprobados.\n"
                 "3. Cotización en Word/PDF, con membrete y firma de Rodrigo Sánchez. Los certificados oficiales mantienen su formato y firma originales.\n"
                 "4. Auditoría externa sobre todos los archivos y devolución del JSON de revisión.\n"
-                "5. Revalidación del acto, vigencias y archivos antes de publicar en Drive.\n\n"
+                "5. Revalidación del acto, vigencias y archivos antes de reemplazar los PDF de Entrega actual en Drive.\n\n"
                 "El pacto bilateral con la entidad corresponde a la etapa posterior indicada en los anexos de ejemplo; no se exige para preparar esta cotización. "
                 "Notaría y apostillas deben obtenerse cuando el acto las exija; insertar la firma de RIR no las sustituye. "
-                "La biblioteca conserva cada versión y su historial. El número de documentos depende del pliego, no de una cantidad fija.")
+                "La entrega estándar contiene 12 PDF, agrupando oferente e inscripción del producto sin omitir páginas. "
+                "Las firmas digitales y los requisitos adicionales pueden exigir archivos separados. "
+                "Los originales, Word y revisiones se conservan en el historial; la carpeta para presentar contiene únicamente PDF.")
     except Exception as exc:
         st.error(f"No fue posible completar la operación documental: {exc}")
         st.caption("Los originales y expedientes anteriores se conservan. Reintenta con Actualizar estado.")

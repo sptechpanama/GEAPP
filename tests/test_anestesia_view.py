@@ -138,6 +138,46 @@ def test_registry_is_automatic_and_removed_boxes_do_not_erase_saved_requirements
         saved = storage.tables['ANESTESIA_EXPEDIENTES'][0]['config']
         assert saved['registry_max_months'] == 12 and saved['registry_rule_evidence']
         assert saved['extra_requirements'] == ['Requisito ya registrado']
+
+
+@pytest.mark.parametrize('publication,show_current', [
+    ({'state': 'ready', 'request': 'a'*32, 'manifest': 'approved', 'count': '12'}, True),
+    ({'state': 'ready', 'request': 'another-act', 'manifest': 'other', 'count': '12'}, False),
+    ({'state': 'updating'}, False),
+])
+def test_final_link_never_presents_another_request_or_partial_folder_as_this_delivery(publication, show_current):
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(state='Listo para entregar', final_url='https://drive.example/current',
+               delivery_folder_id='current', published_manifest='approved', manifest_hash='approved', archive_url='https://drive.example/archive',
+               zip_url='https://drive.example/zip')
+    storage.delivery_status = lambda ident: publication
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception
+        labels = [w.label for w in app.get('link_button')]
+        assert ('Abrir 12 PDF para entregar' in labels) is show_current
+        assert 'PDF revisados de este expediente (historial)' in labels
+        assert 'Descargar ZIP de los PDF de este expediente' in labels
+
+
+def test_old_delivery_is_not_presented_as_new_draft_ready_to_submit():
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(state='Pendiente de revisión', final_url='https://drive.example/current',
+               delivery_folder_id='current', published_manifest='old', manifest_hash='new')
+    storage.delivery_status = lambda ident: {'state': 'ready', 'request': job['id'], 'manifest': 'old', 'count': '12'}
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception
+        assert not any('PDF para entregar' in w.label for w in app.get('link_button'))
+        assert any('conserva una versión anterior' in w.value for w in app.caption)
 ACT_URL = "https://www.panamacompra.gob.pa/Inicio/#/solicitud-de-cotizacion/2026-1-10-01-08-CL-051598/0nM6ICc0JCL2AjN1UDMxojIpJye"
 
 

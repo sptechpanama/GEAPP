@@ -141,6 +141,15 @@ class AnestesiaStorage:
     def json_file(self, file_id):
         return json.loads(self.get_bytes(file_id, max_size=8 * 1024 * 1024).decode("utf-8"))
 
+    def delivery_status(self, folder_id):
+        """Read publication identity before linking a shared, replaceable PDF set."""
+        result = self.drive.files().get(fileId=folder_id, fields="id,name,mimeType,trashed,appProperties",
+                                       supportsAllDrives=True).execute()
+        props = result.get('appProperties', {})
+        if result.get('trashed') or result.get('mimeType') != FOLDER or props.get('role') != 'anestesia_current_delivery':
+            raise ValueError('No se pudo verificar la carpeta de entrega actual.')
+        return props
+
     def _validated_metadata(self, data, metadata):
         from services.anestesia_health import certificate_content_check
         validation = certificate_content_check(data, metadata)

@@ -4,6 +4,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import zipfile
 
 from docx import Document
 import fitz
@@ -243,6 +244,12 @@ def generated(monkeypatch):
     source, config, docs = fixture()
     storage = FakeStorage(source, docs)
     monkeypatch.setattr(worker, "capture", lambda *args, **kw: source)
+    class Publisher:
+        def __init__(self, backend): self.backend = backend
+        def publish(self, pdfs, **metadata):
+            self.backend.published_pdfs = deepcopy(pdfs)
+            return {'folder_id': 'stable-delivery-folder', 'count': len(pdfs)}
+    monkeypatch.setattr(worker, 'DeliveryPublisher', Publisher)
     result = worker.run_request(storage, {"action": "generate", "request_id": IDENT, "config": config}, execution_id="first", root=ROOT)
     assert result["state"] == "Pendiente de revisión"
     manifest = storage.json_file(result["manifest_id"])
@@ -269,10 +276,16 @@ def test_wrong_certificate_content_blocks_before_creating_quotation(monkeypatch)
 
 def test_worker_generates_reviewable_bundle_and_only_publishes_exact_approved_files(monkeypatch):
     _, storage, manifest = generated(monkeypatch)
-    assert len(manifest["files"]) == 14  # quotation Word/PDF plus 12 original certificates
+    assert len(manifest["files"]) == 13  # 12 PDF plus the editable quotation in the audit folder
+    assert manifest['delivery_pdf_count'] == 12
     assert not any('Pacto' in f['name'] for f in manifest['files'])
     result = worker.run_request(storage, {"action": "finalize", "request_id": IDENT, "review_id": "review", "user_confirmed": True}, execution_id="second", root=ROOT)
     assert result["state"] == "Listo para entregar" and result["zip_url"]
+    assert result['delivery_pdf_count'] == 12 and result['final_url'].endswith('stable-delivery-folder')
+    assert len(storage.published_pdfs) == 12 and all(f['mime'] == 'application/pdf' for f in storage.published_pdfs)
+    archive_id = result['zip_url'].split('/')[-1]
+    with zipfile.ZipFile(BytesIO(storage.objects[archive_id])) as zipped:
+        assert len(zipped.namelist()) == 12 and all(name.endswith('.pdf') for name in zipped.namelist())
     size = len(storage.objects)
     again = worker.run_request(storage, {"action": "finalize", "request_id": IDENT}, execution_id="retry", root=ROOT)
     assert again["published_manifest"] == manifest["manifest_hash"] and len(storage.objects) == size
