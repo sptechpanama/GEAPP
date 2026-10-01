@@ -91,7 +91,23 @@ def test_complete_evidence_passes_and_all_missing_documents_are_listed():
     checks, _ = validate_package(source, config, docs)
     assert {r["estado"] for r in checks} == {"Vigente documentalmente"}
     checks, _ = validate_package(source, config, [])
-    assert len(checks) == 12 and all(c["estado"] == "Falta" for c in checks)
+    assert len(checks) == 11 and all(c["estado"] == "Falta" for c in checks)
+
+
+def test_requirements_match_original_offers_and_reuse_legacy_imports():
+    source, config, docs = fixture()
+    expected = {'dgi', 'css', 'registro_publico', 'oferente', 'inscripcion_producto',
+                'criterio_tecnico', 'catalogo', 'cedula', 'aviso_operacion', 'licencia_minsa', 'metodo_destruccion'}
+    # Imported originals already exist in Drive under older classification names.
+    next(d for d in docs if d['kind'] == 'licencia_minsa')['kind'] = 'otro:Licencia de operaciones MINSA'
+    next(d for d in docs if d['kind'] == 'metodo_destruccion')['kind'] = 'disposicion'
+    docs.extend([{'kind': kind, 'verified': False} for kind in ('retorsion', 'calidad')])
+    before = deepcopy(docs)
+    checks, selected = validate_package(source, config, docs)
+    assert set(selected) == {c['kind'] for c in checks} == expected
+    assert all(c['estado'] == 'Vigente documentalmente' for c in checks)
+    assert selected['metodo_destruccion']['id'] == 'metodo_destruccion'
+    assert docs == before
 
 
 @pytest.mark.parametrize("kind,changes,reason", [
@@ -100,10 +116,8 @@ def test_complete_evidence_passes_and_all_missing_documents_are_listed():
     ("criterio_tecnico", {"catalogs": "C"}, "biblioteca"),
     ("criterio_tecnico", {"fichas": "102625"}, "43358"),
     ("oferente", {"company": "Otra empresa"}, "RIR"),
-    ("retorsion", {"issued": str(TODAY - timedelta(days=30))}, "publicación"),
-    ("calidad", {"notarized": False}, "notarial"),
-    ("disposicion", {"apostilled": False}, "apostilla"),
-    ("disposicion", {"translation_verified": False}, "idioma"),
+    ("licencia_minsa", {"expires": str(TODAY - timedelta(days=1))}, "Venció"),
+    ("metodo_destruccion", {"expires": str(TODAY - timedelta(days=1))}, "Venció"),
     ("cedula", {"verified": "false"}, "verificar"),
     ("catalogo", {"file_id": ""}, "Drive"),
     ("registro_publico", {"issued": str(TODAY - timedelta(days=400))}, "meses"),
@@ -142,11 +156,11 @@ def test_old_saved_age_override_cannot_bypass_stricter_current_tender_at_generat
     assert check['estado'] == 'Bloqueado' and '3 meses' in check['motivo']
 
 
-def test_requirements_not_limited_to_fixed_twelve_and_no_automatic_ct_for_c():
+def test_explicit_additional_requirements_and_no_automatic_ct_for_c():
     source, config, docs = fixture()
     config.update(require_rs=True, require_power=True, extra_requirements=["Certificado adicional"])
     checks, _ = validate_package(source, config, docs)
-    assert len(checks) == 15 and sum(c["estado"] == "Falta" for c in checks) == 3
+    assert len(checks) == 14 and sum(c["estado"] == "Falta" for c in checks) == 3
     config["catalog"] = "C"
     assert any(c["kind"] == "criterio_tecnico" and c["estado"] == "Falta" for c in validate_package(source, config, docs)[0])
 

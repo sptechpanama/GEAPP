@@ -20,11 +20,13 @@ COMPANY = "RIR MEDICAL ENGINEERING"
 KINDS = {
     "dgi": "Paz y salvo DGI", "css": "Paz y salvo CSS / no cotizante",
     "registro_publico": "Certificado del Registro Público", "oferente": "Certificado de oferente",
-    "inscripcion_producto": "Inscripción del producto en el registro de oferentes",
+    "inscripcion_producto": "Catálogo de oferentes (inscripción del producto)",
     "criterio_tecnico": "Criterio técnico", "registro_sanitario": "Registro sanitario (si aplica)",
     "catalogo": "Catálogo del producto", "cedula": "Cédula del representante",
     "aviso_operacion": "Aviso de operación", "disposicion": "Disposición final del fabricante",
     "retorsion": "Medidas de retorsión notarizadas", "calidad": "Declaración de calidad notarizada",
+    "licencia_minsa": "Licencia de operaciones MINSA",
+    "metodo_destruccion": "Método de destrucción",
     "poder": "Poder del apoderado (si aplica)", "otro": "Otro requisito del acto",
 }
 CATALOGS = {"C": "C (5)", "K": "K (4)"}
@@ -38,10 +40,22 @@ REGISTRY_RULE_EVIDENCE = (
     "MODELO CONTRATACION MENOR O COMPRA MENOR AGIL-INSUMO - V 2.pdf, página 2: "
     "vigencia no mayor de un (1) año."
 )
-EXPIRING = {"dgi", "css", "oferente", "criterio_tecnico", "registro_sanitario", "cedula"}
-PRODUCT_DOCS = {"catalogo", "criterio_tecnico", "registro_sanitario", "inscripcion_producto", "disposicion"}
+EXPIRING = {"dgi", "css", "oferente", "criterio_tecnico", "registro_sanitario", "cedula", "licencia_minsa"}
+PRODUCT_DOCS = {"catalogo", "criterio_tecnico", "registro_sanitario", "inscripcion_producto", "disposicion", "metodo_destruccion"}
+# Original attachment sets of RIR offers 1496274 / 1498699, verified 2026-09-30.
+# The quotation is generated separately; these are the 11 accompanying PDFs.
 BASE_KINDS = ("dgi", "css", "registro_publico", "oferente", "inscripcion_producto",
-              "criterio_tecnico", "catalogo", "cedula", "aviso_operacion", "disposicion", "retorsion", "calidad")
+              "criterio_tecnico", "catalogo", "cedula", "aviso_operacion", "licencia_minsa", "metodo_destruccion")
+# Removed from this module at the user's request; keep labels for historical records.
+EXCLUDED_KINDS = frozenset({"disposicion", "retorsion", "calidad"})
+DOCUMENT_KIND_ALIASES = {"disposicion": "metodo_destruccion", "otro:Licencia de operaciones MINSA": "licencia_minsa"}
+
+
+def document_kind(kind):
+    """Read old imports with their actual attachment names; never rewrite originals."""
+    return DOCUMENT_KIND_ALIASES.get(kind, kind)
+
+
 AUDIT_CONTROLS = ("requisitos", "vigencias", "identidad", "producto_ct_catalogo", "cantidades_precios_itbms",
                   "entregas", "firmas_formalidades", "presentacion_word_pdf", "fuentes_modificaciones")
 
@@ -242,10 +256,6 @@ def base_requirements(source: dict) -> list[dict]:
         rule = {"kind": kind, "label": KINDS[kind]}
         if kind == "registro_publico":
             rule.update(max_age_months=maximum, rule_evidence=evidence)
-        if kind in {"retorsion", "calidad"}:
-            rule.update(notarized=True, act_specific=True)
-        if kind == "disposicion":
-            rule.update(apostilled=True, translation=True)
         result.append(rule)
     return result
 
@@ -254,7 +264,7 @@ def select_documents(library: list[dict], requirements: list[dict], catalog: str
     chosen = {}
     for rule in requirements:
         kind = rule["kind"]
-        candidates = [d for d in library if d.get("kind") == kind and d.get("act", "") in ("", act)
+        candidates = [d for d in library if document_kind(d.get("kind")) == kind and d.get("act", "") in ("", act)
                       and (kind not in PRODUCT_DOCS or catalog in str(d.get("catalogs", "")).split(","))]
         # Prefer an act-specific original; newest version wins even if expired.
         if candidates:

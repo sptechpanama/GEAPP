@@ -18,35 +18,21 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def original_pdf_set(originals, selected):
-    """Keep every required page; combine the two related registration records."""
-    bundle = ("oferente", "inscripcion_producto")
-    combine = all(k in originals for k in bundle)
-    notes = []
-    if combine:
-        for kind in bundle:
-            with fitz.open(stream=originals[kind], filetype="pdf") as pdf:
-                if pdf.get_sigflags() > 0 or any(w.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE
-                    for page in pdf for w in (page.widgets() or [])):
-                    combine = False
-        if not combine:
-            notes.append("Oferente e inscripción se entregan separados para conservar sus firmas digitales originales.")
+    """One original per attachment, exactly as in the user's example offers."""
+    labels = {
+        "dgi": "Paz_y_salvo_DGI", "css": "Paz_y_salvo_CSS", "registro_publico": "Registro_publico",
+        "oferente": "Certificado_de_oferentes", "inscripcion_producto": "Catalogo_de_oferentes",
+        "criterio_tecnico": "Criterio_tecnico", "catalogo": "Catalogo_del_producto",
+        "cedula": "Cedula", "aviso_operacion": "Aviso_de_operacion",
+        "licencia_minsa": "Licencia_de_operaciones_MINSA", "metodo_destruccion": "Metodo_de_destruccion",
+    }
     result = []
     for kind, data in originals.items():
-        if combine and kind == bundle[1]:
-            continue
-        kinds = list(bundle) if combine and kind == bundle[0] else [kind]
-        if len(kinds) > 1:
-            with fitz.open() as merged:
-                for member in kinds:
-                    with fitz.open(stream=originals[member], filetype="pdf") as pdf:
-                        merged.insert_pdf(pdf)
-                data = merged.tobytes()
-        label = "Oferente_e_inscripcion_del_producto" if len(kinds) > 1 else kind.replace(":", "_")
+        label = labels.get(kind, kind.replace(":", "_"))
         result.append({"name": f"{len(result)+2:02d}_{label}.pdf", "data": data,
-                       "kind": kind if len(kinds) == 1 else "oferente_e_inscripcion_producto",
-                       "library_ids": [selected[k]["id"] for k in kinds],
-                       "original_hashes": {k: file_hash(originals[k]) for k in kinds}})
-    return result, notes
+                       "kind": kind, "library_ids": [selected[kind]["id"]],
+                       "original_hashes": {kind: file_hash(data)}})
+    return result, []
 
 
 class DeliveryPublisher:

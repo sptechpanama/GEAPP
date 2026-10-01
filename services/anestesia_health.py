@@ -5,8 +5,8 @@ from datetime import date, timedelta
 import re
 
 from services.anestesia_docs import (
-    BASE_KINDS, KINDS, REGISTRY_MAX_MONTHS, canonical_hash, document_status, document_expiry,
-    file_hash, normalized, now_iso, parse_date, select_documents,
+    BASE_KINDS, EXCLUDED_KINDS, KINDS, REGISTRY_MAX_MONTHS, canonical_hash, document_status, document_expiry,
+    document_kind, file_hash, normalized, now_iso, parse_date, select_documents,
 )
 
 
@@ -75,7 +75,7 @@ def library_health(library, *, as_of: date, catalog='K'):
     declarations are not presented as reusable for a new tender.
     """
     kinds = list(BASE_KINDS)
-    kinds.extend(sorted({d.get('kind') for d in library if d.get('kind') and not d.get('act')} - set(kinds)))
+    kinds.extend(sorted({document_kind(d.get('kind')) for d in library if d.get('kind') and not d.get('act')} - set(kinds) - EXCLUDED_KINDS))
     requirements = [{'kind': kind, 'library_only': True} for kind in kinds]
     for rule in requirements:
         if rule['kind'] == 'registro_publico':
@@ -87,8 +87,7 @@ def library_health(library, *, as_of: date, catalog='K'):
         check = document_status(doc, rule, as_of=as_of, catalog=catalog, act='')
         expiry = document_expiry(doc or {}, rule)
         if not doc:
-            status = 'Falta · por acto' if kind in {'retorsion', 'calidad'} else 'Falta'
-            detail = 'Se debe preparar y verificar para cada acto.' if kind in {'retorsion', 'calidad'} else check['motivo']
+            status, detail = 'Falta', check['motivo']
         elif expiry and expiry < as_of:
             status, detail = 'Vencido', check['motivo']
         elif check['estado'] != 'Vigente documentalmente':

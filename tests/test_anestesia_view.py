@@ -50,7 +50,7 @@ def test_can_open_historical_case_library_and_validate_without_an_exception():
         assert not app.exception
         assert any('Documentos actuales y vigencias' in x.value for x in app.markdown)
         health = app.dataframe[0].value
-        assert len(health) == 12 and 'Falta' in health['Estado'].tolist()
+        assert len(health) == 11 and 'Falta' in health['Estado'].tolist()
         assert any("Registro Público" in x.value for x in app.info)
         button = next(b for b in app.button if b.label == "Comprobar requisitos y preparar borradores")
         button.click().run()

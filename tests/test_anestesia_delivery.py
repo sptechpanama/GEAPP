@@ -24,7 +24,7 @@ def pdf_bytes(text, pages=1, signature=False):
         return pdf.tobytes()
 
 
-def test_twelve_pdfs_keep_every_original_page_and_content():
+def test_twelve_pdfs_keep_each_example_attachment_separate_and_byte_identical():
     originals = {k: pdf_bytes(k, 2 if k in {'oferente', 'inscripcion_producto'} else 1) for k in BASE_KINDS}
     before = deepcopy(originals)
     selected = {k: {'id': k} for k in originals}
@@ -32,23 +32,19 @@ def test_twelve_pdfs_keep_every_original_page_and_content():
     assert len(result) == 11  # plus quotation = 12
     assert not notes and originals == before
     assert {ident for f in result for ident in f['library_ids']} == set(BASE_KINDS)
-    merged = next(f for f in result if len(f['library_ids']) == 2)
-    with fitz.open(stream=merged['data'], filetype='pdf') as output:
-        index = 0
-        for kind in ('oferente', 'inscripcion_producto'):
-            with fitz.open(stream=originals[kind], filetype='pdf') as original:
-                for page in original:
-                    assert output[index].get_text() == page.get_text()
-                    assert output[index].get_pixmap().samples == page.get_pixmap().samples
-                    index += 1
-        assert len(output) == index == 4
+    for file in result:
+        assert file['data'] == originals[file['kind']]
+        assert file['library_ids'] == [file['kind']]
+        assert file['original_hashes'] == {file['kind']: file_hash(originals[file['kind']])}
+    assert any(f['kind'] == 'oferente' for f in result)
+    assert any(f['kind'] == 'inscripcion_producto' for f in result)
 
 
 @pytest.mark.parametrize('signed', ['oferente', 'inscripcion_producto'])
 def test_signature_fields_preserve_original_bytes_and_separate_files(signed):
     originals = {k: pdf_bytes(k, signature=k == signed) for k in BASE_KINDS}
     result, notes = original_pdf_set(originals, {k: {'id': k} for k in originals})
-    assert len(result) == 12 and notes  # plus quotation = 13; no invalidated signature
+    assert len(result) == 11 and not notes  # signatures stay intact without changing the file count
     assert all(f['data'] == originals[f['kind']] for f in result)
 
 

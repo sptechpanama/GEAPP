@@ -8,17 +8,29 @@ El identificador de esta carpeta permanece igual entre solicitudes. Una
 solicitud nueva reemplaza el conjunto completo, incluso si pertenece a otro
 acto. La publicación no presenta la oferta en PanamáCompra.
 
-La entrega estándar tiene **12 PDF**: cotización, DGI, CSS, Registro Público,
-oferente e inscripción del producto agrupados, criterio técnico, catálogo,
-cédula, aviso de operación, disposición final, retorsión y declaración de
-calidad. El agrupado conserva todas las páginas y registra las huellas de
-los dos originales en el manifiesto. La biblioteca permanece intacta.
-Los dos documentos actuales de oferente e inscripción tienen una y cuatro
-páginas respectivamente, sin campos de firma digital; pueden agruparse.
+La entrega estándar reproduce **12 archivos separados**, como las ofertas
+RIR 1496274 (Ciudad de la Salud, excluyendo la cotización incorrecta) y 1498699
+(Hospital Dr. Gustavo Nelson Collado):
 
-Si aparece una firma digital en cualquiera de esos dos originales, se mantienen
-separados para no invalidarla. Tampoco se elimina un requisito adicional para
-forzar el número 12: el conteo real y la excepción se muestran antes de publicar.
+1. Cotización membretada, generada para el acto y modelo seleccionados.
+2. Paz y salvo DGI.
+3. Paz y salvo CSS.
+4. Certificado del Registro Público.
+5. Certificado de oferentes.
+6. Catálogo de oferentes (inscripción del producto).
+7. Criterio técnico.
+8. Catálogo del producto (`Ficha tecnica kit de anestesia.pdf` en el ejemplo).
+9. Cédula del representante.
+10. Aviso de operación.
+11. Licencia de operaciones MINSA.
+12. Método de destrucción.
+
+No se agrupa ningún respaldo ni se alteran sus bytes, páginas o firmas.
+Retorsión y declaración de calidad no forman parte de esas ofertas y se
+eliminan de los requisitos base. El método de destrucción es el mismo PDF de
+9 páginas anteriormente clasificado como `disposicion`; no es un documento
+nuevo ni una declaración adicional. La licencia MINSA ya estaba importada
+como `otro:Licencia de operaciones MINSA` y ahora se selecciona automáticamente.
 
 La carpeta de entrega contiene únicamente PDF. El ZIP incluye exactamente esos
 PDF; se guarda fuera de esa carpeta. El Word editable, manifiesto y revisión
@@ -58,7 +70,7 @@ de otro acto ni se usa una carpeta general como sustituto de los PDF finales.
 ## Verificación
 
 - Regresión de generación, vigencias, almacenamiento, formularios y LP Generator.
-- Comparación de texto y píxeles de las páginas agrupadas; conservación de originales.
+- Igualdad de bytes, nombres documentales y separación de los 11 respaldos.
 - Pruebas de reemplazo entre actos, reintento sin duplicados, reducción de 13 a 12,
   cambio de bytes, firma digital, documento adicional y archivo ajeno.
 - Fallos de red, copia incompleta e interrupción abrupta del worker.

@@ -28,8 +28,8 @@ def row(library, name='Paz y salvo CSS / no cotizante', **kwargs):
 
 def test_opening_report_includes_missing_base_documents_without_an_existing_case():
     report = library_health([], as_of=TODAY)
-    assert len(report) == 12
-    assert {r['Estado'] for r in report} == {'Falta', 'Falta · por acto'}
+    assert len(report) == 11
+    assert {r['Estado'] for r in report} == {'Falta'}
 
 
 @pytest.mark.parametrize('expiry,status', [('2026-09-29','Vencido'),('2026-09-30','Vence hoy'),
@@ -53,9 +53,19 @@ def test_registry_uses_researched_43358_acceptance_deadline_without_changing_ori
     assert document_status(doc, {'kind':'registro_publico'}, as_of=TODAY, catalog='K', act='')['estado'] == 'Vigente documentalmente'
 
 
-def test_other_act_declaration_is_never_reported_reusable():
-    doc = certificate('retorsion', act='ACTO-ANTERIOR', notarized=True)
-    assert row([doc], 'Medidas de retorsión notarizadas')['Estado'] == 'Falta · por acto'
+def test_removed_declarations_never_reappear_from_old_library_rows():
+    docs = [certificate(kind, act=act) for kind in ('retorsion', 'calidad') for act in ('', 'ACTO-ANTERIOR')]
+    report = library_health(docs, as_of=TODAY)
+    assert len(report) == 11
+    assert not any('retorsión' in r['Documento'] or 'calidad' in r['Documento'] for r in report)
+
+
+def test_legacy_import_names_use_existing_originals_without_duplicate_health_rows():
+    docs = [certificate('disposicion'), certificate('otro:Licencia de operaciones MINSA')]
+    report = library_health(docs, as_of=TODAY)
+    assert len(report) == 11
+    assert row(docs, 'Método de destrucción')['Estado'] == 'Vence hoy'
+    assert row(docs, 'Licencia de operaciones MINSA')['Estado'] == 'Vence hoy'
 
 
 def test_catalog_c_does_not_reuse_k_only_document():

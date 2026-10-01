@@ -9,14 +9,14 @@ import pandas as pd
 import streamlit as st
 from googleapiclient.discovery import build
 
-from services.anestesia_docs import (CATALOGS, COMPANY, KINDS, PANAMA, REGISTRY_MAX_MONTHS, now_iso, parse_date,
-                                    document_status,
+from services.anestesia_docs import (CATALOGS, COMPANY, EXCLUDED_KINDS, KINDS, PANAMA, REGISTRY_MAX_MONTHS, now_iso, parse_date,
+                                    document_kind, document_status,
                                     prepare_offer_config, review_errors, review_prompt, totals, validate_package)
 from services.anestesia_source import delivery_destination, portal_delivery_term, route, source_is_closed
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 11
+ANESTESIA_UI_VERSION = 12
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -92,14 +92,15 @@ def _table(rows):
 
 def _library(storage, actor):
     st.caption("Cada carga conserva el original y su historial en Drive. La fecha de subida no renueva su vigencia.")
-    rows = _records(storage.sheet_id, "ANESTESIA_DOCUMENTOS", storage)
+    rows = [r for r in _records(storage.sheet_id, "ANESTESIA_DOCUMENTOS", storage)
+            if document_kind(r.get('kind')) not in EXCLUDED_KINDS]
     today = datetime.now(PANAMA).date()
     with st.expander("Historial de documentos (incluye versiones anteriores)", expanded=False):
         history = []
         for r in rows:
             check = document_status(r, {"kind": r.get("kind", "otro"), "library_only": True},
                 as_of=today, catalog="K", act=r.get("act", ""))
-            history.append({"Documento": r.get("label", KINDS.get(r.get("kind"), r.get("kind"))),
+            history.append({"Documento": KINDS.get(document_kind(r.get("kind")), r.get("label", r.get("kind"))),
              "Catálogo": r.get("catalogs", ""), "Emisión": r.get("issued", ""), "Vence": r.get("expires", ""),
              "Estado": "Vencido" if parse_date(r.get("expires")) and parse_date(r["expires"]) < today
              else "Datos verificados" if r.get("verified") is True else "Pendiente de verificación",
@@ -117,8 +118,9 @@ def _library(storage, actor):
     previous = entries.get(chosen, {})
     if previous.get("url"):
         st.link_button("Abrir original que se verificará", previous["url"])
-    original_kind = previous.get("kind", "dgi").split(":")[0]
-    kind = st.selectbox("Documento", list(KINDS), index=list(KINDS).index(original_kind), format_func=KINDS.get, key="anes_library_kind_" + chosen)
+    original_kind = document_kind(previous.get("kind", "dgi")).split(":")[0]
+    available_kinds = [kind for kind in KINDS if kind not in EXCLUDED_KINDS]
+    kind = st.selectbox("Documento", available_kinds, index=available_kinds.index(original_kind), format_func=KINDS.get, key="anes_library_kind_" + chosen)
     with st.form("anes_library_" + chosen + kind, clear_on_submit=True):
         uploaded = st.file_uploader("PDF original completo (máximo 30 MB)", type=["pdf"])
         extra = st.text_input("Nombre exacto del requisito adicional", value=previous.get("kind", "").partition(":")[2], help="Solo para Otro requisito del acto.") if kind == "otro" else ""
@@ -132,7 +134,7 @@ def _library(storage, actor):
         fichas = right.text_input("Fichas expresamente cubiertas", value=previous.get("fichas", ""), placeholder="43358")
         models = st.text_input("Modelos exactos expresamente cubiertos (separados por coma)", value=previous.get("models", ""), placeholder="Ej.: LB4330K, LB4330C")
         st.caption("Un CT puede cubrir varios modelos. Registra todas sus páginas; la cotización ofrecerá únicamente el modelo seleccionado para el acto.")
-        act = st.text_input("Número de acto específico, si aplica", value=previous.get("act", ""), help="Obligatorio para retorsión y calidad. Déjalo vacío en certificados generales.")
+        act = st.text_input("Número de acto específico, si aplica", value=previous.get("act", ""), help="Déjalo vacío en certificados generales.")
         evidence = st.text_area("Evidencia de verificación: páginas, fechas, titular, producto y alcance",
             value=previous.get("evidence", ""), placeholder="Ej.: página 1, vigencia impresa hasta..., emitido para RIR..., modelo LB4330K...")
         no_expiry = st.checkbox("Verifiqué que no tiene vencimiento expreso (cuando corresponda)", value=bool(previous.get("no_expiry_confirmed", False)))
@@ -426,7 +428,9 @@ def render_anestesia_docs(creds, actor):
         elif job.get("state") in {"Error", "Bloqueado"}:
             st.warning(job.get("detail") or "Revisa los datos y documentos antes de continuar.")
         if job.get("checks"):
-            _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")} for c in job["checks"]])
+            excluded_labels = {KINDS[kind] for kind in EXCLUDED_KINDS}
+            _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")}
+                    for c in job["checks"] if c.get('kind') not in EXCLUDED_KINDS and c.get('documento') not in excluded_labels])
         if job.get("source_id"):
             source = _json(job["source_id"], storage)
             _review(storage, job, actor)
@@ -441,8 +445,8 @@ def render_anestesia_docs(creds, actor):
                 "5. Revalidación del acto, vigencias y archivos antes de reemplazar los PDF de Entrega actual en Drive.\n\n"
                 "El pacto bilateral con la entidad corresponde a la etapa posterior indicada en los anexos de ejemplo; no se exige para preparar esta cotización. "
                 "Notaría y apostillas deben obtenerse cuando el acto las exija; insertar la firma de RIR no las sustituye. "
-                "La entrega estándar contiene 12 PDF, agrupando oferente e inscripción del producto sin omitir páginas. "
-                "Las firmas digitales y los requisitos adicionales pueden exigir archivos separados. "
+                "La entrega estándar reproduce los 12 archivos de las participaciones de ejemplo: cotización y 11 respaldos separados. "
+                "El certificado de oferente y el catálogo de oferentes permanecen en archivos independientes. "
                 "Los originales, Word y revisiones se conservan en el historial; la carpeta para presentar contiene únicamente PDF.")
     except Exception as exc:
         st.error(f"No fue posible completar la operación documental: {exc}")
@@ -464,7 +468,6 @@ def _health_panel(storage):
             for row in library_health(rows, as_of=today, catalog=catalog)])
     st.caption(f"Control al {today:%d/%m/%Y} (Panamá). Se muestra la última versión aplicable; se actualiza cada 60 segundos mientras esta pestaña está abierta. "
                f"Registro Público: emisión + {REGISTRY_MAX_MONTHS} meses, o vencimiento impreso anterior; si el acto exige menos antigüedad, se aplica al generar. "
-               "Retorsión y calidad se verifican para cada acto. "
                "La revisión documental no sustituye la consulta de autenticidad al emisor.")
     for issue in st.session_state.pop("anes_document_result", []):
         st.warning("Documento guardado pendiente de verificación: " + issue)
