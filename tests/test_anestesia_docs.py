@@ -10,9 +10,9 @@ import fitz
 import pytest
 
 from services.anestesia_docs import (AUDIT_CONTROLS, BASE_KINDS, COMPANY, PANAMA, canonical_hash,
-    document_status, file_hash, now_iso, public_registry_age, review_errors, totals, validate_package)
+    ANESTHESIA_WARRANTY, prepare_offer_config, document_status, file_hash, now_iso, public_registry_age, review_errors, totals, validate_package)
 from services.anestesia_documents import pact_docx, quote_docx
-from services.anestesia_source import route, source_is_closed
+from services.anestesia_source import delivery_destination, route, source_is_closed
 from services import anestesia_worker as worker
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -259,7 +259,8 @@ def test_wrong_certificate_content_blocks_before_creating_quotation(monkeypatch)
 
 def test_worker_generates_reviewable_bundle_and_only_publishes_exact_approved_files(monkeypatch):
     _, storage, manifest = generated(monkeypatch)
-    assert len(manifest["files"]) == 16  # two authored Word/PDF pairs plus 12 originals
+    assert len(manifest["files"]) == 14  # quotation Word/PDF plus 12 original certificates
+    assert not any('Pacto' in f['name'] for f in manifest['files'])
     result = worker.run_request(storage, {"action": "finalize", "request_id": IDENT, "review_id": "review", "user_confirmed": True}, execution_id="second", root=ROOT)
     assert result["state"] == "Listo para entregar" and result["zip_url"]
     size = len(storage.objects)
@@ -307,3 +308,74 @@ def test_initial_capture_preserves_offer_entered_before_the_worker_runs(monkeypa
     assert result['state'] == 'Datos capturados' and result['config'] == config
     assert storage.json_file(result['source_id']) == source
     assert not result.get('manifest_id')  # capture is not a generated or approved bid
+
+
+@pytest.mark.parametrize('text,place', [
+    ('LUGAR DE ENTREGA\nCIUDAD SALUD – ALMACEN GENERAL\n30 DÍAS CALENDARIO\nTIEMPO DE ENTREGA', 'CIUDAD SALUD – ALMACEN GENERAL'),
+    ('DE\nLUGAR\nENTREGA\nHOSPITAL DR,G,N,C.R, ALM. MEDICOOUIRURGICO\nTIEMPO\nENTREGA\n30 DÍAS CALENDARIOS', 'HOSPITAL DR,G,N,C.R, ALM. MEDICOOUIRURGICO'),
+    ('LUGAR DE ENTREGA:\r\nVIGENCIA:\r\n30 HABILES\r\nUNIDAD\r\nPANAMA J.J.VALLARINO.Z - ALMACEN GENERAL\r\nNO APLICA\r\nCTNI:', 'PANAMA J.J.VALLARINO.Z - ALMACEN GENERAL'),
+    ('Lugar de entrega: Almacén general del hospital.\nTiempo de entrega: 30 días', 'Almacén general del hospital.'),
+    ('LUGAR DE ENTREGA\nAlmacén general\nPoliclínica Joaquín José Vallarino\nPlanta baja\nTIEMPO DE ENTREGA\n30 DÍAS', 'Almacén general Policlínica Joaquín José Vallarino Planta baja'),
+    ('Lugar de entrega: Almacén general. Tiempo de entrega: 30 días', 'Almacén general.'),
+])
+def test_destination_comes_from_official_annex_including_reordered_ocr_tables(text, place):
+    source = {'info': {'provincia de entrega': 'Panamá', 'direccion de la unidad de compra': 'Juan Díaz'},
+              'attachments': [{'name': 'Requerimientos.pdf', 'text': text}]}
+    found, evidence = delivery_destination(source)
+    assert found == place and 'Requerimientos.pdf' in evidence
+
+
+@pytest.mark.parametrize('text', ['', 'LUGAR DE ENTREGA\nVIGENCIA\n24 MESES\nUNIDAD\nCTNI: 43358',
+                                  'Requisitos: cotización dirigida al hospital de prueba.'])
+def test_destination_never_invents_warehouse_from_buyer_or_province(text):
+    source = {'purchase_unit': 'Hospital de prueba', 'info': {'provincia de entrega': 'Panamá'},
+              'attachments': [{'text': text}]}
+    assert delivery_destination(source)[0] == ''
+
+
+def test_explicit_portal_destination_wins_over_unrelated_annex():
+    source = {'info': {'Lugar de entrega': 'Almacén de Vallarino'},
+              'attachments': [{'text': 'LUGAR DE ENTREGA: Almacén antiguo'}]}
+    assert delivery_destination(source) == ('Almacén de Vallarino', 'PanamáCompra: Lugar de entrega')
+
+
+def test_offer_defaults_remove_generic_pact_fields_and_use_standing_signature_permission():
+    source, cfg, docs = fixture()
+    source['info']['lugar de entrega'] = 'Almacén médico del acto'
+    cfg.update(delivery_place='Destino anterior', require_rs=True, require_power=True, signature_authorized=False)
+    before = deepcopy(cfg)
+    result = prepare_offer_config(source, cfg)
+    assert cfg == before
+    assert result['delivery_place'] == 'Almacén médico del acto'
+    assert result['warranty'] == ANESTHESIA_WARRANTY
+    assert not result['require_rs'] and not result['require_power']
+    assert result['signature_authorized'] is True
+    assert not any(field in result for field in ['entity_representative', 'entity_id', 'entity_role'])
+    checks, chosen = validate_package(source, result, docs)
+    assert all(c['estado'] == 'Vigente documentalmente' for c in checks), checks
+    assert not {'poder', 'registro_sanitario'} & set(chosen)
+
+
+def test_stricter_explicit_sterility_requirement_cannot_be_replaced_silently_by_default():
+    source, cfg, docs = fixture()
+    source['items'][0]['descripcion'] = 'Vencimiento de la esterilidad no menor de 36 meses a partir de la entrega.'
+    checks, _ = validate_package(source, prepare_offer_config(source, cfg), docs)
+    assert any('36 meses' in c['motivo'] for c in checks)
+
+
+def test_worker_generates_own_signed_quote_without_requesting_entity_or_proxy_data(monkeypatch):
+    source, cfg, docs = fixture()
+    for field in ['entity_representative', 'entity_id', 'entity_role', 'warranty', 'signature_authorized']:
+        cfg.pop(field, None)
+    source['info']['lugar de entrega'] = 'Almacén general de la unidad solicitante'
+    cfg.pop('delivery_place')
+    storage = FakeStorage(source, docs)
+    monkeypatch.setattr(worker, 'capture', lambda *args, **kwargs: source)
+    result = worker.run_request(storage, {'action': 'generate', 'request_id': IDENT, 'config': cfg}, execution_id='simplified-offer', root=ROOT)
+    assert result['state'] == 'Pendiente de revisión'
+    manifest = storage.json_file(result['manifest_id'])
+    quote = next(f for f in manifest['files'] if f['name'] == '01_Cotizacion.docx')
+    content = text_docx(storage.get_bytes(quote['file_id']))
+    assert '24 meses' in content and 'Almacén general de la unidad solicitante' in content
+    assert len(Document(BytesIO(storage.get_bytes(quote['file_id']))).inline_shapes) >= 1
+    assert result['config']['signature_authorized'] is True

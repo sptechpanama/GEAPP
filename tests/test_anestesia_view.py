@@ -241,3 +241,27 @@ def test_worker_completing_between_reads_is_not_reported_as_failed():
     storage.queue_request.return_value = {'status': 'done'}
     assert view._live_job('sheet-race', 'job', storage) == complete
     storage.save_job.assert_not_called()
+
+
+def test_simplified_form_uses_source_destination_and_no_longer_asks_removed_fields():
+    storage = Storage()
+    source = deepcopy(SOURCE)
+    source['info']['lugar de entrega'] = 'PANAMA J.J.VALLARINO.Z - ALMACEN GENERAL'
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'), patch.object(storage, 'json_file', return_value=source):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception and not app.error
+        labels = [w.label for w in app.text_input] + [w.label for w in app.text_area] + [w.label for w in app.checkbox]
+        assert not any('representante de la entidad' in label.lower() for label in labels)
+        assert not any('Registro Sanitario' in label or 'apoderado' in label or 'Autorizo usar' in label for label in labels)
+        assert not any('Lugar' in label or 'Garantía' in label for label in labels)
+        assert any('J.J.VALLARINO' in m.value for m in app.markdown)
+        assert any('24 meses de garantía' in m.value for m in app.markdown)
+        next(b for b in app.button if b.label == 'Comprobar requisitos y preparar borradores').click().run()
+        assert not app.exception
+        config = storage.tables['ANESTESIA_EXPEDIENTES'][0]['config']
+        assert config['delivery_place'] == source['info']['lugar de entrega']
+        assert config['signature_authorized'] and not config['require_rs'] and not config['require_power']
+        assert not any('entity_' in k for k in config)

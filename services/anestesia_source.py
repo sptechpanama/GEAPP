@@ -54,6 +54,46 @@ def pdf_text(data: bytes):
         return "\n".join(f"[Página {i}]\n{text}" for i, text in enumerate(pages, 1)), missing
 
 
+def delivery_destination(source: dict) -> tuple[str, str]:
+    """Use an explicit delivery field or its labelled annex cell, not buyer address."""
+    for key, value in source.get("info", {}).items():
+        if normalized(key).rstrip(":") in {"lugar de entrega", "direccion de entrega", "sitio de entrega"}:
+            place = " ".join(str(value or "").split())
+            if place and normalized(place) not in {"no aplica", "n/a", "por definir", "ver anexo", "segun anexo"}:
+                return place, f"PanamáCompra: {key}"
+    # OCR sometimes separates/reorders the label: DE / LUGAR / ENTREGA.
+    label = re.compile(r"(?:lugar\s+(?:de\s+)?entrega|de\s+lugar\s+entrega)\s*[:\-]?", re.I)
+    location = re.compile(r"\b(?:almacen|alm\.|hospital|policlinica|bodega|deposito|calle|avenida|ciudad|centro\s+de\s+salud)\b")
+    stop = re.compile(r"^(?:requisitos|documentos|observacion|nota\b|ctni\b|forma\s+de\s+pago)")
+    noise = re.compile(r"^(?:vigencia|presentacion|cantidad|dias|vencimiento|unidad|no aplica|tiempo|termino|forma|global|credito|total|parcial|\d)")
+    for attachment in source.get("attachments", []):
+        text = attachment.get("text", "")
+        for match in label.finditer(text):
+            lines = [" ".join(line.split()) for line in text[match.end():match.end() + 700].splitlines() if line.strip()]
+            for index, line in enumerate(lines[:16]):
+                norm = normalized(line)
+                if stop.match(norm):
+                    break
+                if noise.match(norm) or label.fullmatch(line) or len(line) < 4:
+                    continue
+                # A value directly beside the label can be a short locality;
+                # interleaved table columns require an identifiable destination.
+                if location.search(norm) or (index == 0 and not line.endswith(":")):
+                    parts = [line]
+                    for continuation in lines[index + 1:index + 4]:
+                        candidate = normalized(continuation)
+                        if stop.match(candidate) or noise.match(candidate) or label.fullmatch(continuation):
+                            break
+                        if location.search(candidate) or re.match(r"^(?:piso|planta|edificio|local)\b", candidate):
+                            parts.append(continuation)
+                        else:
+                            break
+                    place = " ".join(parts)
+                    place = re.split(r"\b(?:TIEMPO|T[ÉE]RMINO|FORMA)\s+DE\s+ENTREGA\s*:", place, maxsplit=1, flags=re.I)[0].strip()
+                    return place, f"{attachment.get('name', 'Anexo oficial')}: lugar de entrega"
+    return "", "No se identificó un lugar de entrega explícito en el acto o sus anexos."
+
+
 def capture(url, storage, source_folder, *, client=None):
     flow, kind, number = route(url)
     client = client or session()
@@ -126,6 +166,8 @@ def capture(url, storage, source_folder, *, client=None):
     source["explicit_fichas"] = sorted(set(re.findall(r"(?:CTNI|FICHA\s*T[ÉE]CNICA)\s*[:#.]?\s*(\d{4,7})\b", full_text, re.I)))
     maximum, evidence = public_registry_age(full_text)
     source.update(registry_max_months=maximum, registry_rule=evidence)
+    place, evidence = delivery_destination(source)
+    source.update(delivery_place=place, delivery_place_evidence=evidence)
     source["fingerprint"] = canonical_hash({"components": components,
         "documents": [{"id": d["official_id"], "sha256": d["sha256"]} for d in source["attachments"]]})
     return source

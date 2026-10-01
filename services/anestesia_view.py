@@ -10,12 +10,12 @@ import streamlit as st
 from googleapiclient.discovery import build
 
 from services.anestesia_docs import (CATALOGS, COMPANY, KINDS, PANAMA, now_iso, parse_date,
-                                    review_errors, review_prompt, totals, validate_package)
-from services.anestesia_source import route, source_is_closed
+                                    prepare_offer_config, review_errors, review_prompt, totals, validate_package)
+from services.anestesia_source import delivery_destination, route, source_is_closed
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 5
+ANESTESIA_UI_VERSION = 6
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -147,7 +147,7 @@ def _library(storage, actor):
 
 
 def _configure(source, job, storage, actor):
-    cfg = job.get("config") or {}
+    cfg = prepare_offer_config(source, job.get("config") or {})
     today = datetime.now(PANAMA).date()
     st.link_button("Abrir acto oficial", source["url"])
     st.write(f"**{source.get('number')} · {source.get('purchase_unit') or source.get('entity')}**")
@@ -175,33 +175,33 @@ def _configure(source, job, storage, actor):
         st.caption("MFLAB: K = LB4330K, mascarilla talla 4; C = LB4330C, mascarilla talla 5. El CT puede cubrir ambos; esta oferta debe indicar cuál se entrega.")
         delivery = st.text_area("Calendario de entregas completo", value=cfg.get("delivery", ""),
             placeholder="Ej.: 300 unidades a 30 días; 300 a 45 días; 300 a 60 días calendario desde...")
-        place = st.text_input("Lugar exacto de entrega", value=cfg.get("delivery_place", ""))
-        warranty = st.text_area("Garantía y vida útil / esterilidad exigida", value=cfg.get("warranty", ""))
+        place, place_evidence = delivery_destination(source)
+        if place:
+            st.markdown(f"**Lugar de entrega:** {place}")
+            st.caption("Extraído de " + place_evidence)
+        else:
+            st.warning(place_evidence + " Completa este dato desde el anexo para continuar.")
+            place = st.text_input("Lugar de entrega (solo si no se pudo extraer del anexo)", value=cfg.get("delivery_place", ""))
+        st.markdown("**Garantía y esterilidad:** " + cfg["warranty"])
         validity = st.number_input("Validez de la cotización (días)", min_value=1, value=int(cfg.get("proposal_validity_days", 30)))
-        representative = c1.text_input("Representante de la entidad para el pacto", value=cfg.get("entity_representative", ""))
-        entity_id = c2.text_input("Cédula del representante de la entidad", value=cfg.get("entity_id", ""))
-        role = st.text_input("Cargo del representante de la entidad", value=cfg.get("entity_role", "Representante Legal"))
         document_date = c1.date_input("Fecha de los documentos", value=parse_date(cfg.get("document_date")) or today, max_value=today)
         control_date = c2.date_input("Vigencia exigible hasta (presentación u otra fecha exigida)",
             value=max(parse_date(cfg.get("control_date")) or today, today), min_value=today)
         max_age = st.number_input("Antigüedad máxima Registro Público (meses; 0 = no confirmada)", min_value=0, max_value=24,
             value=int(cfg.get("registry_max_months") or registry or 0))
         rule_evidence = st.text_input("Archivo/página que respalda esa antigüedad", value=cfg.get("registry_rule_evidence", source.get("registry_rule", "")))
-        rs = st.checkbox("El acto exige además Registro Sanitario", value=bool(cfg.get("require_rs", False)))
-        power = st.checkbox("Se presenta mediante apoderado: exige poder", value=bool(cfg.get("require_power", False)))
         extras = st.text_area("Otros documentos exigidos (uno por línea)", value="\n".join(cfg.get("extra_requirements", [])))
         confirmed = st.checkbox("Revisé todos los requisitos y anexos, su calendario y posibles modificaciones")
-        signed = st.checkbox("Autorizo usar la firma de RIR en la cotización y el pacto de este expediente")
+        st.caption("Firma de RIR: Rodrigo Sánchez, representante legal. Se incorpora automáticamente con tu autorización permanente; no se utiliza apoderado.")
         submit = st.form_submit_button("Comprobar requisitos y preparar borradores", type="primary", disabled=job.get("state") in {"En cola", "Procesando"})
     if submit:
-        config = {"catalog": catalog, "price": str(price), "tax_mode": mode, "tax_rate": tax_rate,
+        config = prepare_offer_config(source, {"catalog": catalog, "price": str(price), "tax_mode": mode, "tax_rate": tax_rate,
             "tax_evidence": tax_evidence.strip(), "catalog_brand": brand.strip(), "catalog_model": model.strip(),
-            "delivery": delivery.strip(), "delivery_place": place.strip(), "warranty": warranty.strip(),
-            "entity_representative": representative.strip(), "entity_id": entity_id.strip(), "entity_role": role.strip(),
+            "delivery": delivery.strip(), "delivery_place": place.strip(),
             "document_date": str(document_date), "control_date": str(control_date), "proposal_validity_days": validity,
-            "registry_max_months": max_age or None, "registry_rule_evidence": rule_evidence.strip(), "require_rs": rs,
-            "require_power": power, "extra_requirements": [x.strip() for x in extras.splitlines() if x.strip()],
-            "source_confirmed": confirmed, "signature_authorized": signed}
+            "registry_max_months": max_age or None, "registry_rule_evidence": rule_evidence.strip(),
+            "extra_requirements": [x.strip() for x in extras.splitlines() if x.strip()],
+            "source_confirmed": confirmed})
         checks, _ = validate_package(source, config, storage.rows("ANESTESIA_DOCUMENTOS"))
         if any(c["estado"] != "Vigente documentalmente" for c in checks):
             storage.save_job({"id": job["id"], "config": config, "checks": checks,
@@ -357,10 +357,11 @@ def render_anestesia_docs(creds, actor):
             _enqueue(storage, job, "capture", actor, url=job["url"])
         with st.expander("Cómo funciona y qué debe verificarse", expanded=False):
             st.markdown("1. Captura oficial y revisión de anexos.\n2. Certificados originales vigentes y metadatos comprobados.\n"
-                "3. Cotización y pacto en Word/PDF, con membrete y firma de RIR. Los certificados oficiales mantienen su formato y firma originales.\n"
+                "3. Cotización en Word/PDF, con membrete y firma de Rodrigo Sánchez. Los certificados oficiales mantienen su formato y firma originales.\n"
                 "4. Auditoría externa sobre todos los archivos y devolución del JSON de revisión.\n"
                 "5. Revalidación del acto, vigencias y archivos antes de publicar en Drive.\n\n"
-                "La firma de la entidad, notaría y apostillas deben obtenerse cuando el acto las exija; insertar la firma de RIR no las sustituye. "
+                "El pacto bilateral con la entidad corresponde a la etapa posterior indicada en los anexos de ejemplo; no se exige para preparar esta cotización. "
+                "Notaría y apostillas deben obtenerse cuando el acto las exija; insertar la firma de RIR no las sustituye. "
                 "La biblioteca conserva cada versión y su historial. El número de documentos depende del pliego, no de una cantidad fija.")
     except Exception as exc:
         st.error(f"No fue posible completar la operación documental: {exc}")

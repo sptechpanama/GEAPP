@@ -11,8 +11,8 @@ import zipfile
 import fitz
 
 from services.anestesia_docs import (PANAMA, canonical_hash, file_hash, now_iso, review_errors,
-                                    review_prompt, totals, validate_package)
-from services.anestesia_documents import pact_docx, quote_docx
+                                    prepare_offer_config, review_prompt, totals, validate_package)
+from services.anestesia_documents import quote_docx
 from services.anestesia_source import capture, source_is_closed
 from services.anestesia_health import certificate_content_check
 
@@ -49,7 +49,7 @@ def run_request(storage, payload, *, execution_id, root: Path):
             raise ValueError("Primero captura el acto y sus anexos.")
         source = storage.json_file(job["source_id"])
         if action == "generate":
-            config = payload["config"]
+            config = prepare_offer_config(source, payload["config"])
             library = storage.rows("ANESTESIA_DOCUMENTOS")
             checks, selected = validate_package(source, config, library)
             blocked = [c for c in checks if c["estado"] != "Vigente documentalmente"]
@@ -83,8 +83,9 @@ def run_request(storage, payload, *, execution_id, root: Path):
             draft_folder = storage.folder("Borradores - " + execution_id[:8], folder)
             conversion = storage.folder("Conversión Word a PDF", draft_folder)
             files = []
-            outputs = [("01_Cotizacion.docx", quote_docx(source, config, root / "assets/cotizacion_base")),
-                       ("02_Pacto_de_integridad.docx", pact_docx(source, config, root))]
+            # This is the proposal stage. The entity's bilateral pact belongs
+            # to the later award procedure in the supplied example annexes.
+            outputs = [("01_Cotizacion.docx", quote_docx(source, config, root / "assets/cotizacion_base"))]
             for name, data in outputs:
                 original = storage.put(draft_folder, name, data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
                 files.append({**original, "deliverable": True})
@@ -93,7 +94,7 @@ def run_request(storage, payload, *, execution_id, root: Path):
                     if not len(doc) or source["number"] not in " ".join(page.get_text() for page in doc):
                         raise ValueError("El PDF no contiene el número del acto. Revisar la conversión.")
                 files.append({**storage.put(draft_folder, name.replace(".docx", ".pdf"), pdf, "application/pdf"), "deliverable": True})
-            for n, (kind, document) in enumerate(selected.items(), 3):
+            for n, (kind, document) in enumerate(selected.items(), 2):
                 data = originals[kind]
                 saved = storage.put(draft_folder, f"{n:02d}_{kind.replace(':', '_')}.pdf", data, "application/pdf")
                 files.append({**saved, "deliverable": True, "library_id": document["id"], "kind": kind})

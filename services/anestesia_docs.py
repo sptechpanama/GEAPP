@@ -28,6 +28,7 @@ KINDS = {
     "poder": "Poder del apoderado (si aplica)", "otro": "Otro requisito del acto",
 }
 CATALOGS = {"C": "C (5)", "K": "K (4)"}
+ANESTHESIA_WARRANTY = "24 meses de garantía y esterilidad no menor de 24 meses a partir de la fecha de entrega."
 EXPIRING = {"dgi", "css", "oferente", "criterio_tecnico", "registro_sanitario", "cedula"}
 PRODUCT_DOCS = {"catalogo", "criterio_tecnico", "registro_sanitario", "inscripcion_producto", "disposicion"}
 BASE_KINDS = ("dgi", "css", "registro_publico", "oferente", "inscripcion_producto",
@@ -202,6 +203,20 @@ def select_documents(library: list[dict], requirements: list[dict], catalog: str
     return chosen
 
 
+def prepare_offer_config(source: dict, config: dict) -> dict:
+    """Standing instructions for Rodrigo's own 43358 proposals, not LP Generator."""
+    from services.anestesia_source import delivery_destination
+    place, evidence = delivery_destination(source)
+    prepared = {**config, "warranty": ANESTHESIA_WARRANTY,
+                "require_rs": False, "require_power": False, "signature_authorized": True,
+                "signature_authorization": "Autorización permanente del titular para Anestesia-Docs (2026-09-30)"}
+    if place:
+        prepared.update(delivery_place=place, delivery_place_evidence=evidence)
+    for field in ("entity_representative", "entity_id", "entity_role"):
+        prepared.pop(field, None)
+    return prepared
+
+
 def validate_package(source: dict, config: dict, library: list[dict], *, today: date | None = None) -> tuple[list[dict], dict]:
     today = today or datetime.now(PANAMA).date()
     control = parse_date(config.get("control_date")) or today
@@ -221,14 +236,19 @@ def validate_package(source: dict, config: dict, library: list[dict], *, today: 
         errors.append("Confirma los requisitos y anexos del acto antes de preparar el expediente.")
     if not config.get("delivery") or not config.get("delivery_place"):
         errors.append("Confirma el calendario completo y lugar de entrega de los anexos.")
-    if not config.get("entity_representative") or not config.get("entity_id") or not config.get("entity_role"):
-        errors.append("Completa nombre, cédula y cargo del representante de la entidad para el pacto.")
     if not config.get("tax_evidence"):
         errors.append("Confirma el tratamiento tributario y su respaldo.")
     if not config.get("catalog_model") or not config.get("catalog_brand"):
         errors.append("Confirma modelo y marca exactos del catálogo ofertado.")
     if not config.get("warranty"):
         errors.append("Confirma garantía y vida útil o esterilidad exigida en los anexos.")
+    official_text = normalized("\n".join([
+        str(source.get("info", {}).get("descripcion", "")),
+        *(str(item.get("descripcion", "")) for item in source.get("items", [])),
+        *(str(attachment.get("text", "")) for attachment in source.get("attachments", []))]))
+    required_months = [int(m) for m in re.findall(r"(?:esterilidad|garantia)[^.;:]{0,70}?\b(\d{1,3})\s*meses\b", official_text)]
+    if config.get("warranty") == ANESTHESIA_WARRANTY and required_months and max(required_months) > 24:
+        errors.append(f"El acto indica una garantía/esterilidad de {max(required_months)} meses, superior a los 24 de la oferta habitual. Revisa esta diferencia antes de generar.")
     issued = parse_date(config.get("document_date"))
     if not issued or issued > today:
         errors.append("La fecha de los documentos debe ser verificable y no estar en el futuro.")
