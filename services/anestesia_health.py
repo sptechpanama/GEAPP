@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import re
 
 from services.anestesia_docs import (
-    BASE_KINDS, KINDS, canonical_hash, document_status,
+    BASE_KINDS, KINDS, REGISTRY_MAX_MONTHS, canonical_hash, document_status, document_expiry,
     file_hash, normalized, now_iso, parse_date, select_documents,
 )
 
@@ -71,18 +71,21 @@ def certificate_content_check(data, metadata, *, ocr_text=''):
 def library_health(library, *, as_of: date, catalog='K'):
     """Show only the latest applicable original, with missing base requirements.
 
-    Does not invent a uniform legal validity period for Registro Público or
-    present old act-specific declarations as reusable for a new tender.
+    Registry acceptance age follows the researched 43358 policy. Act-specific
+    declarations are not presented as reusable for a new tender.
     """
     kinds = list(BASE_KINDS)
     kinds.extend(sorted({d.get('kind') for d in library if d.get('kind') and not d.get('act')} - set(kinds)))
     requirements = [{'kind': kind, 'library_only': True} for kind in kinds]
+    for rule in requirements:
+        if rule['kind'] == 'registro_publico':
+            rule['max_age_months'] = REGISTRY_MAX_MONTHS
     selected = select_documents(library, requirements, catalog, '')
     result = []
     for rule in requirements:
         kind = rule['kind']; doc = selected.get(kind)
         check = document_status(doc, rule, as_of=as_of, catalog=catalog, act='')
-        expiry = parse_date((doc or {}).get('expires'))
+        expiry = document_expiry(doc or {}, rule)
         if not doc:
             status = 'Falta · por acto' if kind in {'retorsion', 'calidad'} else 'Falta'
             detail = 'Se debe preparar y verificar para cada acto.' if kind in {'retorsion', 'calidad'} else check['motivo']
@@ -90,8 +93,6 @@ def library_health(library, *, as_of: date, catalog='K'):
             status, detail = 'Vencido', check['motivo']
         elif check['estado'] != 'Vigente documentalmente':
             status, detail = 'Pendiente de verificar', check['motivo']
-        elif kind == 'registro_publico':
-            status, detail = 'Según pliego', 'Emisión comprobada. La antigüedad permitida se valida contra cada acto.'
         elif expiry and expiry == as_of:
             status, detail = 'Vence hoy', 'Válido para hoy; requiere renovación para una presentación posterior.'
         elif expiry and expiry <= as_of + timedelta(days=7):

@@ -118,6 +118,26 @@ def test_participation_evidence_is_visible_without_changing_offer_selection():
 
 
 APP = "from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')"
+
+
+def test_registry_is_automatic_and_removed_boxes_do_not_erase_saved_requirements():
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job['config'] = {'registry_max_months': 24, 'extra_requirements': ['Requisito ya registrado']}
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        labels = [w.label for collection in (app.text_input, app.text_area, app.number_input) for w in collection]
+        assert not any('Otros documentos' in label or 'Archivo/página' in label or 'Antigüedad máxima' in label for label in labels)
+        assert any('máximo 12 meses' in x.value for x in app.info)
+        assert any('Requisito ya registrado' in x.value for x in app.caption)
+        next(b for b in app.button if b.label == 'Comprobar requisitos y preparar borradores').click().run()
+        assert not app.exception
+        saved = storage.tables['ANESTESIA_EXPEDIENTES'][0]['config']
+        assert saved['registry_max_months'] == 12 and saved['registry_rule_evidence']
+        assert saved['extra_requirements'] == ['Requisito ya registrado']
 ACT_URL = "https://www.panamacompra.gob.pa/Inicio/#/solicitud-de-cotizacion/2026-1-10-01-08-CL-051598/0nM6ICc0JCL2AjN1UDMxojIpJye"
 
 

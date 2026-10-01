@@ -44,10 +44,13 @@ def test_newest_failed_replacement_does_not_show_old_valid_as_current():
     assert row([new, old])['Estado'] == 'Pendiente de verificar'
 
 
-def test_registry_has_no_invented_six_or_twelve_month_deadline():
+def test_registry_uses_researched_43358_acceptance_deadline_without_changing_original():
     doc = certificate('registro_publico', expires='', no_expiry_confirmed=True)
-    assert row([doc], 'Certificado del Registro Público')['Estado'] == 'Según pliego'
-    assert document_status(doc, {'kind':'registro_publico'}, as_of=TODAY, catalog='K', act='')['estado'] == 'Bloqueado'
+    result = row([doc], 'Certificado del Registro Público')
+    assert result['Estado'] == 'Vigente documentalmente'
+    assert result['Vence'] == '2027-09-23'
+    assert doc['expires'] == ''
+    assert document_status(doc, {'kind':'registro_publico'}, as_of=TODAY, catalog='K', act='')['estado'] == 'Vigente documentalmente'
 
 
 def test_other_act_declaration_is_never_reported_reusable():

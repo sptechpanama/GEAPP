@@ -9,13 +9,14 @@ import pandas as pd
 import streamlit as st
 from googleapiclient.discovery import build
 
-from services.anestesia_docs import (CATALOGS, COMPANY, KINDS, PANAMA, now_iso, parse_date,
+from services.anestesia_docs import (CATALOGS, COMPANY, KINDS, PANAMA, REGISTRY_MAX_MONTHS, now_iso, parse_date,
+                                    document_status,
                                     prepare_offer_config, review_errors, review_prompt, totals, validate_package)
 from services.anestesia_source import delivery_destination, portal_delivery_term, route, source_is_closed
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 7
+ANESTESIA_UI_VERSION = 8
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -94,11 +95,21 @@ def _library(storage, actor):
     rows = _records(storage.sheet_id, "ANESTESIA_DOCUMENTOS", storage)
     today = datetime.now(PANAMA).date()
     with st.expander("Historial de documentos (incluye versiones anteriores)", expanded=False):
-        _table([{"Documento": r.get("label", KINDS.get(r.get("kind"), r.get("kind"))),
+        history = []
+        for r in rows:
+            check = document_status(r, {"kind": r.get("kind", "otro"), "library_only": True},
+                as_of=today, catalog="K", act=r.get("act", ""))
+            history.append({"Documento": r.get("label", KINDS.get(r.get("kind"), r.get("kind"))),
              "Catálogo": r.get("catalogs", ""), "Emisión": r.get("issued", ""), "Vence": r.get("expires", ""),
              "Estado": "Vencido" if parse_date(r.get("expires")) and parse_date(r["expires"]) < today
              else "Datos verificados" if r.get("verified") is True else "Pendiente de verificación",
-             "Acto": r.get("act", ""), "enlace": r.get("url"), "Versión": r.get("created_at", "")} for r in rows])
+             "Acto": r.get("act", ""), "enlace": r.get("url"), "Versión": r.get("created_at", "")})
+            if r.get("kind") == "registro_publico":
+                expiry = parse_date(check.get("vence"))
+                history[-1].update(Vence=str(expiry or ""), Estado="Vencido" if expiry and expiry < today
+                    else "Vence hoy" if expiry == today and check["estado"] == "Vigente documentalmente"
+                    else check["estado"])
+        _table(history)
     st.markdown("#### Cargar o actualizar un documento")
     entries = {r["id"]: r for r in rows}
     chosen = st.selectbox("Nuevo PDF o revisar uno ya guardado", [""] + list(entries),
@@ -114,6 +125,9 @@ def _library(storage, actor):
         left, right = st.columns(2)
         issued = left.date_input("Fecha de emisión (si consta)", value=parse_date(previous.get("issued")))
         expires = right.date_input("Fecha de vencimiento (si consta)", value=parse_date(previous.get("expires")))
+        if kind == "registro_publico":
+            st.caption(f"El vencimiento para presentar se calcula automáticamente: emisión + {REGISTRY_MAX_MONTHS} meses. "
+                       "Completa vencimiento solo si el certificado imprime uno anterior; se aplicará la fecha más próxima.")
         catalogs = left.multiselect("Catálogos expresamente cubiertos", ["C", "K"], default=[c for c in previous.get("catalogs", "").split(",") if c in CATALOGS], format_func=CATALOGS.get)
         fichas = right.text_input("Fichas expresamente cubiertas", value=previous.get("fichas", ""), placeholder="43358")
         models = st.text_input("Modelos exactos expresamente cubiertos (separados por coma)", value=previous.get("models", ""), placeholder="Ej.: LB4330K, LB4330C")
@@ -158,9 +172,8 @@ def _configure(source, job, storage, actor):
     closed, reason = source_is_closed(source)
     if closed:
         st.warning(reason + " Se permite estudiar este expediente histórico, pero no publicarlo como oferta vigente.")
-    registry = source.get("registry_max_months")
-    st.info(f"Registro Público: antigüedad máxima detectada de {registry} meses. {source.get('registry_rule', '')}"
-            if registry else "Registro Público: confirma la antigüedad máxima directamente en el requisito del acto.")
+    st.info(f"Registro Público: máximo {cfg['registry_max_months']} meses desde su emisión. "
+            "La vigencia se calcula automáticamente y debe cubrir la fecha de presentación; si el certificado vence antes, se usa esa fecha.")
     with st.form("anes_config_" + job["id"]):
         c1, c2 = st.columns(2)
         catalog = c1.selectbox("Mascarilla / catálogo", ["K", "C"], index=0 if cfg.get("catalog", "K") == "K" else 1, format_func=CATALOG_LABELS.get)
@@ -194,10 +207,8 @@ def _configure(source, job, storage, actor):
         document_date = c1.date_input("Fecha de los documentos", value=parse_date(cfg.get("document_date")) or today, max_value=today)
         control_date = c2.date_input("Vigencia exigible hasta (presentación u otra fecha exigida)",
             value=max(parse_date(cfg.get("control_date")) or today, today), min_value=today)
-        max_age = st.number_input("Antigüedad máxima Registro Público (meses; 0 = no confirmada)", min_value=0, max_value=24,
-            value=int(cfg.get("registry_max_months") or registry or 0))
-        rule_evidence = st.text_input("Archivo/página que respalda esa antigüedad", value=cfg.get("registry_rule_evidence", source.get("registry_rule", "")))
-        extras = st.text_area("Otros documentos exigidos (uno por línea)", value="\n".join(cfg.get("extra_requirements", [])))
+        if cfg.get("extra_requirements"):
+            st.caption("Requisitos adicionales ya guardados en este expediente: " + "; ".join(cfg["extra_requirements"]))
         confirmed = st.checkbox("Revisé todos los requisitos y anexos, su calendario y posibles modificaciones")
         st.caption("Firma de RIR: Rodrigo Sánchez, representante legal. Se incorpora automáticamente con tu autorización permanente; no se utiliza apoderado.")
         submit = st.form_submit_button("Comprobar requisitos y preparar borradores", type="primary", disabled=job.get("state") in {"En cola", "Procesando"})
@@ -209,8 +220,7 @@ def _configure(source, job, storage, actor):
             "delivery_portal_source_hash": source.get("fingerprint") if use_portal else None,
             "delivery_place": place.strip(),
             "document_date": str(document_date), "control_date": str(control_date), "proposal_validity_days": validity,
-            "registry_max_months": max_age or None, "registry_rule_evidence": rule_evidence.strip(),
-            "extra_requirements": [x.strip() for x in extras.splitlines() if x.strip()],
+            "extra_requirements": cfg.get("extra_requirements", []),
             "source_confirmed": confirmed})
         checks, _ = validate_package(source, config, storage.rows("ANESTESIA_DOCUMENTOS"))
         if any(c["estado"] != "Vigente documentalmente" for c in checks):
@@ -392,7 +402,8 @@ def _health_panel(storage):
     _table([{key: value for key, value in row.items() if key != "Qué falta / comprobación"}
             for row in library_health(rows, as_of=today, catalog=catalog)])
     st.caption(f"Control al {today:%d/%m/%Y} (Panamá). Se muestra la última versión aplicable; se actualiza cada 60 segundos mientras esta pestaña está abierta. "
-               "Registro Público, retorsión y calidad se verifican contra el pliego de cada acto. "
+               f"Registro Público: emisión + {REGISTRY_MAX_MONTHS} meses, o vencimiento impreso anterior; si el acto exige menos antigüedad, se aplica al generar. "
+               "Retorsión y calidad se verifican para cada acto. "
                "La revisión documental no sustituye la consulta de autenticidad al emisor.")
     for issue in st.session_state.pop("anes_document_result", []):
         st.warning("Documento guardado pendiente de verificación: " + issue)

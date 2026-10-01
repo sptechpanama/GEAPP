@@ -30,6 +30,14 @@ KINDS = {
 CATALOGS = {"C": "C (5)", "K": "K (4)"}
 CATALOG_MODELS = {"K": "LB4330K", "C": "LB4330C"}
 ANESTHESIA_WARRANTY = "24 meses de garantía y esterilidad no menor de 24 meses a partir de la fecha de entrega."
+# Operational acceptance rule for 43358; provenance is retained in each package.
+# A shorter requirement in the current annex always takes precedence.
+REGISTRY_MAX_MONTHS = 12
+REGISTRY_RULE_EVIDENCE = (
+    "Ficha 43358: acto 2026-1-10-01-08-CL-051191, "
+    "MODELO CONTRATACION MENOR O COMPRA MENOR AGIL-INSUMO - V 2.pdf, página 2: "
+    "vigencia no mayor de un (1) año."
+)
 EXPIRING = {"dgi", "css", "oferente", "criterio_tecnico", "registro_sanitario", "cedula"}
 PRODUCT_DOCS = {"catalogo", "criterio_tecnico", "registro_sanitario", "inscripcion_producto", "disposicion"}
 BASE_KINDS = ("dgi", "css", "registro_publico", "oferente", "inscripcion_producto",
@@ -100,15 +108,64 @@ def totals(quantity, price, tax_mode: str, tax_rate=7) -> dict:
 
 
 def public_registry_age(text: str) -> tuple[int | None, str]:
-    """Read a tender-specific maximum age; do not hard-code six months."""
-    plain = normalized(text)
-    plain = re.sub(r"\bun\s*\([li1]\)\s*ano", "1 ano", plain)
+    """Read registry clauses, taking the shortest age without borrowing other deadlines."""
+    plain = normalized(text).replace("¡", "i")
+    plain = re.sub(r"\(\s*['’]?\s*([li]|\d{1,2})\s*\)", r"(\1)", plain)
+    words = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4,
+             "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9,
+             "diez": 10, "once": 11, "doce": 12}
+    quantity = (r"\b(?P<number>\d{1,2}|" + "|".join(words) + r")"
+                r"(?:\s*\(\s*(?:\d{1,2}|[li])\s*\))?\s*\)?\s*(?P<unit>anos?|mes(?:es)?)\b")
+    patterns = [
+        r"(?:vigencia|antiguedad|fecha(?:\s+de\s+(?:emision|expedicion))?)[^.]{0,160}?"
+        r"(?:no mayor|no superior|maxima|menor)[^.]{0,60}?" + quantity,
+        r"(?:expedid[oa]|emitid[oa])[^.]{0,80}?(?:dentro de|en los|en el)\s*" + quantity,
+    ]
+    # Stop at the next kind of document, including OCR where line breaks are lost.
+    next_requirement = re.compile(
+        r"paz\s*y\s*salvo|poder\s+de\s+representacion|declaracion\s+jurada|"
+        r"medidas\s+de\s+retorsion|criterio\s+tecnico|registro\s+sanitario|"
+        r"certificado\s+de\s+(?:oferente|calidad)|vida\s+util|esterilidad")
+    found = []
     for match in re.finditer(r"registro publico", plain):
-        context = plain[max(0, match.start() - 100):match.end() + 2300]
-        age = re.search(r"(?:vigencia|antiguedad)[^.]{0,200}?(?:no mayor|no superior|maxima|menor)[^.]{0,60}?(?:de\s+)?(?:un\s*)?\(?([136]|12)\)?\s*(anos?|meses?)", context)
-        if age:
-            return int(age[1]) * (12 if age[2].startswith("ano") else 1), context[age.start():age.end()]
+        context = next_requirement.split(plain[match.end():match.end() + 2300], maxsplit=1)[0]
+        for pattern in patterns:
+            for age in re.finditer(pattern, context):
+                value = age["number"]
+                months = (int(value) if value.isdigit() else words[value]) * (12 if age["unit"].startswith("ano") else 1)
+                if 0 < months <= 120:
+                    found.append((months, age[0]))
+    if found:
+        return min(found, key=lambda item: item[0])
     return None, "No se pudo extraer la antigüedad máxima: revisar el requisito del acto."
+
+
+def registry_policy(source: dict | None = None) -> tuple[int, str]:
+    """Automatic 43358 limit; old editable config cannot loosen the current annex."""
+    source = source or {}
+    candidates = [(REGISTRY_MAX_MONTHS, REGISTRY_RULE_EVIDENCE)]
+    value = str(source.get("registry_max_months") or "")
+    if re.fullmatch(r"\d{1,3}", value) and 0 < int(value) <= 120:
+        candidates.append((int(value), source.get("registry_rule") or "Requisito capturado del acto."))
+    # Re-read stored annex text as well: captures made with older parsers may be incomplete.
+    for attachment in source.get("attachments", []):
+        months, evidence = public_registry_age(attachment.get("text", ""))
+        if months:
+            candidates.append((months, f"{attachment.get('name', 'Anexo oficial')}: {evidence}"))
+    return min(candidates, key=lambda item: item[0])
+
+
+def document_expiry(document: dict, requirement: dict) -> date | None:
+    """Acceptance deadline; never mutate the certificate's printed expiration."""
+    printed = parse_date(document.get("expires"))
+    issued = parse_date(document.get("issued"))
+    maximum = requirement.get("max_age_months")
+    if document.get("kind") == "registro_publico":
+        maximum = min(int(maximum or REGISTRY_MAX_MONTHS), REGISTRY_MAX_MONTHS)
+    if maximum and issued:
+        by_age = add_months(issued, int(maximum))
+        return min(printed, by_age) if printed else by_age
+    return printed
 
 
 def document_status(document: dict | None, requirement: dict, *, as_of: date, catalog: str, act: str,
@@ -136,10 +193,10 @@ def document_status(document: dict | None, requirement: dict, *, as_of: date, ca
     if kind not in EXPIRING and not expiry and document.get("no_expiry_confirmed") is not True:
         errors.append("Confirmar con evidencia si no tiene vencimiento expreso.")
     maximum = requirement.get("max_age_months")
-    if kind == "registro_publico" and not maximum and not requirement.get("library_only"):
-        errors.append("Falta confirmar la antigüedad máxima que exige este acto.")
+    if kind == "registro_publico":
+        maximum = min(int(maximum or REGISTRY_MAX_MONTHS), REGISTRY_MAX_MONTHS)
     if maximum and issued and as_of > add_months(issued, int(maximum)):
-        errors.append(f"Supera los {maximum} meses permitidos por el requisito del acto.")
+        errors.append(f"Supera los {maximum} meses de antigüedad permitidos; venció para presentación el {add_months(issued, int(maximum)):%d/%m/%Y}.")
     if kind in PRODUCT_DOCS:
         if "43358" not in re.findall(r"\b\d{4,7}\b", str(document.get("fichas", ""))):
             errors.append("No está verificada su correspondencia con la ficha 43358.")
@@ -173,17 +230,18 @@ def document_status(document: dict | None, requirement: dict, *, as_of: date, ca
         errors.extend(validation.get("errors", []))
     return {"documento": label, "kind": kind, "estado": "Bloqueado" if errors else "Vigente documentalmente",
             "motivo": " ".join(errors) or "Fechas, alcance y formalidades verificados; sujeto a revisión del expediente.",
-            "id": document.get("id", ""), "vence": str(expiry or "Sin vencimiento expreso"),
+            "id": document.get("id", ""), "vence": str(document_expiry(document, requirement) or "Sin vencimiento expreso"),
+            "regla_vigencia": f"Emisión + {maximum} meses; prevalece un vencimiento impreso anterior." if maximum else "Vencimiento del documento.",
             "enlace": document.get("url", "")}
 
 
 def base_requirements(source: dict) -> list[dict]:
-    maximum = source.get("registry_max_months")
+    maximum, evidence = registry_policy(source)
     result = []
     for kind in BASE_KINDS:
         rule = {"kind": kind, "label": KINDS[kind]}
         if kind == "registro_publico":
-            rule.update(max_age_months=maximum, rule_evidence=source.get("registry_rule", ""))
+            rule.update(max_age_months=maximum, rule_evidence=evidence)
         if kind in {"retorsion", "calidad"}:
             rule.update(notarized=True, act_specific=True)
         if kind == "disposicion":
@@ -211,6 +269,8 @@ def prepare_offer_config(source: dict, config: dict) -> dict:
     prepared = {**config, "warranty": ANESTHESIA_WARRANTY,
                 "require_rs": False, "require_power": False, "signature_authorized": True,
                 "signature_authorization": "Autorización permanente del titular para Anestesia-Docs (2026-09-30)"}
+    maximum, registry_evidence = registry_policy(source)
+    prepared.update(registry_max_months=maximum, registry_rule_evidence=registry_evidence)
     if place:
         prepared.update(delivery_place=place, delivery_place_evidence=evidence)
     model = CATALOG_MODELS.get(config.get("catalog"))
@@ -274,9 +334,6 @@ def validate_package(source: dict, config: dict, library: list[dict], *, today: 
         errors.append("La fecha de los documentos debe ser verificable y no estar en el futuro.")
     if config.get("signature_authorized") is not True:
         errors.append("Confirma autorización para usar la firma de RIR en este expediente.")
-    maximum = config.get("registry_max_months") or source.get("registry_max_months")
-    if maximum != source.get("registry_max_months") and not config.get("registry_rule_evidence"):
-        errors.append("Indica archivo y página del requisito que respalda la antigüedad del Registro Público.")
     if not source.get("items") or len(source.get("items", [])) != 1 or "43358" not in source.get("explicit_fichas", []):
         errors.append("Esta versión requiere un renglón con ficha 43358 explícita; otros alcances necesitan revisión.")
     for problem in source.get("blocking_errors", []):
@@ -286,8 +343,7 @@ def validate_package(source: dict, config: dict, library: list[dict], *, today: 
             totals(source["items"][0].get("cantidad"), config.get("price"), config.get("tax_mode"), config.get("tax_rate", 7))
         except (ValueError, TypeError):
             errors.append("Cantidad, precio unitario o tratamiento tributario inválido.")
-    selected_source = {**source, "registry_max_months": config.get("registry_max_months") or source.get("registry_max_months")}
-    required = base_requirements(selected_source)
+    required = base_requirements(source)
     if config.get("require_rs"):
         required.append({"kind": "registro_sanitario", "label": KINDS["registro_sanitario"]})
     if config.get("require_power"):

@@ -123,12 +123,22 @@ def test_cannot_validate_only_today_when_certificate_expires_before_tender_close
     assert any("presentación" in c["motivo"] for c in checks)
 
 
-def test_unknown_registry_rule_and_unreadable_annex_block_without_guessing():
+def test_default_registry_policy_does_not_bypass_an_unreadable_annex():
     source, config, docs = fixture()
     source.update(registry_max_months=None, blocking_errors=["Anexo no interpretado"])
     checks, _ = validate_package(source, config, docs)
     assert any("Anexo no interpretado" in c["motivo"] for c in checks)
-    assert any("antigüedad máxima" in c["motivo"] for c in checks)
+    assert next(c for c in checks if c['kind'] == 'registro_publico')['estado'] == 'Vigente documentalmente'
+
+
+def test_old_saved_age_override_cannot_bypass_stricter_current_tender_at_generation():
+    source, config, docs = fixture()
+    source['registry_max_months'] = 3
+    config.update(registry_max_months=12, registry_rule_evidence='Antiguo valor manual')
+    next(d for d in docs if d['kind'] == 'registro_publico')['issued'] = str(TODAY - timedelta(days=150))
+    checks, _ = validate_package(source, config, docs)
+    check = next(c for c in checks if c['kind'] == 'registro_publico')
+    assert check['estado'] == 'Bloqueado' and '3 meses' in check['motivo']
 
 
 def test_requirements_not_limited_to_fixed_twelve_and_no_automatic_ct_for_c():
