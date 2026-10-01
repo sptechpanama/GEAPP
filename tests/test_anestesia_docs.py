@@ -217,6 +217,7 @@ def test_incomplete_or_other_version_review_cannot_approve(change):
 class FakeStorage:
     def __init__(self, source, docs):
         self.objects = {"source": json.dumps(source).encode()}
+        self.writes = []
         self.saved = {"id": IDENT, "number": ACT, "state": "Datos capturados", "source_id": "source"}
         self.tables = {"ANESTESIA_DOCUMENTOS": deepcopy(docs), "ANESTESIA_REVISIONES": []}
         for item in self.tables["ANESTESIA_DOCUMENTOS"]:
@@ -234,6 +235,7 @@ class FakeStorage:
     def get_bytes(self, ident): return self.objects[ident]
     def put(self, parent, name, data, mime):
         ident = str(len(self.objects)); self.objects[ident] = data
+        self.writes.append({'parent': parent, 'name': name, 'mime': mime, 'file_id': ident})
         return {"file_id": ident, "name": name, "url": "https://drive.example/" + ident, "sha256": file_hash(data), "mime": mime}
     def convert_document(self, data, name, parent):
         pdf = fitz.open(); page = pdf.new_page(); page.insert_text((40, 40), ACT)
@@ -283,6 +285,12 @@ def test_worker_generates_reviewable_bundle_and_only_publishes_exact_approved_fi
     assert result["state"] == "Listo para entregar" and result["zip_url"]
     assert result['delivery_pdf_count'] == 12 and result['final_url'].endswith('stable-delivery-folder')
     assert len(storage.published_pdfs) == 12 and all(f['mime'] == 'application/pdf' for f in storage.published_pdfs)
+    case_folder = result['archive_url'].split('/')[-1]
+    assert ACT in case_folder and 'PDF para presentar' in case_folder
+    case_files = [f for f in storage.writes if f['parent'] == case_folder]
+    assert len(case_files) == 12 and all(f['mime'] == 'application/pdf' for f in case_files)
+    assert sum(f['name'] == '01_Cotizacion.pdf' for f in case_files) == 1
+    assert {f['name'] for f in case_files} == {f['name'] for f in storage.published_pdfs}
     archive_id = result['zip_url'].split('/')[-1]
     with zipfile.ZipFile(BytesIO(storage.objects[archive_id])) as zipped:
         assert len(zipped.namelist()) == 12 and all(name.endswith('.pdf') for name in zipped.namelist())

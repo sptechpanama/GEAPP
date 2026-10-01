@@ -16,7 +16,7 @@ from services.anestesia_source import delivery_destination, portal_delivery_term
 from services.anestesia_health import library_health
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 10
+ANESTESIA_UI_VERSION = 11
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -267,18 +267,20 @@ def _review(storage, job, actor):
 
 @st.fragment(run_every="10s")
 def _delivery_links(storage, job):
-    if not job.get('delivery_folder_id'):
-        # Historical delivery folders predate the common replacement folder.
-        st.link_button("Abrir expediente final en Drive", job['final_url'])
-    else:
+    st.markdown("#### Documentos para presentar")
+    ready = (job.get('state') == 'Listo para entregar' and bool(job.get('manifest_hash'))
+             and job.get('manifest_hash') == job.get('published_manifest'))
+    target = None
+    # This immutable snapshot contains only the PDFs approved for THIS case.
+    # The shared final_url can be replaced by a later request for another act.
+    if ready and job.get('delivery_folder_id') and job.get('archive_url'):
+        target = job['archive_url']
+    elif ready and job.get('delivery_folder_id') and job.get('final_url'):
         try:
             current = storage.delivery_status(job['delivery_folder_id'])
             if (current.get('state') == 'ready' and current.get('request') == job['id']
-                    and current.get('manifest') == job.get('published_manifest')
-                    and job.get('state') == 'Listo para entregar'
-                    and job.get('manifest_hash') == job.get('published_manifest')):
-                st.link_button(f"Abrir {current.get('count', '')} PDF para entregar", job['final_url'], type='primary')
-                st.caption("Entrega actual corresponde a este expediente. La próxima solicitud completada reemplazará estos PDF.")
+                    and current.get('manifest') == job.get('published_manifest')):
+                target = job['final_url']
             elif current.get('state') == 'updating':
                 st.warning("Se está reemplazando la entrega actual. Espera a que se complete la verificación de los PDF.")
             elif current.get('request') == job['id']:
@@ -287,10 +289,49 @@ def _delivery_links(storage, job):
                 st.caption("Entrega actual corresponde a otra solicitud. Los PDF revisados de este expediente siguen disponibles en su historial.")
         except Exception:
             st.warning("No se pudo verificar la entrega actual. Se reintentará en 10 segundos; conserva la referencia del expediente.")
-    if job.get('archive_url'):
-        st.link_button("PDF revisados de este expediente (historial)", job['archive_url'])
-    if job.get('zip_url'):
-        st.link_button("Descargar ZIP de los PDF de este expediente", job['zip_url'])
+    if target:
+        st.link_button("Ver archivos en Drive", target, type='primary',
+            help="Abre únicamente los PDF finales de este acto: cotización membretada y documentos de respaldo vigentes al validar la entrega.")
+        count = job.get('delivery_pdf_count')
+        st.caption(f"Acto {job.get('number', '')} · {str(count) + ' PDF' if count else 'PDF finales'}. "
+                   "Cotización generada con los datos de esta oferta y sus documentos de respaldo. Referencias y Word se guardan aparte.")
+        if job.get('zip_url'):
+            st.link_button("Descargar todos los PDF (ZIP)", job['zip_url'])
+    else:
+        st.button("Ver archivos en Drive", disabled=True, key='anes_delivery_pending_' + job['id'])
+        if job.get('state') == 'Pendiente de revisión':
+            st.caption("Los documentos están generados y pendientes de revisión final. Completa la revisión de abajo para habilitar la entrega.")
+        elif job.get('state') in ACTIVE_STATES:
+            st.caption("El orquestador está trabajando. La carpeta de entrega se habilitará al completar la generación y validación.")
+        elif not ready:
+            st.caption("Aún no hay una entrega final para esta versión. Completa los datos y documentos indicados y genera el expediente.")
+        else:
+            st.caption("No hay una carpeta de PDF finales verificada para este expediente. Genera y revisa una nueva versión.")
+        if job.get('archive_url'):
+            with st.expander("Entrega anterior (no corresponde a la nueva versión)", expanded=False):
+                st.caption("Se conserva una versión anterior; no es la entrega nueva pendiente.")
+                st.link_button("Abrir PDF de la versión anterior", job['archive_url'])
+
+
+def _reference_links(job):
+    folder_url = job.get("folder_url") or (
+        f"https://drive.google.com/drive/folders/{job['folder_id']}" if job.get("folder_id") else "")
+    participation = job.get("participation") or {}
+    if not folder_url and not participation:
+        return
+    with st.expander("Referencias, anexos e historial (no son la entrega)", expanded=False):
+        if folder_url:
+            st.link_button("Abrir referencias e historial", folder_url)
+        if participation:
+            st.write(f"Modelo ofrecido en la cotización anterior: **{participation.get('model', 'Pendiente')}** · "
+                     f"Catálogo **{participation.get('catalog', 'Pendiente')}**.")
+            st.caption("Antecedente documental: no sustituye la revisión de requisitos ni los datos de una nueva oferta.")
+            if participation.get('quotation_url'):
+                st.link_button("Abrir cotización de referencia", participation["quotation_url"])
+            if participation.get('folder_url'):
+                st.link_button("Ver adjuntos originales de la participación", participation["folder_url"])
+            for note in participation.get("observations", []):
+                st.info(note)
 
 
 def render_anestesia_docs(creds, actor):
@@ -367,21 +408,8 @@ def render_anestesia_docs(creds, actor):
         job = mapping[selected]
         st.write(f"**{job['state']}** — {job.get('detail', '')}")
         st.caption("Último cambio: " + job.get("updated_at", ""))
-        folder_url = job.get("folder_url") or (
-            f"https://drive.google.com/drive/folders/{job['folder_id']}" if job.get("folder_id") else "")
-        if folder_url:
-            st.link_button("Ver archivos en Drive", folder_url, type="primary",
-                help="Abre la carpeta de este expediente con sus anexos, borradores e historial de documentos.")
-        participation = job.get("participation", {})
-        if participation:
-            with st.expander("Participación anterior de RIR y documentos recuperados", expanded=False):
-                st.write(f"Modelo ofrecido en la cotización: **{participation.get('model', 'Pendiente')}** · "
-                         f"Catálogo **{participation.get('catalog', 'Pendiente')}**.")
-                st.caption("Antecedente documental: no sustituye la revisión de requisitos ni los datos de una nueva oferta.")
-                st.link_button("Abrir cotización de referencia", participation["quotation_url"])
-                st.link_button("Ver adjuntos originales de la participación", participation["folder_url"])
-                for note in participation.get("observations", []):
-                    st.info(note)
+        _delivery_links(storage, job)
+        _reference_links(job)
         if job.get("state") in ACTIVE_STATES:
             config = job.get("config") or {}
             if config.get("catalog"):
@@ -399,8 +427,6 @@ def render_anestesia_docs(creds, actor):
             st.warning(job.get("detail") or "Revisa los datos y documentos antes de continuar.")
         if job.get("checks"):
             _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")} for c in job["checks"]])
-        if job.get("final_url"):
-            _delivery_links(storage, job)
         if job.get("source_id"):
             source = _json(job["source_id"], storage)
             _review(storage, job, actor)

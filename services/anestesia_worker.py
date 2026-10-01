@@ -149,7 +149,7 @@ def run_request(storage, payload, *, execution_id, root: Path):
             # Keep the exact approved PDFs as an immutable per-case snapshot.
             # The common delivery folder is replaced only after this set is complete.
             import uuid
-            final_folder = storage.folder("PDF revisados - " + uuid.uuid4().hex[:12], folder)
+            final_folder = storage.folder(f"Entrega {source['number']} - PDF para presentar - {uuid.uuid4().hex[:12]}", folder)
             audit_folder = storage.folder("Revisión y descargables - " + manifest["version"], folder)
             pdf_files = []
             buffer = BytesIO()

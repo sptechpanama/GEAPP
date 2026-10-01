@@ -149,7 +149,7 @@ def test_final_link_never_presents_another_request_or_partial_folder_as_this_del
     storage = Storage()
     job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
     job.update(state='Listo para entregar', final_url='https://drive.example/current',
-               delivery_folder_id='current', published_manifest='approved', manifest_hash='approved', archive_url='https://drive.example/archive',
+               delivery_folder_id='current', published_manifest='approved', manifest_hash='approved',
                zip_url='https://drive.example/zip')
     storage.delivery_status = lambda ident: publication
     view._records.clear(); view._json.clear()
@@ -159,16 +159,19 @@ def test_final_link_never_presents_another_request_or_partial_folder_as_this_del
         app.run()
         assert not app.exception
         labels = [w.label for w in app.get('link_button')]
-        assert ('Abrir 12 PDF para entregar' in labels) is show_current
-        assert 'PDF revisados de este expediente (historial)' in labels
-        assert 'Descargar ZIP de los PDF de este expediente' in labels
+        assert ('Ver archivos en Drive' in labels) is show_current
+        assert ('Descargar todos los PDF (ZIP)' in labels) is show_current
+        if show_current:
+            link = next(w for w in app.get('link_button') if w.label == 'Ver archivos en Drive')
+            assert link.proto.url == job['final_url']
 
 
 def test_old_delivery_is_not_presented_as_new_draft_ready_to_submit():
     storage = Storage()
     job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
     job.update(state='Pendiente de revisión', final_url='https://drive.example/current',
-               delivery_folder_id='current', published_manifest='old', manifest_hash='new')
+               delivery_folder_id='current', published_manifest='old', manifest_hash='new',
+               archive_url='https://drive.example/old-case')
     storage.delivery_status = lambda ident: {'state': 'ready', 'request': job['id'], 'manifest': 'old', 'count': '12'}
     view._records.clear(); view._json.clear()
     with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
@@ -176,8 +179,54 @@ def test_old_delivery_is_not_presented_as_new_draft_ready_to_submit():
         app.secrets['app'] = {}
         app.run()
         assert not app.exception
-        assert not any('PDF para entregar' in w.label for w in app.get('link_button'))
+        assert not any('Ver archivos en Drive' == w.label for w in app.get('link_button'))
+        assert next(w for w in app.button if w.label == 'Ver archivos en Drive').disabled
         assert any('conserva una versión anterior' in w.value for w in app.caption)
+
+
+def test_delivery_button_opens_only_selected_cases_pdfs_even_after_another_request():
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(state='Listo para entregar', final_url='https://drive.example/shared-now-another-act',
+               archive_url='https://drive.example/this-act-12-pdfs', folder_url='https://drive.example/references',
+               delivery_folder_id='current', delivery_pdf_count=12, published_manifest='approved', manifest_hash='approved',
+               zip_url='https://drive.example/this-act-zip')
+    storage.delivery_status = Mock(side_effect=AssertionError('Per-case PDF folder does not depend on shared folder'))
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception and not app.error
+        links = {w.label: w.proto.url for w in app.get('link_button')}
+        assert links['Ver archivos en Drive'] == job['archive_url']
+        assert links['Abrir referencias e historial'] == job['folder_url']
+        assert job['final_url'] not in links.values()
+        assert links['Descargar todos los PDF (ZIP)'] == job['zip_url']
+        assert any('ACTO-PRUEBA · 12 PDF' in w.value for w in app.caption)
+        references = next(w for w in app.expander if w.label.startswith('Referencias, anexos'))
+        assert not references.proto.expanded
+        storage.delivery_status.assert_not_called()
+
+
+@pytest.mark.parametrize('state', ['Datos capturados', 'Bloqueado', 'Pendiente de revisión', 'Error', 'En cola'])
+def test_reference_folder_never_substitutes_ungenerated_or_unapproved_delivery(state):
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(state=state, folder_url='https://drive.example/references')
+    view._records.clear(); view._json.clear()
+    with patch.object(view, 'AnestesiaStorage', return_value=storage), patch.object(view, 'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception and not app.error
+        links = {w.label: w.proto.url for w in app.get('link_button')}
+        assert 'Ver archivos en Drive' not in links
+        assert next(w for w in app.button if w.label == 'Ver archivos en Drive').disabled
+        assert links['Abrir referencias e historial'] == job['folder_url']
+        assert not next(w for w in app.expander if w.label.startswith('Referencias, anexos')).proto.expanded
+
+
 ACT_URL = "https://www.panamacompra.gob.pa/Inicio/#/solicitud-de-cotizacion/2026-1-10-01-08-CL-051598/0nM6ICc0JCL2AjN1UDMxojIpJye"
 
 

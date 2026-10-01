@@ -44,10 +44,16 @@ disponible. Los archivos ajenos al módulo provocan un error y no se eliminan.
 Una repetición de una publicación ya completada comprueba los PDF existentes y
 no añade duplicados.
 
-Streamlit comprueba cada diez segundos qué expediente y versión ocupan la
-carpeta compartida. No muestra su botón de entrega como perteneciente a otro
-acto ni como la versión nueva de un borrador aún pendiente. El usuario puede
-abrir por separado los PDF históricos del expediente seleccionado.
+El botón principal **Ver archivos en Drive** abre directamente la carpeta
+`Entrega <número del acto> - PDF para presentar - <versión>`, que contiene
+únicamente los PDF finales del expediente seleccionado. Esta copia se conserva
+aunque otra solicitud reemplace la entrega compartida. El ZIP se ofrece al lado.
+Anexos, participaciones de referencia, Word y revisiones se consultan en un
+desplegable aparte, cerrado por defecto. El botón de entrega queda deshabilitado
+hasta completar la generación, revisión y validación de esa versión.
+En expedientes sin copia individual, se verifica cada diez segundos qué acto y
+versión ocupan la carpeta compartida antes de enlazarla; nunca se abre una entrega
+de otro acto ni se usa una carpeta general como sustituto de los PDF finales.
 
 ## Verificación
 
