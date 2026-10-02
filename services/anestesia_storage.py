@@ -151,7 +151,10 @@ class AnestesiaStorage:
         return props
 
     def _validated_metadata(self, data, metadata):
-        from services.anestesia_health import certificate_content_check
+        from services.anestesia_health import certificate_content_check, certificate_date_suggestions
+        suggestions = certificate_date_suggestions(data, metadata.get('kind'))
+        # Only fill missing labelled dates. Conflicting supplied dates remain errors.
+        metadata = {**metadata, **{k: v for k, v in suggestions.items() if not metadata.get(k)}}
         validation = certificate_content_check(data, metadata)
         if metadata.get('kind') in {'css', 'dgi'} and validation['unreadable_pages']:
             try:
@@ -183,7 +186,8 @@ class AnestesiaStorage:
         if file_hash(data) != original["sha256"]:
             raise ValueError("El PDF cambió en Drive. Carga su nueva versión antes de verificarlo.")
         checked = self._validated_metadata(data, {**original, **metadata})
-        metadata = {**metadata, 'verified': checked.get('verified', False), 'content_validation': checked['content_validation']}
+        metadata = {**metadata, **{k: checked.get(k, '') for k in ('issued', 'expires')},
+                    'verified': checked.get('verified', False), 'content_validation': checked['content_validation']}
         ident = uuid.uuid4().hex
         document = {**original, **metadata, "id": ident, "created_at": now_iso(), "actor": actor,
                     "previous_id": original["id"]}

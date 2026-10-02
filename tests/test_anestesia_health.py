@@ -3,7 +3,7 @@ import fitz
 import pytest
 
 from services.anestesia_docs import document_status, file_hash
-from services.anestesia_health import certificate_content_check, library_health
+from services.anestesia_health import certificate_content_check, certificate_date_suggestions, library_health
 
 TODAY = date(2026, 9, 30)
 
@@ -117,3 +117,30 @@ def test_scanned_css_can_be_checked_with_ocr_without_modifying_original():
     checked = certificate_content_check(data, certificate(), ocr_text=text)
     assert not checked['errors'] and checked['sha256'] == file_hash(data)
     assert checked['unreadable_pages'] == [1]
+
+
+def test_css_date_autofill_uses_generation_not_contribution_period():
+    data = pdf_text('CAJA DEL SEGURO SOCIAL\nNumero patronal: 1\nRIR MEDICAL ENGINEERING\nPeriodo: 2026-08-01\nGenerado: 2026-10-01 05:21\nValido hasta: 2026-10-31')
+    assert certificate_date_suggestions(data, 'css') == {'issued':'2026-10-01', 'expires':'2026-10-31'}
+    assert certificate_date_suggestions(data, 'dgi') == {}
+
+
+def test_ambiguous_or_absent_css_dates_are_not_guessed():
+    data = pdf_text('CAJA DEL SEGURO SOCIAL\nNumero patronal: 1\nPeriodo: 2026-08-01\nGenerado: 2026-10-01\nGenerado: 2026-10-02\nValido hasta: 2026-10-31')
+    assert certificate_date_suggestions(data, 'css') == {'expires':'2026-10-31'}
+    assert certificate_date_suggestions(pdf_text('OTHER PDF\n2026-10-01\n2026-10-31'), 'css') == {}
+
+
+def test_missing_css_dates_are_filled_before_validation_but_conflicts_and_unverified_stay_blocked():
+    from services.anestesia_storage import AnestesiaStorage
+    data = pdf_text('CAJA DEL SEGURO SOCIAL\nNumero patronal: 1\nRIR MEDICAL ENGINEERING\nGenerado: 2026-10-01\nValido hasta: 2026-10-31')
+    storage = AnestesiaStorage(None, None)
+    doc = certificate(issued='', expires='2026-10-31')
+    updated = storage._validated_metadata(data, doc)
+    assert updated['issued']=='2026-10-01' and updated['verified'] is True
+    assert not updated['content_validation']['errors']
+    assert doc['issued'] == ''
+    wrong = storage._validated_metadata(data, {**doc, 'issued':'2026-09-01'})
+    assert wrong['issued']=='2026-09-01' and wrong['verified'] is False
+    unverified = storage._validated_metadata(data, {**doc, 'verified':False})
+    assert not unverified['verified']

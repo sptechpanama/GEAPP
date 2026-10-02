@@ -556,3 +556,58 @@ def test_replacement_upload_preserves_original_and_reports_content_or_network_er
         else:
             assert len(storage.tables['ANESTESIA_DOCUMENTOS']) == 2
             assert any('La fecha no coincide' in w.value for w in app.warning)
+
+
+def test_control_issues_are_explained_and_never_listed_as_deliverable_documents():
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(state='Bloqueado', checks=[{'kind':'expediente','documento':'Datos del expediente','estado':'Bloqueado','motivo':'OLD ISSUE'}])
+    view._records.clear(); view._json.clear()
+    with patch.object(view,'AnestesiaStorage',return_value=storage), patch.object(view,'build'):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception
+        assert any('Confirma los requisitos y anexos' in w.value for w in app.warning)
+        assert not any('OLD ISSUE' in w.value for w in app.warning)
+        assert all('Datos del expediente' not in str(frame.value) for frame in app.dataframe)
+        assert any('Son comprobaciones, no archivos' in w.value for w in app.caption)
+
+
+def test_draft_word_pdf_and_folder_can_be_opened_before_final_approval():
+    storage = Storage()
+    job = storage.tables['ANESTESIA_EXPEDIENTES'][0]
+    job.update(state='Pendiente de revisión', manifest_id='manifest', manifest_hash='hash', draft_url='https://drive.example/drafts')
+    manifest = {'request_id':job['id'],'manifest_hash':'hash','created_at':'2026-10-01','source':SOURCE,
+        'folder_url':job['draft_url'],'delivery_pdf_count':12,
+        'files':[{'name':'01_Cotizacion.docx','url':'https://drive.example/word','mime':'docx','sha256':'w'},
+                 {'name':'01_Cotizacion.pdf','url':'https://drive.example/pdf','mime':'application/pdf','sha256':'p'}]}
+    view._records.clear(); view._json.clear()
+    with patch.object(view,'AnestesiaStorage',return_value=storage), patch.object(view,'build'), \
+         patch.object(storage,'json_file',side_effect=lambda ident: manifest if ident=='manifest' else SOURCE):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets['app'] = {}
+        app.run()
+        assert not app.exception and not app.error
+        links = {w.label:w.proto.url for w in app.get('link_button')}
+        assert links['Abrir cotización membretada en Word']=='https://drive.example/word'
+        assert links['Abrir cotización en PDF']=='https://drive.example/pdf'
+        assert links['Abrir documentos para revisar en Drive']==job['draft_url']
+        assert 'Ver archivos en Drive' not in links
+        assert next(b for b in app.button if b.label=='Ver archivos en Drive').disabled
+
+
+def test_open_status_refresh_does_not_change_form_or_authorize_when_api_is_down():
+    from datetime import datetime
+    source = {'url':ACT_URL,'number':'2026-1-10-01-08-CL-051598','flow':1055606,'process_type':2,
+        'info':{},'closing':datetime.now(view.PANAMA).date().isoformat(), 'official_status':{}}
+    status = {'number':source['number'],'flow':1055606,'process_type':2,'state_id':8,'checked_at':view.now_iso()}
+    with patch.object(view,'_open_status',return_value=status) as fetch, patch.object(view,'_refresh') as refresh:
+        app = AppTest.from_string('from services.anestesia_view import _source_status\n_source_status(' + repr(source) + ')')
+        app.run()
+        assert not app.exception and not app.warning
+        assert any('confirma el acto abierto' in w.value for w in app.caption)
+        fetch.side_effect = TimeoutError('Public API temporarily unavailable')
+        app.run()
+        assert not app.exception and any('Hay que confirmar' in w.value for w in app.warning)
+        refresh.assert_not_called()

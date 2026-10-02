@@ -17,6 +17,30 @@ def metadata_hash(metadata):
     return canonical_hash({k: metadata.get(k) for k in fields})
 
 
+def certificate_date_suggestions(data, kind):
+    """Read labelled CSS dates, never its contribution period or upload date."""
+    if kind != 'css':
+        return {}
+    import fitz
+    if len(data) > 30 * 1024 * 1024:
+        raise ValueError('El PDF supera 30 MB.')
+    with fitz.open(stream=data, filetype='pdf') as pdf:
+        if pdf.is_encrypted or not 0 < len(pdf) <= 100:
+            raise ValueError('Adjunta un PDF completo, legible y sin contraseña.')
+        text = normalized(' '.join(page.get_text() for page in pdf))
+    if not re.search(r'caja (?:del? )?seguro social', text) or 'numero patronal' not in text:
+        return {}
+    if 'direccion general de ingresos' in text:
+        return {}
+    result = {}
+    date_pattern = r'(\d{4}-\d{2}-\d{2}|\d{2}[/-]\d{2}[/-]\d{4})'
+    for field, label in [('issued', r'generado'), ('expires', r'valido hasta')]:
+        dates = {parse_date(m) for m in re.findall(label + r'\s*:?\s*' + date_pattern, text)} - {None}
+        if len(dates) == 1:
+            result[field] = next(iter(dates)).isoformat()
+    return result
+
+
 def certificate_content_check(data, metadata, *, ocr_text=''):
     """Check the actual PDF; DGI/CSS dates and issuer must match readable content.
 

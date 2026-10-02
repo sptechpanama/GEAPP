@@ -12,11 +12,12 @@ from googleapiclient.discovery import build
 from services.anestesia_docs import (BASE_KINDS, CATALOGS, COMPANY, EXCLUDED_KINDS, KINDS, PANAMA, PRODUCT_DOCS, REGISTRY_MAX_MONTHS, now_iso, parse_date,
                                     document_kind, select_documents,
                                     prepare_offer_config, review_errors, review_prompt, validate_package)
-from services.anestesia_source import delivery_destination, portal_delivery_term, route, source_is_closed
-from services.anestesia_health import library_health
+from services.anestesia_source import (delivery_destination, portal_delivery_term, route, source_is_closed,
+                                     public_open_status, needs_live_open_status)
+from services.anestesia_health import library_health, certificate_date_suggestions
 from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
 
-ANESTESIA_UI_VERSION = 13
+ANESTESIA_UI_VERSION = 14
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -30,6 +31,33 @@ def _records(sheet_id, table, _storage):
 @st.cache_data(ttl=300, max_entries=8, show_spinner=False)
 def _json(file_id, _storage):
     return _storage.json_file(file_id)
+
+
+@st.cache_data(ttl=300, max_entries=6, show_spinner=False)
+def _saved_certificate_dates(file_id, _storage):
+    return certificate_date_suggestions(_storage.get_bytes(file_id), 'css')
+
+
+@st.cache_data(ttl=45, max_entries=8, show_spinner=False)
+def _open_status(url):
+    return public_open_status(url)
+
+
+@st.fragment(run_every='60s')
+def _source_status(source):
+    current = source
+    if needs_live_open_status(source):
+        try:
+            current = {**source, 'official_status': _open_status(source['url'])}
+        except Exception:
+            # A failed request cannot extend a previously verified open state.
+            current = {**source, 'official_status': {}}
+    closed, reason = source_is_closed(current)
+    if closed:
+        st.warning(reason)
+    elif reason:
+        st.caption(reason)
+    st.caption('Presentación publicada: ' + str(source.get('closing') or 'Pendiente de consultar'))
 
 
 @st.cache_data(ttl=5, max_entries=64, show_spinner=False)
@@ -109,13 +137,29 @@ def _library(storage, actor):
     previous = select_documents(rows, [{"kind": kind}], catalog, "").get(kind, {})
     if previous.get("url"):
         st.link_button("Abrir documento actual", previous["url"])
+    pending = next((r['Qué falta / comprobación'] for r in health
+        if r['Documento'] == KINDS[kind] and r['Estado'] == 'Pendiente de verificar'), '')
+    if pending:
+        st.warning(pending)
     revise = st.toggle("Solo corregir los datos del PDF actual", value=False,
         disabled=not bool(previous), key="anes_revise_" + kind)
     prefix = f"anes_doc_{kind}_{previous.get('id', 'missing')}_{revise}"
     uploaded = None if revise else st.file_uploader("Adjuntar PDF actualizado", type=["pdf"], key=prefix + "_pdf")
     # A different upload cannot inherit a prior certificate's dates or verification.
     upload_id = str(getattr(uploaded, "file_id", ""))
-    initial = previous if revise else {}
+    initial = dict(previous) if revise else {}
+    suggestions = {}
+    if kind == 'css':
+        try:
+            if uploaded:
+                suggestions = certificate_date_suggestions(uploaded.getvalue(), kind)
+            elif revise and previous.get('file_id'):
+                suggestions = _saved_certificate_dates(previous['file_id'], storage)
+        except Exception:
+            st.caption('No se pudieron leer las fechas automáticamente. Complétalas mirando el PDF.')
+    initial.update({k: v for k, v in suggestions.items() if not initial.get(k)})
+    if suggestions:
+        st.caption('Fechas leídas del propio PDF (Generado / Válido hasta). Revisa los datos antes de guardar.')
     with st.form(prefix + upload_id):
         left, right = st.columns(2)
         issued = left.date_input("Fecha de emisión", value=parse_date(initial.get("issued")))
@@ -178,9 +222,7 @@ def _configure(source, job, storage, actor):
         with st.expander("Acto oficial y anexos", expanded=False):
             st.link_button("Abrir acto oficial", source["url"])
             _table([{"Documento": a["name"], "enlace": a["url"]} for a in source.get("attachments", [])])
-        closed, reason = source_is_closed(source)
-        if closed:
-            st.warning(reason + " Solo disponible para consulta histórica.")
+        _source_status(source)
     with st.form(key):
         url = st.text_input("Enlace del acto en PanamáCompra", value=job.get("url", ""),
             placeholder="https://www.panamacompra.gob.pa/Inicio/#/...", disabled=not new,
@@ -308,6 +350,14 @@ def _review(storage, job, actor):
 @st.fragment(run_every="10s")
 def _delivery_links(storage, job):
     st.markdown("#### Documentos para presentar")
+    if job.get('manifest_id') and job.get('draft_url') and job.get('state') == 'Pendiente de revisión':
+        st.link_button('Abrir documentos para revisar en Drive', job['draft_url'], type='primary')
+        manifest = _json(job['manifest_id'], storage)
+        for file in manifest.get('files', []):
+            if file.get('name') in {'01_Cotizacion.docx', '01_Cotizacion.pdf'} and file.get('url'):
+                label = 'Abrir cotización membretada en Word' if file['name'].endswith('.docx') else 'Abrir cotización en PDF'
+                st.link_button(label, file['url'])
+        st.caption('Borradores generados para revisar. La carpeta final se habilita después de aprobar la revisión.')
     ready = (job.get('state') == 'Listo para entregar' and bool(job.get('manifest_hash'))
              and job.get('manifest_hash') == job.get('published_manifest'))
     target = None
@@ -419,8 +469,10 @@ def render_anestesia_docs(creds, actor):
                 st.success("Borradores listos para la revisión final.")
             elif job.get("state") == "Listo para entregar":
                 st.success("Expediente listo para entregar.")
-            elif job.get("state") in {"Error", "Bloqueado"}:
+            elif job.get("state") == "Error":
                 st.warning(job.get("detail") or "Revisa los datos y documentos para continuar.")
+            elif job.get("state") == "Bloqueado":
+                st.caption('Se conservaron los datos de tu oferta. Abajo se indican los pendientes actuales.')
             else:
                 st.write(f"**{job['state']}** — {job.get('detail', '')}")
         source = _json(job["source_id"], storage) if job.get("source_id") else {}
@@ -430,12 +482,21 @@ def render_anestesia_docs(creds, actor):
         if job.get("state") in ACTIVE_STATES:
             _watch_job(storage, job)
         elif job.get("checks") or source.get("blocking_errors"):
-            with st.expander("Comprobaciones del expediente", expanded=job.get("state") in {"Error", "Bloqueado"}):
-                excluded_labels = {KINDS[kind] for kind in EXCLUDED_KINDS}
-                _table([{k: c.get(k, "") for k in ("documento", "estado", "motivo", "vence", "enlace")}
-                    for c in job.get("checks", []) if c.get('kind') not in EXCLUDED_KINDS and c.get('documento') not in excluded_labels])
-                for message in source.get("blocking_errors", []):
-                    st.error(message)
+            # Saved failures become obsolete when a certificate is replaced.
+            checks, _ = validate_package(source, prepare_offer_config(source, job.get('config') or {}),
+                _records(storage.sheet_id, 'ANESTESIA_DOCUMENTOS', storage))
+            pending = [c for c in checks if c.get('estado') != 'Vigente documentalmente']
+            if pending:
+                st.markdown('**Pendientes antes de generar**')
+                for check in pending:
+                    if check.get('kind') == 'expediente':
+                        for issue in check.get('issues') or [check.get('motivo', '')]:
+                            st.warning(issue)
+                    else:
+                        st.warning(f"{check.get('documento')}: {check.get('motivo')}")
+                st.caption('Son comprobaciones, no archivos. La cotización se creará al resolverlas y pulsar Generar documentos.')
+            elif job.get('state') == 'Bloqueado':
+                st.success('Los documentos y datos guardados ya pasan la comprobación. Pulsa Generar documentos.')
         _delivery_links(storage, job)
         if job.get("state") not in ACTIVE_STATES and job.get("manifest_id"):
             with st.expander("Revisión final y publicación", expanded=job.get("state") == "Pendiente de revisión"):

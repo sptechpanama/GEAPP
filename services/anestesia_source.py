@@ -121,6 +121,43 @@ def delivery_destination(source: dict) -> tuple[str, str]:
     return "", "No se identificó un lugar de entrega explícito en el acto o sus anexos."
 
 
+def explicit_ficha_evidence(text):
+    """Read explicit labels and the known CSS table layout after column-wise OCR."""
+    plain = normalized(text)
+    evidence = [{"ficha": m[1], "metodo": "Etiqueta explícita", "texto": m[0]}
+        for m in re.finditer(r"(?:ctni|ficha\s*tecnica)\s*[:#.]?\s*(\d{4,7})\b", plain)]
+    # OCR can read the value column (CTNI, award type, payment), then the labels.
+    # Require the whole labelled table, not a bare code or a product name.
+    pattern = (r"(?m)^\s*(\d{4,7})\s*\n\s*(?:global|parcial|por renglon)\s*\n"
+               r"\s*(?:credito|contado)\s*\n(?P<delivery>[\s\S]{0,500}?)"
+               r"\bctni\s*:\s*forma de adjudicacion\s*:\s*forma de pago\s*:")
+    lines = '\n'.join(normalized(line) for line in str(text).splitlines() if line.strip())
+    for m in re.finditer(pattern, lines):
+        if all(label in m['delivery'] for label in ('tiempo de entrega', 'lugar de entrega', 'vigencia')):
+            evidence.append({"ficha": m[1], "metodo": "Tabla CSS CTNI/adjudicación/pago con columnas OCR", "texto": m[0]})
+    return evidence
+
+
+def public_open_status(url, *, client=None):
+    """Exact act AND flow in the official active listing; absence is inconclusive."""
+    flow, kind, number = route(url)
+    state = 8 if kind == 2 else 36
+    response = (client or session()).post(API + '/busqueda/proceso-lista-publico',
+        json={'registrosPorPagina': 50, 'valorSiguiente': '', 'filtro': {
+            'idEstado': state, 'idTipoProceso': kind, 'numProceso': number, 'idProvincia': 0}}, timeout=(10, 30))
+    response.raise_for_status()
+    payload = response.json()
+    if (not isinstance(payload, dict) or payload.get('status') != 1
+            or not isinstance(payload.get('result'), dict)
+            or not isinstance(payload['result'].get('registros'), list)):
+        raise ValueError('No se pudo verificar el estado oficial del acto.')
+    matched = [r for r in payload['result']['registros'] if isinstance(r, dict) and r.get('numProceso') == number
+        and str(r.get('idProcesosContratacionFlujos')) == str(flow)
+        and str(r.get('idTipoProceso')) == str(kind) and str(r.get('idEstado')) == str(state)]
+    return {'number': number, 'flow': flow, 'process_type': kind, 'state_id': state if matched else None,
+            'state': matched[0].get('nombreRealizado', '') if matched else '', 'checked_at': now_iso()}
+
+
 def capture(url, storage, source_folder, *, client=None):
     flow, kind, number = route(url)
     client = client or session()
@@ -190,13 +227,20 @@ def capture(url, storage, source_folder, *, client=None):
     if not attachments or len(source["attachments"]) != len(attachments):
         source["blocking_errors"].append("La captura de anexos oficiales está incompleta.")
     full_text = "\n".join(texts)
-    source["explicit_fichas"] = sorted(set(re.findall(r"(?:CTNI|FICHA\s*T[ÉE]CNICA)\s*[:#.]?\s*(\d{4,7})\b", full_text, re.I)))
+    source['ficha_evidence'] = [dict(e, origen=label) for label, text in
+        [('Detalle del portal', texts[0] + '\n' + texts[1]),
+         *((a['name'], a['text']) for a in source['attachments'])] for e in explicit_ficha_evidence(text)]
+    source["explicit_fichas"] = sorted({e['ficha'] for e in source['ficha_evidence']})
     maximum, evidence = public_registry_age(full_text)
     source.update(registry_max_months=maximum, registry_rule=evidence)
     place, evidence = delivery_destination(source)
     source.update(delivery_place=place, delivery_place_evidence=evidence)
     source["fingerprint"] = canonical_hash({"components": components,
         "documents": [{"id": d["official_id"], "sha256": d["sha256"]} for d in source["attachments"]]})
+    try:
+        source['official_status'] = public_open_status(url, client=client)
+    except (requests.RequestException, ValueError, TypeError):
+        source['official_status'] = {'error': 'Estado actual no verificable; no equivale a acto cerrado.'}
     return source
 
 
@@ -210,6 +254,24 @@ def source_is_closed(source, *, now=None):
     end, exact = _deadline(source.get("closing", ""))
     if end is None:
         return True, "No se pudo verificar el cierre oficial del acto."
-    if (exact and end <= clock) or (not exact and end.date() <= clock.date()):
-        return True, "El acto está cerrado o cierra hoy sin hora exacta verificada. No se publica como listo para presentar."
+    if (exact and end <= clock) or (not exact and end.date() < clock.date()):
+        return True, f"El plazo publicado de presentación ya terminó: {source.get('closing', '')}."
+    if not exact and end.date() == clock.date():
+        official = source.get('official_status') or {}
+        checked = _local_timestamp(official.get('checked_at'))
+        fresh = checked is not None and 0 <= (clock - checked).total_seconds() <= 300
+        same = (official.get('number') == source.get('number') and bool(source.get('flow'))
+                and official.get('flow') == source.get('flow')
+                and official.get('process_type') == source.get('process_type'))
+        if fresh and same and official.get('state_id') == (8 if source.get('process_type') == 2 else 36):
+            return False, "El portal confirma el acto abierto/vigente; no publica una hora exacta de cierre."
+        return True, "El acto cierra hoy y el portal no indica hora. Hay que confirmar que siga abierto; se comprobará otra vez al generar."
     return False, ""
+
+
+def needs_live_open_status(source, *, now=None):
+    from services.rir_supplier_research import _deadline, _local_timestamp
+    from services.anestesia_docs import PANAMA
+    end, exact = _deadline(source.get('closing', ''))
+    clock = _local_timestamp(now or datetime.now(PANAMA).isoformat())
+    return end is not None and not exact and end.date() == clock.date()

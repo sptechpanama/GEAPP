@@ -366,7 +366,7 @@ def validate_package(source: dict, config: dict, library: list[dict], *, today: 
                               catalog=config.get("catalog", ""), act=source.get("number", ""),
                               publication=parse_date(source.get("publication")), model=config.get("catalog_model", "")) for r in required]
     if errors:
-        checks.insert(0, {"kind": "expediente", "documento": "Datos del expediente", "estado": "Bloqueado", "motivo": " ".join(errors)})
+        checks.insert(0, {"kind": "expediente", "documento": "Datos del expediente", "estado": "Bloqueado", "motivo": " ".join(errors), "issues": errors})
     return checks, selected
 
 
