@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import pandas as pd
+import json
+import logging
 import re
+import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -13,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 RIR_TOP10_SHEET = "RIR_TOP10_DIARIO"
 RIR_TOP_LIMIT = 10
-RIR_TOP_SERVICE_VERSION = 8
+RIR_TOP_SERVICE_VERSION = 9
 RIR_RESEARCH_SHEET = "RIR_INVESTIGACION_PROVEEDORES"
 RIR_PRICES_SHEET = "RIR_PRECIOS_HISTORICOS"
 RIR_RESEARCH_SHEETS = (RIR_TOP10_SHEET, RIR_RESEARCH_SHEET, RIR_PRICES_SHEET)
@@ -123,7 +126,24 @@ def latest_top10_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
     if frame is not None and not frame.empty and "fecha_corte" in frame:
         dates = pd.to_datetime(frame["fecha_corte"], errors="coerce", format="mixed", utc=True)
         frame = frame.loc[dates.dt.normalize().eq(dates.max().normalize())] if dates.notna().any() else frame
+        frame = committed_top_rows(frame)
     return latest_top_snapshot(frame, rank_limit=RIR_TOP_LIMIT, prefer_complete=False)
+
+
+def committed_top_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """With a completion marker, only rows from that publication belong to the cut."""
+    if "ranking" not in frame or "actualizado_en" not in frame:
+        return frame
+    ranks = pd.to_numeric(frame["ranking"], errors="coerce")
+    dates = pd.to_datetime(frame["actualizado_en"], errors="coerce", format="mixed", utc=True)
+    markers = frame.loc[ranks.eq(0) & dates.notna()]
+    if markers.empty:
+        return frame
+    last_index = dates.loc[markers.index].idxmax()
+    marker = frame.loc[last_index]
+    if re.search(r"filas_publicadas\s*=\s*\d+", _text(marker.get("estado")), re.I):
+        return frame.loc[dates.eq(dates.loc[last_index])]
+    return frame
 
 
 PANAMA = ZoneInfo("America/Panama")
@@ -196,6 +216,40 @@ def _key(row: Mapping) -> tuple[str, str, str]:
     return (_text(row.get("numero_acto")), _text(row.get("ficha")).removesuffix(".0"), _line(row))
 
 
+def evidence_date(row: Mapping) -> pd.Timestamp | None:
+    """Commercial review time; a Top publication is never a renewed quotation."""
+    for field in ("fecha_revision_comercial", "fecha_estudio"):
+        date = _local_timestamp(row.get(field))
+        if date is not None:
+            return date
+    notes = "\n".join(_text(row.get(k)) for k in ("oportunidad", "observaciones"))
+    block = re.search(r"\[FECHAS_RIR_V2\](.*?)\[/FECHAS_RIR_V2\]", notes, re.S)
+    explicit = re.findall(r"fecha_revision_comercial\s*=\s*(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?)?)", block.group(1), re.I) if block else []
+    if not explicit:
+        explicit = re.findall(r"Estudio real\s*:\s*(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?)?)", _text(row.get("oportunidad")), re.I)
+    if explicit:
+        return _local_timestamp(explicit[-1])
+    if row.get("origen_evaluacion") == "Top publicado":
+        return _local_timestamp(row.get("fecha_investigacion"))
+    return _local_timestamp(row.get("actualizado_en")) or _local_timestamp(row.get("fecha_investigacion"))
+
+
+def followup_date(row: Mapping) -> pd.Timestamp | None:
+    date = _local_timestamp(row.get("fecha_ultimo_seguimiento"))
+    if date is not None:
+        return date
+    block = re.search(r"\[FECHAS_RIR_V2\](.*?)\[/FECHAS_RIR_V2\]", _text(row.get("observaciones")), re.S)
+    explicit = re.search(r"fecha_ultimo_seguimiento\s*=\s*(\S+)", block.group(1)) if block else None
+    if explicit and (date := _local_timestamp(explicit.group(1))) is not None:
+        return date
+    dates = re.findall(r"\[RIR_(?:NOCHE|TOP_REVIEW)_(\d{4}-\d{2}-\d{2})\]", _text(row.get("observaciones")))
+    return max((date for value in dates if (date := _local_timestamp(value)) is not None), default=None)
+
+
+def _inactive_status(status: str) -> bool:
+    return status in INACTIVE_LABELS or status.startswith(("no_vigente", "vencid", "cancelad", "archivad", "descartad", "suspendid", "adjudicad", "desierto"))
+
+
 def assess_research_validity(frame: pd.DataFrame, current_acts: pd.DataFrame | None = None,
                              *, research: pd.DataFrame | None = None, now=None) -> pd.DataFrame:
     """Evaluate saved evidence against the clock and latest scraper publication.
@@ -227,11 +281,11 @@ def assess_research_validity(frame: pd.DataFrame, current_acts: pd.DataFrame | N
         closed, exact = _deadline(raw)
         reason = ""
         status = research_column_key(_text(row.get("estado_investigacion")) or _text(row.get("estado")))
-        if status in INACTIVE_LABELS:
+        if _inactive_status(status):
             reason = "Retirada en la investigación publicada"
         newer = investigations.get(_key(row))
         if newer:
-            if research_column_key(_text(newer.get("estado_investigacion"))) in INACTIVE_LABELS:
+            if _inactive_status(research_column_key(_text(newer.get("estado_investigacion")))):
                 reason = "Retirada en la investigación más reciente"
             updated = _local_timestamp(newer.get("actualizado_en"))
             previous = _local_timestamp(row.get("actualizado_en"))
@@ -242,7 +296,7 @@ def assess_research_validity(frame: pd.DataFrame, current_acts: pd.DataFrame | N
         if live is not None:
             source_note = "Verificado con la última captura del scraper"
             live_close, live_exact = _deadline(live.get("fecha_cierre"))
-            published = _local_timestamp(row.get("actualizado_en"))
+            published = evidence_date(row)
             if live_close is not None and checked is not None and (published is None or checked >= published):
                 closed, exact = live_close, live_exact
             elif live_close is not None and closed is not None and live_exact and not exact and live_close.date() == closed.date():
@@ -265,6 +319,8 @@ def assess_research_validity(frame: pd.DataFrame, current_acts: pd.DataFrame | N
                 reason = reason or "Captura del scraper sin verificar en las últimas 36 horas"
             elif checked - clock > pd.Timedelta(minutes=5):
                 reason = reason or "La fecha de captura está en el futuro; verificar el reloj del scraper"
+            if live.get("lectura_respaldo") is True or live.get("lectura_respaldo") == "True":
+                reason = reason or "Fuente temporalmente inaccesible; última captura conservada por verificar"
         else:
             reason = reason or source_note
         if reason.startswith("Retirada"):
@@ -286,47 +342,96 @@ def assess_research_validity(frame: pd.DataFrame, current_acts: pd.DataFrame | N
     return pd.DataFrame(output, columns=list(frame.columns) + [c for c in ("vigencia", "motivo_vigencia", "cierre_verificado", "verificado_en") if c not in frame.columns])
 
 
-def read_current_research_acts(spreadsheet) -> pd.DataFrame:
-    """Read only identity, date and eligibility columns, never the item payloads."""
+def retry_read(reader: Callable, *, attempts=3, sleeper=time.sleep):
+    """Retry bounded reads; callers retain the actual exception for diagnostics."""
+    for attempt in range(attempts):
+        try:
+            return reader()
+        except Exception:
+            if attempt + 1 == attempts:
+                raise
+            sleeper((0.5, 1.5)[min(attempt, 1)])
+
+
+def pack_frame(frame: pd.DataFrame) -> dict:
+    return {"data": json.loads(frame.to_json(orient="split", date_format="iso")), "attrs": frame.attrs}
+
+
+def unpack_frame(payload: dict) -> pd.DataFrame:
+    data = payload["data"]
+    frame = pd.DataFrame(data["data"], columns=data["columns"])
+    frame.attrs = payload.get("attrs", {})
+    return frame
+
+
+def read_current_research_acts(spreadsheet, *, store=None, attempts=3, sleeper=time.sleep) -> pd.DataFrame:
+    """Isolate each source and retain its last verified read on an outage."""
     fields = {"enlace": "enlace_acto", "fecha": "fecha_cierre", "fecha_de_actualizacion": "verificado_en",
               "fichas_sin_requisitos": "fichas_sin_requisitos", "tipo_de_adjudicacion": "tipo_adjudicacion",
               "tipo_de_acto_sin_requisitos": "tipo_acto", "descartar": "descartar",
               "fichas_con_requisitos": "fichas_con_requisitos", "fichas_por_verificar": "fichas_por_verificar"}
-    heads = spreadsheet.values_batch_get([f"'{name}'!A1:AZ1" for name in RIR_ACT_SHEETS]).get("valueRanges", [])
-    if len(heads) != len(RIR_ACT_SHEETS):
-        raise ValueError("Lectura incompleta de las fuentes de actos RIR")
-    ranges, targets, source_errors = [], [], []
-    for name, data in zip(RIR_ACT_SHEETS, heads):
-        headers = (data.get("values") or [[]])[0]
-        found = set()
-        source_ranges, source_targets = [], []
+    tables, source_errors, states = [], [], {}
+
+    def read_source(name):
+        header_data = spreadsheet.values_batch_get([f"'{name}'!A1:AZ1"]).get("valueRanges", [])
+        if len(header_data) != 1:
+            raise ValueError("Lectura incompleta de encabezados")
+        headers = (header_data[0].get("values") or [[]])[0]
+        found, ranges, columns = set(), [], []
         for position, label in enumerate(headers, 1):
             key = research_column_key(label)
             if key in fields:
+                if key in found:
+                    raise ValueError("Encabezado de verificación repetido")
                 found.add(key)
                 col, number = "", position
                 while number:
                     number, remainder = divmod(number - 1, 26)
                     col = chr(65 + remainder) + col
-                source_ranges.append(f"'{name}'!{col}2:{col}15000")
-                source_targets.append((name, fields[key]))
+                ranges.append(f"'{name}'!{col}2:{col}15000")
+                columns.append(fields[key])
         if found != set(fields):
-            source_errors.append(f"Faltan columnas de verificación en {name}; esa fuente queda pendiente")
-            continue
-        ranges.extend(source_ranges)
-        targets.extend(source_targets)
-    if not ranges:
-        raise ValueError("Ninguna fuente tiene columnas de verificación completas")
-    values = spreadsheet.values_batch_get(ranges).get("valueRanges", [])
-    if len(values) != len(targets):
-        raise ValueError("Lectura incompleta de fechas de cierre")
-    tables = {name: {} for name in RIR_ACT_SHEETS}
-    for (name, column), data in zip(targets, values):
-        tables[name][column] = pd.Series([row[0] if row else "" for row in data.get("values", [])], dtype=object)
-    result = pd.concat([pd.DataFrame(table) for table in tables.values()], ignore_index=True).fillna("")
-    if not result.empty:
-        result["numero_acto"] = result["enlace_acto"].str.extract(r"(\d{4}-\d+(?:-\d+)+-[A-Z]+-\d+)", expand=False)
+            raise ValueError("Faltan columnas de verificación")
+        values = spreadsheet.values_batch_get(ranges).get("valueRanges", [])
+        if len(values) != len(columns):
+            raise ValueError("Lectura incompleta de datos")
+        table = pd.DataFrame({column: pd.Series([row[0] if row else "" for row in data.get("values", [])], dtype=object)
+                              for column, data in zip(columns, values)}).fillna("")
+        if not table.empty:
+            table = table.loc[table["enlace_acto"].ne("")].copy()
+        table["numero_acto"] = table["enlace_acto"].str.extract(r"(\d{4}-\d+(?:-\d+)+-[A-Z]+-\d+)", expand=False)
+        if table["numero_acto"].isna().any():
+            raise ValueError("Hay enlaces sin número de acto verificable")
+        table["fuente_captura"] = name
+        return table
+
+    for name in RIR_ACT_SHEETS:
+        try:
+            table = retry_read(lambda: read_source(name), attempts=attempts, sleeper=sleeper)
+            states[name] = "ok"
+            if store is not None:
+                try:
+                    store.save("acts:" + name, pack_frame(table))
+                except Exception as exc:
+                    logging.warning("Captura RIR actual conservada; respaldo pendiente (%s)", type(exc).__name__)
+        except Exception as exc:
+            logging.warning("Lectura RIR %s falló (%s)", name, type(exc).__name__)
+            saved = store.load("acts:" + name) if store is not None else None
+            if saved:
+                table = unpack_frame(saved[0])
+                table["lectura_respaldo"] = True
+                states[name] = "backup"
+            else:
+                table = pd.DataFrame()
+                states[name] = "error"
+            source_errors.append(f"{name}: lectura pendiente ({type(exc).__name__}); "
+                                 + ("se conserva el último respaldo" if saved else "sin captura verificable"))
+        tables.append(table)
+    if all(state == "error" for state in states.values()):
+        raise ValueError("Lectura incompleta: ninguna fuente de actos RIR respondió")
+    result = pd.concat(tables, ignore_index=True).fillna("")
     result.attrs["source_errors"] = source_errors
+    result.attrs["source_states"] = states
     return result
 
 
@@ -375,6 +480,9 @@ def _evaluation(row: Mapping) -> dict[str, str]:
 
 
 def _candidate_blocker(row: Mapping) -> str:
+    status = research_column_key(_text(row.get("estado_investigacion")))
+    if status.startswith(("excluido", "bloqueado", "no_viable")):
+        return _text(row.get("estado_investigacion"))
     explicit = _evaluation(row)["bloqueo_material"]
     if explicit and research_column_key(explicit) not in {"no", "ninguno", "ninguna", "false", "0"}:
         return explicit
@@ -461,13 +569,18 @@ def build_research_opportunities(research: pd.DataFrame | None, published: pd.Da
         candidates[_key(row)] = dict(row, origen_evaluacion="Top publicado")
     for key, row in latest.items():
         old = candidates.get(key)
-        old_date = _local_timestamp(old.get("actualizado_en")) if old else None
         date = _local_timestamp(row.get("actualizado_en"))
-        if old and date is not None and date == old_date:
+        old_date = evidence_date(dict(old, origen_evaluacion="Top publicado")) if old else None
+        if old and date is not None and (date == old_date or date == _local_timestamp(old.get("actualizado_en"))):
             candidates[key] = {**old, **row, "origen_evaluacion": "Investigación y Top del mismo corte"}
-        elif not old or old_date is None or date is None or date > old_date:
-            # Do not inherit a stale margin, model, compliance or recommendation.
-            candidates[key] = dict(row, origen_evaluacion="Investigación detallada")
+        else:
+            # Detailed evidence is authoritative even if the editorial Top was
+            # republished later. Never revive a withdrawal or renew a quote.
+            item = dict(row, origen_evaluacion="Investigación detallada")
+            if old:
+                item["ranking"] = old.get("ranking", 999)
+                item["fecha_publicacion_top"] = old.get("actualizado_en", "")
+            candidates[key] = item
     adapted = pd.DataFrame([_research_candidate(row) for row in candidates.values()])
     reviewed = assess_research_validity(adapted, current_acts, now=clock)
     if reviewed.empty:
@@ -490,7 +603,10 @@ def build_research_opportunities(research: pd.DataFrame | None, published: pd.Da
             excluded.append(row)
             continue
         decision = _evaluation(row)
-        evidence = _local_timestamp(row.get("actualizado_en"))
+        evidence = evidence_date(row)
+        row["fecha_estudio"] = evidence.isoformat() if evidence is not None else ""
+        followup = followup_date(row)
+        row["fecha_ultimo_seguimiento"] = followup.isoformat() if followup is not None else ""
         flags = ("cumplimiento_confirmado", "costo_puesto_confirmado", "stock_confirmado", "entrega_confirmada", "economia_viable")
         ready = (research_column_key(decision["situacion"] or _text(row.get("estado"))) == "lista_para_ofertar"
                  and all(research_column_key(decision[name]) in {"si", "true", "1"} for name in flags)
@@ -504,9 +620,9 @@ def build_research_opportunities(research: pd.DataFrame | None, published: pd.Da
             row["que_falta"] = "Registrar enlace del producto/proveedor y verificar su cotización. " + row["que_falta"]
         if not _http(row.get("enlace_ficha_minsa")):
             row["que_falta"] = "Verificar enlace y ficha CTNI oficial. " + row["que_falta"]
-        row["prioridad_publicada"] = row.get("ranking", 999) if row["origen_evaluacion"] != "Investigación detallada" else 999
+        row["prioridad_publicada"] = row.get("ranking", 999)
         accepted.append(row)
-    eligible = pd.DataFrame(accepted, columns=list(dict.fromkeys([*reviewed.columns, "situacion", "prioridad_publicada", "evidencia_proveedor"])))
+    eligible = pd.DataFrame(accepted, columns=list(dict.fromkeys([*reviewed.columns, "situacion", "prioridad_publicada", "evidencia_proveedor", "fecha_estudio", "fecha_ultimo_seguimiento"])))
     if not eligible.empty:
         eligible["__ready"] = eligible["situacion"].eq("Lista para ofertar")
         eligible["__close"] = pd.to_datetime(eligible["cierre_verificado"], format="mixed", utc=True, errors="coerce")
@@ -555,16 +671,14 @@ def pending_research_acts(research: pd.DataFrame | None, current_acts: pd.DataFr
 
 
 def research_publication_issues(research: pd.DataFrame | None) -> list[str]:
-    """Surface stale metadata without turning a date written in prose into approval."""
+    """Report actual invalid evidence dates; routine follow-ups are independent."""
     inconsistent = 0
+    clock = pd.Timestamp.now(tz=PANAMA)
     for row in (research.to_dict("records") if research is not None else []):
-        structured = _local_timestamp(row.get("actualizado_en"))
-        if structured is None:
-            continue
-        dates = re.findall(r"\[RIR_[^\]\n]*?(\d{4}-\d{2}-\d{2})[^\]\n]*\]", _text(row.get("observaciones")))
-        if any((parsed := _local_timestamp(value)) is not None and parsed.date() > structured.date() for value in dates):
+        date = evidence_date(row)
+        if date is not None and date > clock + pd.Timedelta(minutes=5):
             inconsistent += 1
-    return ([f"{inconsistent} investigaciones contienen seguimientos posteriores a su fecha de actualización. ChatGPT debe guardar la fecha real de la revisión en actualizado_en y publicar el Top del mismo corte; la app no cambia esas fechas."] if inconsistent else [])
+    return ([f"{inconsistent} investigaciones tienen fecha de estudio futura; verificar la publicación de ChatGPT."] if inconsistent else [])
 
 
 def prepare_research_table(frame: pd.DataFrame, *, include_inactive: bool = False) -> pd.DataFrame:
@@ -598,7 +712,51 @@ def research_frames_from_values(response: Mapping) -> dict[str, pd.DataFrame]:
             raise ValueError(f"La hoja {name} tiene encabezados incompletos o repetidos.")
         rows = [list(row[:len(headers)]) + [""] * max(0, len(headers) - len(row)) for row in values[1:]]
         frames[name] = pd.DataFrame(rows, columns=headers).replace("", pd.NA).dropna(how="all")
+    validate_publication(frames)
     return frames
+
+
+def validate_publication(frames: Mapping) -> None:
+    """Reject conflicting versions and incomplete committed cuts, preserving history."""
+    research = frames.get(RIR_RESEARCH_SHEET, pd.DataFrame())
+    if {"numero_acto", "ficha", "renglon", "actualizado_en"}.issubset(research.columns):
+        buckets = {}
+        for row in research.to_dict("records"):
+            key = _key(row)
+            if all(key):
+                version = (*key, _text(row.get("actualizado_en")))
+                content = json.dumps({k: _text(v) for k, v in row.items()}, sort_keys=True)
+                if version in buckets and buckets[version] != content:
+                    raise ValueError("La investigación contiene versiones contradictorias del mismo renglón y fecha")
+                buckets[version] = content
+    top = frames.get(RIR_TOP10_SHEET, pd.DataFrame())
+    if top.empty or "fecha_corte" not in top or "ranking" not in top:
+        return
+    dates = pd.to_datetime(top["fecha_corte"], errors="coerce", format="mixed", utc=True)
+    if not dates.notna().any():
+        raise ValueError("El Top no contiene un corte fechado")
+    latest = committed_top_rows(top.loc[dates.dt.normalize().eq(dates.max().normalize())])
+    ranks = pd.to_numeric(latest["ranking"], errors="coerce")
+    markers = latest.loc[ranks.eq(0)]
+    if not markers.empty:
+        state = _text(markers.iloc[-1].get("estado"))
+        if "publicacion=pendiente" in state.casefold():
+            raise ValueError("El nuevo corte aún se está publicando")
+        expected = re.search(r"filas_publicadas\s*=\s*(\d+)", state, re.I)
+        if expected:
+            count = int(expected.group(1))
+            positions = set(ranks.loc[ranks.between(1, RIR_TOP_LIMIT) & ranks.mod(1).eq(0)].astype(int))
+            if count > RIR_TOP_LIMIT or positions != set(range(1, count + 1)):
+                raise ValueError("El nuevo corte está incompleto; se conserva la publicación anterior")
+    if "actualizado_en" in latest:
+        active = latest.loc[ranks.between(1, RIR_TOP_LIMIT)]
+        seen = {}
+        for row in active.to_dict("records"):
+            version = (_text(row.get("ranking")), _text(row.get("actualizado_en")))
+            key = _key(row)
+            if version in seen and seen[version] != key:
+                raise ValueError("El Top repite una posición con oportunidades diferentes en la misma publicación")
+            seen[version] = key
 
 
 @dataclass
@@ -609,15 +767,29 @@ class ResearchRead:
     using_previous: bool = False
 
 
-def read_research_safely(reader: Callable, previous: ResearchRead | None = None) -> ResearchRead:
-    """Retain the last successful session read when Sheets is unavailable."""
+def read_research_safely(reader: Callable, previous: ResearchRead | None = None, *, store=None) -> ResearchRead:
+    """Preserve the last validated publication across sessions and redeploys."""
     now = datetime.now(ZoneInfo("America/Panama"))
+    if previous is None and store is not None:
+        saved = store.load("research")
+        if saved:
+            try:
+                previous = ResearchRead({name: unpack_frame(value) for name, value in saved[0].items()},
+                                        datetime.fromisoformat(saved[1]))
+            except (ValueError, KeyError, TypeError):
+                logging.warning("Respaldo de investigación RIR inválido")
     try:
         frames = reader()
         if previous and any(frames[name].empty and not previous.frames.get(name, pd.DataFrame()).empty for name in RIR_RESEARCH_SHEETS):
             raise ValueError("Una hoja respondió vacía después de tener registros; vuelve a consultar al terminar la publicación.")
+        if store is not None:
+            try:
+                store.save("research", {name: pack_frame(frame) for name, frame in frames.items()}, checked_at=now.isoformat())
+            except Exception as exc:
+                logging.warning("Se mantiene la lectura RIR actual; respaldo pendiente (%s)", type(exc).__name__)
         return ResearchRead(frames, now)
     except Exception as exc:
+        logging.warning("Publicación RIR no disponible (%s)", type(exc).__name__)
         return ResearchRead(previous.frames if previous else {}, previous.checked_at if previous else now,
                             f"No se pudieron leer los resultados de Google Sheets ({type(exc).__name__}).", bool(previous and previous.frames))
 

@@ -193,11 +193,17 @@ def _require_repository() -> AnalyticsRepository:
     try:
         return _repository(_database_url(), ANALYTICS_REPOSITORY_API_VERSION)
     except AnalyticsUnavailable as exc:
-        st.error(
-            "No se encontro la capa analitica de Inteligencia. Ejecuta "
-            "`C:\\Users\\rodri\\scrapers_repo\\db\\actualizar_base_corregida.bat` "
-            f"para construirla y publicarla. Detalle: {exc}"
-        )
+        reason = getattr(exc, "reason", "schema")
+        if reason == "dependency":
+            st.error("La app necesita actualizar su controlador PostgreSQL. Completa el redespliegue de Streamlit y vuelve a cargar esta página; los datos guardados se conservan.")
+        elif reason == "connection":
+            st.error("No se pudo conectar con Supabase. Vuelve a intentar la consulta; esta incidencia no significa que falte la base analítica.")
+        else:
+            st.error(
+                "No se encontró la capa analítica de Inteligencia. Ejecuta "
+                "`C:\\Users\\rodri\\scrapers_repo\\db\\actualizar_base_corregida.bat` "
+                "para construirla y publicarla."
+            )
         st.stop()
         raise
 

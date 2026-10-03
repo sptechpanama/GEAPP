@@ -52,7 +52,7 @@ from services.panama_compra_db_filters import (
 from services import panama_compra_no_requirements as _no_requirements_rules
 from services import rir_supplier_research as _rir_supplier_research
 
-if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 8:
+if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 9:
     try:
         _rir_supplier_research = importlib.reload(_rir_supplier_research)
     except Exception:
@@ -7411,18 +7411,41 @@ def _render_price_method_legend() -> None:
     )
 
 
+@st.cache_resource(show_spinner=False)
+def _rir_snapshot_store(database_url: str):
+    from services.rir_research_snapshots import ResearchSnapshotStore
+    engine = None
+    if database_url:
+        try:
+            engine = create_engine(database_url, pool_pre_ping=True, pool_size=1, max_overflow=0,
+                                   pool_timeout=5, connect_args={"connect_timeout": 8})
+        except Exception as exc:
+            print("Respaldo RIR remoto pendiente:", type(exc).__name__)
+    path = Path(tempfile.gettempdir()) / "geapp_rir_read_backups" / "snapshots.sqlite"
+    return ResearchSnapshotStore(SHEET_ID, path, engine=engine)
+
+
+def _rir_spreadsheet():
+    client = get_gc()
+    client.set_timeout((5, 12))
+    return client.open_by_key(SHEET_ID)
+
+
 @st.cache_data(ttl=60, max_entries=1, show_spinner=False)
 def _read_rir_research_frames() -> dict[str, pd.DataFrame]:
-    spreadsheet = get_gc().open_by_key(SHEET_ID)
-    response = spreadsheet.values_batch_get(
-        [f"'{name}'!A1:AZ" for name in _rir_supplier_research.RIR_RESEARCH_SHEETS]
-    )
-    return _rir_supplier_research.research_frames_from_values(response)
+    def read():
+        response = _rir_spreadsheet().values_batch_get(
+            [f"'{name}'!A1:AZ15000" for name in _rir_supplier_research.RIR_RESEARCH_SHEETS]
+        )
+        return _rir_supplier_research.research_frames_from_values(response)
+    return _rir_supplier_research.retry_read(read)
 
 
 @st.cache_data(ttl=60, max_entries=1, show_spinner=False)
 def _read_rir_current_acts() -> pd.DataFrame:
-    return _rir_supplier_research.read_current_research_acts(get_gc().open_by_key(SHEET_ID))
+    return _rir_supplier_research.read_current_research_acts(
+        _rir_supplier_research.retry_read(_rir_spreadsheet), store=_rir_snapshot_store(_supabase_db_url())
+    )
 
 
 def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=None) -> None:
@@ -7466,7 +7489,8 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
         "enlace_acto": "Acto",
         "enlace_ficha_minsa": "Ficha CTNI",
         "enlace_producto_recomendado": "Proveedor/producto",
-        "actualizado_en": "Último estudio",
+        "fecha_estudio": "Estudio comercial",
+        "fecha_ultimo_seguimiento": "Última gestión",
     }
     available = [column for column in display_columns if column in snapshot.columns]
     executive = snapshot[available].rename(columns=display_columns)
@@ -7592,20 +7616,15 @@ def _render_rir_daily_top10(frame: pd.DataFrame, research=None, current_acts=Non
         )
 
     st.caption(
-        "La selección se recalcula cada minuto con la última investigación y captura de actos, "
-        "aunque el Top publicado en Sheets no se haya renovado. ‘Para cotizar o confirmar’ "
-        "permite evaluar pendientes; no acredita cumplimiento ni rentabilidad. ‘Lista para ofertar’ "
-        "exige confirmaciones explícitas de cumplimiento, costo puesto, stock, entrega y viabilidad "
-        "económica de las últimas 36 horas. La vista no renueva cotizaciones ni investiga proveedores. "
-        "El precio competitivo histórico es el percentil 25 de ofertas unitarias "
-        "comparables; la diferencia bruta preliminar resta el costo localizado, pero "
-        "todavía no descuenta flete, impuestos ni otros gastos y no equivale a utilidad."
+        "‘Para cotizar o confirmar’ muestra oportunidades con pendientes. ‘Lista para ofertar’ "
+        "requiere cumplimiento, costo puesto, stock y entrega confirmados en las últimas 36 horas. "
+        "Una gestión o una publicación nueva del Top no renueva esas confirmaciones."
     )
 
 
 @st.fragment(run_every="60s")
 def _render_rir_supplier_research() -> None:
-    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 7:
+    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) < 9:
         st.info("La vista RIR está terminando de actualizarse. Vuelve a cargar la página en unos segundos; las investigaciones guardadas se conservan.")
         return
     controls = st.columns([1, 2])
@@ -7617,12 +7636,14 @@ def _render_rir_supplier_research() -> None:
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit",
     )
     previous = st.session_state.get("__rir_research_last_good")
-    loaded = _rir_supplier_research.read_research_safely(_read_rir_research_frames, previous)
+    store = _rir_snapshot_store(_supabase_db_url())
+    loaded = _rir_supplier_research.read_research_safely(_read_rir_research_frames, previous, store=store)
+    issues = []
     if loaded.error:
         if not loaded.using_previous:
             st.error(loaded.error + " Pulsa Recargar datos para reintentar.")
             return
-        st.warning(
+        issues.append(
             loaded.error + " Se conserva la última lectura disponible de "
             + loaded.checked_at.strftime("%d/%m/%Y %H:%M") + "."
         )
@@ -7631,33 +7652,33 @@ def _render_rir_supplier_research() -> None:
     frames = loaded.frames
     try:
         current_acts = _read_rir_current_acts()
-    except Exception:
+    except Exception as exc:
         current_acts = None
-        st.warning("No se pudo verificar la última captura de actos. El historial sigue disponible; ninguna oportunidad se marcará vigente hasta recuperar esta lectura.")
+        print("Lectura de actos RIR no disponible:", type(exc).__name__)
+        issues.append("Lectura de actos temporalmente inaccesible; el historial se conserva por verificar.")
     frame = frames[_rir_supplier_research.RIR_RESEARCH_SHEET]
     top_frame = frames[RIR_TOP10_SHEET]
     dates = {
-        "Investigaciones": _rir_supplier_research.research_updated_at(frame),
-        "Top de ChatGPT": _rir_supplier_research.research_updated_at(top_frame),
+        "Estudio comercial": _rir_supplier_research.research_updated_at(frame),
+        "Top publicado": _rir_supplier_research.research_updated_at(top_frame),
         "Precios históricos": _rir_supplier_research.research_updated_at(frames[_rir_supplier_research.RIR_PRICES_SHEET]),
     }
     st.caption(" · ".join(
         f"{label}: {value.strftime('%d/%m/%Y %H:%M') if value is not None else 'Sin fecha'}"
         for label, value in dates.items()
     ) + " (hora de Panamá)")
-    research_date, top_date = dates["Investigaciones"], dates["Top de ChatGPT"]
-    if research_date is not None and (top_date is None or research_date > top_date):
-        st.caption(
-            "El Top de ChatGPT tiene un corte anterior. El cuadro incorpora automáticamente "
-            "la investigación más reciente y señala lo que falta confirmar."
-        )
-    st.caption("Recarga automática cada 60 segundos mientras esta sección está abierta. Recargar datos consulta Sheets; no ejecuta una búsqueda de proveedores.")
-    for issue in _rir_supplier_research.research_health(frame, current_acts):
-        st.warning(issue)
-    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) >= 8:
-        for issue in _rir_supplier_research.research_publication_issues(frame):
-            st.warning(issue)
-    with st.expander("Cómo se mantiene actualizado", expanded=False):
+    issues.extend(_rir_supplier_research.research_health(frame, current_acts))
+    issues.extend(_rir_supplier_research.research_publication_issues(frame))
+    issues = list(dict.fromkeys(issues))
+    acts_ok = current_acts is not None and not current_acts.attrs.get("source_errors")
+    st.caption(f"Actos: {'lectura correcta' if acts_ok else 'lectura pendiente o parcial'} · "
+               f"Investigación: {'revisión pendiente' if issues else 'al día'} · Recarga cada 60 segundos")
+    if issues:
+        st.warning("Hay datos pendientes de comprobar. Las oportunidades muestran su situación real; consulta los detalles de actualización.")
+    with st.expander("Actualización y detalles de revisión", expanded=False):
+        for issue in issues:
+            st.write("• " + issue)
+        st.caption("Estudio comercial = última revisión de producto/precio. Última gestión = seguimiento. Top publicado = fecha del ranking. Son fechas independientes.")
         st.write("El orquestador publica las capturas de actos. ChatGPT guarda la investigación de proveedores en Sheets. Este cuadro combina ambos y revisa los cierres cada minuto mientras está abierto, sin esperar a que se publique otro Top.")
         st.caption("La computadora del orquestador debe permanecer encendida y conectada. Las cotizaciones y confirmaciones del proveedor conservan su fecha real; una recarga de pantalla no las renueva.")
         prompt_path = Path(__file__).resolve().parents[1] / "docs" / "prompt_rir_top10_diario.md"
@@ -7669,16 +7690,19 @@ def _render_rir_supplier_research() -> None:
             st.download_button("Descargar prompt para corregir la publicación en ChatGPT", repair_path.read_text(encoding="utf-8"),
                                file_name=repair_path.name, mime="text/markdown", key="rir_research_repair_prompt_download")
     _render_rir_daily_top10(top_frame, frame, current_acts)
-    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) >= 8:
+    if getattr(_rir_supplier_research, "RIR_TOP_SERVICE_VERSION", 0) >= 9:
         waiting = _rir_supplier_research.pending_research_acts(frame, current_acts)
-        with st.expander(f"Actos y fichas pendientes de investigar: {len(waiting):,}", expanded=False):
+        label = f"Actos y fichas pendientes de investigar: {len(waiting):,}" if acts_ok else "Pendientes de investigar · cobertura parcial o por verificar"
+        with st.expander(label, expanded=False):
             st.caption("Capturas vigentes sin estudio asociado a esa ficha y acto. Son trabajo pendiente para ChatGPT; no son recomendaciones de compra ni tienen proveedor validado.")
             if waiting.empty:
-                st.info("No hay nuevas combinaciones de acto y ficha verificadas pendientes de investigar en esta captura.")
+                st.info("No hay nuevas combinaciones verificadas pendientes de investigar." if acts_ok else "La lectura incompleta no permite confirmar que no haya trabajo pendiente.")
             else:
                 st.dataframe(waiting[["numero_acto", "ficha", "cierre_verificado", "enlace_acto"]].rename(
                     columns={"numero_acto": "Acto", "ficha": "Ficha", "cierre_verificado": "Cierre", "enlace_acto": "Enlace"}),
                     hide_index=True, column_config={"Enlace": st.column_config.LinkColumn("Enlace", display_text="Abrir acto")})
+                st.download_button("Descargar pendientes para investigar", waiting.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name="RIR_pendientes_investigar.csv", mime="text/csv", key="rir_pending_download")
     st.divider()
     st.markdown("### Investigación detallada")
     st.caption(

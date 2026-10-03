@@ -117,6 +117,18 @@ un impedimento comprobado, escribe su razón en `bloqueo_material`. No convierta
 la frase antigua `Fuera del Top` en un bloqueo: revisa si solo faltaba una cotización.
 Conserva la evidencia, los pendientes técnicos y las fechas originales.
 No renueves `actualizado_en` para simular una investigación que no realizaste.
+Separa en `observaciones` estas fechas, sin añadir ni mover columnas existentes:
+
+```
+[FECHAS_RIR_V2]
+fecha_revision_comercial=ISO de la última revisión real de producto/precio
+fecha_ultimo_seguimiento=ISO de la última gestión de correo o proveedor
+[/FECHAS_RIR_V2]
+```
+
+Usa zona `-05:00`; deja vacíos los campos que no puedas comprobar. Una revisión
+de correo no renueva las confirmaciones comerciales. Conserva la fecha real de
+cada evidencia de precio, stock, cumplimiento y entrega.
 
 Streamlit construye una selección vigente directamente con la investigación y
 los actos, cada 60 segundos mientras la vista está abierta. Una investigación
@@ -184,8 +196,8 @@ y comercial.
 ### Publicación completa y seguimiento (obligatorio)
 
 - Compara TODAS las capturas actuales de CL abiertas, programadas y AP sin requisitos con la investigación existente por acto y ficha; investiga también las nuevas. No reduzcas la corrida a seguir los proveedores ya contactados.
-- Actualiza `actualizado_en` cuando realmente revises o cambies una investigación. Una nota de seguimiento fechada dentro de `observaciones` no sustituye este campo. No refresques fechas de cotizaciones, confirmaciones o capturas que no verificaste.
-- Publica siempre investigación y Top del mismo corte, con la misma marca temporal para las filas que resume el Top. Guarda además las evidencias originales y su fecha.
+- Actualiza `actualizado_en` de la investigación únicamente al realizar un estudio técnico/comercial. Registra los seguimientos por separado en `fecha_ultimo_seguimiento` dentro de `observaciones`. No refresques fechas de cotizaciones, confirmaciones o capturas que no verificaste.
+- Publica investigación y Top en la misma corrida. `actualizado_en` del Top es fecha de publicación; en `oportunidad` incluye `Estudio real: ISO de la revisión comercial resumida`. Reutilizar un estudio anterior conserva su fecha anterior. El Top aporta prioridad y texto ejecutivo; el estudio detallado determina las comprobaciones y bloqueos.
 - Un proveedor identificado, con correo válido y evidencia trazable de cotización o mensaje, puede aparecer como `Para cotizar o confirmar` aunque no haya URL pública. Conserva su correo en `contacto_proveedor`, referencia de cotización o message_id en `fuentes` y explica el enlace faltante. Nunca inventes enlaces ni conviertas correos en URLs. Completa `enlace_producto_recomendado` en el Top cuando exista una URL comprobada.
 - Separa la recepción de una respuesta del cumplimiento técnico: un vendedor puede decir que cumple y su catálogo contradecirlo. Esas discrepancias deben permanecer en `que_falta`; si se demuestra incumplimiento, registra el bloqueo.
 - Relee ambas hojas después de publicar y reporta fecha de corte, número de estudios nuevos, actualizados y posiciones del Top. Si falla la escritura, informa el error sin declarar éxito. No reescribas la captura del scraper.
@@ -205,6 +217,9 @@ orden:
 
 Reglas de escritura:
 
+- Escribe las filas del corte y un marcador `ranking=0`, `estado=publicacion=completa;filas_publicadas=N`, con `fecha_corte` y fecha ISO de publicación, en una sola operación atómica. `N` es el número real de posiciones, entre cero y diez. El marcador no es una oportunidad. No publiques el marcador antes de terminar las filas. Si no puedes completar la escritura, conserva el corte anterior e informa el fallo.
+- No repitas una posición con oportunidades diferentes en la misma publicación. La clave del estudio es acto + ficha + renglón; conserva los documentos y modelos de esa combinación.
+
 0. Primero actualiza la investigación detallada en `RIR_INVESTIGACION_PROVEEDORES`
    conservando su esquema y `id_estable` por acto, ficha y renglón. Mantén el
    historial y marca `No vigente` cuando exista evidencia de que venció. Escribe
@@ -220,8 +235,8 @@ Reglas de escritura:
    en la misma operación; no dejes posiciones viejas mezcladas con las nuevas.
    Usa `estado=Lista para ofertar` o `estado=Para cotizar o confirmar` según la
    evidencia. El bloque EVALUACION_RIR_V2 de la investigación detallada es el
-   respaldo de las confirmaciones. Publica ambos cortes con la misma fecha y hora
-   para que la investigación detallada conserve esos campos en la selección.
+   respaldo de las confirmaciones. Publica ambas hojas en la misma corrida,
+   conservando por separado la fecha real del estudio y la publicación del Top.
 3. Una repetición del mismo día reemplaza solo ese corte. Conserva cortes de
    fechas anteriores para auditoría.
 4. Mantén una sola fila por ranking 1–10 y no alteres encabezados ni formatos.
@@ -232,7 +247,7 @@ Reglas de escritura:
    enlaces genéricos o campos desplazados.
 7. Cuando la revisión completa no encuentre candidatas válidas, registra una sola
    fila de control con `fecha_corte` de hoy, `ranking=0`,
-   `estado=Sin oportunidades vigentes`, `id_snapshot=fecha_corte|0|sin_top`,
+   `estado=publicacion=completa;filas_publicadas=0;sin_oportunidades`, `id_snapshot=fecha_corte|0|sin_top`,
    `actualizado_en` real y la explicación en `recomendacion_general`. Deja vacíos
    ficha, acto, precios y enlaces: esta fila no es una recomendación y está exenta
    de los campos de producto. Sustituye el corte de hoy, conservando los anteriores.

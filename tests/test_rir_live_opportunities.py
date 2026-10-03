@@ -201,10 +201,11 @@ def test_one_incomplete_source_does_not_hide_other_confirmed_sources():
     data = [ROW['enlace_acto'], LIVE['fecha_cierre'], LIVE['verificado_en'], '41364', 'Global', 'Solo fichas sin requisitos', '', '', '']
     class Reader:
         def values_batch_get(self, ranges):
-            if len(ranges) == 3:
-                return {'valueRanges': [{'values': [headers]}, {'values': [['enlace']]}, {'values': [headers]}]}
-            return {'valueRanges': [{'values': [[value]]} for value in data * 2]}
-    live = read_current_research_acts(Reader())
+            if len(ranges) == 1:
+                selected = ['enlace'] if 'cl_prog_' in ranges[0] else headers
+                return {'valueRanges': [{'values': [selected]}]}
+            return {'valueRanges': [{'values': [[value]]} for value in data]}
+    live = read_current_research_acts(Reader(), sleeper=lambda _: None)
     assert len(live) == 2 and len(live.attrs['source_errors']) == 1
     assert len(build_research_opportunities(pd.DataFrame([ROW]), None, live, now=NOW)[0]) == 1
 
@@ -236,6 +237,6 @@ def test_unknown_products_are_visible_for_new_research_without_inventing_a_suppl
 
 def test_follow_up_written_in_notes_does_not_renew_structured_evidence_date():
     frame = pd.DataFrame([{**ROW, "observaciones": "[RIR_NOCHE_2026-09-28] Revisar proveedor"}])
-    assert research_publication_issues(frame)
+    assert not research_publication_issues(frame)
     assert frame.iloc[0].actualizado_en == ROW["actualizado_en"]
     assert not research_publication_issues(pd.DataFrame([ROW]))

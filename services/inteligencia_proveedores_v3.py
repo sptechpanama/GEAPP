@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-09-04-rir-price-benchmarks-v9"
+ANALYTICS_SERVICE_VERSION = "2026-10-03-postgres-connection-v10"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -396,7 +396,9 @@ class AnalyticsFilters:
 
 
 class AnalyticsUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, *, reason: str = "schema") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class AnalyticsRepository:
@@ -415,8 +417,10 @@ class AnalyticsRepository:
         local_candidates: Sequence[Path] = (),
     ) -> "AnalyticsRepository":
         errors: list[str] = []
+        failure_reason = "schema"
         url = clean_text(database_url or os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL"))
         if url:
+            engine = None
             try:
                 engine = create_engine(url, pool_pre_ping=True, pool_recycle=240, connect_args={"connect_timeout": 12})
                 repository = cls(engine, source_label="Supabase (capa analítica)")
@@ -424,7 +428,14 @@ class AnalyticsRepository:
                 # adicional duplicaba un viaje al pooler en cada arranque frio.
                 return repository
             except Exception as exc:
-                errors.append(f"Supabase: {exc}")
+                if engine is not None:
+                    engine.dispose()
+                if isinstance(exc, (ModuleNotFoundError, ImportError)):
+                    failure_reason = "dependency"
+                    errors.append("Falta el controlador PostgreSQL del despliegue. Actualiza las dependencias de la app.")
+                else:
+                    failure_reason = "connection" if not isinstance(exc, AnalyticsUnavailable) else exc.reason
+                    errors.append(f"Supabase: {exc}")
 
         for candidate in local_candidates:
             path = Path(candidate)
@@ -436,7 +447,7 @@ class AnalyticsRepository:
             except Exception as exc:
                 errors.append(f"{path}: {exc}")
         detail = " | ".join(errors) if errors else "No se encontró una capa analítica local ni una URL remota."
-        raise AnalyticsUnavailable(detail)
+        raise AnalyticsUnavailable(detail, reason=failure_reason)
 
     def close(self) -> None:
         if self.owns_engine:
