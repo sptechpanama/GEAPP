@@ -300,7 +300,8 @@ def prepare_offer_config(source: dict, config: dict) -> dict:
     return prepared
 
 
-def validate_package(source: dict, config: dict, library: list[dict], *, today: date | None = None) -> tuple[list[dict], dict]:
+def validate_quotation(source: dict, config: dict, *, today: date | None = None) -> list[dict]:
+    """Validate the offer itself without consulting the certificate library."""
     today = today or datetime.now(PANAMA).date()
     control = parse_date(config.get("control_date")) or today
     errors = []
@@ -353,6 +354,15 @@ def validate_package(source: dict, config: dict, library: list[dict], *, today: 
             totals(source["items"][0].get("cantidad"), config.get("price"), config.get("tax_mode"), config.get("tax_rate", 7))
         except (ValueError, TypeError):
             errors.append("Cantidad, precio unitario o tratamiento tributario inválido.")
+    if errors:
+        return [{"kind": "cotizacion", "documento": "Datos de la cotización", "estado": "Bloqueado", "motivo": " ".join(errors), "issues": errors}]
+    return []
+
+
+def validate_package(source: dict, config: dict, library: list[dict], *, today: date | None = None) -> tuple[list[dict], dict]:
+    today = today or datetime.now(PANAMA).date()
+    control = parse_date(config.get("control_date")) or today
+    errors = [issue for check in validate_quotation(source, config, today=today) for issue in check.get("issues", [])]
     required = base_requirements(source)
     if config.get("require_rs"):
         required.append({"kind": "registro_sanitario", "label": KINDS["registro_sanitario"]})

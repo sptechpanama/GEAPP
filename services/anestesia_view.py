@@ -22,7 +22,7 @@ if getattr(_storage_module, "ANESTESIA_STORAGE_API_VERSION", 0) < 2:
 AnestesiaStorage = _storage_module.AnestesiaStorage
 DRIVE_PARENT, SHEET_ID = _storage_module.DRIVE_PARENT, _storage_module.SHEET_ID
 
-ANESTESIA_UI_VERSION = 15
+ANESTESIA_UI_VERSION = 16
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -537,7 +537,7 @@ def render_anestesia_docs(creds, actor):
             if busy:
                 _watch_job(storage, job)
             elif job.get("state") in {"Bloqueado", "Error"}:
-                st.error(job.get("detail", "Revisa los documentos indicados."))
+                st.error(job.get("detail", "Revisa los datos de la cotización."))
                 for check in job.get("checks", []):
                     if check.get("estado") != "Vigente documentalmente":
                         st.warning(f"{check.get('documento')}: {check.get('motivo')}")
@@ -546,8 +546,11 @@ def render_anestesia_docs(creds, actor):
             elif job.get("state") == "Documentos generados":
                 status = storage.delivery_status(job["delivery_folder_id"])
                 if status.get("state") == "ready" and status.get("manifest") == job.get("published_manifest"):
-                    st.success("12 documentos PDF generados.")
-                    st.markdown(f"[Ver archivos en Drive]({job['final_url']}) · [Cotización Word]({job['word_url']}) · [Descargar PDF en ZIP]({job['zip_url']})")
+                    if job.get("quotation_output_version") == 2 and job.get("delivery_pdf_count") == 1:
+                        st.success("Cotización membretada generada en PDF y Word.")
+                        st.markdown(f"[Ver cotización en Drive]({job['final_url']}) · [Cotización Word]({job['word_url']})")
+                    else:
+                        st.info("Esta generación corresponde al formato anterior. Pulsa Generar documentos para guardar solo la cotización membretada.")
                     st.caption("Comprobaciones automáticas completadas. Revisa la cotización antes de presentarla.")
                 else:
                     st.warning("La carpeta se está actualizando. Espera a que termine la comprobación.")

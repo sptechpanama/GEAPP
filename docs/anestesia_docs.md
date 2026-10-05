@@ -3,7 +3,7 @@
 ## Dónde está
 
 Generador de cotizaciones → **Anestesia-Docs**, inmediatamente después de LP Doc Generator.
-La captura y conversión de documentos se ejecutan en la cola `pc_manual` del orquestador existente. Streamlit consulta el índice y permite editar datos/cargar certificados; no ejecuta un navegador ni una generación prolongada.
+La captura y conversión se ejecutan en la cola `pc_manual` del orquestador existente. Streamlit consulta el índice y permite editar los datos de la cotización; no ejecuta un navegador ni una generación prolongada.
 
 ## Flujo vigente desde 2026-10-05
 
@@ -15,10 +15,12 @@ no transfiere esa confirmacion a otro acto.
 
 Un solo boton, **Generar documentos**, guarda la configuracion y encola
 `generate_quotation` en el mismo worker del orquestador. El worker captura
-el portal y anexos, verifica el alcance 43358, certificados originales,
-vigencias y modelo, y genera la cotizacion Word/PDF y los 11 respaldos.
-Revalida biblioteca, acto y anexos antes de publicar. Una captura incompleta,
-un documento vencido o una modificacion bloquean la salida con su motivo.
+el portal y anexos, verifica el alcance 43358, cantidad, modelo, precio y
+condiciones de entrega, y genera **solo la cotizacion membretada en Word/PDF**.
+Revalida acto y anexos antes de publicar. Una captura incompleta, datos de
+oferta invalidos o una modificacion bloquean la salida con su motivo.
+No consulta ni copia los once certificados de la biblioteca; su ausencia o
+vencimiento no bloquean la generacion de la cotizacion.
 
 La validez es **120 dias calendario**, el pago **Credito** y garantia/esterilidad
 **24 meses**. La fecha de la cotizacion corresponde a la publicacion oficial
@@ -30,25 +32,32 @@ social S.EP. del ejemplo y la identidad registrada.
 
 - El worker serial es el unico que reserva consecutivos: `RIR-000001`, etc.
 - La hoja `ANESTESIA_COTIZACIONES` registra numero, consecutivo, acto, enlace,
-  estado y carpeta; su JSON conserva configuracion, importes y enlaces Word/ZIP.
+  estado y carpeta; su JSON conserva configuracion, importes y enlace Word.
 - Un acto distinto recibe otro consecutivo. Regenerar el mismo acto conserva
   su numero y carpeta; variantes del enlace no producen duplicados.
 - `RIR / Anestesia-Docs / Cotizaciones / 000001 - <acto>` agrupa cada caso.
-  Dentro, `Documentos para presentar - 12 PDF` contiene exclusivamente los
-  doce PDF. Word, ZIP, fuentes y comprobaciones quedan aparte.
+  Dentro, `Cotización membretada - PDF` contiene exclusivamente
+  `01_Cotizacion.pdf`. El Word editable, fuentes y comprobaciones quedan aparte.
+  No se genera un ZIP ni se copian otros documentos.
 - El reemplazo de PDFs se limita a esa cotizacion, con respaldo y recuperacion;
   nunca reemplaza los archivos de otro acto. Los reintentos conservan el numero.
 - La pantalla consulta el avance cada cinco segundos mientras corre y muestra
-  enlaces a PDFs, Word, ZIP y todas las cotizaciones. El historial va cerrado.
+  enlaces a la cotizacion PDF, Word y todas las cotizaciones. El historial va cerrado.
 
 La salida indica **Documentos generados**: comprobaciones automaticas,
 no una aprobacion independiente de ChatGPT ni una presentacion en PanamaCompra.
+Al regenerar un caso del formato anterior, los doce PDF anteriores se archivan
+y la carpeta final se reemplaza por el unico PDF de cotizacion, conservando
+su consecutivo. Los originales de biblioteca permanecen intactos.
 Las acciones antiguas capture/generate/finalize y sus registros siguen siendo
 compatibles para solicitudes ya existentes. La biblioteca de originales,
 metadatos de verificacion e historial se conservan; el formulario compacto
 no incluye los anteriores paneles de carga y auditoria.
 
-## Vigencias y alcance
+## Vigencias del flujo histórico de expedientes completos
+
+Estas reglas corresponden a los expedientes completos anteriores. No son
+requisitos para el flujo vigente que genera exclusivamente la cotizacion.
 
 - DGI, CSS/no cotizante, oferente, CT, licencia MINSA y cédula requieren una fecha de vencimiento verificable. Se comprueba la fecha de presentación, no solo el día de generación.
 - Registro Público: la antigüedad máxima se toma del **pliego concreto**. En los dos actos revisados se exige no mayor de **un año**. No se fija universalmente en seis meses. Si no puede extraerse, exige confirmar la regla con archivo y página.
@@ -70,7 +79,7 @@ No se publicó una oferta real para estos ejemplos ni se inventó un precio de p
 ## Persistencia y configuración
 
 - Drive: carpeta `RIR/Anestesia-Docs`, biblioteca, fuentes oficiales, borradores, originales y entregas.
-- Sheets, libro usado por el orquestador: `ANESTESIA_DOCUMENTOS`, `ANESTESIA_EXPEDIENTES`, `ANESTESIA_REVISIONES`.
+- Sheets, libro usado por el orquestador: `ANESTESIA_COTIZACIONES`, `ANESTESIA_EXPEDIENTES`; se conservan `ANESTESIA_DOCUMENTOS` y `ANESTESIA_REVISIONES` para el historial.
 - Se reutilizan las credenciales existentes. No se añaden claves, contraseñas ni correos al código.
 - Worker: `scrapers_repo/orquestador/anestesia_docs_worker.py`; job manual `anestesia_docs`. No tiene una ejecución diaria automática y no modifica el horario de otros trabajos.
 - Localmente, `ANESTESIA_GEAPP_PATH` puede señalar la copia desplegada de GEAPP. Alternativa local ignorada por Git: `orquestador/anestesia_docs.local.json` con `{"geapp_path":"RUTA_ABSOLUTA_GEAPP"}`.
