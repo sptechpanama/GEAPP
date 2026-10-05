@@ -1,6 +1,21 @@
 # Entrega PDF de Anestesia-Docs
 
-## Resultado de cada solicitud
+## Carpeta por cotizacion desde 2026-10-05
+
+El flujo de un boton registra `RIR-000001`, etc., en
+`ANESTESIA_COTIZACIONES`. Cada acto tiene una carpeta ordenada dentro de
+`RIR / Anestesia-Docs / Cotizaciones`, con un conjunto independiente de
+12 PDF en `Documentos para presentar - 12 PDF`. El Word y ZIP permanecen
+fuera de ese conjunto. Un acto nuevo no reemplaza una cotizacion anterior;
+regenerar el mismo acto conserva su consecutivo y actualiza solo su carpeta.
+
+El mismo publicador comprueba los bytes copiados y conserva el mecanismo de
+recuperacion descrito abajo, ahora aplicado dentro de cada cotizacion.
+El nuevo flujo valida automaticamente los originales y no declara una
+aprobacion independiente de ChatGPT. Las solicitudes antiguas mantienen
+el procedimiento que sigue, para no alterar registros y colas previas.
+
+## Resultado de solicitudes del flujo anterior
 
 Después de generar, revisar y revalidar el expediente, el orquestador publica
 los PDF en `RIR / Anestesia-Docs / Entrega actual - PDF para presentar`.

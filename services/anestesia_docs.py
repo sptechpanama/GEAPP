@@ -31,7 +31,7 @@ KINDS = {
 }
 CATALOGS = {"C": "C (5)", "K": "K (4)"}
 CATALOG_MODELS = {"K": "LB4330K", "C": "LB4330C"}
-ANESTHESIA_WARRANTY = "24 meses de garantía y esterilidad no menor de 24 meses a partir de la fecha de entrega."
+ANESTHESIA_WARRANTY = "24 meses de garantía y esterilidad no menor a 24 meses a partir de la fecha de entrega"
 # Operational acceptance rule for 43358; provenance is retained in each package.
 # A shorter requirement in the current annex always takes precedence.
 REGISTRY_MAX_MONTHS = 12
@@ -276,7 +276,7 @@ def prepare_offer_config(source: dict, config: dict) -> dict:
     """Standing instructions for Rodrigo's own 43358 proposals, not LP Generator."""
     from services.anestesia_source import delivery_destination, portal_delivery_term, tax_source_evidence
     place, evidence = delivery_destination(source)
-    prepared = {**config, "warranty": ANESTHESIA_WARRANTY,
+    prepared = {**config, "warranty": ANESTHESIA_WARRANTY, "proposal_validity_days": 120,
                 "require_rs": False, "require_power": False, "signature_authorized": True,
                 "signature_authorization": "Autorización permanente del titular para Anestesia-Docs (2026-09-30)"}
     maximum, registry_evidence = registry_policy(source)

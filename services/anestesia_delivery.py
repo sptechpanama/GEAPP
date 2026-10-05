@@ -42,9 +42,11 @@ class DeliveryPublisher:
     every PDF is read back and verified. Interrupted publication is rolled back
     before a retry; a failed rollback remains visibly unavailable.
     """
-    def __init__(self, storage):
+    def __init__(self, storage, *, root=None, folder_name=None):
         self.storage = storage
         self.api = storage.drive.files()
+        self.root_override = root
+        self.folder_name = folder_name or CURRENT_NAME
 
     def _list(self, query):
         result, token = [], None
@@ -77,7 +79,7 @@ class DeliveryPublisher:
             raise ValueError("Hay dos carpetas de entrega actual. No se sobrescribió ninguna; revisa la duplicidad.")
         if matches:
             return matches[0]
-        return self.api.create(body={"name": CURRENT_NAME, "mimeType": FOLDER_MIME, "parents": [root],
+        return self.api.create(body={"name": self.folder_name, "mimeType": FOLDER_MIME, "parents": [root],
             "appProperties": {"module": "anestesia_docs", "role": ROLE, "state": "empty", "count": "0"}},
             fields="id,name,mimeType,appProperties", supportsAllDrives=True).execute()
 
@@ -129,7 +131,7 @@ class DeliveryPublisher:
             with fitz.open(stream=data, filetype="pdf") as doc:
                 if doc.is_encrypted or not len(doc):
                     raise ValueError("No se puede publicar un PDF vacío o cifrado.")
-        root = self.storage.root()
+        root = self.root_override or self.storage.root()
         current = self._current(root)
         if current.get("appProperties", {}).get("state") == "updating":
             current = self._restore(current)
@@ -164,7 +166,7 @@ class DeliveryPublisher:
             expected = {f['name']: f['sha256'] for f in pdfs}
             if len(actual) != len(pdfs) or {f['name']: file_hash(self.storage.get_bytes(f['id'])) for f in actual} != expected:
                 raise ValueError("La copia de los PDF en Drive quedó incompleta; se recuperará la entrega anterior.")
-            self._update(current["id"], name=CURRENT_NAME, appProperties={"module": "anestesia_docs", "role": ROLE,
+            self._update(current["id"], name=self.folder_name, appProperties={"module": "anestesia_docs", "role": ROLE,
                 "state": "ready", "manifest": manifest_hash, "request": request_id, "act": number,
                 "count": str(len(pdfs)), "rollback": None, "pending": None})
             return {"folder_id": current["id"], "count": len(pdfs)}

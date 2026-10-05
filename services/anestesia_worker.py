@@ -30,6 +30,9 @@ def run_request(storage, payload, *, execution_id, root: Path):
     job = storage.job(ident)
     if not job:
         raise ValueError("No se encontró el expediente en el índice.")
+    if action == "generate_quotation":
+        from services.anestesia_quotations import generate_quotation
+        return generate_quotation(storage, payload, execution_id=execution_id, root=root)
     if action == "finalize" and job.get("state") == "Listo para entregar" and job.get("published_manifest") == job.get("manifest_hash"):
         return job
     if job.get("last_execution") == execution_id and job.get("state") in {"Datos capturados", "Bloqueado", "Pendiente de revisión", "Listo para entregar"}:

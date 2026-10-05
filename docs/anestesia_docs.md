@@ -5,35 +5,48 @@
 Generador de cotizaciones → **Anestesia-Docs**, inmediatamente después de LP Doc Generator.
 La captura y conversión de documentos se ejecutan en la cola `pc_manual` del orquestador existente. Streamlit consulta el índice y permite editar datos/cargar certificados; no ejecuta un navegador ni una generación prolongada.
 
-## Secuencia
+## Flujo vigente desde 2026-10-05
 
-Al abrir la pestaña aparece **Documentos actuales y vigencias**: una fila por documento
-aplicable al catálogo K o C. Se muestran la última versión, emisión, vencimiento,
-enlace al original y motivo del estado. El historial completo queda en un desplegable
-de Biblioteca y vigencias. Los estados diferencian Vigente documentalmente, Vence hoy,
-Vence pronto (7 días), Vencido, Falta, Pendiente de verificar y Según pliego.
-El panel consulta de nuevo cada 60 segundos mientras está abierto, usando la fecha de Panamá.
-Un corte de red se informa como tal; no se interpreta como biblioteca vacía.
+La pantalla contiene Enlace, Mascarilla 4/K o 5/C, catalogo asociado, precio
+unitario, ITBMS, termino del portal, plazo manual cuando corresponde,
+Provincia y Hospital del acto y Almacen opcional. Las dos casillas documentan
+la revision de adjuntos sobre plazo y destino; cambiar el enlace o los anexos
+no transfiere esa confirmacion a otro acto.
 
-Para reemplazar un certificado: **Biblioteca y vigencias → seleccionar documento o Nuevo PDF →
-adjuntar original actualizado → registrar datos y evidencia → Guardar nueva versión y verificación**.
-DGI/CSS se contrastan contra el emisor, titular y fechas impresas del PDF; si es escaneado,
-se intenta OCR en Drive. La carga queda pendiente si no puede comprobarse o no coincide.
-Marcar la casilla de revisión no anula esas comprobaciones. La huella vincula la validación
-al archivo y sus metadatos. En los otros documentos se conserva la revisión registrada
-de alcance y formalidades: el programa no sustituye al emisor ni certifica autenticidad.
+Un solo boton, **Generar documentos**, guarda la configuracion y encola
+`generate_quotation` en el mismo worker del orquestador. El worker captura
+el portal y anexos, verifica el alcance 43358, certificados originales,
+vigencias y modelo, y genera la cotizacion Word/PDF y los 11 respaldos.
+Revalida biblioteca, acto y anexos antes de publicar. Una captura incompleta,
+un documento vencido o una modificacion bloquean la salida con su motivo.
 
-Antes de crear siquiera la cotización, el worker comprueba también los PDF reales y sus
-huellas, además de las reglas del expediente. Actualizar una fecha en la interfaz o
-cargar una nueva versión incompleta no permite utilizar silenciosamente una versión anterior.
-La vigencia debe cubrir la presentación del acto, aunque el documento todavía sea válido hoy.
+La validez es **120 dias calendario**, el pago **Credito** y garantia/esterilidad
+**24 meses**. La fecha de la cotizacion corresponde a la publicacion oficial
+del pliego. Precio y tratamiento ITBMS mantienen el calculo Decimal existente.
+El membrete incorpora Engineering e info@rirmedical.com y conserva la razon
+social S.EP. del ejemplo y la identidad registrada.
 
-1. **Consultar acto y anexos**: introducir el enlace de PanamáCompra. Se verifica que el identificador y el número coincidan y se conservan los anexos originales. Los PDF escaneados se leen mediante OCR de Drive. Una captura incompleta bloquea la preparación.
-2. **Biblioteca y vigencias**: cargar un PDF actualizado o seleccionar uno guardado para revisar sus metadatos. Registrar emisión, vencimiento, titular, ficha/modelo cubiertos y evidencia con página. Confirmar notaría, apostilla e idioma cuando correspondan. Guardar conserva el original y añade una versión; nunca renueva las fechas por haber subido el archivo.
-3. **Datos y preparación**: elegir C (5) o K (4); introducir precio **unitario** e ITBMS exento/adicional/incluido. La marca/modelo se obtiene de esa selección, la garantía habitual es de 24 meses y el lugar se extrae del acto. Confirmar calendario completo y anexos.
-4. **Comprobar requisitos y preparar borradores**: si falta un requisito, la tabla identifica qué actualizar. Si todos pasan, se genera la cotización membretada y firmada por RIR en Word y PDF, más copias idénticas de los 11 respaldos de las ofertas de ejemplo. No se genera un pacto bilateral en esta etapa.
-5. **Revisión de ChatGPT**: descargar el prompt del expediente y compartir los archivos de la carpeta con el chat que utilizarás. Elegir el modelo disponible en tu cuenta. El programa no inicia ni controla automáticamente tu chat personal. La revisión debe cubrir todos los documentos, páginas y requisitos y devolver `revision_anestesia.json`.
-6. **Revalidar y publicar**: adjuntar el JSON, revisar sus resultados y confirmar. Antes de publicar se comprueban otra vez los certificados, las versiones, los anexos del acto, el cierre y la integridad de cada archivo. **Ver archivos en Drive** abre la carpeta de los 12 PDF del caso; ZIP, índice y referencias se guardan aparte. No se presenta una oferta automáticamente.
+### Numeracion y carpetas
+
+- El worker serial es el unico que reserva consecutivos: `RIR-000001`, etc.
+- La hoja `ANESTESIA_COTIZACIONES` registra numero, consecutivo, acto, enlace,
+  estado y carpeta; su JSON conserva configuracion, importes y enlaces Word/ZIP.
+- Un acto distinto recibe otro consecutivo. Regenerar el mismo acto conserva
+  su numero y carpeta; variantes del enlace no producen duplicados.
+- `RIR / Anestesia-Docs / Cotizaciones / 000001 - <acto>` agrupa cada caso.
+  Dentro, `Documentos para presentar - 12 PDF` contiene exclusivamente los
+  doce PDF. Word, ZIP, fuentes y comprobaciones quedan aparte.
+- El reemplazo de PDFs se limita a esa cotizacion, con respaldo y recuperacion;
+  nunca reemplaza los archivos de otro acto. Los reintentos conservan el numero.
+- La pantalla consulta el avance cada cinco segundos mientras corre y muestra
+  enlaces a PDFs, Word, ZIP y todas las cotizaciones. El historial va cerrado.
+
+La salida indica **Documentos generados**: comprobaciones automaticas,
+no una aprobacion independiente de ChatGPT ni una presentacion en PanamaCompra.
+Las acciones antiguas capture/generate/finalize y sus registros siguen siendo
+compatibles para solicitudes ya existentes. La biblioteca de originales,
+metadatos de verificacion e historial se conservan; el formulario compacto
+no incluye los anteriores paneles de carga y auditoria.
 
 ## Vigencias y alcance
 

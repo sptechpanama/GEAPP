@@ -5,6 +5,8 @@ from datetime import date
 from dataclasses import replace
 from decimal import Decimal
 from io import BytesIO
+from html.parser import HTMLParser
+import re
 from pathlib import Path
 
 from docx import Document
@@ -13,7 +15,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
-from services.anestesia_docs import totals
+from services.anestesia_docs import totals, ANESTHESIA_WARRANTY
 from services import lp_documents as _lp
 if getattr(_lp, "LP_DOCUMENTS_API_VERSION", 0) < 2:
     import importlib
@@ -25,13 +27,30 @@ render_lp_document = _lp.render_lp_document
 MONTHS = ("", "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre")
 
 
+class _DescriptionText(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"br", "p", "div", "li", "tr"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in {"p", "div", "li", "tr"}:
+            self.parts.append("\n")
+
+
 def rir_profile():
     # Verified against Registro Público 15-May-2026 and the signed Bella Vista
     # operations notice. Keep the other LP company profiles untouched.
     return replace(get_lp_company_profile("RIR Medical"), legal_name="RIR MEDICAL ENGINEERING, S.EP.",
         operations_notice="155750585-2-2024-2024-574365876",
         address="PH Bonanza Plaza, local 4B, calle 41, Bella Vista, Panamá",
-        header_lines=("RUC: 155750585-2-2024 | DV: 40", "PH Bonanza Plaza, local 4B · Bella Vista, Panamá", "Tel. +507 6847-5616"))
+        header_lines=("RUC: 155750585-2-2024 | DV: 40", "PH Bonanza Plaza, local 4B · Bella Vista, Panamá", "Tel. +507 6847-5616", "info@rirmedical.com"))
 
 
 def quote_docx(source: dict, config: dict, assets: Path) -> bytes:
@@ -54,10 +73,23 @@ def quote_docx(source: dict, config: dict, assets: Path) -> bytes:
         style.font.name, style.font.size, style.font.color.rgb = "Calibri", Pt(size), RGBColor.from_string("173C55")
         style.paragraph_format.space_before, style.paragraph_format.space_after = Pt(10), Pt(6)
     _add_company_header(doc, profile, assets)
+    # Extend only Anestesia's letterhead; the RS/RIR/SP LP templates are unchanged.
+    for section in doc.sections:
+        if section.header.tables:
+            cell = section.header.tables[0].cell(0, 0)
+            p = cell.add_paragraph("ENGINEERING")
+            p.paragraph_format.left_indent = Inches(0.60)
+            p.paragraph_format.space_after = Pt(0)
+            p.paragraph_format.line_spacing = 1
+            for run in p.runs:
+                run.font.size, run.font.bold = Pt(11), True
+                run.font.color.rgb = RGBColor.from_string("003B82")
     issued = date.fromisoformat(config["document_date"])
     doc.add_heading("COTIZACIÓN", 0)
-    doc.add_paragraph(f"{issued.day} de {MONTHS[issued.month]} de {issued.year}")
-    for label, value in (("Acto", source["number"]), ("Dirigida a", source["entity"]),
+    if config.get("quotation_number"):
+        doc.add_paragraph("Número de cotización: " + config["quotation_number"])
+    doc.add_paragraph(f"Fecha: {issued.day} de {MONTHS[issued.month]} de {issued.year}")
+    for label, value in (("Número de acto", source["number"]), ("Dirigida a", source["entity"]),
                          ("Unidad de compra", source["purchase_unit"]), ("Objeto", source["title"])):
         p = doc.add_paragraph(); p.add_run(label + ": ").bold = True; p.add_run(value)
     doc.add_paragraph(f"{profile.legal_name}, RUC {profile.ruc}, DV {profile.dv}, presenta la siguiente oferta:")
@@ -65,7 +97,7 @@ def quote_docx(source: dict, config: dict, assets: Path) -> bytes:
     amounts = totals(item["cantidad"], config["price"], config["tax_mode"], config.get("tax_rate", 7))
     table = doc.add_table(rows=1, cols=4)
     table.style, table.autofit = "Table Grid", False
-    widths = [1200, 4140, 2010, 2010]
+    widths = [1200, 5520, 1320, 1320]
     tbl_pr = table._tbl.tblPr
     for name, attrs in (("tblW", {"w": "9360", "type": "dxa"}), ("tblInd", {"w": "120", "type": "dxa"})):
         old = tbl_pr.find(qn("w:" + name))
@@ -73,15 +105,42 @@ def quote_docx(source: dict, config: dict, assets: Path) -> bytes:
         el = OxmlElement("w:" + name)
         for k, v in attrs.items(): el.set(qn("w:" + k), v)
         tbl_pr.append(el)
-    for cell, text in zip(table.rows[0].cells, ("Cantidad", "Producto", "Precio unitario USD", "Importe USD")):
+    for cell, text in zip(table.rows[0].cells, ("Cantidad", "Descripción del producto", "Precio unitario USD", "Importe USD")):
         cell.text = text
         for run in cell.paragraphs[0].runs: run.bold = True
         shade = OxmlElement("w:shd"); shade.set(qn("w:fill"), "EAF1F5"); cell._tc.get_or_add_tcPr().append(shade)
     cells = table.add_row().cells
     cells[0].text = amounts["cantidad"]
-    cells[1].text = (f"Kit de circuito de paciente para máquina de anestesia.\nFicha CTNI 43358.\n"
-                     f"Marca: {config['catalog_brand']}. Modelo/catálogo: {config['catalog_model']}.\n"
-                     f"Presentación: {item.get('unidad') or 'Unidad'}.")
+    description = str(item.get("descripcion") or source.get("info", {}).get("descripcion") or source["title"]).strip()
+    if "<" in description and ">" in description:
+        reader = _DescriptionText()
+        reader.feed(description)
+        description = "\n".join(line.strip() for line in "".join(reader.parts).splitlines() if line.strip())
+    # Some portals paste the two standard observations into the item's text.
+    # Move that exact trailing block to the updated notes, without duplicating
+    # the old "Debe traer"/"Cumplir" wording or cutting other observations.
+    from services.anestesia_docs import normalized
+    observations = re.search(r"\bOBSERVACI[ÓO]N(?:ES)?\s*:", description, flags=re.I)
+    if observations:
+        tail = description[observations.end():]
+        plain = normalized(tail)
+        first = re.search(r"(?:\b1\s*[.)]\s*)?(?:Debe\s+)?traer\s+impreso", tail, flags=re.I)
+        second = re.search(r"(?:\b2\s*[.)]\s*)?(?:Cumplir|Cumple)\s+con\s+los\s+est[áa]ndares", tail, flags=re.I)
+        if first and second and first.start() < second.start() and "fecha de manufactura" in plain:
+            remaining = re.search(r"(?:^|\n)\s*3\s*[.)]", tail[second.end():])
+            extra = tail[second.end() + remaining.start():] if remaining else ""
+            extra = (tail[:first.start()] + extra).strip()
+            description = description[:observations.start()].rstrip()
+            if extra:
+                description += "\nOBSERVACIÓN:\n" + extra
+    cells[1].text = (description + "\nFicha técnica: 43358\n"
+        f"Catálogo: {config['catalog_model']}\nMarca: MFLAB\n"
+        "Fabricante: NINGBO MFLAB MEDICAL INSTRUMENTS CO., LTD.\n"
+        "País de origen: China\nPaís de procedencia: China")
+    # Keep the two notes below the product details inside the description cell,
+    # as in the supplied quotation; replace only the requested wording.
+    cells[1].add_paragraph("1. Trae impreso y visible la fecha de manufactura, vencimiento de la esterilidad no menor de 24 meses a partir de la fecha de entrega, número de lote, país de origen.")
+    cells[1].add_paragraph("2. Cumple con los estándares internacionales, aseguramiento de calidad y comercialización")
     unit_price = Decimal(amounts["precio_ingresado"])
     digits = max(2, -unit_price.as_tuple().exponent)
     cells[2].text = f"{unit_price:,.{digits}f}"
@@ -95,15 +154,16 @@ def quote_docx(source: dict, config: dict, assets: Path) -> bytes:
     for key, label in (("subtotal", "Subtotal"), ("itbms", "ITBMS"), ("total", "TOTAL OFERTADO")):
         p = doc.add_paragraph(f"{label}: USD {float(amounts[key]):,.2f}")
         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p.paragraph_format.keep_with_next = key != "total"
         if key == "total":
             for run in p.runs: run.bold = True
     mode = {"exento": "Exento / no aplica ITBMS", "incluido": "El precio unitario ingresado incluye ITBMS", "adicional": "ITBMS adicional al precio unitario"}[config["tax_mode"]]
     doc.add_paragraph(mode + (f" ({amounts['tasa']}%)." if config["tax_mode"] != "exento" else "."))
     doc.add_heading("Condiciones de la oferta", level=2)
-    for label, value in (("Lugar de entrega", config["delivery_place"]), ("Entregas", config["delivery"]),
-                         ("Forma de pago", source["info"].get("forma de pago", "Crédito")),
-                         ("Validez de la cotización", f"{config.get('proposal_validity_days', 30)} días calendario"),
-                         ("Garantía / vida útil exigida", config.get("warranty", ""))):
+    for label, value in (("Lugar de entrega", config["delivery_place"]), ("Tiempo de entrega", config["delivery"]),
+                         ("Forma de pago", "Crédito"),
+                         ("Validez de la propuesta", "120 días calendario"),
+                         ("Garantía / Vencimiento de la esterilidad", ANESTHESIA_WARRANTY)):
         if value:
             p = doc.add_paragraph(); p.add_run(label + ": ").bold = True; p.add_run(str(value))
     p = doc.add_paragraph("Atentamente,"); p.paragraph_format.keep_with_next = True

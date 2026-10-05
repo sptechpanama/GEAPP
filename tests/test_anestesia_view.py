@@ -1,4 +1,7 @@
-"""Exercise the real Streamlit controls with fake storage; no external writes."""
+"""Compatibility of historical offer/library/review helpers; no external writes.
+
+The new single-button public view is exercised in test_anestesia_quotations.py.
+"""
 from copy import deepcopy
 from unittest.mock import patch, Mock
 import pytest
@@ -44,7 +47,7 @@ def test_can_open_historical_case_library_and_validate_without_an_exception():
     storage = Storage()
     view._records.clear(); view._json.clear()
     with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"):
-        app = AppTest.from_string("from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')", default_timeout=20)
+        app = AppTest.from_string("from services.anestesia_view import _render_legacy_docs\n_render_legacy_docs(None, 'usuario_prueba')", default_timeout=20)
         app.secrets["app"] = {}
         app.run()
         assert not app.exception
@@ -66,7 +69,7 @@ def test_google_read_failure_is_visible_instead_of_erasing_library():
     view._records.clear()
     storage = Storage()
     with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"), patch.object(storage, "rows", side_effect=TimeoutError("Prueba de corte de red")):
-        app = AppTest.from_string("from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')", default_timeout=20)
+        app = AppTest.from_string("from services.anestesia_view import _render_legacy_docs\n_render_legacy_docs(None, 'usuario_prueba')", default_timeout=20)
         app.secrets["app"] = {}
         app.run()
         assert not app.exception and any("corte de red" in e.value for e in app.error)
@@ -87,7 +90,7 @@ def test_resolved_workbook_survives_reruns_and_configuration_changes():
             assert self.sheet_id in {"native", "other-native"}
             return super().rows(name)
     with patch.object(view, "AnestesiaStorage", ResolvingStorage), patch.object(view, "build"):
-        app = AppTest.from_string("from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')", default_timeout=20)
+        app = AppTest.from_string("from services.anestesia_view import _render_legacy_docs\n_render_legacy_docs(None, 'usuario_prueba')", default_timeout=20)
         app.secrets["app"] = {"PC_MANUAL_SHEET_ID": "office"}
         app.session_state["anes_tables_ready"] = True  # session predating the fix
         app.run()
@@ -109,7 +112,7 @@ def test_participation_evidence_is_visible_without_changing_offer_selection():
         "quotation_url": "https://drive.google.com/file/d/quote/view", "folder_url": "https://drive.google.com/drive/folders/history",
         "observations": ["Primera cotización incorrecta: conservar solo como antecedente."]}
     with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"):
-        app = AppTest.from_string("from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')", default_timeout=20)
+        app = AppTest.from_string("from services.anestesia_view import _render_legacy_docs\n_render_legacy_docs(None, 'usuario_prueba')", default_timeout=20)
         app.secrets["app"] = {}
         app.run()
         assert not app.exception and not app.error
@@ -117,7 +120,7 @@ def test_participation_evidence_is_visible_without_changing_offer_selection():
         assert "config" not in job  # archive does not authorize or create a new bid
 
 
-APP = "from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario_prueba')"
+APP = "from services.anestesia_view import _render_legacy_docs\n_render_legacy_docs(None, 'usuario_prueba')"
 
 
 def test_registry_is_automatic_and_removed_boxes_do_not_erase_saved_requirements():

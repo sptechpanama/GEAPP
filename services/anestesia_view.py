@@ -9,15 +9,20 @@ import pandas as pd
 import streamlit as st
 from googleapiclient.discovery import build
 
-from services.anestesia_docs import (BASE_KINDS, CATALOGS, COMPANY, EXCLUDED_KINDS, KINDS, PANAMA, PRODUCT_DOCS, REGISTRY_MAX_MONTHS, now_iso, parse_date,
+from services.anestesia_docs import (BASE_KINDS, CATALOGS, COMPANY, EXCLUDED_KINDS, KINDS, PANAMA, PRODUCT_DOCS, REGISTRY_MAX_MONTHS, now_iso, parse_date, file_hash,
                                     document_kind, select_documents,
                                     prepare_offer_config, review_errors, review_prompt, validate_package)
 from services.anestesia_source import (delivery_destination, portal_delivery_term, route, source_is_closed,
                                      public_open_status, needs_live_open_status)
 from services.anestesia_health import library_health, certificate_date_suggestions
-from services.anestesia_storage import AnestesiaStorage, DRIVE_PARENT, SHEET_ID
+from services import anestesia_storage as _storage_module
+if getattr(_storage_module, "ANESTESIA_STORAGE_API_VERSION", 0) < 2:
+    import importlib
+    _storage_module = importlib.reload(_storage_module)
+AnestesiaStorage = _storage_module.AnestesiaStorage
+DRIVE_PARENT, SHEET_ID = _storage_module.DRIVE_PARENT, _storage_module.SHEET_ID
 
-ANESTESIA_UI_VERSION = 14
+ANESTESIA_UI_VERSION = 15
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -26,6 +31,11 @@ TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", 
 @st.cache_data(ttl=20, max_entries=30, show_spinner=False)
 def _records(sheet_id, table, _storage):
     return _storage.rows(table)
+
+
+@st.cache_data(ttl=3600, max_entries=6, show_spinner=False)
+def _quotation_folder(sheet_id, parent_id, _storage):
+    return _storage.quotation_root()
 
 
 @st.cache_data(ttl=300, max_entries=8, show_spinner=False)
@@ -425,6 +435,139 @@ def _reference_links(job):
 
 
 def render_anestesia_docs(creds, actor):
+    """One compact offer screen; existing library/audit helpers stay compatible."""
+    from services.anestesia_docs import CATALOG_MODELS
+    from services.anestesia_quotations import location_fields
+    st.subheader("Anestesia-Docs")
+    app = st.secrets.get("app", {})
+    storage = AnestesiaStorage(build("drive", "v3", credentials=creds, cache_discovery=False),
+        build("sheets", "v4", credentials=creds, cache_discovery=False),
+        sheet_id=app.get("PC_MANUAL_SHEET_ID", SHEET_ID), parent_id=app.get("DRIVE_COTIZACIONES_FOLDER_ID", DRIVE_PARENT))
+    try:
+        signature = (storage.sheet_id, storage.parent_id, ANESTESIA_UI_VERSION)
+        ready = st.session_state.get("anes_simple_tables", {})
+        if ready.get("configuration") != signature:
+            storage.ensure_tables()
+            st.session_state["anes_simple_tables"] = {"configuration": signature, "resolved_id": storage.sheet_id}
+        else:
+            storage.sheet_id = ready["resolved_id"]
+        jobs = _records(storage.sheet_id, "ANESTESIA_EXPEDIENTES", storage)
+        ident = st.session_state.get("anes_simple_job")
+        job = next((r for r in jobs if r.get("id") == ident), {})
+        if ident:
+            job = _live_job(storage.sheet_id, ident, storage) or job
+        cfg = job.get("config") or {}
+        source = _json(job["source_id"], storage) if job.get("source_id") else {}
+        busy = job.get("state") in ACTIVE_STATES
+        url = st.text_input("Enlace", value=job.get("url", ""),
+            placeholder="https://www.panamacompra.gob.pa/Inicio/#/...", disabled=busy, key="anes_simple_url")
+        # Clearing/changing the URL clears only its scraped preview, not the
+        # user's price or catalogue. Official act identity is checked on submit.
+        same_act = bool(source) and url.strip() == source.get("url")
+        preview = source if same_act else {}
+        mask_col, catalog_col, price_col, tax_col = st.columns(4)
+        mask = mask_col.selectbox("Mascarilla", ["K", "C"],
+            index=0 if cfg.get("catalog", "K") == "K" else 1,
+            format_func=lambda v: "Mascarilla 4" if v == "K" else "Mascarilla 5",
+            disabled=busy, key="anes_simple_mask")
+        catalog_col.text_input("Catálogo", value=CATALOG_MODELS[mask], disabled=True,
+            key="anes_simple_catalog_" + mask)
+        price = price_col.number_input("Precio unitario", min_value=0.0,
+            value=float(cfg.get("price") or 0), step=0.01, format="%.4f", disabled=busy, key="anes_simple_price")
+        modes = list(TAX_LABELS)
+        tax_mode = tax_col.selectbox("ITBMS", modes, index=modes.index(cfg.get("tax_mode", "exento")),
+            format_func=TAX_LABELS.get, disabled=busy, key="anes_simple_tax")
+        term = portal_delivery_term(preview)
+        fingerprint = preview.get("fingerprint") or ("new_" + file_hash(url.strip().encode())[:12] if url.strip() else "new")
+        st.text_input("Término de entrega del portal", value=term,
+            placeholder="Se obtendrá al generar documentos", disabled=True,
+            key="anes_simple_portal_" + fingerprint)
+        use_portal = st.checkbox("Revisé adjuntos y no indica una condición de entrega distinta, usar plazo del portal",
+            value=bool(cfg.get("delivery_use_portal") and cfg.get("delivery_portal_source_hash") == fingerprint) if same_act else False,
+            disabled=busy, key="anes_simple_use_portal_" + fingerprint)
+        manual = cfg.get("delivery_manual", "")
+        if not use_portal:
+            manual = st.text_input("Tiempo de entrega (manual)", value=manual,
+                disabled=busy, key="anes_simple_manual")
+        province, hospital = location_fields(preview)
+        left, right = st.columns(2)
+        left.text_input("Provincia", value=province, disabled=True,
+            placeholder="Se obtendrá del acto", key="anes_simple_province_" + fingerprint)
+        right.text_input("Hospital", value=hospital, disabled=True,
+            placeholder="Unidad de compra del acto", key="anes_simple_hospital_" + fingerprint)
+        warehouse = st.text_input("Almacén", value=cfg.get("warehouse", ""), disabled=busy, key="anes_simple_warehouse")
+        st.caption("opcional, solo si está en el pliego o adjuntos")
+        location_reviewed = st.checkbox("Verifiqué adjuntos y no indican un lugar de entrega más específico o distinto",
+            value=bool(cfg.get("location_reviewed") and cfg.get("location_source_hash") == fingerprint) if same_act else False,
+            disabled=busy, key="anes_simple_place_reviewed_" + fingerprint)
+        generate = st.button("Generar documentos", type="primary", disabled=busy, key="anes_simple_generate")
+        if generate:
+            _, _, number = route(url.strip())
+            if price <= 0:
+                st.error("Indica un precio unitario mayor que cero.")
+                return
+            if not use_portal and not manual.strip():
+                st.error("Marca el uso del plazo del portal o indica el tiempo de entrega manualmente.")
+                return
+            if not location_reviewed and not warehouse.strip():
+                st.error("Verifica los adjuntos o indica el Almacén/lugar específico de entrega.")
+                return
+            # Read live before enqueueing; the cache cannot authorize duplicates.
+            current_jobs = storage.rows("ANESTESIA_EXPEDIENTES")
+            active = next((r for r in current_jobs if r.get("number") == number and r.get("state") in ACTIVE_STATES), None)
+            if active:
+                st.session_state["anes_simple_job"] = active["id"]
+                _refresh()
+                return
+            current = next((r for r in reversed(current_jobs) if r.get("number") == number), {})
+            values = {**(current.get("config") or {}), "catalog": mask, "price": str(price),
+                "tax_mode": tax_mode, "tax_rate": 7, "warehouse": warehouse.strip(),
+                "location_reviewed": location_reviewed, "delivery_manual": manual.strip(),
+                "location_source_hash": preview.get("fingerprint") if location_reviewed else None,
+                "delivery_use_portal": use_portal, "workflow": "quotation_v2",
+                "delivery_portal_source_hash": preview.get("fingerprint") if use_portal else None}
+            saved = storage.save_job({"id": current.get("id") or uuid.uuid4().hex, "number": number,
+                "url": url.strip(), "state": "Nuevo", "config": values, "created_by": actor})
+            st.session_state["anes_simple_job"] = saved["id"]
+            _enqueue(storage, saved, "generate_quotation", actor, url=url.strip(), config=values)
+            return
+        if job:
+            label = job.get("quotation_number") or job.get("number", "")
+            st.caption(f"{label} · {job.get('state', '')}")
+            if busy:
+                _watch_job(storage, job)
+            elif job.get("state") in {"Bloqueado", "Error"}:
+                st.error(job.get("detail", "Revisa los documentos indicados."))
+                for check in job.get("checks", []):
+                    if check.get("estado") != "Vigente documentalmente":
+                        st.warning(f"{check.get('documento')}: {check.get('motivo')}")
+                        if check.get("enlace"):
+                            st.markdown(f"[Abrir documento original]({check['enlace']})")
+            elif job.get("state") == "Documentos generados":
+                status = storage.delivery_status(job["delivery_folder_id"])
+                if status.get("state") == "ready" and status.get("manifest") == job.get("published_manifest"):
+                    st.success("12 documentos PDF generados.")
+                    st.markdown(f"[Ver archivos en Drive]({job['final_url']}) · [Cotización Word]({job['word_url']}) · [Descargar PDF en ZIP]({job['zip_url']})")
+                    st.caption("Comprobaciones automáticas completadas. Revisa la cotización antes de presentarla.")
+                else:
+                    st.warning("La carpeta se está actualizando. Espera a que termine la comprobación.")
+        root_url = job.get("quotation_root_url") or (
+            "https://drive.google.com/drive/folders/" + _quotation_folder(storage.sheet_id, storage.parent_id, storage))
+        st.markdown(f"[Todas las cotizaciones en Drive]({root_url})")
+        quotations = _records(storage.sheet_id, "ANESTESIA_COTIZACIONES", storage)
+        if quotations:
+            ordered = sorted(quotations, key=lambda r: int(r["sequence"]), reverse=True)
+            with st.expander("Cotizaciones guardadas", expanded=False):
+                st.dataframe(pd.DataFrame([{"Cotización": r["quotation_number"], "Acto": r["number"],
+                    "Estado": r.get("state", ""), "Total USD": float((r.get("amounts") or {}).get("total") or 0),
+                    "Carpeta": r.get("final_url") or r.get("folder_url", "")} for r in ordered]),
+                    hide_index=True, use_container_width=True,
+                    column_config={"Carpeta": st.column_config.LinkColumn("Archivos", display_text="Abrir")})
+    except Exception as exc:
+        st.error(f"No fue posible completar la operación documental: {exc}")
+
+
+def _render_legacy_docs(creds, actor):
     st.subheader("Anestesia-Docs")
     st.caption("Ficha 43358 · documentos originales en Drive · vigencias por acto · generación desde tu orquestador.")
     app = st.secrets.get("app", {})

@@ -514,4 +514,4 @@ def test_worker_quote_uses_confirmed_portal_term_and_no_tax_note_is_required(mon
     manifest = storage.json_file(result['manifest_id'])
     quote = next(f for f in manifest['files'] if f['name'] == '01_Cotizacion.docx')
     content = text_docx(storage.get_bytes(quote['file_id']))
-    assert 'Entregas: 30 Días hábiles' in content and '300 unidades a 45 días' not in content
+    assert 'Tiempo de entrega: 30 Días hábiles' in content and '300 unidades a 45 días' not in content

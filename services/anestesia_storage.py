@@ -12,10 +12,12 @@ from googleapiclient.errors import HttpError
 
 from services.anestesia_docs import file_hash, now_iso
 
+ANESTESIA_STORAGE_API_VERSION = 2
 SHEET_ID = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
 DRIVE_PARENT = "0AOB-QlptrUHYUk9PVA"
 FOLDER = "application/vnd.google-apps.folder"
 TABLES = {
+    "ANESTESIA_COTIZACIONES": ["id", "numero_cotizacion", "consecutivo", "acto", "enlace_acto", "estado", "carpeta", "actualizado_en", "datos_json"],
     "ANESTESIA_DOCUMENTOS": ["id", "documento", "catalogo", "emision", "vencimiento", "enlace", "registrado_por", "registrado_en", "datos_json"],
     "ANESTESIA_EXPEDIENTES": ["id", "acto", "estado", "detalle", "carpeta", "actualizado_en", "datos_json"],
     "ANESTESIA_REVISIONES": ["id", "expediente", "decision", "manifest_hash", "revisor", "fecha", "datos_json"],
@@ -219,6 +221,52 @@ class AnestesiaStorage:
         saved.pop("_row", None)
         self._write("ANESTESIA_EXPEDIENTES", {"id": saved["id"], "acto": saved.get("number", ""),
             "estado": saved.get("state", ""), "detalle": saved.get("detail", ""), "carpeta": saved.get("folder_url", ""),
+            "actualizado_en": saved["updated_at"]}, saved, row=current.get("_row") if current else None)
+        return saved
+
+    def quotation_root(self):
+        return self.folder("Cotizaciones", self.root())
+
+    def ensure_quotation(self, number, url):
+        """Allocate only inside the single-consumer orchestrator, never in the UI.
+
+        The official act number is the identity; URL token/host variants do not
+        create another quotation. Persist the allocation before creating files
+        so a failed upload or worker retry keeps its consecutive number.
+        """
+        from services.anestesia_source import route
+        if route(url)[2] != number:
+            raise ValueError("El enlace no corresponde al acto de la cotización.")
+        rows = self.rows("ANESTESIA_COTIZACIONES")
+        sequences = [int(r["sequence"]) for r in rows]
+        if len(sequences) != len(set(sequences)):
+            raise ValueError("Hay consecutivos duplicados; no se asignó otro número.")
+        matches = [r for r in rows if r.get("number") == number]
+        if len(matches) > 1:
+            raise ValueError("Hay dos cotizaciones para el mismo acto; no se sobrescribió ninguna.")
+        if matches:
+            quote = matches[0]
+        else:
+            sequence = max(sequences, default=0) + 1
+            quote = self.save_quotation({"id": uuid.uuid4().hex, "sequence": sequence,
+                "quotation_number": f"RIR-{sequence:06d}", "number": number, "url": url,
+                "state": "Reservada", "created_at": now_iso()})
+        if not quote.get("folder_id"):
+            parent = self.quotation_root()
+            folder = self.folder(f"{quote['sequence']:06d} - {number}", parent)
+            quote = self.save_quotation({**quote, "folder_id": folder,
+                "folder_url": f"https://drive.google.com/drive/folders/{folder}",
+                "root_url": f"https://drive.google.com/drive/folders/{parent}"})
+        return quote
+
+    def save_quotation(self, data):
+        current = next((r for r in self.rows("ANESTESIA_COTIZACIONES") if r.get("id") == data["id"]), None)
+        saved = {**(current or {}), **data, "updated_at": now_iso()}
+        saved.pop("_row", None)
+        self._write("ANESTESIA_COTIZACIONES", {"id": saved["id"],
+            "numero_cotizacion": saved["quotation_number"], "consecutivo": saved["sequence"],
+            "acto": saved["number"], "enlace_acto": saved.get("url", ""),
+            "estado": saved.get("state", ""), "carpeta": saved.get("final_url") or saved.get("folder_url", ""),
             "actualizado_en": saved["updated_at"]}, saved, row=current.get("_row") if current else None)
         return saved
 

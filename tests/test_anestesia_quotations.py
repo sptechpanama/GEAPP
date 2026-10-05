@@ -1,0 +1,360 @@
+"""New quotations: official capture, validity, totals, retries and act isolation."""
+from copy import deepcopy
+from datetime import timedelta
+from io import BytesIO
+import json
+from unittest.mock import patch
+import zipfile
+
+from docx import Document
+import fitz
+import pytest
+from streamlit.testing.v1 import AppTest
+
+from services import anestesia_quotations as quotes, anestesia_view as view
+from services.anestesia_docs import PANAMA, file_hash
+from services.anestesia_storage import AnestesiaStorage
+from services.anestesia_worker import run_request
+from test_anestesia_docs import fixture, FakeStorage, ROOT, IDENT, ACT, URL
+from test_anestesia_delivery import Storage as DriveStorage, contents
+from test_anestesia_view import Storage as ViewStorage
+
+ACT2 = "2026-1-10-01-06-CL-051243"
+URL2 = "https://www.panamacompra.gob.pa/Inicio/#/solicitud-de-cotizacion/" + ACT2 + "/0nM6ICc0JCLwUDN3QDMxojIpJye"
+
+
+class Storage(DriveStorage):
+    ensure_quotation = AnestesiaStorage.ensure_quotation
+    save_quotation = AnestesiaStorage.save_quotation
+    quotation_root = AnestesiaStorage.quotation_root
+
+    def __init__(self):
+        super().__init__()
+        source, cfg, library = fixture()
+        source["info"].update(provincia="Panamá", **{"termino de entrega": "30 Días hábiles"})
+        self.source = source
+        originals = FakeStorage(source, library)
+        docs = []
+        for doc in originals.tables["ANESTESIA_DOCUMENTOS"]:
+            file = self.put("library", doc["kind"] + ".pdf", originals.get_bytes(doc["file_id"]), "application/pdf")
+            docs.append({**doc, **file})
+        self.tables = {"ANESTESIA_COTIZACIONES": [], "ANESTESIA_DOCUMENTOS": docs}
+        self.jobs = {IDENT: {"id": IDENT, "number": ACT, "url": URL, "state": "Nuevo"}}
+        self.fail_conversion = False
+
+    def rows(self, table): return deepcopy(self.tables[table])
+    def job(self, ident): return deepcopy(self.jobs.get(ident))
+    def save_job(self, data):
+        self.jobs[data["id"]].update(deepcopy(data))
+        return self.job(data["id"])
+    def _write(self, name, columns, data, row=None):
+        saved = deepcopy(data)
+        if row:
+            saved["_row"] = row
+            self.tables[name][row - 2] = saved
+        else:
+            saved["_row"] = len(self.tables[name]) + 2
+            self.tables[name].append(saved)
+    def put(self, *args):
+        file = super().put(*args)
+        file["url"] = "https://drive.google.com/file/d/" + file["file_id"] + "/view"
+        return file
+    def convert_document(self, data, name, parent):
+        if self.fail_conversion:
+            raise TimeoutError("Conversión interrumpida")
+        doc = Document(BytesIO(data))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        with fitz.open() as pdf:
+            page = pdf.new_page()
+            page.insert_textbox((30, 30, 580, 780), text, fontsize=9)
+            return pdf.tobytes()
+
+
+def values():
+    return {"catalog": "K", "price": "19.48", "tax_mode": "exento", "tax_rate": 7,
+        "warehouse": "Almacén médico quirúrgico", "location_reviewed": True,
+        "delivery_use_portal": True, "workflow": "quotation_v2"}
+
+
+def generate(storage, monkeypatch, execution="exec-1", ident=IDENT, source=None, cfg=None):
+    source = deepcopy(source or storage.source)
+    monkeypatch.setattr(quotes, "capture", lambda *a, **kw: deepcopy(source))
+    return run_request(storage, {"request_id": ident, "action": "generate_quotation",
+        "url": source["url"], "config": cfg or values()}, execution_id=execution, root=ROOT)
+
+
+def test_one_button_generates_exact_twelve_pdfs_and_registers_word_amounts_and_official_date(monkeypatch):
+    storage = Storage()
+    result = generate(storage, monkeypatch)
+    assert result["state"] == "Documentos generados"
+    assert result["quotation_number"] == "RIR-000001"
+    record = storage.rows("ANESTESIA_COTIZACIONES")[0]
+    assert record["config"]["document_date"] == storage.source["publication"]
+    assert record["config"]["proposal_validity_days"] == 120
+    assert record["config"]["delivery_place"] == "Panamá - Ciudad de la Salud - Almacén médico quirúrgico"
+    assert record["amounts"]["total"] == "17532.00"
+    live = contents(storage, result["delivery_folder_id"])
+    assert len(live) == 12 and "01_Cotizacion.pdf" in live
+    assert not any("expediente" in name.lower() or name.endswith(".docx") for name in live)
+    assert record["word_url"] == result["word_url"] and record["final_url"] == result["final_url"]
+    archives = [data for ident, data in storage.api.content.items()
+                if storage.api.files_data[ident]["name"].endswith(".zip")]
+    with zipfile.ZipFile(BytesIO(archives[-1])) as archive:
+        assert sorted(archive.namelist()) == sorted(live)
+
+
+def test_new_act_gets_next_number_while_same_act_regenerates_without_overwriting_other_act(monkeypatch):
+    storage = Storage()
+    first = generate(storage, monkeypatch)
+    old = contents(storage, first["delivery_folder_id"])
+    second_source = {**storage.source, "number": ACT2, "url": URL2, "fingerprint": "official-2"}
+    ident2 = "b" * 32
+    storage.jobs[ident2] = {"id": ident2, "number": ACT2, "state": "Nuevo"}
+    second = generate(storage, monkeypatch, "exec-2", ident2, second_source)
+    assert second["quotation_number"] == "RIR-000002"
+    assert first["delivery_folder_id"] != second["delivery_folder_id"]
+    assert contents(storage, first["delivery_folder_id"]) == old
+    updated = generate(storage, monkeypatch, "exec-3", cfg={**values(), "price": "21"})
+    assert updated["quotation_number"] == "RIR-000001"
+    assert updated["delivery_folder_id"] == first["delivery_folder_id"]
+    assert len(storage.rows("ANESTESIA_COTIZACIONES")) == 2
+    assert contents(storage, first["delivery_folder_id"]) != old
+
+
+def test_retry_after_conversion_failure_preserves_consecutive_and_successful_execution_is_idempotent(monkeypatch):
+    storage = Storage()
+    storage.fail_conversion = True
+    with pytest.raises(TimeoutError): generate(storage, monkeypatch)
+    assert storage.rows("ANESTESIA_COTIZACIONES")[0]["quotation_number"] == "RIR-000001"
+    storage.fail_conversion = False
+    result = generate(storage, monkeypatch)
+    before = len(storage.api.files_data)
+    assert generate(storage, monkeypatch) == result
+    assert len(storage.api.files_data) == before
+    assert len(storage.rows("ANESTESIA_COTIZACIONES")) == 1
+
+
+@pytest.mark.parametrize("kind", ["css", "dgi", "registro_publico", "oferente", "criterio_tecnico"])
+def test_expired_document_blocks_files_and_does_not_consume_consecutive(monkeypatch, kind):
+    storage = Storage()
+    for row in storage.tables["ANESTESIA_DOCUMENTOS"]:
+        if row["kind"] == kind:
+            row["expires"] = "2000-01-01"
+            if kind == "registro_publico": row["issued"] = "2000-01-01"
+    result = generate(storage, monkeypatch)
+    assert result["state"] == "Bloqueado" and not result.get("final_url")
+    assert storage.rows("ANESTESIA_COTIZACIONES") == []
+
+
+@pytest.mark.parametrize("field,value", [("publication", ""), ("publication", "2099-01-01"),
+    ("purchase_unit", ""), ("info", {}), ("explicit_fichas", ["12345"]), ("items", [])])
+def test_incomplete_or_wrong_official_data_never_creates_quote(monkeypatch, field, value):
+    storage = Storage()
+    source = {**storage.source, field: value}
+    try:
+        result = generate(storage, monkeypatch, source=source)
+        assert result["state"] == "Bloqueado"
+    except ValueError:
+        assert storage.job(IDENT)["state"] == "Bloqueado"
+    assert not storage.rows("ANESTESIA_COTIZACIONES")
+
+
+def test_original_change_and_wrong_catalogue_block_generation(monkeypatch):
+    storage = Storage()
+    ct = next(d for d in storage.tables["ANESTESIA_DOCUMENTOS"] if d["kind"] == "criterio_tecnico")
+    storage.api.content[ct["file_id"]] += b"changed"
+    with pytest.raises(ValueError, match="cambió"): generate(storage, monkeypatch)
+    assert storage.rows("ANESTESIA_COTIZACIONES") == []
+    storage = Storage()
+    result = generate(storage, monkeypatch, cfg={**values(), "catalog": "C"})
+    assert result["state"] == "Bloqueado"  # K-only certificates do not authorize C
+
+
+def test_portal_term_and_delivery_attestations_are_bound_to_fresh_source():
+    storage = Storage()
+    with pytest.raises(ValueError, match="cambió"):
+        quotes.prepare_quotation(storage.source, {**values(), "delivery_portal_source_hash": "old"})
+    with pytest.raises(ValueError, match="Verifica"):
+        quotes.prepare_quotation(storage.source, {**values(), "warehouse": "", "location_reviewed": False})
+    cfg = quotes.prepare_quotation(storage.source, {**values(), "delivery_use_portal": False,
+        "delivery_manual": "10 kits al mes durante 3 meses"})
+    assert cfg["delivery"] == "10 kits al mes durante 3 meses"
+
+
+def test_url_alias_keeps_quote_number_and_duplicate_number_corruption_is_rejected():
+    storage = Storage()
+    a = storage.ensure_quotation(ACT, URL)
+    b = storage.ensure_quotation(ACT, URL.replace("www.panamacompra", "panamacompra"))
+    assert a["id"] == b["id"] and len(storage.rows("ANESTESIA_COTIZACIONES")) == 1
+    storage.tables["ANESTESIA_COTIZACIONES"].append({**a, "id": "duplicate"})
+    with pytest.raises(ValueError, match="duplicados"): storage.ensure_quotation(ACT2, URL2)
+
+
+def test_quote_template_preserves_description_precise_prices_and_all_fixed_conditions():
+    from services.anestesia_documents import quote_docx
+    storage = Storage()
+    source = deepcopy(storage.source)
+    source["items"][0]["descripcion"] = "<p>Kit circuito</p><p>Tubo de 182 cm y filtro HMEF</p>"
+    cfg = quotes.prepare_quotation(source, values())
+    cfg["quotation_number"] = "RIR-000012"
+    doc = Document(BytesIO(quote_docx(source, cfg, ROOT / "assets/cotizacion_base")))
+    text = "\n".join(p.text for p in doc.paragraphs) + "\n" + "\n".join(c.text for t in doc.tables for r in t.rows for c in r.cells)
+    for part in ("Descripción del producto", "Kit circuito\nTubo de 182 cm y filtro HMEF", "Ficha técnica: 43358",
+        "LB4330K", "MFLAB", "NINGBO MFLAB", "País de origen: China", "País de procedencia: China",
+        "Trae impreso y visible la fecha de manufactura", "aseguramiento de calidad y comercialización",
+        "120 días calendario", "Forma de pago: Crédito", "Garantía / Vencimiento de la esterilidad",
+        "24 meses de garantía y esterilidad no menor a 24 meses", "RIR-000012", "19.48", "17,532.00"):
+        assert part in text
+    header = doc.sections[0].header._element.xml
+    assert "ENGINEERING" in header and "info@rirmedical.com" in header
+
+
+def test_portal_standard_observations_are_replaced_once_without_dropping_other_notes():
+    from services.anestesia_documents import quote_docx
+    storage = Storage()
+    source = deepcopy(storage.source)
+    source["items"][0]["descripcion"] = "Kit completo.\nOBSERVACIÓN:\n1.Debe traer impreso y visible fecha de manufactura.\n2.Cumplir con los estándares internacionales."
+    cfg = quotes.prepare_quotation(source, values())
+    doc = Document(BytesIO(quote_docx(source, cfg, ROOT / "assets/cotizacion_base")))
+    text = doc.tables[0].cell(1, 1).text
+    assert "Debe traer" not in text and "Cumplir con" not in text
+    assert text.count("Trae impreso y visible") == 1
+    assert text.count("Cumple con los estándares internacionales") == 1
+    source["items"][0]["descripcion"] += "\n3. Incluir accesorio específico solicitado."
+    doc = Document(BytesIO(quote_docx(source, cfg, ROOT / "assets/cotizacion_base")))
+    text = doc.tables[0].cell(1, 1).text
+    assert "accesorio específico solicitado" in text and "Debe traer" not in text
+
+
+def test_source_change_during_generation_never_publishes_new_files(monkeypatch):
+    storage = Storage()
+    captures = iter([deepcopy(storage.source), {**storage.source, "fingerprint": "new-amendment"}])
+    monkeypatch.setattr(quotes, "capture", lambda *a, **kw: next(captures))
+    with pytest.raises(ValueError, match="cambiaron durante"):
+        run_request(storage, {"request_id": IDENT, "action": "generate_quotation", "url": URL,
+            "config": values()}, execution_id="changed-source", root=ROOT)
+    assert storage.job(IDENT)["source_hash"] == "new-amendment"
+    assert storage.job(IDENT)["state"] == "Bloqueado"
+    assert not storage.job(IDENT).get("final_url")
+
+
+def test_quote_publication_failure_restores_previous_pdfs_and_preserves_number(monkeypatch):
+    storage = Storage()
+    previous = generate(storage, monkeypatch)
+    old = contents(storage, previous["delivery_folder_id"])
+    storage.api.fail_copy = storage.api.copy_count + 4
+    with pytest.raises(RuntimeError, match="restauró"):
+        generate(storage, monkeypatch, "failed-copy", cfg={**values(), "price": "20"})
+    assert contents(storage, previous["delivery_folder_id"]) == old
+    assert len(storage.rows("ANESTESIA_COTIZACIONES")) == 1
+    storage.api.fail_copy = None
+    done = generate(storage, monkeypatch, "retry-copy", cfg={**values(), "price": "20"})
+    assert done["quotation_number"] == previous["quotation_number"]
+    assert len(contents(storage, done["delivery_folder_id"])) == 12
+
+
+def test_library_replacement_during_conversion_blocks_publication(monkeypatch):
+    storage = Storage()
+    convert = storage.convert_document
+    def change(*args, **kw):
+        result = convert(*args, **kw)
+        storage.tables["ANESTESIA_DOCUMENTOS"][0]["id"] = "new-certificate-version"
+        return result
+    monkeypatch.setattr(storage, "convert_document", change)
+    with pytest.raises(ValueError, match="biblioteca cambió"):
+        generate(storage, monkeypatch)
+    assert not storage.job(IDENT).get("final_url")
+
+
+APP = "from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario')"
+
+
+class UIStorage(ViewStorage):
+    def __init__(self):
+        super().__init__()
+        self.tables["ANESTESIA_COTIZACIONES"] = []
+        self.tables["ANESTESIA_EXPEDIENTES"] = []
+        self.enqueued = []
+    def enqueue(self, payload, **kwargs):
+        self.enqueued.append(deepcopy(payload))
+        return "queue-1"
+    def quotation_root(self): return "all-quotes"
+
+
+@pytest.fixture
+def ui():
+    view._records.clear(); view._json.clear(); view._live_job.clear(); view._quotation_folder.clear()
+    storage = UIStorage()
+    with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"):
+        app = AppTest.from_string(APP, default_timeout=20)
+        app.secrets["app"] = {}
+        app.run()
+        yield app, storage
+    view._records.clear(); view._json.clear(); view._live_job.clear(); view._quotation_folder.clear()
+
+
+def test_new_screen_has_one_button_only_and_mask_updates_catalogue_without_scraping(ui):
+    app, storage = ui
+    assert not app.exception and not app.error
+    assert [b.label for b in app.button] == ["Generar documentos"]
+    assert not app.date_input and not app.radio and not app.tabs
+    assert not any("Fechas" in x.label for x in app.expander)
+    assert next(x for x in app.text_input if x.label == "Catálogo").value == "LB4330K"
+    app.selectbox(key="anes_simple_mask").set_value("C").run()
+    assert next(x for x in app.text_input if x.label == "Catálogo").value == "LB4330C"
+    assert storage.enqueued == []
+
+
+def fill_ui(app, url=URL):
+    app.text_input(key="anes_simple_url").set_value(url).run()
+    app.number_input(key="anes_simple_price").set_value(19.48)
+    next(w for w in app.checkbox if w.label.startswith("Revisé adjuntos")).check()
+    next(w for w in app.checkbox if w.label.startswith("Verifiqué adjuntos")).check()
+    app.button(key="anes_simple_generate").click().run()
+
+
+def test_single_click_saves_inputs_and_queues_scrape_and_generate_together(ui):
+    app, storage = ui
+    fill_ui(app)
+    assert not app.exception and not app.error
+    assert len(storage.enqueued) == 1
+    payload = storage.enqueued[0]
+    assert payload["action"] == "generate_quotation" and payload["url"] == URL
+    assert payload["config"]["price"] == "19.48"
+    assert payload["config"]["delivery_use_portal"] and payload["config"]["location_reviewed"]
+    assert next(b for b in app.button if b.label == "Generar documentos").disabled
+    assert next(x for x in app.text_input if x.label == "Provincia").value == ""
+
+
+def test_invalid_price_or_incomplete_delivery_does_not_enqueue(ui):
+    app, storage = ui
+    app.text_input(key="anes_simple_url").set_value(URL)
+    app.button(key="anes_simple_generate").click().run()
+    assert any("precio" in e.value for e in app.error) and not storage.enqueued
+    app.number_input(key="anes_simple_price").set_value(20)
+    app.button(key="anes_simple_generate").click().run()
+    assert any("plazo" in e.value for e in app.error) and not storage.enqueued
+
+
+def test_changed_link_does_not_inherit_adjunct_attestations_from_another_act(ui):
+    app, storage = ui
+    app.text_input(key="anes_simple_url").set_value(URL).run()
+    next(w for w in app.checkbox if w.label.startswith("Revisé adjuntos")).check()
+    next(w for w in app.checkbox if w.label.startswith("Verifiqué adjuntos")).check()
+    app.run()
+    assert all(w.value for w in app.checkbox)
+    app.text_input(key="anes_simple_url").set_value(URL2).run()
+    assert not any(w.value for w in app.checkbox)
+    assert not storage.enqueued
+
+
+def test_streamlit_hot_reload_replaces_old_storage_api_before_using_quotation_methods(monkeypatch):
+    import importlib
+    from services import anestesia_storage
+    monkeypatch.setattr(anestesia_storage, "ANESTESIA_STORAGE_API_VERSION", 1)
+    previous = anestesia_storage.AnestesiaStorage
+    importlib.reload(view)
+    assert view.AnestesiaStorage is anestesia_storage.AnestesiaStorage
+    assert view.AnestesiaStorage is not previous
+    assert anestesia_storage.ANESTESIA_STORAGE_API_VERSION == 2
+    assert "ANESTESIA_COTIZACIONES" in anestesia_storage.TABLES
