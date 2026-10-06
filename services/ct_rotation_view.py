@@ -12,7 +12,8 @@ from services import ct_rotation as rotation
 def _snapshot(sheet_id: str) -> dict:
     from sheets import get_client
 
-    return rotation.load_snapshot(get_client(), sheet_id=sheet_id)
+    client, _ = get_client()
+    return rotation.load_snapshot(client, sheet_id=sheet_id)
 
 
 @st.fragment(run_every="60s")
@@ -73,7 +74,8 @@ def render_rotation_view(actor: str, sheet_id: str = rotation.SHEET_ID) -> None:
             try:
                 from sheets import get_client
 
-                saved = rotation.save_inventory(get_client(), stock, stock_date, actor, sheet_id=sheet_id)
+                client, _ = get_client()
+                saved = rotation.save_inventory(client, stock, stock_date, actor, sheet_id=sheet_id)
                 snapshot["inventory"] = saved
                 st.session_state["ct_rotation_last_snapshot"] = snapshot
                 _snapshot.clear()

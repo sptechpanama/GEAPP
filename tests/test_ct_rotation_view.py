@@ -25,8 +25,11 @@ def snapshot(monkeypatch):
     monkeypatch.setattr(view, "_snapshot", read)
     import sheets
 
-    monkeypatch.setattr(sheets, "get_client", lambda: object())
+    client = object()
+    credentials = object()
+    monkeypatch.setattr(sheets, "get_client", lambda: (client, credentials))
     def save(client, kits, inventory_date, actor, **settings):
+        assert client is sheets.get_client()[0]
         snapshot["inventory"] = {"ficha": "43358", "kits": str(kits), "fecha": inventory_date.isoformat()}
         return snapshot["inventory"]
     monkeypatch.setattr(rotation, "save_inventory", save)
@@ -35,6 +38,27 @@ def snapshot(monkeypatch):
 
 def app():
     return AppTest.from_string("from services.ct_rotation_view import render_rotation_view\nrender_rotation_view('usuario')").run(timeout=20)
+
+
+def test_snapshot_uses_the_client_from_the_real_credentials_contract(monkeypatch):
+    import sheets
+
+    client = object()
+    credentials = object()
+    expected = {"records": [], "inventory": None, "status": {}}
+    monkeypatch.setattr(sheets, "get_client", lambda: (client, credentials))
+
+    def load(authorised_client, *, sheet_id):
+        assert authorised_client is client
+        assert sheet_id == "test-rotation-client-contract"
+        return expected
+
+    monkeypatch.setattr(rotation, "load_snapshot", load)
+    view._snapshot.clear()
+    try:
+        assert view._snapshot("test-rotation-client-contract") == expected
+    finally:
+        view._snapshot.clear()
 
 
 def test_only_the_requested_two_tabs_and_inventory_controls_are_rendered(snapshot):
