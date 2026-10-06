@@ -541,6 +541,8 @@ def test_final_review_prompt_is_collapsed_between_drive_link_and_saved_quotation
     prompt = next(code.value for code in review.code)
     assert URL in prompt and "13 documentos" in prompt
     assert any("Adjunta en ChatGPT" in caption.value for caption in review.caption)
+    instructions = "\n".join(caption.value for caption in review.caption)
+    assert "incluye el enlace" not in instructions and "adjúntalos también" not in instructions
     assert len(app.button) == 1 and not storage.enqueued
 
 
@@ -558,6 +560,18 @@ def test_final_review_prompt_uses_form_link_when_no_quotation_has_been_issued(ui
     prompt = app.code[0].value
     assert URL2 in prompt and ACT2 in prompt and not quotation_boxes(app)
     assert not app.exception and not storage.enqueued
+
+
+def test_final_review_prompt_prefers_official_scraped_link_over_entered_link(ui):
+    app, storage = ui
+    job = show_issued_quotation(app, storage)
+    scraped_url = URL.replace("www.panamacompra.gob.pa", "panamacompra.gob.pa")
+    job["source_preview"] = {"url": scraped_url, "number": ACT}
+    view._records.clear(); view._live_job.clear()
+    app.run()
+    prompt = next(code.value for code in app.code if code.value.startswith("Revisa exhaustivamente"))
+    assert scraped_url in prompt and URL not in prompt
+    assert not app.exception and not app.error and not storage.enqueued
 
 
 @pytest.mark.parametrize("catalog,price", [("K", "1234.5678"), ("C", "16.98")])
