@@ -22,37 +22,63 @@ oferta invalidos o una modificacion bloquean la salida con su motivo.
 No consulta ni copia los once certificados de la biblioteca; su ausencia o
 vencimiento no bloquean la generacion de la cotizacion.
 
+La cotizacion se genera en **una sola hoja larga de 8.5 × 14 pulgadas**.
+El publicador comprueba tamaño y cantidad de paginas antes de guardar el PDF.
 La validez es **120 dias calendario**, el pago **Credito** y garantia/esterilidad
 **24 meses**. La fecha de la cotizacion corresponde a la publicacion oficial
 del pliego. Precio y tratamiento ITBMS mantienen el calculo Decimal existente.
 El membrete incorpora Engineering e info@rirmedical.com y conserva la razon
 social S.EP. del ejemplo y la identidad registrada.
 
-### Numeracion y carpetas
+### Identificacion y carpetas
 
-- El worker serial es el unico que reserva consecutivos: `RIR-000001`, etc.
-- La hoja `ANESTESIA_COTIZACIONES` registra numero, consecutivo, acto, enlace,
-  estado y carpeta; su JSON conserva configuracion, importes y enlace Word.
-- Un acto distinto recibe otro consecutivo. Regenerar el mismo acto conserva
-  su numero y carpeta; variantes del enlace no producen duplicados.
-- `RIR / Anestesia-Docs / Cotizaciones / 000001 - <acto>` agrupa cada caso.
-  Dentro, `Cotización membretada - PDF` contiene exclusivamente
-  `01_Cotizacion.pdf`. El Word editable, fuentes y comprobaciones quedan aparte.
-  No se genera un ZIP ni se copian otros documentos.
-- El reemplazo de PDFs se limita a esa cotizacion, con respaldo y recuperacion;
-  nunca reemplaza los archivos de otro acto. Los reintentos conservan el numero.
+- Se usa **solo el numero oficial del acto** como numero de cotizacion. No se
+  añade un identificador RIR en el documento. El contador interno permanece
+  exclusivamente para ordenar los registros existentes.
+- La hoja `ANESTESIA_COTIZACIONES` registra numero oficial, acto, enlace,
+  estado, carpeta y enlaces Word/PDF. Un enlace alternativo del mismo acto
+  conserva el registro; regenerar actualiza solamente sus dos archivos.
+- `RIR / Anestesia-Docs` contiene dos subcarpetas: `Cotizaciones generadas`
+  y `Documentos y vigencias`.
+- Cotizaciones generadas contiene los Word/PDF finales, sin subcarpetas por
+  acto ni referencias. Nombre: `Cotización firmada dirigida a la Caja de
+  Seguro Social - <acto>` o `... dirigida al Ministerio de Salud - <acto>`.
+- La generacion usa una carpeta temporal que se retira al finalizar. El
+  resumen oficial para el formulario se conserva en Sheets. No se genera ZIP.
+- El reemplazo de Word/PDF usa un registro de recuperacion en Sheets; un fallo
+  recuperable restaura ambos archivos anteriores. Las interrupciones conservan
+  la carpeta temporal necesaria hasta recuperar la operacion. Los archivos
+  retirados se envian a la papelera, sin borrado permanente.
 - La pantalla consulta el avance cada cinco segundos mientras corre y muestra
   enlaces a la cotizacion PDF, Word y todas las cotizaciones. El historial va cerrado.
 
 La salida indica **Documentos generados**: comprobaciones automaticas,
 no una aprobacion independiente de ChatGPT ni una presentacion en PanamaCompra.
-Al regenerar un caso del formato anterior, los doce PDF anteriores se archivan
-y la carpeta final se reemplaza por el unico PDF de cotizacion, conservando
-su consecutivo. Los originales de biblioteca permanecen intactos.
+La reorganizacion inicial conserva la cotizacion generada y los once
+originales actuales, cotejando sus hashes antes de retirar los archivos
+restantes. Se conservan sus IDs y bytes al mover/renombrar los certificados.
 Las acciones antiguas capture/generate/finalize y sus registros siguen siendo
 compatibles para solicitudes ya existentes. La biblioteca de originales,
 metadatos de verificacion e historial se conservan; el formulario compacto
 no incluye los anteriores paneles de carga y auditoria.
+
+### Control manual de los once documentos
+
+El formulario enlaza el Google Sheets **Control de documentos - Anestesia**
+y la carpeta de los once PDF. El control tiene Nombre del documento, Tipo,
+Fecha de vencimiento editable y Descargar, con nombres del ejemplo de ofertas.
+La celda superior abre la carpeta de Drive.
+
+- CSS, DGI y Registro Publico: amarillo a 10 dias o menos.
+- CT, oferente, inscripcion, licencia y otros documentos con vencimiento:
+  amarillo a 30 dias o menos.
+- Vencidos: rojo. Vigentes fuera del aviso: verde. Sin vencimiento impreso: `-`.
+- Las reglas se recalculan en Sheets usando TODAY(), zona America/Panama.
+  El codigo no sobreescribe fechas manuales al abrir la app o generar cotizaciones.
+- Registro Publico: el corte inicial es emision + 12 meses y la celda explica
+  que es un control de antigüedad por el pliego revisado, no una fecha impresa.
+- Actualizar un archivo en Drive y su fecha en el control no modifica ni
+  condiciona la generacion de la cotizacion, que es un documento independiente.
 
 ## Vigencias del flujo histórico de expedientes completos
 

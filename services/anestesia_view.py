@@ -16,13 +16,13 @@ from services.anestesia_source import (delivery_destination, portal_delivery_ter
                                      public_open_status, needs_live_open_status)
 from services.anestesia_health import library_health, certificate_date_suggestions
 from services import anestesia_storage as _storage_module
-if getattr(_storage_module, "ANESTESIA_STORAGE_API_VERSION", 0) < 2:
+if getattr(_storage_module, "ANESTESIA_STORAGE_API_VERSION", 0) < 3:
     import importlib
     _storage_module = importlib.reload(_storage_module)
 AnestesiaStorage = _storage_module.AnestesiaStorage
 DRIVE_PARENT, SHEET_ID = _storage_module.DRIVE_PARENT, _storage_module.SHEET_ID
 
-ANESTESIA_UI_VERSION = 16
+ANESTESIA_UI_VERSION = 17
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -36,6 +36,11 @@ def _records(sheet_id, table, _storage):
 @st.cache_data(ttl=3600, max_entries=6, show_spinner=False)
 def _quotation_folder(sheet_id, parent_id, _storage):
     return _storage.quotation_root()
+
+
+@st.cache_data(ttl=60, max_entries=6, show_spinner=False)
+def _document_control_links(sheet_id, parent_id, _storage):
+    return _storage.document_control_links()
 
 
 @st.cache_data(ttl=300, max_entries=8, show_spinner=False)
@@ -451,13 +456,19 @@ def render_anestesia_docs(creds, actor):
             st.session_state["anes_simple_tables"] = {"configuration": signature, "resolved_id": storage.sheet_id}
         else:
             storage.sheet_id = ready["resolved_id"]
+        links = _document_control_links(storage.sheet_id, storage.parent_id, storage)
+        control_col, originals_col = st.columns(2)
+        if links.get("sheet"):
+            control_col.link_button("Control de documentos y vencimientos (Sheets)", links["sheet"])
+        if links.get("folder"):
+            originals_col.link_button("Abrir los 11 documentos en Drive", links["folder"])
         jobs = _records(storage.sheet_id, "ANESTESIA_EXPEDIENTES", storage)
         ident = st.session_state.get("anes_simple_job")
         job = next((r for r in jobs if r.get("id") == ident), {})
         if ident:
             job = _live_job(storage.sheet_id, ident, storage) or job
         cfg = job.get("config") or {}
-        source = _json(job["source_id"], storage) if job.get("source_id") else {}
+        source = job.get("source_preview") or (_json(job["source_id"], storage) if job.get("source_id") else {})
         busy = job.get("state") in ACTIVE_STATES
         url = st.text_input("Enlace", value=job.get("url", ""),
             placeholder="https://www.panamacompra.gob.pa/Inicio/#/...", disabled=busy, key="anes_simple_url")
@@ -544,16 +555,15 @@ def render_anestesia_docs(creds, actor):
                         if check.get("enlace"):
                             st.markdown(f"[Abrir documento original]({check['enlace']})")
             elif job.get("state") == "Documentos generados":
-                status = storage.delivery_status(job["delivery_folder_id"])
-                if status.get("state") == "ready" and status.get("manifest") == job.get("published_manifest"):
-                    if job.get("quotation_output_version") == 2 and job.get("delivery_pdf_count") == 1:
+                if job.get("quotation_output_version") == 3:
+                    if storage.quotation_status(job):
                         st.success("Cotización membretada generada en PDF y Word.")
-                        st.markdown(f"[Ver cotización en Drive]({job['final_url']}) · [Cotización Word]({job['word_url']})")
+                        st.markdown(f"[Cotización PDF]({job['pdf_url']}) · [Cotización Word]({job['word_url']}) · [Ver archivos en Drive]({job['final_url']})")
                     else:
-                        st.info("Esta generación corresponde al formato anterior. Pulsa Generar documentos para guardar solo la cotización membretada.")
+                        st.warning("No se pudieron verificar los archivos de esta cotización. Vuelve a generar.")
                     st.caption("Comprobaciones automáticas completadas. Revisa la cotización antes de presentarla.")
                 else:
-                    st.warning("La carpeta se está actualizando. Espera a que termine la comprobación.")
+                    st.info("Esta generación corresponde al formato anterior. Pulsa Generar documentos para actualizar su formato.")
         root_url = job.get("quotation_root_url") or (
             "https://drive.google.com/drive/folders/" + _quotation_folder(storage.sheet_id, storage.parent_id, storage))
         st.markdown(f"[Todas las cotizaciones en Drive]({root_url})")

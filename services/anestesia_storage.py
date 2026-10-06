@@ -12,7 +12,7 @@ from googleapiclient.errors import HttpError
 
 from services.anestesia_docs import file_hash, now_iso
 
-ANESTESIA_STORAGE_API_VERSION = 2
+ANESTESIA_STORAGE_API_VERSION = 3
 SHEET_ID = "1-2sgJPhSPzP65HLeGSvxDBtfNczhiDiZhdEbyy6lia0"
 DRIVE_PARENT = "0AOB-QlptrUHYUk9PVA"
 FOLDER = "application/vnd.google-apps.folder"
@@ -225,7 +225,37 @@ class AnestesiaStorage:
         return saved
 
     def quotation_root(self):
-        return self.folder("Cotizaciones", self.root())
+        return self.folder("Cotizaciones generadas", self.root())
+
+    def trash_file(self, ident):
+        self.drive.files().update(fileId=ident, body={"trashed": True},
+            fields="id,trashed", supportsAllDrives=True).execute()
+
+    def document_control_links(self):
+        properties = self.drive.files().get(fileId=self.root(), fields="appProperties",
+            supportsAllDrives=True).execute().get("appProperties", {})
+        result = {}
+        for key, prop in (("sheet", "documentControlSheet"), ("folder", "supportingDocumentsFolder")):
+            ident = properties.get(prop)
+            if ident:
+                meta = self.drive.files().get(fileId=ident, fields="id,webViewLink,trashed",
+                    supportsAllDrives=True).execute()
+                if not meta.get("trashed"):
+                    result[key] = meta.get("webViewLink", "")
+        return result
+
+    def quotation_status(self, job):
+        """Confirm this act's two files before displaying its download links."""
+        for key in ("pdf_id", "word_id"):
+            meta = self.drive.files().get(fileId=job[key], fields="id,trashed,parents,appProperties",
+                supportsAllDrives=True).execute()
+            props = meta.get("appProperties", {})
+            if (meta.get("trashed") or job["folder_id"] not in meta.get("parents", [])
+                    or props.get("role") != "anestesia_quotation"
+                    or props.get("act") != job.get("number")
+                    or props.get("manifest") != job.get("published_manifest")):
+                return False
+        return True
 
     def ensure_quotation(self, number, url):
         """Allocate only inside the single-consumer orchestrator, never in the UI.
@@ -246,14 +276,16 @@ class AnestesiaStorage:
             raise ValueError("Hay dos cotizaciones para el mismo acto; no se sobrescribió ninguna.")
         if matches:
             quote = matches[0]
+            if quote.get("quotation_number") != number:
+                quote = self.save_quotation({"id": quote["id"], "quotation_number": number})
         else:
             sequence = max(sequences, default=0) + 1
             quote = self.save_quotation({"id": uuid.uuid4().hex, "sequence": sequence,
-                "quotation_number": f"RIR-{sequence:06d}", "number": number, "url": url,
+                "quotation_number": number, "number": number, "url": url,
                 "state": "Reservada", "created_at": now_iso()})
-        if not quote.get("folder_id"):
-            parent = self.quotation_root()
-            folder = self.folder(f"{quote['sequence']:06d} - {number}", parent)
+        parent = self.quotation_root()
+        if quote.get("folder_id") != parent:
+            folder = parent
             quote = self.save_quotation({**quote, "folder_id": folder,
                 "folder_url": f"https://drive.google.com/drive/folders/{folder}",
                 "root_url": f"https://drive.google.com/drive/folders/{parent}"})
@@ -264,7 +296,7 @@ class AnestesiaStorage:
         saved = {**(current or {}), **data, "updated_at": now_iso()}
         saved.pop("_row", None)
         self._write("ANESTESIA_COTIZACIONES", {"id": saved["id"],
-            "numero_cotizacion": saved["quotation_number"], "consecutivo": saved["sequence"],
+            "numero_cotizacion": saved["quotation_number"], "consecutivo": saved["number"],
             "acto": saved["number"], "enlace_acto": saved.get("url", ""),
             "estado": saved.get("state", ""), "carpeta": saved.get("final_url") or saved.get("folder_url", ""),
             "actualizado_en": saved["updated_at"]}, saved, row=current.get("_row") if current else None)

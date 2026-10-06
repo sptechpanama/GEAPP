@@ -177,3 +177,88 @@ class DeliveryPublisher:
                 raise RuntimeError("No se completó la publicación ni su recuperación. La carpeta está marcada ACTUALIZANDO; "
                                    "no uses esos PDF. Reintenta para recuperar el respaldo. " + str(recovery)) from exc
             raise RuntimeError("No se completó la publicación. Se restauró la entrega anterior; reintenta. " + str(exc)) from exc
+
+
+class QuotationPublisher(DeliveryPublisher):
+    """Keep only the current Word/PDF per act in the shared quotation folder.
+
+    The recovery journal lives in the existing Sheets quotation record. New
+    copies are verified in the temporary folder before replacing older files.
+    An interrupted operation is rolled back before the next attempt.
+    """
+    ROLE = "anestesia_quotation"
+
+    def _act_files(self, root, quote):
+        return [f for f in self._children(root)
+            if f.get("appProperties", {}).get("role") == self.ROLE
+            and f.get("appProperties", {}).get("quotation_id") == quote["id"]]
+
+    def restore(self, quote):
+        pending = quote.get("publication")
+        if not pending:
+            return quote
+        root, stage = pending["root"], pending["stage"]
+        copies = [f for parent in (root, stage) for f in self._children(parent)
+            if f.get("appProperties", {}).get("role") == self.ROLE
+            and f.get("appProperties", {}).get("quotation_id") == quote["id"]
+            and f.get("appProperties", {}).get("manifest") == pending["manifest"]]
+        for file in copies:
+            self._update(file["id"], trashed=True)
+        for file in pending["old"]:
+            if file_hash(self.storage.get_bytes(file["id"])) != file["appProperties"]["sha256"]:
+                raise ValueError("Cambió una cotización anterior; no se completó la recuperación.")
+            self._update(file["id"], trashed=False)
+        if {f["id"] for f in self._act_files(root, quote)} != {f["id"] for f in pending["old"]}:
+            raise ValueError("No se restauraron exactamente los archivos anteriores de este acto.")
+        saved = self.storage.save_quotation({"id": quote["id"], "publication": None})
+        self.storage.trash_file(stage)
+        return saved
+
+    def publish_quotation(self, files, quote, *, stage, manifest_hash):
+        quote = self.restore(quote)
+        root = quote["folder_id"]
+        expected_mimes = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+        if len(files) != 2 or {f.get("mime") for f in files} != expected_mimes:
+            raise ValueError("La cotización debe contener exactamente su PDF y su Word.")
+        for file in files:
+            if file_hash(self.storage.get_bytes(file["file_id"])) != file["sha256"]:
+                raise ValueError("Cambió un archivo de cotización antes de publicarlo.")
+        old = self._act_files(root, quote)
+        for file in old:
+            if file_hash(self.storage.get_bytes(file["id"])) != file["appProperties"].get("sha256"):
+                raise ValueError("Cambió la cotización guardada en Drive. No se sobrescribió.")
+        names = {f["name"] for f in files}
+        if any(f["name"] in names and f["id"] not in {o["id"] for o in old} for f in self._children(root)):
+            raise ValueError("Hay un archivo ajeno con el mismo nombre. No se sobrescribió.")
+        pending = {"root": root, "stage": stage, "manifest": manifest_hash, "old": old}
+        current = self.storage.save_quotation({"id": quote["id"], "publication": pending})
+        try:
+            copies = []
+            for file in files:
+                saved = self.api.copy(fileId=file["file_id"], body={"name": file["name"], "parents": [stage],
+                    "appProperties": {"module": "anestesia_docs", "role": self.ROLE,
+                        "quotation_id": quote["id"], "act": quote["number"], "manifest": manifest_hash,
+                        "sha256": file["sha256"]}}, fields="id,name,mimeType,webViewLink,parents,appProperties",
+                    supportsAllDrives=True).execute()
+                if file_hash(self.storage.get_bytes(saved["id"])) != file["sha256"]:
+                    raise ValueError("La copia en Drive no coincide con el archivo generado.")
+                copies.append(saved)
+            for file in copies:
+                self._move(file, stage, root)
+            for file in old:
+                self._update(file["id"], trashed=True)
+            actual = self._act_files(root, quote)
+            if {f["id"] for f in actual} != {f["id"] for f in copies}:
+                raise ValueError("La publicación quedó incompleta.")
+            for file in copies:
+                if file_hash(self.storage.get_bytes(file["id"])) != file["appProperties"]["sha256"]:
+                    raise ValueError("Los archivos publicados no coinciden con su verificación.")
+            self.storage.save_quotation({"id": quote["id"], "publication": None})
+            return {f["mimeType"]: {"file_id": f["id"], "name": f["name"],
+                "url": f.get("webViewLink") or f"https://drive.google.com/file/d/{f['id']}/view"} for f in copies}
+        except Exception as exc:
+            try:
+                self.restore(current)
+            except Exception as recovery:
+                raise RuntimeError("No se completó la publicación ni la recuperación. Reintenta antes de usar estos archivos. " + str(recovery)) from exc
+            raise RuntimeError("No se completó la publicación. Se restauró la cotización anterior; reintenta. " + str(exc)) from exc

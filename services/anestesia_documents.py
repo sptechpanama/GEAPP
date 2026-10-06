@@ -54,18 +54,18 @@ def rir_profile():
 
 
 def quote_docx(source: dict, config: dict, assets: Path) -> bytes:
-    """US Letter business brief, existing RIR branding, fixed-width price table."""
+    """US Legal quotation with the official act as its only visible identifier."""
     profile = rir_profile()
     doc = Document()
     for section in doc.sections:
-        section.page_width, section.page_height = Inches(8.5), Inches(11)
+        section.page_width, section.page_height = Inches(8.5), Inches(14)
         section.top_margin, section.bottom_margin = Inches(1.35), Inches(0.65)  # branded-header override
         section.left_margin = section.right_margin = Inches(1)
         section.header_distance = section.footer_distance = Inches(0.3)
     normal = doc.styles["Normal"]
-    normal.font.name, normal.font.size = "Calibri", Pt(10.5)
-    normal.paragraph_format.space_before, normal.paragraph_format.space_after = Pt(0), Pt(4)
-    normal.paragraph_format.line_spacing = 1.04
+    normal.font.name, normal.font.size = "Calibri", Pt(10)
+    normal.paragraph_format.space_before, normal.paragraph_format.space_after = Pt(0), Pt(2)
+    normal.paragraph_format.line_spacing = 1
     doc.styles["Title"].font.size = Pt(21)
     doc.styles["Title"].paragraph_format.space_after = Pt(8)
     for key, size in (("Heading 1", 16), ("Heading 2", 12)):
@@ -86,8 +86,6 @@ def quote_docx(source: dict, config: dict, assets: Path) -> bytes:
                 run.font.color.rgb = RGBColor.from_string("003B82")
     issued = date.fromisoformat(config["document_date"])
     doc.add_heading("COTIZACIÓN", 0)
-    if config.get("quotation_number"):
-        doc.add_paragraph("Número de cotización: " + config["quotation_number"])
     doc.add_paragraph(f"Fecha: {issued.day} de {MONTHS[issued.month]} de {issued.year}")
     for label, value in (("Número de acto", source["number"]), ("Dirigida a", source["entity"]),
                          ("Unidad de compra", source["purchase_unit"]), ("Objeto", source["title"])):

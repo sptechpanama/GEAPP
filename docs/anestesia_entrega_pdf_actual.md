@@ -1,22 +1,24 @@
 # Entrega PDF de Anestesia-Docs
 
-## Carpeta por cotizacion desde 2026-10-05
+## Carpeta de cotizaciones desde 2026-10-05
 
-El flujo de un boton registra `RIR-000001`, etc., en
-`ANESTESIA_COTIZACIONES`. Cada acto tiene una carpeta ordenada dentro de
-`RIR / Anestesia-Docs / Cotizaciones`, con un conjunto independiente de
-un unico `01_Cotizacion.pdf` en `Cotización membretada - PDF`. El Word editable
-permanece en las versiones internas y se enlaza directamente en la app.
-No se genera ZIP ni se copian certificados. Un acto nuevo no reemplaza una cotizacion anterior;
-regenerar el mismo acto conserva su consecutivo y actualiza solo su carpeta.
+El flujo de un boton registra el numero oficial del acto en
+`ANESTESIA_COTIZACIONES`; no añade un numero RIR al documento.
+`RIR / Anestesia-Docs / Cotizaciones generadas` contiene exclusivamente
+los PDF y Word finales. Los nombres indican destinatario y numero del acto.
+El PDF debe tener una pagina de tamaño legal (8.5 × 14 pulgadas).
+No se genera ZIP ni se copian certificados. Un acto nuevo no reemplaza otra
+cotizacion; regenerar el mismo acto actualiza solamente sus dos archivos.
 
-El mismo publicador comprueba los bytes copiados y conserva el mecanismo de
-recuperacion descrito abajo, ahora aplicado dentro de cada cotizacion.
+El publicador de cotizaciones comprueba ambos formatos y registra su
+recuperacion en Sheets antes de reemplazar. Las carpetas temporales se retiran
+cuando el proceso termina; una interrupcion conserva lo necesario para
+recuperar antes del siguiente intento. Los archivos retirados van a la papelera.
 El nuevo flujo valida automaticamente los datos del acto y de la cotizacion,
 sin consultar la biblioteca ni bloquear por certificados faltantes o vencidos.
-No declara una aprobacion independiente de ChatGPT. Si se regenera un caso del
-formato anterior, el publicador archiva los doce PDF y publica solo la cotizacion
-con el mismo numero y carpeta. Las solicitudes antiguas mantienen
+No declara una aprobacion independiente de ChatGPT. La segunda subcarpeta,
+`Documentos y vigencias`, contiene once PDF originales con sus nombres del
+ejemplo y el Sheets de control manual de vencimientos. Las solicitudes antiguas mantienen
 el procedimiento que sigue, para no alterar registros y colas previas.
 
 ## Resultado de solicitudes del flujo anterior
