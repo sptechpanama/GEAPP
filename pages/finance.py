@@ -47,6 +47,7 @@ from services.backups import (
 from services.access_control import build_authenticator, require_page_access
 from services.finance_opening import get_finance_opening_config, opening_amount_for_filter
 from services.finance_recurring import materialize_due_recurring_gastos
+from services.finance_financing_view import render_financing_comparison
 
 from gspread.exceptions import APIError, WorksheetNotFound
 
@@ -4386,6 +4387,15 @@ if search_q.strip():
 
 
 # -------------------- KPIs principales --------------------
+finance_summary_tab, finance_comparison_tab = st.tabs(["Resumen financiero", "Elección de financiamiento"])
+with finance_comparison_tab:
+    render_financing_comparison(
+        lambda: load_credit_lines_cached(SHEET_ID, st.session_state.google_cache_token),
+        st.session_state.df_ing,
+        st.session_state.df_gas,
+        filtro_empresa,
+    )
+
 ing_total = (
     float(pd.to_numeric(df_ing_f.get(COL_COBRO_REAL_MONTO), errors="coerce").fillna(0.0).sum())
     if COL_COBRO_REAL_MONTO in df_ing_f.columns
@@ -4397,19 +4407,20 @@ gas_total = (
     else 0.0
 )
 
-k1, k2 = st.columns(2)
-with k1:
-    st.markdown(
-        '<div class="kpi-card"><p class="kpi-label">Ingresos (filtrados)</p>'
-        f'<p class="kpi-value">{_format_money_es(ing_total)}</p></div>',
-        unsafe_allow_html=True,
-    )
-with k2:
-    st.markdown(
-        '<div class="kpi-card"><p class="kpi-label">Gastos (filtrados)</p>'
-        f'<p class="kpi-value">{_format_money_es(gas_total)}</p></div>',
-        unsafe_allow_html=True,
-    )
+with finance_summary_tab:
+    k1, k2 = st.columns(2)
+    with k1:
+        st.markdown(
+            '<div class="kpi-card"><p class="kpi-label">Ingresos (filtrados)</p>'
+            f'<p class="kpi-value">{_format_money_es(ing_total)}</p></div>',
+            unsafe_allow_html=True,
+        )
+    with k2:
+        st.markdown(
+            '<div class="kpi-card"><p class="kpi-label">Gastos (filtrados)</p>'
+            f'<p class="kpi-value">{_format_money_es(gas_total)}</p></div>',
+            unsafe_allow_html=True,
+        )
 
 # ---- Flujo y saldo actual ----
 opening_cash = opening_amount_for_filter(opening_cfg.cash_by_company, filtro_empresa)
@@ -4471,14 +4482,15 @@ cxc_futuras = (
     )
 )
 
-k1, k2, k3 = st.columns(3)
-with k1: st.metric("Capital actual", _format_money_es(saldo_actual))
-with k2: st.metric("Cuentas por cobrar", _format_money_es(cxc_futuras))
-with k3: st.metric("Cuentas por pagar", _format_money_es(cxp_activas))
-st.caption(
-    f"Apertura financiera vigente desde {opening_cfg.effective_date.isoformat()}. "
-    "`Capital actual` usa saldo inicial por empresa; `CxC` parte en 0; `CxP` solo cuenta pendientes desde la apertura."
-)
+with finance_summary_tab:
+    k1, k2, k3 = st.columns(3)
+    with k1: st.metric("Capital actual", _format_money_es(saldo_actual))
+    with k2: st.metric("Cuentas por cobrar", _format_money_es(cxc_futuras))
+    with k3: st.metric("Cuentas por pagar", _format_money_es(cxp_activas))
+    st.caption(
+        f"Apertura financiera vigente desde {opening_cfg.effective_date.isoformat()}. "
+        "`Capital actual` usa saldo inicial por empresa; `CxC` parte en 0; `CxP` solo cuenta pendientes desde la apertura."
+    )
 
 with st.expander("Informacion de interes", expanded=False):
     st.markdown("#### Reportes")
