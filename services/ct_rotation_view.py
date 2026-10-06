@@ -31,9 +31,9 @@ def render_rotation_view(actor: str, sheet_id: str = rotation.SHEET_ID) -> None:
     status = snapshot["status"]
     stamp = status.get("ultimo_exito", "")
     if stamp:
-        st.caption(f"Última captura: {stamp[:19].replace('T', ' ')} · hora de Panamá. Lectura automática cada 60 segundos.")
+        st.caption(f"Última publicación: {stamp[:19].replace('T', ' ')} · hora de Panamá. Se reutilizan las corridas normales; esta vista solo relee Sheets cada 60 segundos.")
     if status.get("error"):
-        st.warning("La última captura no fue completa; se conserva el histórico confirmado.")
+        st.warning("No se pudo completar la actualización con los datos extraídos; se conserva el histórico confirmado.")
     try:
         summary = rotation.rotation_summary(snapshot["records"], today=today)
     except (ValueError, TypeError):

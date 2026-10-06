@@ -5,12 +5,21 @@ mismo archivo utilizado por el orquestador: `ct_rotacion_actos`,
 `ct_rotacion_inventario` y `ct_rotacion_estado`. No necesita abrir Supabase ni
 ejecutar el ranking maestro. La lectura se renueva cada 60 segundos.
 
-`scripts/update_ct_rotation.py` reutiliza los endpoints y el cliente HTTP de
-`db.db_api_updater` en el servidor. Captura CL y otros procedimientos, conserva
-el histórico y sigue sus relaciones oficiales. Solo cuenta el renglón del kit
-confirmado; no deduce la ficha desde códigos de clasificación. Si falla una
-fuente, conserva los registros anteriores y comunica la incidencia. No envía
-correos. `pc_config` programa el job `ct_rotacion_43358`.
+`scripts/update_ct_rotation.py` lee las bases locales ya extraídas por los
+procesos normales: `panamacompra.db` e `inteligencia_proveedores.db`. No consulta
+PanamáCompra, no descarga documentos y no ejecuta scrapers adicionales.
+`orquestador/database_pipeline.py` publica el histórico después de construir la
+analítica médica dentro de la actualización habitual de la base. No tiene un
+horario independiente; el antiguo job `ct_rotacion_43358` está deshabilitado en
+`pc_config`. `--dry-run` permite comprobar el resultado sin modificar Sheets.
+
+La capa analítica sirve únicamente como índice de candidatos; las cantidades se
+toman del renglón con ficha explícita, o del kit único de un acto previamente
+verificado. No se deduce la ficha desde códigos de clasificación. Se conservan
+las relaciones y requisiciones auditadas, además de las relaciones guardadas por
+el seguimiento habitual de CL. Si falta una cantidad, una fuente no puede leerse
+o un acto desaparece del índice, no se elimina el histórico confirmado. La
+publicación no modifica el inventario ni envía correos.
 
 Las convocatorias CL y sus actos derivados se cuentan una vez. Las
 republicaciones documentadas de una misma requisición se agrupan y las

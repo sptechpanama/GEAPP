@@ -69,6 +69,7 @@ def test_only_the_requested_two_tabs_and_inventory_controls_are_rendered(snapsho
     assert len(tested.dataframe) == 1
     assert len(tested.number_input) == 1
     assert len(tested.date_input) == 1
+    assert any("corridas normales" in caption.value and "60 segundos" in caption.value for caption in tested.caption)
     assert [button.label for button in tested.button] == ["Guardar inventario"]
 
 
