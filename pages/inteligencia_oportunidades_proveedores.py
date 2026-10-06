@@ -21,6 +21,7 @@ from services.auth_drive import get_drive_delegated
 from services import inteligencia_orquestador_v3 as _orchestrator_v3
 from services import inteligencia_proveedores_v3 as _analytics_v3
 from services.inteligencia_estudio_contexto import enrich_study_details
+from services.ct_rotation_view import render_rotation_view
 from ui.theme import apply_global_theme
 
 
@@ -2314,6 +2315,29 @@ st.caption(
     "La conexión se abre únicamente al realizar una consulta."
 )
 
+view_names = [
+    "Oportunidades",
+    "Consulta por ficha",
+    "Varias fichas",
+    "Consulta por empresa",
+    "Tendencias",
+    "Competencia",
+    "Proveedores",
+    "Estudio profundo",
+    "Rotación e inventario",
+]
+selected_view = st.radio(
+    "Vista de inteligencia",
+    view_names,
+    horizontal=True,
+    key="intel_v3_active_view",
+    label_visibility="collapsed",
+)
+
+if selected_view == "Rotación e inventario":
+    render_rotation_view(current_username())
+    st.stop()
+
 with st.sidebar:
     st.header("Filtros del estudio")
     if st.button(
@@ -2449,24 +2473,6 @@ with st.sidebar.form("intel_v3_filters_form", clear_on_submit=False):
 
 if apply_filters:
     st.session_state["intel_v3_analysis_ready"] = True
-
-view_names = [
-    "Oportunidades",
-    "Consulta por ficha",
-    "Varias fichas",
-    "Consulta por empresa",
-    "Tendencias",
-    "Competencia",
-    "Proveedores",
-    "Estudio profundo",
-]
-selected_view = st.radio(
-    "Vista de inteligencia",
-    view_names,
-    horizontal=True,
-    key="intel_v3_active_view",
-    label_visibility="collapsed",
-)
 
 # Las consultas directas no necesitan construir el mapa maestro. Esto permite
 # abrirlas y usarlas de inmediato, independientemente del costo del ranking.
