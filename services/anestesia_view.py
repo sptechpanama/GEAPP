@@ -22,7 +22,7 @@ if getattr(_storage_module, "ANESTESIA_STORAGE_API_VERSION", 0) < 3:
 AnestesiaStorage = _storage_module.AnestesiaStorage
 DRIVE_PARENT, SHEET_ID = _storage_module.DRIVE_PARENT, _storage_module.SHEET_ID
 
-ANESTESIA_UI_VERSION = 17
+ANESTESIA_UI_VERSION = 18
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -41,6 +41,26 @@ def _quotation_folder(sheet_id, parent_id, _storage):
 @st.cache_data(ttl=60, max_entries=6, show_spinner=False)
 def _document_control_links(sheet_id, parent_id, _storage):
     return _storage.document_control_links()
+
+
+@st.cache_data(ttl=300, max_entries=30, show_spinner=False)
+def _quotation_copy_fields(file_id, manifest, _storage):
+    """Read the issued Word, rather than rebuild it from editable form values."""
+    from io import BytesIO
+    from docx import Document
+
+    document = Document(BytesIO(_storage.get_bytes(file_id)))
+    for table in document.tables:
+        if len(table.rows) < 2:
+            continue
+        headers = [cell.text.strip() for cell in table.rows[0].cells]
+        if "Descripción del producto" in headers and "Precio unitario USD" in headers:
+            cells = table.rows[1].cells
+            product = cells[headers.index("Descripción del producto")].text
+            price = cells[headers.index("Precio unitario USD")].text
+            if product.strip() and price.strip():
+                return {"product": product, "price": price}
+    raise ValueError("La cotización Word no contiene el producto y precio emitidos.")
 
 
 @st.cache_data(ttl=300, max_entries=8, show_spinner=False)
@@ -542,6 +562,7 @@ def render_anestesia_docs(creds, actor):
             st.session_state["anes_simple_job"] = saved["id"]
             _enqueue(storage, saved, "generate_quotation", actor, url=url.strip(), config=values)
             return
+        issued_quotation = False
         if job:
             label = job.get("quotation_number") or job.get("number", "")
             st.caption(f"{label} · {job.get('state', '')}")
@@ -557,6 +578,7 @@ def render_anestesia_docs(creds, actor):
             elif job.get("state") == "Documentos generados":
                 if job.get("quotation_output_version") == 3:
                     if storage.quotation_status(job):
+                        issued_quotation = True
                         st.success("Cotización membretada generada en PDF y Word.")
                         st.markdown(f"[Cotización PDF]({job['pdf_url']}) · [Cotización Word]({job['word_url']}) · [Ver archivos en Drive]({job['final_url']})")
                     else:
@@ -567,6 +589,17 @@ def render_anestesia_docs(creds, actor):
         root_url = job.get("quotation_root_url") or (
             "https://drive.google.com/drive/folders/" + _quotation_folder(storage.sheet_id, storage.parent_id, storage))
         st.markdown(f"[Todas las cotizaciones en Drive]({root_url})")
+        if issued_quotation:
+            try:
+                copied = _quotation_copy_fields(job["word_id"], job["published_manifest"], storage)
+                st.caption("Descripción del producto · cotización generada")
+                st.code(copied["product"], language=None, wrap_lines=True, height=300)
+                price_box, _ = st.columns([1, 3])
+                price_box.caption("Precio unitario de participación (USD)")
+                price_box.code(copied["price"], language=None, wrap_lines=True)
+                st.caption("Usa el icono de copiar en la esquina superior derecha de cada cuadro.")
+            except Exception:
+                st.warning("No fue posible leer los campos para copiar. La cotización sigue disponible en los enlaces anteriores.")
         quotations = _records(storage.sheet_id, "ANESTESIA_COTIZACIONES", storage)
         if quotations:
             ordered = sorted(quotations, key=lambda r: int(r["sequence"]), reverse=True)

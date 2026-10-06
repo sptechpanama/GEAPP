@@ -30,6 +30,14 @@ del pliego. Precio y tratamiento ITBMS mantienen el calculo Decimal existente.
 El membrete incorpora Engineering e info@rirmedical.com y conserva la razon
 social S.EP. del ejemplo y la identidad registrada.
 
+Debajo de **Todas las cotizaciones en Drive**, al finalizar una generación,
+se muestran dos cuadros con icono de copia: descripción completa del producto
+y precio unitario de participación. Se leen del Word emitido, con su catálogo,
+marca, fabricante y notas, conservando el texto y la precisión del precio.
+Editar el formulario no cambia esos cuadros hasta generar una nueva cotización.
+La lectura se reutiliza durante cinco minutos y una regeneración usa el nuevo
+archivo. Si Drive falla, se mantienen disponibles los enlaces de descarga.
+
 ### Identificacion y carpetas
 
 - Se usa **solo el numero oficial del acto** como numero de cotizacion. No se

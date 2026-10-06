@@ -373,6 +373,11 @@ class UIStorage(ViewStorage):
         self.tables["ANESTESIA_COTIZACIONES"] = []
         self.tables["ANESTESIA_EXPEDIENTES"] = []
         self.enqueued = []
+        self.files = {}
+        self.file_reads = []
+    def get_bytes(self, ident):
+        self.file_reads.append(ident)
+        return self.files[ident]
     def enqueue(self, payload, **kwargs):
         self.enqueued.append(deepcopy(payload))
         return "queue-1"
@@ -382,14 +387,14 @@ class UIStorage(ViewStorage):
 
 @pytest.fixture
 def ui():
-    view._records.clear(); view._json.clear(); view._live_job.clear(); view._quotation_folder.clear(); view._document_control_links.clear()
+    view._records.clear(); view._json.clear(); view._live_job.clear(); view._quotation_folder.clear(); view._document_control_links.clear(); view._quotation_copy_fields.clear()
     storage = UIStorage()
     with patch.object(view, "AnestesiaStorage", return_value=storage), patch.object(view, "build"):
         app = AppTest.from_string(APP, default_timeout=20)
         app.secrets["app"] = {}
         app.run()
         yield app, storage
-    view._records.clear(); view._json.clear(); view._live_job.clear(); view._quotation_folder.clear(); view._document_control_links.clear()
+    view._records.clear(); view._json.clear(); view._live_job.clear(); view._quotation_folder.clear(); view._document_control_links.clear(); view._quotation_copy_fields.clear()
 
 
 def test_new_screen_has_one_button_only_and_mask_updates_catalogue_without_scraping(ui):
@@ -397,6 +402,7 @@ def test_new_screen_has_one_button_only_and_mask_updates_catalogue_without_scrap
     assert not app.exception and not app.error
     assert [b.label for b in app.button] == ["Generar documentos"]
     assert not app.date_input and not app.radio and not app.tabs
+    assert not app.code
     assert not any("Fechas" in x.label for x in app.expander)
     assert next(x for x in app.text_input if x.label == "Catálogo").value == "LB4330K"
     app.selectbox(key="anes_simple_mask").set_value("C").run()
@@ -428,6 +434,105 @@ def test_completion_shows_only_quotation_links_and_distinguishes_previous_full_p
     else:
         assert any("formato anterior" in i.value for i in app.info)
         assert not app.success
+
+
+def issued_word(product, price):
+    document = Document()
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "Otra tabla"
+    table = document.add_table(rows=2, cols=4)
+    for cell, text in zip(table.rows[0].cells, ["Cantidad", "Descripción del producto", "Precio unitario USD", "Importe USD"]):
+        cell.text = text
+    for cell, text in zip(table.rows[1].cells, ["900", product, price, "Total"]):
+        cell.text = text
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def show_issued_quotation(app, storage, *, product="Producto emitido\nFicha técnica: 43358\nCatálogo: LB4330K", price="16.9800"):
+    job = {"id": IDENT, "number": ACT, "url": URL, "state": "Documentos generados",
+        "quotation_output_version": 3, "word_id": "issued-word", "published_manifest": "issued-manifest",
+        "word_url": "https://drive.google.com/file/d/issued-word/view",
+        "pdf_url": "https://drive.google.com/file/d/issued-pdf/view",
+        "final_url": "https://drive.google.com/drive/folders/all-quotes",
+        "config": {"catalog": "K", "price": "16.9800", "tax_mode": "exento"}}
+    storage.files[job["word_id"]] = issued_word(product, price)
+    storage.tables["ANESTESIA_EXPEDIENTES"] = [job]
+    storage.quotation_status = lambda job: True
+    app.session_state["anes_simple_job"] = IDENT
+    view._records.clear(); view._live_job.clear()
+    app.run()
+    return job
+
+
+def test_generated_copy_boxes_use_issued_word_and_remain_exact_when_form_changes(ui):
+    app, storage = ui
+    product = "KIT DE CIRCUITO\nEspecificaciones: 1. Tubo de 182 cm.\nFicha técnica: 43358\nCatálogo: LB4330K\nMarca: MFLAB\n1. Trae impreso y visible la fecha de manufactura."
+    show_issued_quotation(app, storage, product=product)
+    assert not app.exception and not app.error and not app.warning
+    assert [c.value for c in app.code] == [product, "16.9800"]
+    assert app.code[0].proto.wrap_lines and app.code[0].proto.language == "plaintext"
+    nodes = list(app.main)
+    drive_link = next(i for i, node in enumerate(nodes) if node.type == "markdown" and "Todas las cotizaciones en Drive" in node.value)
+    product_box = next(i for i, node in enumerate(nodes) if node.type == "code")
+    assert product_box > drive_link
+    app.number_input(key="anes_simple_price").set_value(99.5)
+    app.selectbox(key="anes_simple_mask").set_value("C").run()
+    assert [c.value for c in app.code] == [product, "16.9800"]
+    assert storage.file_reads == ["issued-word"] and not storage.enqueued
+
+
+def test_regeneration_refreshes_copy_boxes_by_published_file(ui):
+    app, storage = ui
+    job = show_issued_quotation(app, storage)
+    product = "Nuevo producto\nCatálogo: LB4330C"
+    job.update(word_id="regenerated-word", published_manifest="regenerated-manifest")
+    storage.files[job["word_id"]] = issued_word(product, "20.00")
+    view._records.clear(); view._live_job.clear()
+    app.run()
+    assert not app.exception and not app.error
+    assert [c.value for c in app.code] == [product, "20.00"]
+    assert storage.file_reads == ["issued-word", "regenerated-word"]
+
+
+@pytest.mark.parametrize("read_failure", [True, False])
+def test_copy_read_failure_or_invalid_word_preserves_downloads(ui, read_failure):
+    app, storage = ui
+    show_issued_quotation(app, storage)
+    view._quotation_copy_fields.clear()
+    storage.files["issued-word"] = b"invalid-word"
+    if read_failure:
+        storage.get_bytes = lambda ident: (_ for _ in ()).throw(TimeoutError("Drive no responde"))
+    app.run()
+    assert not app.exception and not app.error and not app.code
+    assert any("campos para copiar" in w.value for w in app.warning)
+    assert any("issued-pdf" in m.value and "issued-word" in m.value for m in app.markdown)
+
+
+def test_unverified_or_running_quotation_never_exposes_previous_copy_values(ui):
+    app, storage = ui
+    job = show_issued_quotation(app, storage)
+    storage.quotation_status = lambda job: False
+    app.run()
+    assert not app.code
+    job["state"] = "Procesando"
+    view._records.clear(); view._live_job.clear()
+    app.run()
+    assert not app.exception and not app.code
+
+
+@pytest.mark.parametrize("catalog,price", [("K", "1234.5678"), ("C", "16.98")])
+def test_copy_matches_full_real_generated_document_and_selected_catalogue(monkeypatch, catalog, price):
+    storage = Storage()
+    result = generate(storage, monkeypatch, cfg={**values(), "catalog": catalog, "price": price})
+    view._quotation_copy_fields.clear()
+    copied = view._quotation_copy_fields(result["word_id"], result["published_manifest"], storage)
+    document = Document(BytesIO(storage.get_bytes(result["word_id"])))
+    assert copied == {"product": document.tables[0].cell(1, 1).text, "price": document.tables[0].cell(1, 2).text}
+    assert "Catálogo: LB4330" + catalog in copied["product"]
+    assert "Ficha técnica: 43358" in copied["product"] and "Marca: MFLAB" in copied["product"]
+    assert "1. Trae impreso y visible" in copied["product"] and "2. Cumple con los estándares internacionales" in copied["product"]
+    assert copied["price"] == ("1,234.5678" if catalog == "K" else "16.98")
 
 
 def test_quote_location_helper_imports_with_docs_module_from_previous_cloud_session(monkeypatch):
