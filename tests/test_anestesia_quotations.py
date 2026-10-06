@@ -367,6 +367,10 @@ def test_previous_numbering_changes_to_official_act_without_duplicating_record(m
 APP = "from services.anestesia_view import render_anestesia_docs\nrender_anestesia_docs(None, 'usuario')"
 
 
+def quotation_boxes(app):
+    return [code for code in app.code if not code.value.startswith("Revisa exhaustivamente mi participación")]
+
+
 class UIStorage(ViewStorage):
     def __init__(self):
         super().__init__()
@@ -402,7 +406,8 @@ def test_new_screen_has_one_button_only_and_mask_updates_catalogue_without_scrap
     assert not app.exception and not app.error
     assert [b.label for b in app.button] == ["Generar documentos"]
     assert not app.date_input and not app.radio and not app.tabs
-    assert not app.code
+    assert not quotation_boxes(app)
+    assert len(app.code) == 1 and "13 documentos" in app.code[0].value
     assert not any("Fechas" in x.label for x in app.expander)
     assert next(x for x in app.text_input if x.label == "Catálogo").value == "LB4330K"
     app.selectbox(key="anes_simple_mask").set_value("C").run()
@@ -470,7 +475,7 @@ def test_generated_copy_boxes_use_issued_word_and_remain_exact_when_form_changes
     product = "KIT DE CIRCUITO\nEspecificaciones: 1. Tubo de 182 cm.\nFicha técnica: 43358\nCatálogo: LB4330K\nMarca: MFLAB\n1. Trae impreso y visible la fecha de manufactura."
     show_issued_quotation(app, storage, product=product)
     assert not app.exception and not app.error and not app.warning
-    assert [c.value for c in app.code] == [product, "16.9800"]
+    assert [c.value for c in quotation_boxes(app)] == [product, "16.9800"]
     assert app.code[0].proto.wrap_lines and app.code[0].proto.language == "plaintext"
     nodes = list(app.main)
     drive_link = next(i for i, node in enumerate(nodes) if node.type == "markdown" and "Todas las cotizaciones en Drive" in node.value)
@@ -478,7 +483,7 @@ def test_generated_copy_boxes_use_issued_word_and_remain_exact_when_form_changes
     assert product_box > drive_link
     app.number_input(key="anes_simple_price").set_value(99.5)
     app.selectbox(key="anes_simple_mask").set_value("C").run()
-    assert [c.value for c in app.code] == [product, "16.9800"]
+    assert [c.value for c in quotation_boxes(app)] == [product, "16.9800"]
     assert storage.file_reads == ["issued-word"] and not storage.enqueued
 
 
@@ -491,7 +496,7 @@ def test_regeneration_refreshes_copy_boxes_by_published_file(ui):
     view._records.clear(); view._live_job.clear()
     app.run()
     assert not app.exception and not app.error
-    assert [c.value for c in app.code] == [product, "20.00"]
+    assert [c.value for c in quotation_boxes(app)] == [product, "20.00"]
     assert storage.file_reads == ["issued-word", "regenerated-word"]
 
 
@@ -504,7 +509,7 @@ def test_copy_read_failure_or_invalid_word_preserves_downloads(ui, read_failure)
     if read_failure:
         storage.get_bytes = lambda ident: (_ for _ in ()).throw(TimeoutError("Drive no responde"))
     app.run()
-    assert not app.exception and not app.error and not app.code
+    assert not app.exception and not app.error and not quotation_boxes(app)
     assert any("campos para copiar" in w.value for w in app.warning)
     assert any("issued-pdf" in m.value and "issued-word" in m.value for m in app.markdown)
 
@@ -514,11 +519,45 @@ def test_unverified_or_running_quotation_never_exposes_previous_copy_values(ui):
     job = show_issued_quotation(app, storage)
     storage.quotation_status = lambda job: False
     app.run()
-    assert not app.code
+    assert not quotation_boxes(app)
     job["state"] = "Procesando"
     view._records.clear(); view._live_job.clear()
     app.run()
-    assert not app.exception and not app.code
+    assert not app.exception and not quotation_boxes(app)
+
+
+def test_final_review_prompt_is_collapsed_between_drive_link_and_saved_quotations(ui):
+    app, storage = ui
+    storage.tables["ANESTESIA_COTIZACIONES"] = [{"sequence": 1, "quotation_number": ACT, "number": ACT}]
+    show_issued_quotation(app, storage)
+    assert not app.exception and not app.error
+    nodes = list(app.main)
+    drive_link = next(index for index, node in enumerate(nodes) if node.type == "markdown" and "Todas las cotizaciones en Drive" in node.value)
+    review_index = next(index for index, node in enumerate(nodes) if node.type == "expander" and "Revisión final" in node.label)
+    saved_index = next(index for index, node in enumerate(nodes) if node.type == "expander" and node.label == "Cotizaciones guardadas")
+    assert drive_link < review_index < saved_index
+    review = next(expander for expander in app.expander if "Revisión final" in expander.label)
+    assert not review.proto.expanded
+    prompt = next(code.value for code in review.code)
+    assert URL in prompt and "13 documentos" in prompt
+    assert any("Adjunta en ChatGPT" in caption.value for caption in review.caption)
+    assert len(app.button) == 1 and not storage.enqueued
+
+
+def test_final_review_prompt_keeps_issued_act_when_new_form_link_is_entered(ui):
+    app, storage = ui
+    show_issued_quotation(app, storage)
+    app.text_input(key="anes_simple_url").set_value(URL2).run()
+    prompt = next(code.value for code in app.code if code.value.startswith("Revisa exhaustivamente"))
+    assert URL in prompt and URL2 not in prompt and not storage.enqueued
+
+
+def test_final_review_prompt_uses_form_link_when_no_quotation_has_been_issued(ui):
+    app, storage = ui
+    app.text_input(key="anes_simple_url").set_value(URL2).run()
+    prompt = app.code[0].value
+    assert URL2 in prompt and ACT2 in prompt and not quotation_boxes(app)
+    assert not app.exception and not storage.enqueued
 
 
 @pytest.mark.parametrize("catalog,price", [("K", "1234.5678"), ("C", "16.98")])

@@ -22,7 +22,7 @@ if getattr(_storage_module, "ANESTESIA_STORAGE_API_VERSION", 0) < 3:
 AnestesiaStorage = _storage_module.AnestesiaStorage
 DRIVE_PARENT, SHEET_ID = _storage_module.DRIVE_PARENT, _storage_module.SHEET_ID
 
-ANESTESIA_UI_VERSION = 18
+ANESTESIA_UI_VERSION = 19
 ACTIVE_STATES = {"En cola", "Procesando"}
 CATALOG_LABELS = {"K": "Mascarilla 4 · Catálogo K", "C": "Mascarilla 5 · Catálogo C"}
 TAX_LABELS = {"exento": "No aplica / exento", "adicional": "Se suma al precio", "incluido": "Ya incluido en el precio"}
@@ -600,6 +600,12 @@ def render_anestesia_docs(creds, actor):
                 st.caption("Usa el icono de copiar en la esquina superior derecha de cada cuadro.")
             except Exception:
                 st.warning("No fue posible leer los campos para copiar. La cotización sigue disponible en los enlaces anteriores.")
+        from services.anestesia_review import final_review_prompt
+        with st.expander("Revisión final con ChatGPT Pro · 13 documentos", expanded=False):
+            st.caption("Adjunta en ChatGPT los 11 documentos vigentes, la cotización firmada en PDF y el comprobante de participación. Copia el prompt; incluye el enlace del acto. Si ChatGPT no puede abrir los anexos oficiales, adjúntalos también.")
+            review_url = job.get("url", "") if issued_quotation else url.strip()
+            st.code(final_review_prompt(review_url), language=None, wrap_lines=True, height=400)
+            st.caption("La revisión se ejecuta en tu chat de ChatGPT Pro; la app no envía archivos ni certifica el cumplimiento. Si aún no has presentado, el comprobante quedará pendiente.")
         quotations = _records(storage.sheet_id, "ANESTESIA_COTIZACIONES", storage)
         if quotations:
             ordered = sorted(quotations, key=lambda r: int(r["sequence"]), reverse=True)

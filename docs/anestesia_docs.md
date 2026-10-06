@@ -38,6 +38,17 @@ Editar el formulario no cambia esos cuadros hasta generar una nueva cotización.
 La lectura se reutiliza durante cinco minutos y una regeneración usa el nuevo
 archivo. Si Drive falla, se mantienen disponibles los enlaces de descarga.
 
+Antes de **Cotizaciones guardadas** hay un desplegable cerrado de revisión
+final con ChatGPT Pro. Su prompt incorpora el enlace oficial y pide leer los
+11 respaldos, la cotización firmada y la constancia de participación, además
+del pliego, anexos y modificaciones. Devuelve dos checklists (13 documentos y
+11 comprobaciones), notas 1-10, evidencia breve, riesgos y conclusión.
+Los archivos se adjuntan manualmente en ChatGPT; la app no llama a OpenAI,
+envía documentos ni certifica la participación. Si ya existe una cotización
+verificada, el prompt conserva su acto aunque se edite el formulario.
+Sin acceso al portal/anexos o sin constancia de envío, exige marcar lo no
+verificable; ningún resultado equivale a inmunidad frente a impugnaciones.
+
 ### Identificacion y carpetas
 
 - Se usa **solo el numero oficial del acto** como numero de cotizacion. No se
