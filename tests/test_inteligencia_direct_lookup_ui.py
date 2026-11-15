@@ -3,6 +3,7 @@ import unittest
 import uuid
 from pathlib import Path
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 
@@ -108,6 +109,16 @@ class DirectLookupUITests(unittest.TestCase):
         self.app.toggle(key="intel_v3_direct_lookup_prices").set_value(True).run()
         self.assertEqual(len(self.app.exception), 0)
         self.assertEqual(self.app.session_state["price_calls"], 1)
+
+    def test_pagination_uses_session_snapshot_even_after_shared_cache_expires(self):
+        self.submit()
+        st.cache_data.clear()
+        self.app.session_state["fail_acts"] = True
+        self.app.number_input(key="intel_v3_direct_lookup_page").set_value(2).run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertEqual(self.app.session_state["act_calls"], 1)
+        self.assertEqual(len(self.app.dataframe[0].value), 50)
+        self.assertEqual(self.app.dataframe[0].value.iloc[0]["acto_key"], "43358-50")
 
 
 if __name__ == "__main__":

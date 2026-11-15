@@ -7,10 +7,12 @@ import os
 import re
 import sqlite3
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from threading import BoundedSemaphore
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import pandas as pd
 from sqlalchemy import create_engine, inspect, text
@@ -83,7 +85,10 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-11-14-direct-lookup-v11"
+ANALYTICS_SERVICE_VERSION = "2026-11-14-direct-lookup-v12"
+LOOKUP_WAIT_SECONDS = 20
+_LOOKUP_WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="intel-lookup")
+_LOOKUP_SLOTS = BoundedSemaphore(2)
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -96,6 +101,23 @@ SCORE_PRESETS = {
 RISK_CLASS_OTHER = "__OTRA_SIN_CLASE__"
 RISK_CLASS_NONE = "__NINGUNA__"
 RISK_CLASS_CANONICAL = ("A", "B", "C", "D")
+
+
+def _read_with_deadline(operation: Callable[[], pd.DataFrame]) -> pd.DataFrame:
+    slots = _LOOKUP_SLOTS
+    if not slots.acquire(blocking=False):
+        raise TimeoutError("La base analítica sigue atendiendo consultas anteriores. Reintenta en unos segundos.")
+    try:
+        future = _LOOKUP_WORKERS.submit(operation)
+    except Exception:
+        slots.release()
+        raise
+    future.add_done_callback(lambda completed: slots.release())
+    try:
+        return future.result(timeout=LOOKUP_WAIT_SECONDS)
+    except FutureTimeoutError:
+        future.cancel()
+        raise TimeoutError("La base analítica excedió el tiempo de espera de esta consulta.") from None
 
 
 def clean_text(value: object) -> str:
@@ -1504,11 +1526,14 @@ class AnalyticsRepository:
         return self._lookup_query(query, params)
 
     def _lookup_query(self, query: str, params: Mapping[str, Any]) -> pd.DataFrame:
-        with self.engine.begin() as connection:
-            if self.dialect == "postgresql":
-                connection.exec_driver_sql("SET LOCAL statement_timeout = '15s'")
-                connection.exec_driver_sql("SET LOCAL lock_timeout = '3s'")
-            return pd.read_sql_query(text(query), connection, params=params)
+        def read() -> pd.DataFrame:
+            with self.engine.begin() as connection:
+                if self.dialect == "postgresql":
+                    connection.exec_driver_sql("SET LOCAL statement_timeout = '15s'")
+                    connection.exec_driver_sql("SET LOCAL lock_timeout = '3s'")
+                return pd.read_sql_query(text(query), connection, params=params)
+
+        return _read_with_deadline(read) if self.dialect == "postgresql" else read()
 
     def all_acts_for_ficha(self, ficha: str) -> pd.DataFrame:
         """Devuelve el histórico completo aceptado de una ficha exacta.

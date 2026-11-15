@@ -6,6 +6,9 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import BoundedSemaphore, Event
+from time import monotonic
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -18,6 +21,7 @@ sys.path.insert(0, str(APP_ROOT))
 from services.inteligencia_proveedores_v3 import (  # noqa: E402
     AnalyticsFilters,
     AnalyticsRepository,
+    _read_with_deadline,
     RISK_CLASS_NONE,
     RISK_CLASS_OTHER,
     apply_master_filters,
@@ -31,6 +35,36 @@ from services.inteligencia_proveedores_v3 import (  # noqa: E402
 
 
 class ServiceUnitTests(unittest.TestCase):
+    def test_lookup_deadline_releases_ui_without_queuing_unlimited_remote_reads(self) -> None:
+        release = Event()
+        started = Event()
+        executor = ThreadPoolExecutor(max_workers=1)
+        slots = BoundedSemaphore(1)
+
+        def slow_read():
+            started.set()
+            release.wait(3)
+            return pd.DataFrame()
+
+        try:
+            with patch("services.inteligencia_proveedores_v3._LOOKUP_WORKERS", executor), patch("services.inteligencia_proveedores_v3._LOOKUP_SLOTS", slots), patch("services.inteligencia_proveedores_v3.LOOKUP_WAIT_SECONDS", 0.05):
+                before = monotonic()
+                with self.assertRaisesRegex(TimeoutError, "excedió"):
+                    _read_with_deadline(slow_read)
+                self.assertLess(monotonic() - before, 1)
+                self.assertTrue(started.is_set())
+                next_read = MagicMock()
+                with self.assertRaisesRegex(TimeoutError, "consultas anteriores"):
+                    _read_with_deadline(next_read)
+                next_read.assert_not_called()
+                release.set()
+                executor.shutdown(wait=True)
+                self.assertTrue(slots.acquire(blocking=False))
+                slots.release()
+        finally:
+            release.set()
+            executor.shutdown(wait=True)
+
     def test_direct_lookup_timeouts_are_scoped_to_postgres_transaction(self) -> None:
         repo = AnalyticsRepository.__new__(AnalyticsRepository)
         repo.engine = MagicMock()

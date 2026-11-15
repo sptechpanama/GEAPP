@@ -53,7 +53,11 @@ _ANALYTICS_EXPORTS = (
     "sort_and_page",
     "split_search_groups",
 )
-if any(not hasattr(_analytics_v3, name) for name in _ANALYTICS_EXPORTS):
+_EXPECTED_ANALYTICS_SERVICE_VERSION = "2026-11-14-direct-lookup-v12"
+if (
+    any(not hasattr(_analytics_v3, name) for name in _ANALYTICS_EXPORTS)
+    or getattr(_analytics_v3, "ANALYTICS_SERVICE_VERSION", "") != _EXPECTED_ANALYTICS_SERVICE_VERSION
+):
     importlib.invalidate_caches()
     _analytics_v3 = importlib.reload(_analytics_v3)
 
@@ -180,7 +184,7 @@ def _database_url() -> str:
     return _config_value("SUPABASE_DB_URL") or _config_value("DATABASE_URL")
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def _repository(database_url: str, api_version: str) -> AnalyticsRepository:
     # ``api_version`` forma parte de la clave del cache. Al agregar metodos al
     # repositorio se cambia esta constante para impedir que Streamlit reutilice
@@ -1344,39 +1348,55 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         return
 
     refresh_col, current_col = st.columns([1, 4])
-    if refresh_col.button("Actualizar resultados", key="intel_v3_direct_lookup_refresh"):
+    refresh_requested = refresh_col.button("Actualizar resultados", key="intel_v3_direct_lookup_refresh")
+    if refresh_requested:
         _all_acts_data.clear(ficha, ANALYTICS_REPOSITORY_API_VERSION, repository)
         _price_benchmark_data.clear((ficha,), ANALYTICS_REPOSITORY_API_VERSION, repository)
         st.session_state["intel_v3_direct_lookup_page"] = 1
     current_col.caption(f"Consulta activa: **{labels.get(ficha, ficha)}**")
 
-    try:
-        with st.spinner(f"Consultando el histórico completo de la ficha {ficha}..."):
-            acts = _all_acts_data(
-                ficha,
-                ANALYTICS_REPOSITORY_API_VERSION,
-                repository,
-            )
-        st.session_state["intel_v3_direct_lookup_snapshot"] = {
-            "ficha": ficha,
-            "version": ANALYTICS_REPOSITORY_API_VERSION,
-            "acts": acts,
-            "read_at": acts.attrs.get("lookup_read_at", "fecha de lectura no disponible"),
-        }
-    except Exception:
-        logging.exception("Falló la consulta directa de la ficha %s", ficha)
-        snapshot = st.session_state.get("intel_v3_direct_lookup_snapshot", {})
-        if snapshot.get("ficha") != ficha or snapshot.get("version") != ANALYTICS_REPOSITORY_API_VERSION:
-            st.error(
-                "No fue posible consultar esa ficha en este momento. "
-                "Presiona **Actualizar resultados** e inténtalo nuevamente."
-            )
-            return
+    snapshot = st.session_state.get("intel_v3_direct_lookup_snapshot", {})
+    snapshot_matches = (
+        snapshot.get("ficha") == ficha
+        and snapshot.get("version") == ANALYTICS_REPOSITORY_API_VERSION
+    )
+    if snapshot_matches and not submitted and not refresh_requested:
         acts = snapshot["acts"]
+    else:
+        try:
+            with st.spinner(f"Consultando el histórico completo de la ficha {ficha}..."):
+                acts = _all_acts_data(
+                    ficha,
+                    ANALYTICS_REPOSITORY_API_VERSION,
+                    repository,
+                )
+            snapshot = {
+                "ficha": ficha,
+                "version": ANALYTICS_REPOSITORY_API_VERSION,
+                "acts": acts,
+                "read_at": acts.attrs.get("lookup_read_at", "fecha de lectura no disponible"),
+                "refresh_failed": False,
+            }
+            st.session_state["intel_v3_direct_lookup_snapshot"] = snapshot
+        except Exception:
+            logging.exception("Falló la consulta directa de la ficha %s", ficha)
+            if not snapshot_matches:
+                st.error(
+                    "No fue posible consultar esa ficha en este momento. "
+                    "Presiona **Actualizar resultados** e inténtalo nuevamente."
+                )
+                return
+            acts = snapshot["acts"]
+            snapshot["refresh_failed"] = True
+    if snapshot.get("refresh_failed"):
         st.warning(
             "No se pudo actualizar la lectura. Se muestra el último resultado de esta ficha "
             f"({snapshot['read_at']}); no es una actualización nueva."
         )
+    st.caption(
+        f"Datos consultados: {snapshot['read_at']}. "
+        "Cambiar de página conserva esta lectura; usa Actualizar resultados para consultar novedades."
+    )
     if acts.empty:
         st.warning(
             f"No se encontraron actos elegibles para la ficha {ficha}. Puede no existir en la capa "

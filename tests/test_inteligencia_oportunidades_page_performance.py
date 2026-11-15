@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 
@@ -72,3 +73,14 @@ def test_direct_lookup_skips_master_sidebar_and_reruns_only_its_fragment() -> No
     assert "@st.fragment\ndef _render_direct_ficha_lookup" in source
     assert 'page_acts = acts.iloc[offset:offset + page_size]' in source
     assert '_all_acts_data.clear(ficha, ANALYTICS_REPOSITORY_API_VERSION, repository)' in source
+
+
+def test_hot_deploy_reloads_service_when_implementation_version_changes() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    service = PAGE.parents[1] / "services" / "inteligencia_proveedores_v3.py"
+    versions = []
+    for path, name in ((PAGE, "_EXPECTED_ANALYTICS_SERVICE_VERSION"), (service, "ANALYTICS_SERVICE_VERSION")):
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        versions.append(next(ast.literal_eval(node.value) for node in module.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)))
+    assert versions[0] == versions[1]
+    assert 'getattr(_analytics_v3, "ANALYTICS_SERVICE_VERSION", "") != _EXPECTED_ANALYTICS_SERVICE_VERSION' in source
