@@ -53,7 +53,7 @@ _ANALYTICS_EXPORTS = (
     "sort_and_page",
     "split_search_groups",
 )
-_EXPECTED_ANALYTICS_SERVICE_VERSION = "2026-11-14-direct-lookup-v12"
+_EXPECTED_ANALYTICS_SERVICE_VERSION = "2026-11-15-direct-lookup-v13"
 if (
     any(not hasattr(_analytics_v3, name) for name in _ANALYTICS_EXPORTS)
     or getattr(_analytics_v3, "ANALYTICS_SERVICE_VERSION", "") != _EXPECTED_ANALYTICS_SERVICE_VERSION
@@ -1274,6 +1274,64 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
             _render_price_benchmark_legend()
 
 
+def _direct_lookup_labels(repository: AnalyticsRepository) -> dict[str, str]:
+    now = datetime.now(timezone.utc).timestamp()
+    cached = st.session_state.get("intel_v3_direct_lookup_catalog", {})
+    if cached.get("version") != ANALYTICS_REPOSITORY_API_VERSION:
+        cached = {}
+    if now < cached.get("retry_at", 0):
+        if cached.get("failed"):
+            st.caption("Catálogo no actualizado; puedes consultar por número exacto o usar las coincidencias guardadas.")
+        return cached.get("labels", {})
+    try:
+        options_frame = _ficha_search_options(
+            ANALYTICS_REPOSITORY_API_VERSION,
+            repository,
+        )
+        if options_frame.empty and cached.get("labels"):
+            _ficha_search_options.clear(ANALYTICS_REPOSITORY_API_VERSION, repository)
+            raise ValueError("El catálogo devolvió una lista vacía después de una lectura válida.")
+    except Exception:
+        logging.exception("No se pudo cargar el catálogo para Consulta por ficha")
+        cached.update(version=ANALYTICS_REPOSITORY_API_VERSION, retry_at=now + 60, failed=True)
+        st.session_state["intel_v3_direct_lookup_catalog"] = cached
+        st.warning(
+            "No se pudo renovar el catálogo de sugerencias. Se conservan las coincidencias "
+            "ya cargadas; también puedes escribir un número de ficha exacto."
+        )
+        return cached.get("labels", {})
+    labels: dict[str, str] = {}
+    for row in options_frame.itertuples(index=False):
+        code = str(getattr(row, "ficha", "") or "").strip()
+        name = str(getattr(row, "nombre_ficha", "") or "").strip()
+        if code:
+            labels[code] = f"{code} | {name or f'Ficha {code}'}"
+    st.session_state["intel_v3_direct_lookup_catalog"] = {
+        "version": ANALYTICS_REPOSITORY_API_VERSION,
+        "labels": labels,
+        "retry_at": now + 3600,
+        "failed": False,
+    }
+    return labels
+
+
+def _remember_direct_lookup(snapshot: dict) -> None:
+    history = st.session_state.get("intel_v3_direct_lookup_history", {})
+    history = {
+        code: saved for code, saved in history.items()
+        if saved.get("version") == ANALYTICS_REPOSITORY_API_VERSION
+    }
+    history.pop(snapshot["ficha"], None)
+    history[snapshot["ficha"]] = snapshot
+    while history and (
+        len(history) > 4
+        or sum(saved["acts"].memory_usage(deep=True).sum() for saved in history.values()) > 8 * 1024 * 1024
+    ):
+        history.pop(next(iter(history)))
+    st.session_state["intel_v3_direct_lookup_history"] = history
+    st.session_state["intel_v3_direct_lookup_snapshot"] = snapshot
+
+
 @st.fragment
 def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     st.subheader("Consulta directa por ficha")
@@ -1283,25 +1341,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         "Esta consulta es independiente del rango de fechas del mapa maestro y mantiene "
         "la exclusión de fichas que requieren registro sanitario."
     )
-
-    try:
-        options_frame = _ficha_search_options(
-            ANALYTICS_REPOSITORY_API_VERSION,
-            repository,
-        )
-    except Exception:
-        logging.exception("No se pudo cargar el catálogo para Consulta por ficha")
-        options_frame = pd.DataFrame(columns=["ficha", "nombre_ficha"])
-        st.warning(
-            "No se pudo cargar temporalmente el catálogo de sugerencias. "
-            "Aún puedes escribir un número de ficha exacto."
-        )
-    labels: dict[str, str] = {}
-    for row in options_frame.itertuples(index=False):
-        code = str(getattr(row, "ficha", "") or "").strip()
-        name = str(getattr(row, "nombre_ficha", "") or "").strip()
-        if code:
-            labels[code] = f"{code} | {name or f'Ficha {code}'}"
+    labels = _direct_lookup_labels(repository)
 
     st.caption(f"{len(labels):,} fichas con actos elegibles disponibles para consulta.")
     choices = list(labels.values())
@@ -1325,6 +1365,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     if cleared:
         st.session_state.pop("intel_v3_direct_lookup_code", None)
         st.session_state.pop("intel_v3_direct_lookup_snapshot", None)
+        st.session_state.pop("intel_v3_direct_lookup_history", None)
     elif submitted:
         raw_choice = str(selected_choice or "").strip()
         code_match = re.match(r"^\s*\*?(\d{3,8})(?:\s*\||\s*$)", raw_choice)
@@ -1356,12 +1397,15 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     current_col.caption(f"Consulta activa: **{labels.get(ficha, ficha)}**")
 
     snapshot = st.session_state.get("intel_v3_direct_lookup_snapshot", {})
+    if snapshot.get("ficha") != ficha:
+        snapshot = st.session_state.get("intel_v3_direct_lookup_history", {}).get(ficha, {})
     snapshot_matches = (
         snapshot.get("ficha") == ficha
         and snapshot.get("version") == ANALYTICS_REPOSITORY_API_VERSION
     )
-    if snapshot_matches and not submitted and not refresh_requested:
+    if snapshot_matches and not refresh_requested:
         acts = snapshot["acts"]
+        _remember_direct_lookup(snapshot)
     else:
         try:
             with st.spinner(f"Consultando el histórico completo de la ficha {ficha}..."):
@@ -1377,7 +1421,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
                 "read_at": acts.attrs.get("lookup_read_at", "fecha de lectura no disponible"),
                 "refresh_failed": False,
             }
-            st.session_state["intel_v3_direct_lookup_snapshot"] = snapshot
+            _remember_direct_lookup(snapshot)
         except Exception:
             logging.exception("Falló la consulta directa de la ficha %s", ficha)
             if not snapshot_matches:
@@ -1388,6 +1432,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
                 return
             acts = snapshot["acts"]
             snapshot["refresh_failed"] = True
+            _remember_direct_lookup(snapshot)
     if snapshot.get("refresh_failed"):
         st.warning(
             "No se pudo actualizar la lectura. Se muestra el último resultado de esta ficha "
@@ -1395,7 +1440,8 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         )
     st.caption(
         f"Datos consultados: {snapshot['read_at']}. "
-        "Cambiar de página conserva esta lectura; usa Actualizar resultados para consultar novedades."
+        "Cambiar de página o volver a una ficha reciente conserva esta lectura. "
+        "Usa Actualizar resultados para consultar novedades."
     )
     if acts.empty:
         st.warning(
@@ -2401,7 +2447,6 @@ if selected_view == "Rotación e inventario":
 
 if selected_view == "Consulta por ficha":
     repo = _require_repository()
-    _render_data_status(repo)
     _render_direct_ficha_lookup(repo)
     st.stop()
 

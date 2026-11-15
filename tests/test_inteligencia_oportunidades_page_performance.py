@@ -70,6 +70,7 @@ def test_direct_lookup_skips_master_sidebar_and_reruns_only_its_fragment() -> No
     sidebar = runtime.index('st.header("Filtros del estudio")')
     assert direct < sidebar
     assert "st.stop()" in runtime[direct:sidebar]
+    assert "_render_data_status(repo)" not in runtime[direct:sidebar]
     assert "@st.fragment\ndef _render_direct_ficha_lookup" in source
     assert 'page_acts = acts.iloc[offset:offset + page_size]' in source
     assert '_all_acts_data.clear(ficha, ANALYTICS_REPOSITORY_API_VERSION, repository)' in source

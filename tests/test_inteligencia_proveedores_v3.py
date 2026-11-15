@@ -504,6 +504,17 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertNotIn("99999", options.index)
         self.assertNotIn("88888", options.index)
 
+    def test_ficha_search_options_uses_bulk_matching_not_per_ficha_queries(self) -> None:
+        with patch.object(self.repo, "_lookup_query", wraps=self.repo._lookup_query) as read:
+            self.repo.ficha_search_options()
+        self.assertEqual(read.call_count, 1)
+        query = read.call_args.args[0]
+        self.assertIn("detected_fichas AS MATERIALIZED", query)
+        self.assertIn("INNER JOIN detected_fichas", query)
+        self.assertIn("INNER JOIN eligible_fichas", query)
+        self.assertNotIn("LATERAL", query)
+        self.assertNotIn("SELECT 1 FROM", query)
+
     def test_ficha_search_options_recovers_full_catalog_name(self) -> None:
         with self.repo.engine.begin() as connection:
             connection.exec_driver_sql(

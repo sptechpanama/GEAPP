@@ -2,6 +2,9 @@ import ast
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+
+import pandas as pd
 
 import streamlit as st
 from streamlit.testing.v1 import AppTest
@@ -14,6 +17,7 @@ FUNCTIONS = {
     "_price_benchmark_for_fichas", "_enrich_acts_with_price_benchmark",
     "_price_benchmark_column_config", "_render_price_benchmark_summary",
     "_render_price_benchmark_legend", "_money", "_render_direct_ficha_lookup",
+    "_direct_lookup_labels", "_remember_direct_lookup",
 }
 
 
@@ -35,7 +39,9 @@ class FakeRepository:
         st.session_state["catalog_calls"] = st.session_state.get("catalog_calls", 0) + 1
         if st.session_state.get("fail_catalog"):
             raise RuntimeError("catalog unavailable")
-        return pd.DataFrame([{{"ficha":"43358", "nombre_ficha":"Circuito anestesia"}}, {{"ficha":"107110", "nombre_ficha":"Cilindro"}}])
+        if st.session_state.get("empty_catalog"):
+            return pd.DataFrame(columns=["ficha", "nombre_ficha"])
+        return pd.DataFrame([{{"ficha":"43358", "nombre_ficha":"Circuito anestesia"}}, {{"ficha":"107110", "nombre_ficha":"Cilindro"}}, *[{{"ficha":str(100001 + index), "nombre_ficha":f"Producto {{index}}"}} for index in range(4)]])
 
     def all_acts_for_ficha(self, ficha):
         st.session_state["act_calls"] = st.session_state.get("act_calls", 0) + 1
@@ -119,6 +125,77 @@ class DirectLookupUITests(unittest.TestCase):
         self.assertEqual(self.app.session_state["act_calls"], 1)
         self.assertEqual(len(self.app.dataframe[0].value), 50)
         self.assertEqual(self.app.dataframe[0].value.iloc[0]["acto_key"], "43358-50")
+
+    def test_return_to_recent_ficha_never_waits_for_remote_after_shared_cache_expires(self):
+        self.submit()
+        timestamp = self.app.session_state["intel_v3_direct_lookup_snapshot"]["read_at"]
+        self.submit(1)
+        st.cache_data.clear()
+        self.app.session_state["fail_acts"] = True
+        self.app.session_state["fail_catalog"] = True
+        self.submit()
+        self.assertEqual(self.app.metric[1].value, "123")
+        self.assertEqual(self.app.session_state["act_calls"], 2)
+        self.assertEqual(self.app.session_state["catalog_calls"], 1)
+        self.assertEqual(self.app.session_state["intel_v3_direct_lookup_snapshot"]["read_at"], timestamp)
+        self.assertEqual(len(self.app.error), 0)
+
+    def test_expired_catalog_keeps_labels_and_does_not_retry_on_every_widget(self):
+        self.submit()
+        self.app.session_state["intel_v3_direct_lookup_catalog"]["retry_at"] = 0
+        st.cache_data.clear()
+        self.app.session_state["fail_catalog"] = True
+        self.app.number_input(key="intel_v3_direct_lookup_page").set_value(2).run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertEqual(len(self.app.selectbox(key="intel_v3_direct_lookup_selector_v2").options), 6)
+        self.assertEqual(self.app.session_state["catalog_calls"], 2)
+        self.app.number_input(key="intel_v3_direct_lookup_page").set_value(3).run()
+        self.assertEqual(self.app.session_state["catalog_calls"], 2)
+        self.assertEqual(self.app.session_state["act_calls"], 1)
+
+    def test_recent_history_is_bounded_and_clear_removes_it(self):
+        for index in range(6):
+            self.submit(index)
+        history = self.app.session_state["intel_v3_direct_lookup_history"]
+        self.assertEqual(len(history), 4)
+        self.assertNotIn("43358", history)
+        self.assertNotIn("107110", history)
+        next(button for button in self.app.button if button.label == "Limpiar").click().run()
+        self.assertNotIn("intel_v3_direct_lookup_history", self.app.session_state.filtered_state)
+
+    def test_submit_same_ficha_uses_snapshot_but_refresh_queries_database(self):
+        self.submit()
+        st.cache_data.clear()
+        self.submit()
+        self.assertEqual(self.app.session_state["act_calls"], 1)
+        self.app.button(key="intel_v3_direct_lookup_refresh").click().run()
+        self.assertEqual(self.app.session_state["act_calls"], 2)
+        self.assertEqual(len(self.app.exception), 0)
+
+    def test_empty_catalog_does_not_remove_previously_loaded_suggestions(self):
+        self.app.session_state["intel_v3_direct_lookup_catalog"]["retry_at"] = 0
+        self.app.session_state["empty_catalog"] = True
+        st.cache_data.clear()
+        self.app.run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertEqual(len(self.app.selectbox(key="intel_v3_direct_lookup_selector_v2").options), 6)
+        self.assertTrue(self.app.session_state["intel_v3_direct_lookup_catalog"]["failed"])
+        self.app.session_state["empty_catalog"] = False
+        self.app.session_state["intel_v3_direct_lookup_catalog"]["retry_at"] = 0
+        self.app.run()
+        self.assertFalse(self.app.session_state["intel_v3_direct_lookup_catalog"]["failed"])
+        self.assertEqual(self.app.session_state["catalog_calls"], 3)
+
+    def test_history_has_memory_budget_and_drops_previous_code_versions(self):
+        module = ast.parse(PAGE.read_text(encoding="utf-8"))
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_remember_direct_lookup")
+        state = {"intel_v3_direct_lookup_history": {"old": {"version": "previous"}}}
+        namespace = {"st": SimpleNamespace(session_state=state), "ANALYTICS_REPOSITORY_API_VERSION": "current"}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(PAGE), "exec"), namespace)
+        snapshot = {"ficha": "43358", "version": "current", "acts": pd.DataFrame([{"large": "x" * (8 * 1024 * 1024)}])}
+        namespace["_remember_direct_lookup"](snapshot)
+        self.assertEqual(state["intel_v3_direct_lookup_history"], {})
+        self.assertIs(state["intel_v3_direct_lookup_snapshot"], snapshot)
 
 
 if __name__ == "__main__":

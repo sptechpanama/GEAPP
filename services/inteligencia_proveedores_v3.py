@@ -85,7 +85,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-11-14-direct-lookup-v12"
+ANALYTICS_SERVICE_VERSION = "2026-11-15-direct-lookup-v13"
 LOOKUP_WAIT_SECONDS = 20
 _LOOKUP_WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="intel-lookup")
 _LOOKUP_SLOTS = BoundedSemaphore(2)
@@ -1555,62 +1555,39 @@ class AnalyticsRepository:
         requieren registro sanitario. Para nombres vacios o truncados se usa el
         nombre generico mas limpio del catalogo de oferentes como respaldo.
         """
-        if self.dialect == "postgresql":
-            catalog_cte = ""
-            catalog_join = """
-                LEFT JOIN LATERAL (
-                    SELECT TRIM(c0.producto) AS catalog_name
-                    FROM intel_ficha_catalogo c0
-                    WHERE c0.ficha = e.ficha
-                      AND (COALESCE(n.metadata_name, '') = '' OR n.metadata_name LIKE '%...%')
-                      AND COALESCE(TRIM(c0.producto), '') <> ''
-                    ORDER BY LENGTH(TRIM(c0.producto)), TRIM(c0.producto)
-                    LIMIT 1
-                ) c ON TRUE
-            """
-        else:
-            # SQLite no implementa LATERAL. El catalogo se limita primero a las
-            # fichas elegibles para evitar ordenar productos que nunca se
-            # mostraran en el selector.
-            catalog_cte = """
-                , catalog_ranked AS (
+        query = f"""
+                WITH detected_fichas AS MATERIALIZED (
+                    SELECT DISTINCT ficha
+                    FROM intel_actos_fichas
+                    WHERE detection_score >= :score_min
+                ),
+                eligible_fichas AS MATERIALIZED (
+                    SELECT DISTINCT m.ficha
+                    FROM intel_ficha_metadata m
+                    INNER JOIN detected_fichas d ON d.ficha = m.ficha
+                    WHERE LOWER(TRIM(COALESCE(m.registro_sanitario, ''))) = :eligible_rs_status
+                      AND COALESCE(TRIM(m.ficha), '') <> ''
+                ),
+                metadata_names AS MATERIALIZED (
+                    SELECT m.ficha,
+                           MAX(COALESCE(NULLIF(TRIM(m.nombre_ficha), ''), '')) AS metadata_name,
+                           MAX(COALESCE(NULLIF(TRIM(m.clase_riesgo), ''), '')) AS clase_riesgo,
+                           MAX(COALESCE(NULLIF(TRIM(m.enlace_minsa), ''), '')) AS enlace_minsa
+                    FROM intel_ficha_metadata m
+                    INNER JOIN eligible_fichas e ON e.ficha = m.ficha
+                    GROUP BY m.ficha
+                ),
+                catalog_ranked AS (
                     SELECT c.ficha, TRIM(c.producto) AS catalog_name,
                            ROW_NUMBER() OVER (
                                PARTITION BY c.ficha
                                ORDER BY LENGTH(TRIM(c.producto)), TRIM(c.producto)
                            ) AS position
                     FROM intel_ficha_catalogo c
-                    INNER JOIN eligible_fichas e ON e.ficha = c.ficha
-                    INNER JOIN metadata_names n ON n.ficha = e.ficha
+                    INNER JOIN metadata_names n ON n.ficha = c.ficha
                     WHERE COALESCE(TRIM(c.producto), '') <> ''
                       AND (COALESCE(n.metadata_name, '') = '' OR n.metadata_name LIKE '%...%')
                 )
-            """
-            catalog_join = """
-                LEFT JOIN catalog_ranked c ON c.ficha = e.ficha AND c.position = 1
-            """
-
-        query = f"""
-                WITH eligible_fichas AS MATERIALIZED (
-                    SELECT DISTINCT m.ficha
-                    FROM intel_ficha_metadata m
-                    WHERE LOWER(TRIM(COALESCE(m.registro_sanitario, ''))) = :eligible_rs_status
-                      AND COALESCE(TRIM(m.ficha), '') <> ''
-                      AND (
-                          SELECT 1 FROM intel_actos_fichas f
-                          WHERE f.ficha = m.ficha AND f.detection_score >= :score_min
-                          LIMIT 1
-                      ) = 1
-                ),
-                metadata_names AS (
-                    SELECT ficha,
-                           MAX(COALESCE(NULLIF(TRIM(nombre_ficha), ''), '')) AS metadata_name,
-                           MAX(COALESCE(NULLIF(TRIM(clase_riesgo), ''), '')) AS clase_riesgo,
-                           MAX(COALESCE(NULLIF(TRIM(enlace_minsa), ''), '')) AS enlace_minsa
-                    FROM intel_ficha_metadata
-                    GROUP BY ficha
-                )
-                {catalog_cte}
                 SELECT e.ficha,
                        CASE
                            WHEN COALESCE(c.catalog_name, '') <> ''
@@ -1625,7 +1602,7 @@ class AnalyticsRepository:
                        COALESCE(n.enlace_minsa, '') AS enlace_minsa
                 FROM eligible_fichas e
                 LEFT JOIN metadata_names n ON n.ficha = e.ficha
-                {catalog_join}
+                LEFT JOIN catalog_ranked c ON c.ficha = e.ficha AND c.position = 1
                 ORDER BY e.ficha
         """
         return self._lookup_query(
