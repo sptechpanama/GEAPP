@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -237,7 +237,7 @@ def _acts_data(ficha: str, filters: AnalyticsFilters, _repo: AnalyticsRepository
     return _repo.acts_for_ficha(ficha, filters)
 
 
-@st.cache_data(show_spinner=False, ttl=300, max_entries=2)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=6)
 def _all_acts_data(
     ficha: str,
     cache_version: str,
@@ -246,13 +246,14 @@ def _all_acts_data(
     _ = cache_version
     method = getattr(_repo, "all_acts_for_ficha", None)
     if callable(method):
-        return method(ficha)
-    # Compatibilidad defensiva durante un despliegue en caliente: versiones
-    # anteriores ya tenian acts_for_ficha, pero no el acceso historico directo.
-    return _repo.acts_for_ficha(
-        ficha,
-        AnalyticsFilters(detection_profile="muy_flexible"),
-    )
+        result = method(ficha)
+    else:
+        result = _repo.acts_for_ficha(
+            ficha,
+            AnalyticsFilters(detection_profile="muy_flexible"),
+        )
+    result.attrs["lookup_read_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return result
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=1)
@@ -265,6 +266,11 @@ def _ficha_search_options(
     if callable(method):
         return method()
     return pd.DataFrame(columns=["ficha", "nombre_ficha"])
+
+
+@st.cache_data(show_spinner=False, ttl=300, max_entries=2)
+def _build_metadata_cached(cache_version: str, _repo: AnalyticsRepository) -> dict[str, str]:
+    return _repo.build_metadata()
 
 
 @st.cache_data(show_spinner=False, ttl=300, max_entries=2)
@@ -1011,7 +1017,7 @@ def _deep_study_catalog_data(
 
 
 def _render_data_status(repository: AnalyticsRepository) -> None:
-    metadata = repository.build_metadata()
+    metadata = _build_metadata_cached(ANALYTICS_REPOSITORY_API_VERSION, repository)
     cols = st.columns([1.4, 1, 1, 1])
     cols[0].caption(f"Fuente: **{repository.source_label}**")
     # Los conteos ya se guardan al construir la capa analitica. Consultarlos
@@ -1264,6 +1270,7 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
             _render_price_benchmark_legend()
 
 
+@st.fragment
 def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     st.subheader("Consulta directa por ficha")
     st.caption(
@@ -1286,9 +1293,9 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
             "Aún puedes escribir un número de ficha exacto."
         )
     labels: dict[str, str] = {}
-    for _, row in options_frame.iterrows():
-        code = str(row.get("ficha", "") or "").strip()
-        name = str(row.get("nombre_ficha", "") or "").strip()
+    for row in options_frame.itertuples(index=False):
+        code = str(getattr(row, "ficha", "") or "").strip()
+        name = str(getattr(row, "nombre_ficha", "") or "").strip()
         if code:
             labels[code] = f"{code} | {name or f'Ficha {code}'}"
 
@@ -1313,6 +1320,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
 
     if cleared:
         st.session_state.pop("intel_v3_direct_lookup_code", None)
+        st.session_state.pop("intel_v3_direct_lookup_snapshot", None)
     elif submitted:
         raw_choice = str(selected_choice or "").strip()
         code_match = re.match(r"^\s*\*?(\d{3,8})(?:\s*\||\s*$)", raw_choice)
@@ -1320,6 +1328,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
             st.session_state["intel_v3_direct_lookup_code"] = (
                 code_match.group(1).lstrip("0") or "0"
             )
+            st.session_state["intel_v3_direct_lookup_page"] = 1
         else:
             st.session_state.pop("intel_v3_direct_lookup_code", None)
             st.warning(
@@ -1336,7 +1345,9 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
 
     refresh_col, current_col = st.columns([1, 4])
     if refresh_col.button("Actualizar resultados", key="intel_v3_direct_lookup_refresh"):
-        _all_acts_data.clear()
+        _all_acts_data.clear(ficha, ANALYTICS_REPOSITORY_API_VERSION, repository)
+        _price_benchmark_data.clear((ficha,), ANALYTICS_REPOSITORY_API_VERSION, repository)
+        st.session_state["intel_v3_direct_lookup_page"] = 1
     current_col.caption(f"Consulta activa: **{labels.get(ficha, ficha)}**")
 
     try:
@@ -1346,13 +1357,26 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
                 ANALYTICS_REPOSITORY_API_VERSION,
                 repository,
             )
+        st.session_state["intel_v3_direct_lookup_snapshot"] = {
+            "ficha": ficha,
+            "version": ANALYTICS_REPOSITORY_API_VERSION,
+            "acts": acts,
+            "read_at": acts.attrs.get("lookup_read_at", "fecha de lectura no disponible"),
+        }
     except Exception:
         logging.exception("Falló la consulta directa de la ficha %s", ficha)
-        st.error(
-            "No fue posible consultar esa ficha en este momento. "
-            "Presiona **Actualizar resultados** e inténtalo nuevamente."
+        snapshot = st.session_state.get("intel_v3_direct_lookup_snapshot", {})
+        if snapshot.get("ficha") != ficha or snapshot.get("version") != ANALYTICS_REPOSITORY_API_VERSION:
+            st.error(
+                "No fue posible consultar esa ficha en este momento. "
+                "Presiona **Actualizar resultados** e inténtalo nuevamente."
+            )
+            return
+        acts = snapshot["acts"]
+        st.warning(
+            "No se pudo actualizar la lectura. Se muestra el último resultado de esta ficha "
+            f"({snapshot['read_at']}); no es una actualización nueva."
         )
-        return
     if acts.empty:
         st.warning(
             f"No se encontraron actos elegibles para la ficha {ficha}. Puede no existir en la capa "
@@ -1361,7 +1385,6 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         return
 
     acts = acts.drop_duplicates(subset=["acto_key"], keep="first").reset_index(drop=True)
-    acts = _enrich_acts_with_price_benchmark(acts, ficha, repository)
     reference_total = pd.to_numeric(
         acts.get("reference_amount_attributed"), errors="coerce"
     ).fillna(0).sum()
@@ -1379,7 +1402,9 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
     if not valid_dates.empty:
         st.caption(f"Cobertura temporal encontrada: **{valid_dates.min()} → {valid_dates.max()}**")
 
-    _render_price_benchmark_summary((ficha,), repository)
+    if st.toggle("Mostrar precios unitarios históricos", value=False, key="intel_v3_direct_lookup_prices"):
+        acts = _enrich_acts_with_price_benchmark(acts, ficha, repository)
+        _render_price_benchmark_summary((ficha,), repository)
 
     display_columns = [
         "enlace", "acto_key", "titulo", "estado", "publication_date",
@@ -1391,8 +1416,23 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         "detection_method", "detection_evidence",
         *PRICE_BENCHMARK_VALUE_COLUMNS,
     ]
+    size_col, page_col = st.columns(2)
+    page_size = int(size_col.selectbox(
+        "Actos por página", [25, 50, 100], index=1, key="intel_v3_direct_lookup_page_size"
+    ))
+    total_pages = max(1, (len(acts) + page_size - 1) // page_size)
+    page_key = "intel_v3_direct_lookup_page"
+    if int(st.session_state.get(page_key, 1)) > total_pages:
+        st.session_state[page_key] = 1
+    page = int(page_col.number_input("Página", min_value=1, max_value=total_pages, value=1, key=page_key))
+    offset = (page - 1) * page_size
+    page_acts = acts.iloc[offset:offset + page_size]
+    st.caption(
+        f"Actos {offset + 1:,}-{min(offset + page_size, len(acts)):,} de {len(acts):,}. "
+        "Los totales y la descarga incluyen todo el histórico encontrado."
+    )
     display = intelligence_view_frame(
-        acts[[column for column in display_columns if column in acts.columns]]
+        page_acts[[column for column in display_columns if column in page_acts.columns]]
     )
     st.dataframe(
         display,
@@ -1427,6 +1467,7 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         file_name=f"actos_ficha_{ficha}.csv",
         mime="text/csv",
         key="intel_v3_direct_lookup_download",
+        on_click="ignore",
     )
 
 
@@ -2336,6 +2377,12 @@ selected_view = st.radio(
 
 if selected_view == "Rotación e inventario":
     render_rotation_view(current_username())
+    st.stop()
+
+if selected_view == "Consulta por ficha":
+    repo = _require_repository()
+    _render_data_status(repo)
+    _render_direct_ficha_lookup(repo)
     st.stop()
 
 with st.sidebar:

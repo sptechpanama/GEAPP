@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from sqlalchemy import create_engine
@@ -30,6 +31,39 @@ from services.inteligencia_proveedores_v3 import (  # noqa: E402
 
 
 class ServiceUnitTests(unittest.TestCase):
+    def test_direct_lookup_timeouts_are_scoped_to_postgres_transaction(self) -> None:
+        repo = AnalyticsRepository.__new__(AnalyticsRepository)
+        repo.engine = MagicMock()
+        repo.dialect = "postgresql"
+        connection = repo.engine.begin.return_value.__enter__.return_value
+        expected = pd.DataFrame([{"ficha": "43358"}])
+        with patch("services.inteligencia_proveedores_v3.pd.read_sql_query", return_value=expected) as read:
+            actual = repo._lookup_query("SELECT :ficha AS ficha", {"ficha": "43358"})
+        self.assertIs(actual, expected)
+        self.assertEqual(
+            [call.args[0] for call in connection.exec_driver_sql.call_args_list],
+            ["SET LOCAL statement_timeout = '15s'", "SET LOCAL lock_timeout = '3s'"],
+        )
+        self.assertIs(read.call_args.args[1], connection)
+        self.assertEqual(read.call_args.kwargs["params"], {"ficha": "43358"})
+        repo.engine.begin.return_value.__exit__.assert_called_once_with(None, None, None)
+
+    def test_direct_lookup_does_not_send_postgres_settings_to_sqlite(self) -> None:
+        repo = AnalyticsRepository.__new__(AnalyticsRepository)
+        repo.engine = MagicMock()
+        repo.dialect = "sqlite"
+        with patch("services.inteligencia_proveedores_v3.pd.read_sql_query", return_value=pd.DataFrame()):
+            repo._lookup_query("SELECT 1", {})
+        repo.engine.begin.return_value.__enter__.return_value.exec_driver_sql.assert_not_called()
+
+    def test_remote_repository_bounds_pool_and_connection_waits(self) -> None:
+        with patch("services.inteligencia_proveedores_v3.create_engine") as create, patch.object(AnalyticsRepository, "_assert_schema"):
+            repo = AnalyticsRepository.connect(database_url="postgresql://example.invalid/analytics")
+        options = create.call_args.kwargs
+        self.assertEqual((options["pool_size"], options["max_overflow"], options["pool_timeout"]), (1, 2, 8))
+        self.assertEqual(options["connect_args"]["connect_timeout"], 8)
+        repo.close()
+
     def test_visible_tables_hide_internal_scores_coverage_and_entities(self) -> None:
         frame = pd.DataFrame(
             [
@@ -456,6 +490,20 @@ class RepositoryIntegrationTests(unittest.TestCase):
             "KIT DE CIRCUITO DE PACIENTE PARA MAQUINA DE ANESTESIA",
         )
 
+    def test_ficha_search_options_keeps_complete_name_and_excludes_catalog_without_acts(self) -> None:
+        with self.repo.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE intel_ficha_catalogo SET producto = ? WHERE ficha = ?",
+                ("OTRO NOMBRE CORTO", "43358"),
+            )
+            connection.exec_driver_sql(
+                "UPDATE intel_actos_fichas SET detection_score = 20 WHERE ficha = ?",
+                ("103169",),
+            )
+        options = self.repo.ficha_search_options().set_index("ficha")
+        self.assertEqual(options.loc["43358", "nombre_ficha"], "KIT CIRCUITO PACIENTE")
+        self.assertNotIn("103169", options.index)
+
     def test_master_uses_catalog_product_when_metadata_name_is_missing(self) -> None:
         with self.repo.engine.begin() as connection:
             connection.exec_driver_sql(
@@ -781,6 +829,28 @@ class AttributedAmountRepositoryTests(unittest.TestCase):
         self.assertEqual(float(mixed["reference_amount_context"]), 201000.0)
         self.assertEqual(int(mixed["source_line_count"]), 3)
         self.assertEqual(int(mixed["attributed_line_count"]), 1)
+
+    def test_direct_lookup_precomputed_counts_match_legacy_including_rs_mixed_act(self) -> None:
+        optimized = self.repo.all_acts_for_ficha("43358")
+        self.repo._has_profile_counts = False
+        legacy = self.repo.all_acts_for_ficha("43358")
+        pd.testing.assert_frame_equal(optimized, legacy)
+        self.assertEqual(int(optimized.set_index("acto_key").loc["a1", "is_unique_ficha"]), 0)
+
+    def test_direct_lookup_missing_or_zero_profile_count_falls_back_without_losing_acts(self) -> None:
+        expected = self.repo.all_acts_for_ficha("43358")
+        with self.repo.engine.begin() as connection:
+            connection.exec_driver_sql("DELETE FROM intel_acto_profile_counts WHERE acto_key = 'a1'")
+            connection.exec_driver_sql("UPDATE intel_acto_profile_counts SET muy_flexible_count = 0 WHERE acto_key = 'a2'")
+        actual = self.repo.all_acts_for_ficha("43358")
+        pd.testing.assert_frame_equal(actual, expected)
+
+    def test_date_filtered_lookup_preserves_scoped_count_semantics(self) -> None:
+        filters = AnalyticsFilters(detection_profile="muy_flexible", start_date=date(2026, 1, 1), end_date=date(2026, 1, 31))
+        actual = self.repo.acts_for_ficha("43358", filters)
+        self.repo._has_profile_counts = False
+        expected = self.repo.acts_for_ficha("43358", filters)
+        pd.testing.assert_frame_equal(actual, expected)
 
     def test_provider_money_uses_attributed_award_and_keeps_offer_as_context(self) -> None:
         providers = self.repo.providers_for_ficha(

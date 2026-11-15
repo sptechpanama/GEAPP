@@ -83,7 +83,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-10-03-postgres-connection-v10"
+ANALYTICS_SERVICE_VERSION = "2026-11-14-direct-lookup-v11"
 
 SCORE_PRESETS = {
     "equilibrado": DEFAULT_SCORE_WEIGHTS,
@@ -422,7 +422,20 @@ class AnalyticsRepository:
         if url:
             engine = None
             try:
-                engine = create_engine(url, pool_pre_ping=True, pool_recycle=240, connect_args={"connect_timeout": 12})
+                engine = create_engine(
+                    url,
+                    pool_pre_ping=True,
+                    pool_recycle=240,
+                    pool_size=1,
+                    max_overflow=2,
+                    pool_timeout=8,
+                    connect_args={
+                        "connect_timeout": 8,
+                        "keepalives_idle": 30,
+                        "keepalives_interval": 5,
+                        "keepalives_count": 2,
+                    },
+                )
                 repository = cls(engine, source_label="Supabase (capa analítica)")
                 # ``_assert_schema`` ya abrio y valido la conexion. Un SELECT
                 # adicional duplicaba un viaje al pooler en cada arranque frio.
@@ -456,23 +469,22 @@ class AnalyticsRepository:
     def _assert_schema(self) -> None:
         required = {"intel_actos_fichas", "intel_acto_proponentes", "intel_ficha_metadata", "intel_ficha_catalogo"}
         if self.dialect == "postgresql":
-            # Una sola consulta de catalogo sustituye get_table_names + dos
-            # get_columns, que en Supabase implicaban tres viajes remotos.
-            schema = pd.read_sql_query(
-                text(
-                    """
-                    SELECT table_name, column_name
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND table_name IN (
-                          'intel_actos_fichas', 'intel_acto_proponentes',
-                          'intel_ficha_metadata', 'intel_ficha_catalogo',
-                          'intel_acto_profile_counts',
-                          'intel_ficha_price_benchmarks'
-                      )
-                    """
-                ),
-                self.engine,
+            schema = self._lookup_query(
+                """
+                SELECT relation.relname AS table_name, attribute.attname AS column_name
+                FROM pg_catalog.pg_class relation
+                INNER JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+                INNER JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid = relation.oid
+                WHERE namespace.nspname = current_schema()
+                  AND attribute.attnum > 0 AND NOT attribute.attisdropped
+                  AND relation.relname IN (
+                      'intel_actos_fichas', 'intel_acto_proponentes',
+                      'intel_ficha_metadata', 'intel_ficha_catalogo',
+                      'intel_acto_profile_counts',
+                      'intel_ficha_price_benchmarks'
+                  )
+                """,
+                {},
             )
             tables = set(schema["table_name"].astype(str)) if not schema.empty else set()
             fact_columns = set(
@@ -606,11 +618,11 @@ class AnalyticsRepository:
             + clause
             + " ORDER BY ficha"
         )
-        return pd.read_sql_query(text(query), self.engine, params=params)
+        return self._lookup_query(query, params)
 
     def build_metadata(self) -> dict[str, str]:
         try:
-            frame = pd.read_sql_query(text("SELECT key, value FROM intel_build_metadata"), self.engine)
+            frame = self._lookup_query("SELECT key, value FROM intel_build_metadata", {})
         except Exception:
             return {}
         return {clean_text(row["key"]): clean_text(row["value"]) for _, row in frame.iterrows()}
@@ -1439,6 +1451,32 @@ class AnalyticsRepository:
         # semantica de ``is_unique_ficha``.
         selected_amount_select = amount_select.replace("f.", "s.")
         selected_amount_order = amount_order.replace("f.", "s.")
+        profile_counts = f"""
+            SELECT pf.acto_key, COUNT(DISTINCT pf.ficha) AS profile_ficha_count
+            FROM intel_actos_fichas pf
+            INNER JOIN selected_act_keys sk ON sk.acto_key = pf.acto_key
+            WHERE {profile_scope_sql}
+            GROUP BY pf.acto_key
+        """
+        if self._has_profile_counts and not any(
+            (filters.start_date, filters.end_date, filters.states, filters.entities)
+        ):
+            profile_column = {
+                "muy_flexible": "muy_flexible_count",
+                "flexible": "flexible_count",
+                "moderado": "moderado_count",
+                "estricto": "estricto_count",
+            }.get(filters.detection_profile, "moderado_count")
+            profile_counts = f"""
+                SELECT sk.acto_key,
+                       COALESCE(NULLIF(pc.{profile_column}, 0), (
+                           SELECT COUNT(DISTINCT pf.ficha)
+                           FROM intel_actos_fichas pf
+                           WHERE pf.acto_key = sk.acto_key AND {profile_scope_sql}
+                       )) AS profile_ficha_count
+                FROM selected_act_keys sk
+                LEFT JOIN intel_acto_profile_counts pc ON pc.acto_key = sk.acto_key
+            """
         query = f"""
             WITH selected_rows AS MATERIALIZED (
                 SELECT f.*
@@ -1450,11 +1488,7 @@ class AnalyticsRepository:
                 SELECT DISTINCT acto_key FROM selected_rows
             ),
             profile_act_counts AS MATERIALIZED (
-                SELECT pf.acto_key, COUNT(DISTINCT pf.ficha) AS profile_ficha_count
-                FROM intel_actos_fichas pf
-                INNER JOIN selected_act_keys sk ON sk.acto_key = pf.acto_key
-                WHERE {profile_scope_sql}
-                GROUP BY pf.acto_key
+                {profile_counts}
             )
             SELECT s.acto_key, s.enlace, s.titulo, s.entidad, s.estado,
                    s.publication_date, s.celebration_date, s.award_date, s.update_date,
@@ -1467,7 +1501,14 @@ class AnalyticsRepository:
             INNER JOIN profile_act_counts pc ON pc.acto_key = s.acto_key
             ORDER BY {selected_amount_order}, s.enlace
         """
-        return pd.read_sql_query(text(query), self.engine, params=params)
+        return self._lookup_query(query, params)
+
+    def _lookup_query(self, query: str, params: Mapping[str, Any]) -> pd.DataFrame:
+        with self.engine.begin() as connection:
+            if self.dialect == "postgresql":
+                connection.exec_driver_sql("SET LOCAL statement_timeout = '15s'")
+                connection.exec_driver_sql("SET LOCAL lock_timeout = '3s'")
+            return pd.read_sql_query(text(query), connection, params=params)
 
     def all_acts_for_ficha(self, ficha: str) -> pd.DataFrame:
         """Devuelve el histórico completo aceptado de una ficha exacta.
@@ -1496,6 +1537,7 @@ class AnalyticsRepository:
                     SELECT TRIM(c0.producto) AS catalog_name
                     FROM intel_ficha_catalogo c0
                     WHERE c0.ficha = e.ficha
+                      AND (COALESCE(n.metadata_name, '') = '' OR n.metadata_name LIKE '%...%')
                       AND COALESCE(TRIM(c0.producto), '') <> ''
                     ORDER BY LENGTH(TRIM(c0.producto)), TRIM(c0.producto)
                     LIMIT 1
@@ -1514,7 +1556,9 @@ class AnalyticsRepository:
                            ) AS position
                     FROM intel_ficha_catalogo c
                     INNER JOIN eligible_fichas e ON e.ficha = c.ficha
+                    INNER JOIN metadata_names n ON n.ficha = e.ficha
                     WHERE COALESCE(TRIM(c.producto), '') <> ''
+                      AND (COALESCE(n.metadata_name, '') = '' OR n.metadata_name LIKE '%...%')
                 )
             """
             catalog_join = """
@@ -1523,12 +1567,15 @@ class AnalyticsRepository:
 
         query = f"""
                 WITH eligible_fichas AS MATERIALIZED (
-                    SELECT DISTINCT f.ficha
-                    FROM intel_actos_fichas f
-                    INNER JOIN intel_ficha_metadata m ON m.ficha = f.ficha
-                    WHERE f.detection_score >= :score_min
-                      AND LOWER(TRIM(COALESCE(m.registro_sanitario, ''))) = :eligible_rs_status
-                      AND COALESCE(TRIM(f.ficha), '') <> ''
+                    SELECT DISTINCT m.ficha
+                    FROM intel_ficha_metadata m
+                    WHERE LOWER(TRIM(COALESCE(m.registro_sanitario, ''))) = :eligible_rs_status
+                      AND COALESCE(TRIM(m.ficha), '') <> ''
+                      AND (
+                          SELECT 1 FROM intel_actos_fichas f
+                          WHERE f.ficha = m.ficha AND f.detection_score >= :score_min
+                          LIMIT 1
+                      ) = 1
                 ),
                 metadata_names AS (
                     SELECT ficha,
@@ -1556,10 +1603,9 @@ class AnalyticsRepository:
                 {catalog_join}
                 ORDER BY e.ficha
         """
-        return pd.read_sql_query(
-            text(query),
-            self.engine,
-            params={
+        return self._lookup_query(
+            query,
+            {
                 "score_min": PROFILE_THRESHOLDS["muy_flexible"],
                 "eligible_rs_status": ELIGIBLE_RS_STATUS.lower(),
             },

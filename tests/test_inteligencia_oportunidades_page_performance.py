@@ -10,7 +10,7 @@ def test_initial_page_does_not_run_full_coverage_or_master_query() -> None:
     status_end = source.index("def _render_master_table", status_start)
     status_source = source[status_start:status_end]
     assert "repository.coverage()" not in status_source
-    assert "repository.build_metadata()" in status_source
+    assert "_build_metadata_cached(" in status_source
 
     ready_guard = source.index("if not analysis_ready:")
     master_query = source.index("raw_master = _master_data(")
@@ -22,7 +22,7 @@ def test_initial_page_defers_repository_connection_until_requested() -> None:
     runtime_start = source.rindex("\n_apply_pending_saved_view()\n")
     runtime_source = source[runtime_start:]
     advanced_guard = runtime_source.index("if advanced_filters:")
-    first_connection = runtime_source.index("repo = _require_repository()")
+    first_connection = runtime_source.index("repo = _require_repository()", advanced_guard)
     direct_or_ready = runtime_source.index("if selected_view in direct_views or analysis_ready:")
     assert advanced_guard < first_connection < direct_or_ready
 
@@ -60,3 +60,15 @@ def test_expensive_filter_catalog_is_opt_in_and_filters_are_batched() -> None:
     form = runtime_source.index('with st.sidebar.form("intel_v3_filters_form"', options_query)
     submit = runtime_source.index('"Aplicar filtros y cargar análisis"', form)
     assert toggle < guarded_load < options_query < form < submit
+
+
+def test_direct_lookup_skips_master_sidebar_and_reruns_only_its_fragment() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+    runtime = source[source.rindex("\n_apply_pending_saved_view()\n"):]
+    direct = runtime.index('if selected_view == "Consulta por ficha":')
+    sidebar = runtime.index('st.header("Filtros del estudio")')
+    assert direct < sidebar
+    assert "st.stop()" in runtime[direct:sidebar]
+    assert "@st.fragment\ndef _render_direct_ficha_lookup" in source
+    assert 'page_acts = acts.iloc[offset:offset + page_size]' in source
+    assert '_all_acts_data.clear(ficha, ANALYTICS_REPOSITORY_API_VERSION, repository)' in source
