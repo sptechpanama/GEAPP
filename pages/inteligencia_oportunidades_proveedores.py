@@ -22,6 +22,7 @@ from services import inteligencia_orquestador_v3 as _orchestrator_v3
 from services import inteligencia_proveedores_v3 as _analytics_v3
 from services.inteligencia_estudio_contexto import enrich_study_details
 from services.ct_rotation_view import render_rotation_view
+from services.inteligencia_lookup_catalog import DirectFichaLookup
 from ui.theme import apply_global_theme
 
 
@@ -53,7 +54,7 @@ _ANALYTICS_EXPORTS = (
     "sort_and_page",
     "split_search_groups",
 )
-_EXPECTED_ANALYTICS_SERVICE_VERSION = "2026-11-15-direct-lookup-v13"
+_EXPECTED_ANALYTICS_SERVICE_VERSION = "2026-11-16-resilient-catalog-v14"
 if (
     any(not hasattr(_analytics_v3, name) for name in _ANALYTICS_EXPORTS)
     or getattr(_analytics_v3, "ANALYTICS_SERVICE_VERSION", "") != _EXPECTED_ANALYTICS_SERVICE_VERSION
@@ -191,6 +192,15 @@ def _repository(database_url: str, api_version: str) -> AnalyticsRepository:
     # una instancia creada por una version anterior del servicio.
     _ = api_version
     return AnalyticsRepository.connect(database_url=database_url, local_candidates=LOCAL_ANALYTICS_CANDIDATES)
+
+
+@st.cache_resource(show_spinner=False, max_entries=1)
+def _direct_lookup_repository(database_url: str, api_version: str) -> DirectFichaLookup:
+    return DirectFichaLookup(
+        lambda: AnalyticsRepository.connect(database_url=database_url, local_candidates=LOCAL_ANALYTICS_CANDIDATES),
+        source_key=database_url or "local-analytics",
+        seed_path=APP_ROOT / "assets" / "inteligencia" / "ficha_search_catalog.json",
+    )
 
 
 def _require_repository() -> AnalyticsRepository:
@@ -1274,7 +1284,40 @@ def _render_provider_detail(frame: pd.DataFrame, filters: AnalyticsFilters, repo
             _render_price_benchmark_legend()
 
 
+def _catalog_option_labels(options_frame: pd.DataFrame) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for row in options_frame.itertuples(index=False):
+        code = str(getattr(row, "ficha", "") or "").strip()
+        name = str(getattr(row, "nombre_ficha", "") or "").strip()
+        if code:
+            labels[code] = f"{code} | {name or f'Ficha {code}'}"
+    return labels
+
+
 def _direct_lookup_labels(repository: AnalyticsRepository) -> dict[str, str]:
+    snapshot_method = getattr(repository, "catalog_snapshot", None)
+    if callable(snapshot_method):
+        options_frame = snapshot_method()
+        labels = _catalog_option_labels(options_frame)
+        attributes = options_frame.attrs
+        if attributes.get("catalog_origin") == "backup":
+            stamp = pd.to_datetime(attributes.get("catalog_checked_at"), utc=True)
+            displayed_date = stamp.tz_convert("America/Panama").strftime("%d/%m/%Y %H:%M")
+            st.caption(
+                f"Catálogo de respaldo: {displayed_date} (Panamá). "
+                "Puedes buscar por nombre o número; los actos se consultan por separado."
+            )
+        elif options_frame.empty:
+            st.info("Preparando las sugerencias. Puedes consultar por número exacto mientras se recuperan.")
+        if attributes.get("catalog_failed"):
+            st.caption("Supabase no respondió a la renovación; se conserva el catálogo fechado, sin presentarlo como una lectura nueva.")
+        st.session_state["intel_v3_direct_lookup_catalog"] = {
+            "version": ANALYTICS_REPOSITORY_API_VERSION,
+            "labels": labels,
+            "failed": attributes.get("catalog_failed", False),
+            "pending": attributes.get("catalog_pending", False),
+        }
+        return labels
     now = datetime.now(timezone.utc).timestamp()
     cached = st.session_state.get("intel_v3_direct_lookup_catalog", {})
     if cached.get("version") != ANALYTICS_REPOSITORY_API_VERSION:
@@ -1300,12 +1343,7 @@ def _direct_lookup_labels(repository: AnalyticsRepository) -> dict[str, str]:
             "ya cargadas; también puedes escribir un número de ficha exacto."
         )
         return cached.get("labels", {})
-    labels: dict[str, str] = {}
-    for row in options_frame.itertuples(index=False):
-        code = str(getattr(row, "ficha", "") or "").strip()
-        name = str(getattr(row, "nombre_ficha", "") or "").strip()
-        if code:
-            labels[code] = f"{code} | {name or f'Ficha {code}'}"
+    labels = _catalog_option_labels(options_frame)
     st.session_state["intel_v3_direct_lookup_catalog"] = {
         "version": ANALYTICS_REPOSITORY_API_VERSION,
         "labels": labels,
@@ -1313,6 +1351,16 @@ def _direct_lookup_labels(repository: AnalyticsRepository) -> dict[str, str]:
         "failed": False,
     }
     return labels
+
+
+def _retry_direct_lookup_catalog(repository: AnalyticsRepository) -> None:
+    retry = getattr(repository, "retry_catalog", None)
+    if callable(retry):
+        retry()
+    cached = st.session_state.get("intel_v3_direct_lookup_catalog", {})
+    cached["retry_at"] = 0
+    st.session_state["intel_v3_direct_lookup_catalog"] = cached
+    _ficha_search_options.clear(ANALYTICS_REPOSITORY_API_VERSION, repository)
 
 
 def _remember_direct_lookup(snapshot: dict) -> None:
@@ -1342,6 +1390,13 @@ def _render_direct_ficha_lookup(repository: AnalyticsRepository) -> None:
         "la exclusión de fichas que requieren registro sanitario."
     )
     labels = _direct_lookup_labels(repository)
+    if st.session_state.get("intel_v3_direct_lookup_catalog", {}).get("failed"):
+        st.button(
+            "Reintentar catálogo",
+            key="intel_v3_direct_lookup_retry_catalog",
+            on_click=_retry_direct_lookup_catalog,
+            args=(repository,),
+        )
 
     st.caption(f"{len(labels):,} fichas con actos elegibles disponibles para consulta.")
     choices = list(labels.values())
@@ -2446,7 +2501,7 @@ if selected_view == "Rotación e inventario":
     st.stop()
 
 if selected_view == "Consulta por ficha":
-    repo = _require_repository()
+    repo = _direct_lookup_repository(_database_url(), ANALYTICS_REPOSITORY_API_VERSION)
     _render_direct_ficha_lookup(repo)
     st.stop()
 

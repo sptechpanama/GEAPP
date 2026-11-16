@@ -71,6 +71,8 @@ def test_direct_lookup_skips_master_sidebar_and_reruns_only_its_fragment() -> No
     assert direct < sidebar
     assert "st.stop()" in runtime[direct:sidebar]
     assert "_render_data_status(repo)" not in runtime[direct:sidebar]
+    assert "_require_repository()" not in runtime[direct:sidebar]
+    assert "_direct_lookup_repository(" in runtime[direct:sidebar]
     assert "@st.fragment\ndef _render_direct_ficha_lookup" in source
     assert 'page_acts = acts.iloc[offset:offset + page_size]' in source
     assert '_all_acts_data.clear(ficha, ANALYTICS_REPOSITORY_API_VERSION, repository)' in source

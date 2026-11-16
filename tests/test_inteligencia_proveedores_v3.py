@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,30 @@ class ServiceUnitTests(unittest.TestCase):
         self.assertEqual((options["pool_size"], options["max_overflow"], options["pool_timeout"]), (1, 2, 8))
         self.assertEqual(options["connect_args"]["connect_timeout"], 8)
         repo.close()
+
+    def test_supabase_analytics_releases_connections_and_preserves_configured_pooler(self) -> None:
+        for port in (5432, 6543):
+            with self.subTest(port=port), patch("services.inteligencia_proveedores_v3.create_engine") as create, patch.object(AnalyticsRepository, "_assert_schema"):
+                AnalyticsRepository.connect(database_url=f"postgresql://user:password@aws-1-us-east-1.pooler.supabase.com:{port}/postgres?sslmode=require")
+            self.assertEqual(create.call_args.args[0].port, port)
+            options = create.call_args.kwargs
+            self.assertIs(options["poolclass"], NullPool)
+            self.assertNotIn("pool_size", options)
+            self.assertEqual(options["connect_args"]["sslmode"], "require")
+
+    def test_psycopg3_transaction_pool_disables_prepared_statements(self) -> None:
+        with patch("services.inteligencia_proveedores_v3.create_engine") as create, patch.object(AnalyticsRepository, "_assert_schema"):
+            AnalyticsRepository.connect(database_url="postgresql+psycopg://user:password@aws-1-us-east-1.pooler.supabase.com:6543/postgres?sslmode=verify-full")
+        options = create.call_args.kwargs
+        self.assertIsNone(options["connect_args"]["prepare_threshold"])
+        self.assertEqual(options["connect_args"]["sslmode"], "verify-full")
+
+    def test_direct_database_and_custom_endpoints_are_not_rewritten(self) -> None:
+        for url in ("postgresql://user:password@db.project.supabase.co:5432/postgres", "postgresql://user:password@aws-1-us-east-1.pooler.supabase.com:7777/postgres", "postgresql://user:password@example.test:5432/postgres"):
+            with self.subTest(url=url), patch("services.inteligencia_proveedores_v3.create_engine") as create, patch.object(AnalyticsRepository, "_assert_schema"):
+                AnalyticsRepository.connect(database_url=url)
+            self.assertNotIn("poolclass", create.call_args.kwargs)
+            self.assertEqual(create.call_args.kwargs["pool_size"], 1)
 
     def test_visible_tables_hide_internal_scores_coverage_and_entities(self) -> None:
         frame = pd.DataFrame(

@@ -18,6 +18,7 @@ FUNCTIONS = {
     "_price_benchmark_column_config", "_render_price_benchmark_summary",
     "_render_price_benchmark_legend", "_money", "_render_direct_ficha_lookup",
     "_direct_lookup_labels", "_remember_direct_lookup",
+    "_catalog_option_labels", "_retry_direct_lookup_catalog",
 }
 
 
@@ -196,6 +197,35 @@ class DirectLookupUITests(unittest.TestCase):
         namespace["_remember_direct_lookup"](snapshot)
         self.assertEqual(state["intel_v3_direct_lookup_history"], {})
         self.assertIs(state["intel_v3_direct_lookup_snapshot"], snapshot)
+
+    def test_backup_catalog_remains_searchable_when_remote_is_unavailable(self):
+        source = application_source().replace(
+            "_render_direct_ficha_lookup(FakeRepository())",
+            '''
+class SnapshotRepository(FakeRepository):
+    def catalog_snapshot(self):
+        result = pd.DataFrame([{"ficha":"43358", "nombre_ficha":"Circuito anestesia"}])
+        result.attrs.update(catalog_origin="backup", catalog_checked_at="2026-11-15T11:09:03+00:00", catalog_failed=not st.session_state.get("catalog_retried", False))
+        return result
+
+    def retry_catalog(self):
+        st.session_state["catalog_retried"] = True
+
+_render_direct_ficha_lookup(SnapshotRepository())
+''',
+        )
+        self.app = AppTest.from_string(source.encode("ascii", "backslashreplace").decode("ascii"), default_timeout=15).run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertEqual(len(self.app.warning), 0)
+        self.assertEqual(self.app.selectbox(key="intel_v3_direct_lookup_selector_v2").options, ["43358 | Circuito anestesia"])
+        self.assertNotIn("catalog_calls", self.app.session_state.filtered_state)
+        self.assertTrue(any("15/11/2026 06:09" in caption.value for caption in self.app.caption))
+        self.submit()
+        self.assertEqual(self.app.metric[1].value, "123")
+        self.app.button(key="intel_v3_direct_lookup_retry_catalog").click().run()
+        self.assertEqual(len(self.app.exception), 0)
+        self.assertTrue(self.app.session_state["catalog_retried"])
+        self.assertEqual(self.app.session_state["act_calls"], 1)
 
 
 if __name__ == "__main__":

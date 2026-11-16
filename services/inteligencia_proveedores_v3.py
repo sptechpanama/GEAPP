@@ -16,7 +16,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import pandas as pd
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.pool import NullPool
 
 
 DATE_COLUMNS = {
@@ -85,7 +86,7 @@ MANUAL_SCORE_WEIGHTS = {
     "complejidad": 10.0,
 }
 
-ANALYTICS_SERVICE_VERSION = "2026-11-15-direct-lookup-v13"
+ANALYTICS_SERVICE_VERSION = "2026-11-16-resilient-catalog-v14"
 LOOKUP_WAIT_SECONDS = 20
 _LOOKUP_WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="intel-lookup")
 _LOOKUP_SLOTS = BoundedSemaphore(2)
@@ -444,20 +445,33 @@ class AnalyticsRepository:
         if url:
             engine = None
             try:
-                engine = create_engine(
-                    url,
-                    pool_pre_ping=True,
-                    pool_recycle=240,
-                    pool_size=1,
-                    max_overflow=2,
-                    pool_timeout=8,
-                    connect_args={
-                        "connect_timeout": 8,
-                        "keepalives_idle": 30,
-                        "keepalives_interval": 5,
-                        "keepalives_count": 2,
-                    },
+                connection_url = make_url(url)
+                connect_args: dict[str, Any] = {
+                    "connect_timeout": 8,
+                    "keepalives_idle": 30,
+                    "keepalives_interval": 5,
+                    "keepalives_count": 2,
+                }
+                pool_options: dict[str, Any] = {
+                    "pool_pre_ping": True,
+                    "pool_recycle": 240,
+                    "pool_size": 1,
+                    "max_overflow": 2,
+                    "pool_timeout": 8,
+                }
+                shared_pooler = (
+                    connection_url.get_backend_name() == "postgresql"
+                    and (connection_url.host or "").lower().endswith(".pooler.supabase.com")
+                    and connection_url.port in (None, 5432, 6543)
+                    and not connection_url.query.get("host")
+                    and not connection_url.query.get("port")
                 )
+                if shared_pooler:
+                    pool_options = {"poolclass": NullPool}
+                    connect_args["sslmode"] = connection_url.query.get("sslmode", "require")
+                    if connection_url.get_driver_name() == "psycopg":
+                        connect_args["prepare_threshold"] = None
+                engine = create_engine(connection_url, connect_args=connect_args, **pool_options)
                 repository = cls(engine, source_label="Supabase (capa analítica)")
                 # ``_assert_schema`` ya abrio y valido la conexion. Un SELECT
                 # adicional duplicaba un viaje al pooler en cada arranque frio.
